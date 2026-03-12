@@ -140,12 +140,12 @@ curl -fsSL https://librefang.ai/install.sh | sh
 ```bash
 docker build -t librefang:local .
 docker run --rm librefang:local --version
-docker run --rm -p 4545:4545 -v librefang-data:/data librefang:local start
+docker run --rm -p 4545:4545 -v librefang-data:/data librefang:local start --foreground
 ```
 
 Confirm:
 - Binary runs and prints version
-- `start` command boots the kernel and API server
+- `start --foreground` boots the kernel and API server
 - Port 4545 is accessible
 - `/data` volume persists between container restarts
 
