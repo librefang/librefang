@@ -6,6 +6,119 @@ use std::fs;
 use std::path::Path;
 
 const ROUTING_EXCLUDED_TEMPLATES: &[&str] = &["assistant", "router"];
+// Keep this in sync with crates/librefang-cli/src/bundled_agents.rs so the kernel
+// can route against bundled templates even before they are written to disk.
+const BUNDLED_TEMPLATE_MANIFESTS: &[(&str, &str)] = &[
+    (
+        "analyst",
+        include_str!("../../../agents/analyst/agent.toml"),
+    ),
+    (
+        "architect",
+        include_str!("../../../agents/architect/agent.toml"),
+    ),
+    (
+        "assistant",
+        include_str!("../../../agents/assistant/agent.toml"),
+    ),
+    ("coder", include_str!("../../../agents/coder/agent.toml")),
+    (
+        "code-reviewer",
+        include_str!("../../../agents/code-reviewer/agent.toml"),
+    ),
+    (
+        "customer-support",
+        include_str!("../../../agents/customer-support/agent.toml"),
+    ),
+    (
+        "data-scientist",
+        include_str!("../../../agents/data-scientist/agent.toml"),
+    ),
+    (
+        "debugger",
+        include_str!("../../../agents/debugger/agent.toml"),
+    ),
+    (
+        "devops-lead",
+        include_str!("../../../agents/devops-lead/agent.toml"),
+    ),
+    (
+        "doc-writer",
+        include_str!("../../../agents/doc-writer/agent.toml"),
+    ),
+    (
+        "email-assistant",
+        include_str!("../../../agents/email-assistant/agent.toml"),
+    ),
+    (
+        "health-tracker",
+        include_str!("../../../agents/health-tracker/agent.toml"),
+    ),
+    (
+        "hello-world",
+        include_str!("../../../agents/hello-world/agent.toml"),
+    ),
+    (
+        "home-automation",
+        include_str!("../../../agents/home-automation/agent.toml"),
+    ),
+    (
+        "legal-assistant",
+        include_str!("../../../agents/legal-assistant/agent.toml"),
+    ),
+    (
+        "meeting-assistant",
+        include_str!("../../../agents/meeting-assistant/agent.toml"),
+    ),
+    ("ops", include_str!("../../../agents/ops/agent.toml")),
+    (
+        "orchestrator",
+        include_str!("../../../agents/orchestrator/agent.toml"),
+    ),
+    (
+        "personal-finance",
+        include_str!("../../../agents/personal-finance/agent.toml"),
+    ),
+    (
+        "planner",
+        include_str!("../../../agents/planner/agent.toml"),
+    ),
+    (
+        "recruiter",
+        include_str!("../../../agents/recruiter/agent.toml"),
+    ),
+    (
+        "researcher",
+        include_str!("../../../agents/researcher/agent.toml"),
+    ),
+    ("router", include_str!("../../../agents/router/agent.toml")),
+    (
+        "sales-assistant",
+        include_str!("../../../agents/sales-assistant/agent.toml"),
+    ),
+    (
+        "security-auditor",
+        include_str!("../../../agents/security-auditor/agent.toml"),
+    ),
+    (
+        "social-media",
+        include_str!("../../../agents/social-media/agent.toml"),
+    ),
+    (
+        "test-engineer",
+        include_str!("../../../agents/test-engineer/agent.toml"),
+    ),
+    (
+        "translator",
+        include_str!("../../../agents/translator/agent.toml"),
+    ),
+    (
+        "travel-planner",
+        include_str!("../../../agents/travel-planner/agent.toml"),
+    ),
+    ("tutor", include_str!("../../../agents/tutor/agent.toml")),
+    ("writer", include_str!("../../../agents/writer/agent.toml")),
+];
 const GENERIC_ENGLISH_WORDS: &[&str] = &[
     "agent",
     "assistant",
@@ -556,12 +669,7 @@ pub fn auto_select_template(message: &str, agents_dir: &Path) -> TemplateSelecti
 }
 
 pub fn load_template_manifest(home_dir: &Path, template: &str) -> Result<AgentManifest, String> {
-    let manifest_path = home_dir.join("agents").join(template).join("agent.toml");
-    let manifest_toml = fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("failed to read {}: {e}", manifest_path.display()))?;
-
-    toml::from_str::<AgentManifest>(&manifest_toml)
-        .map_err(|e| format!("failed to parse {}: {e}", manifest_path.display()))
+    load_template_manifest_at(&home_dir.join("agents"), template)
 }
 
 fn auto_select_template_from_metadata(
@@ -611,12 +719,12 @@ fn auto_select_template_from_metadata(
 fn manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandidate> {
     let mut candidates = Vec::new();
 
-    for template in template_names_from_dir(agents_dir) {
+    for template in all_template_names(agents_dir) {
         if ROUTING_EXCLUDED_TEMPLATES.contains(&template.as_str()) {
             continue;
         }
 
-        let Ok(manifest) = load_template_manifest_from_dir(agents_dir, &template) else {
+        let Ok(manifest) = load_template_manifest_at(agents_dir, &template) else {
             continue;
         };
         let (routing_aliases, routing_weak_aliases, exclude_generated) =
@@ -656,16 +764,24 @@ fn manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandidate> {
     candidates
 }
 
-fn load_template_manifest_from_dir(
-    agents_dir: &Path,
-    template: &str,
-) -> Result<AgentManifest, String> {
+fn load_template_manifest_at(agents_dir: &Path, template: &str) -> Result<AgentManifest, String> {
     let manifest_path = agents_dir.join(template).join("agent.toml");
-    let manifest_toml = fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("failed to read {}: {e}", manifest_path.display()))?;
+    if manifest_path.exists() {
+        let manifest_toml = fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("failed to read {}: {e}", manifest_path.display()))?;
+        return toml::from_str::<AgentManifest>(&manifest_toml)
+            .map_err(|e| format!("failed to parse {}: {e}", manifest_path.display()));
+    }
 
-    toml::from_str::<AgentManifest>(&manifest_toml)
-        .map_err(|e| format!("failed to parse {}: {e}", manifest_path.display()))
+    if let Some(manifest_toml) = bundled_template_manifest(template) {
+        return toml::from_str::<AgentManifest>(manifest_toml)
+            .map_err(|e| format!("failed to parse bundled manifest '{template}': {e}"));
+    }
+
+    Err(format!(
+        "template '{template}' not found in {} or bundled manifests",
+        agents_dir.display()
+    ))
 }
 
 fn template_names_from_dir(root: &Path) -> Vec<String> {
@@ -684,6 +800,26 @@ fn template_names_from_dir(root: &Path) -> Vec<String> {
     }
     names.sort();
     names
+}
+
+fn all_template_names(agents_dir: &Path) -> Vec<String> {
+    let mut names: HashSet<String> = template_names_from_dir(agents_dir).into_iter().collect();
+    names.extend(
+        BUNDLED_TEMPLATE_MANIFESTS
+            .iter()
+            .map(|(name, _)| (*name).to_string()),
+    );
+
+    let mut ordered: Vec<String> = names.into_iter().collect();
+    ordered.sort();
+    ordered
+}
+
+fn bundled_template_manifest(template: &str) -> Option<&'static str> {
+    BUNDLED_TEMPLATE_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == template)
+        .map(|(_, manifest)| *manifest)
 }
 
 fn matched_labels(message: &str, patterns: &[(&'static str, &'static str)]) -> Vec<&'static str> {
@@ -941,6 +1077,37 @@ weak_aliases = ["changelog"]
         );
         assert_eq!(selection.template, "orchestrator");
         assert!(selection.score > 0);
+    }
+
+    #[test]
+    fn test_load_template_manifest_falls_back_to_bundled_template() {
+        let tmp = tempdir().unwrap();
+        let manifest = load_template_manifest(tmp.path(), "assistant").unwrap();
+        assert_eq!(manifest.name, "assistant");
+    }
+
+    #[test]
+    fn test_load_template_manifest_prefers_local_override() {
+        let tmp = tempdir().unwrap();
+        let template_dir = tmp.path().join("agents").join("assistant");
+        fs::create_dir_all(&template_dir).unwrap();
+        fs::write(
+            template_dir.join("agent.toml"),
+            r#"
+name = "assistant"
+description = "Local override"
+module = "builtin:chat"
+
+[model]
+provider = "default"
+model = "default"
+system_prompt = "override"
+"#,
+        )
+        .unwrap();
+
+        let manifest = load_template_manifest(tmp.path(), "assistant").unwrap();
+        assert_eq!(manifest.description, "Local override");
     }
 
     #[tokio::test]

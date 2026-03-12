@@ -198,6 +198,7 @@ When the daemon wraps the kernel in `Arc`, additional steps occur:
 3. **Quota check**: `AgentScheduler` verifies the agent has not exceeded its token-per-hour limit.
 4. **Entry lookup**: Fetch `AgentEntry` from the registry.
 5. **Module dispatch**: Based on `manifest.module`:
+   - `builtin:router`: deterministic in-kernel routing to Hands, specialist templates, or assistant fallback
    - `builtin:chat` or unrecognized: LLM agent loop
    - `wasm:path/to/module.wasm`: WASM sandbox execution
    - `python:path/to/script.py`: Python subprocess execution (env_clear() + selective vars)
