@@ -246,6 +246,11 @@ function app() {
           window.location.hash = hash;
         }
         if (validPages.indexOf(hash) >= 0) self.page = hash;
+        if (typeof i18n !== 'undefined') {
+          self.$nextTick(function() {
+            i18n.updateDOM();
+          });
+        }
       }
       window.addEventListener('hashchange', handleHash);
       handleHash();

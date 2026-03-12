@@ -8,6 +8,7 @@
   var currentLanguage = DEFAULT_LANGUAGE;
   var translations = {};
   var loaded = false;
+  var observer = null;
 
   function detectLanguage() {
     var stored = localStorage.getItem(STORAGE_KEY);
@@ -54,21 +55,53 @@
     return replacePlaceholders(value, params);
   }
 
-  function updateDOM() {
-    document.querySelectorAll('[data-i18n]').forEach(function(element) {
+  function updateElement(element) {
+    if (!element || element.nodeType !== 1) return;
+
+    if (element.hasAttribute('data-i18n')) {
       var translated = t(element.getAttribute('data-i18n'));
       if (!translated.startsWith('[')) element.textContent = translated;
-    });
+    }
 
-    document.querySelectorAll('[data-i18n-placeholder]').forEach(function(element) {
+    if (element.hasAttribute('data-i18n-placeholder')) {
       var translated = t(element.getAttribute('data-i18n-placeholder'));
       if (!translated.startsWith('[')) element.placeholder = translated;
-    });
+    }
 
-    document.querySelectorAll('[data-i18n-title]').forEach(function(element) {
+    if (element.hasAttribute('data-i18n-title')) {
       var translated = t(element.getAttribute('data-i18n-title'));
       if (!translated.startsWith('[')) element.title = translated;
+    }
+  }
+
+  function updateTree(root) {
+    if (!root) return;
+    if (root.nodeType === 1) updateElement(root);
+    if (typeof root.querySelectorAll !== 'function') return;
+
+    root.querySelectorAll('[data-i18n]').forEach(updateElement);
+    root.querySelectorAll('[data-i18n-placeholder]').forEach(updateElement);
+    root.querySelectorAll('[data-i18n-title]').forEach(updateElement);
+  }
+
+  function updateDOM() {
+    updateTree(document.body || document.documentElement || document);
+  }
+
+  function ensureObserver() {
+    if (observer || typeof MutationObserver === 'undefined') return;
+    var target = document.body || document.documentElement;
+    if (!target) return;
+
+    observer = new MutationObserver(function(mutations) {
+      mutations.forEach(function(mutation) {
+        mutation.addedNodes.forEach(function(node) {
+          updateTree(node);
+        });
+      });
     });
+
+    observer.observe(target, { childList: true, subtree: true });
   }
 
   async function init(lang) {
@@ -77,6 +110,7 @@
     localStorage.setItem(STORAGE_KEY, currentLanguage);
     loaded = true;
     updateDOM();
+    ensureObserver();
     window.dispatchEvent(new CustomEvent('i18n-loaded', { detail: { language: currentLanguage } }));
     return currentLanguage;
   }

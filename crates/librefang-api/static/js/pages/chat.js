@@ -4,6 +4,7 @@
 function chatPage() {
   var msgId = 0;
   return {
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     currentAgent: null,
     messages: [],
     inputText: '',
@@ -65,7 +66,36 @@ function chatPage() {
 
     // ── Tip Bar ──
     tipIndex: 0,
-    tips: ['Type / for commands', '/think on for reasoning', 'Ctrl+Shift+F for focus mode', 'Drag files to attach', '/model to switch models', '/context to check usage', '/verbose off to hide tool details'],
+    tipKeys: [
+      ['agentChat.tipCommands', 'Type / for commands'],
+      ['agentChat.tipThinking', '/think on for reasoning'],
+      ['agentChat.tipFocus', 'Ctrl+Shift+F for focus mode'],
+      ['agentChat.tipAttach', 'Drag files to attach'],
+      ['agentChat.tipModel', '/model to switch models'],
+      ['agentChat.tipContext', '/context to check usage'],
+      ['agentChat.tipVerbose', '/verbose off to hide tool details']
+    ],
+    interpolate(text, params) {
+      if (!params || typeof text !== 'string') return text;
+      return text.replace(/\{(\w+)\}/g, function(match, key) {
+        return params[key] !== undefined ? params[key] : match;
+      });
+    },
+    t(key, fallback, params) {
+      var lang = this._currentLang;
+      if (typeof i18n === 'undefined') return this.interpolate(fallback || key, params);
+      var translated = i18n.t(key, params);
+      if (!translated || translated.charAt(0) === '[') {
+        return this.interpolate(fallback || key, params);
+      }
+      return translated;
+    },
+    get tips() {
+      var self = this;
+      return this.tipKeys.map(function(pair) {
+        return self.t(pair[0], pair[1]);
+      });
+    },
     tipTimer: null,
     get currentTip() {
       if (localStorage.getItem('of-tips-off') === 'true') return '';
@@ -134,8 +164,85 @@ function chatPage() {
       });
     },
 
+    queueText(count, withPlus) {
+      return this.t(
+        withPlus ? 'agentChat.queueCount' : 'agentChat.queueCountCompact',
+        withPlus ? '+{count} queued' : '{count} queued',
+        { count: count }
+      );
+    },
+
+    sessionLabel(session) {
+      if (session.label) return session.label;
+      return this.t('agentChat.sessionDefault', 'Session {id}', {
+        id: session.session_id.substring(0, 8)
+      });
+    },
+
+    messageCountText(count) {
+      return this.t('agentChat.messagesCount', '{count} messages', { count: count });
+    },
+
+    searchResultsText() {
+      return this.t('agentChat.searchResults', '{filtered} of {total}', {
+        filtered: this.filteredMessages.length,
+        total: this.messages.length
+      });
+    },
+
+    copyMessageTitle(msg) {
+      return msg._copied
+        ? this.t('agentChat.copied', 'Copied!')
+        : this.t('agentChat.copyMessage', 'Copy message');
+    },
+
+    composerPlaceholder() {
+      return this.recording
+        ? this.t('agentChat.recordingRelease', 'Recording... release to send')
+        : this.t('agentChat.messageLibreFang', 'Message LibreFang... (/ for commands)');
+    },
+
+    toolStatusText(tool) {
+      if (tool.running) return this.t('agentChat.running', 'running...');
+      if (tool.is_error) return this.t('status.error', 'error');
+      if (tool.result && tool.result.length > 500) return Math.round(tool.result.length / 1024) + 'KB';
+      return this.t('agentChat.done', 'done');
+    },
+
+    toolCharsText(result) {
+      return this.t('agentChat.chars', '({count} chars)', { count: result.length });
+    },
+
+    audioLabel(tool) {
+      return this.t('agentChat.audio', 'Audio: {name}', {
+        name: tool._audioFile.split('/').pop()
+      });
+    },
+
+    audioDurationText(ms) {
+      return '~' + this.t('agentChat.secondsShort', '{count}s', {
+        count: Math.round((ms || 0) / 1000)
+      });
+    },
+
+    footerStatusText() {
+      if (this.tokenCount > 0) {
+        return '~' + this.tokenCount + ' ' + this.t('agentChat.tokens', 'tokens');
+      }
+      if (this.attachments.length) {
+        return this.t('agentChat.filesCount', '{count} file(s)', {
+          count: this.attachments.length
+        });
+      }
+      return '';
+    },
+
     init() {
       var self = this;
+
+      window.addEventListener('i18n-changed', function(event) {
+        self._currentLang = event.detail.language;
+      });
 
       // Start tip cycle
       this.startTipCycle();
@@ -255,7 +362,7 @@ function chatPage() {
           if (el) el.focus();
         });
       }).catch(function(e) {
-        LibreFangToast.error('Failed to load models: ' + e.message);
+        LibreFangToast.error(self.t('agentChat.loadModelsFailed', 'Failed to load models: {message}', { message: e.message }));
       });
     },
 
@@ -492,15 +599,7 @@ function chatPage() {
         this.messages.push({
           id: ++localMsgId,
           role: 'system',
-          text: '**Welcome to LibreFang Chat!**\n\n' +
-            '- Type `/` to see available commands\n' +
-            '- `/help` shows all commands\n' +
-            '- `/think on` enables extended reasoning\n' +
-            '- `/context` shows context window usage\n' +
-            '- `/verbose off` hides tool details\n' +
-            '- `Ctrl+Shift+F` toggles focus mode\n' +
-            '- Drag & drop files to attach them\n' +
-            '- `Ctrl+/` opens the command palette',
+          text: this.t('agentChat.welcomeTips', '**Welcome to LibreFang Chat!**'),
           meta: '',
           tools: []
         });
@@ -557,7 +656,7 @@ function chatPage() {
     // Multi-session: create a new session
     async createSession() {
       if (!this.currentAgent) return;
-      var label = prompt('Session name (optional):');
+      var label = prompt(this.t('agentChat.newSessionPrompt', 'Session name (optional):'));
       if (label === null) return; // cancelled
       try {
         await LibreFangAPI.post('/api/agents/' + this.currentAgent.id + '/sessions', {
@@ -567,9 +666,9 @@ function chatPage() {
         await this.loadSession(this.currentAgent.id);
         this.messages = [];
         this.scrollToBottom();
-        if (typeof LibreFangToast !== 'undefined') LibreFangToast.success('New session created');
+        if (typeof LibreFangToast !== 'undefined') LibreFangToast.success(this.t('agentChat.newSessionCreated', 'New session created'));
       } catch(e) {
-        if (typeof LibreFangToast !== 'undefined') LibreFangToast.error('Failed to create session');
+        if (typeof LibreFangToast !== 'undefined') LibreFangToast.error(this.t('agentChat.newSessionFailed', 'Failed to create session'));
       }
     },
 
@@ -585,7 +684,7 @@ function chatPage() {
         this._wsAgent = null;
         this.connectWs(this.currentAgent.id);
       } catch(e) {
-        if (typeof LibreFangToast !== 'undefined') LibreFangToast.error('Failed to switch session');
+        if (typeof LibreFangToast !== 'undefined') LibreFangToast.error(this.t('agentChat.switchSessionFailed', 'Failed to switch session'));
       }
     },
 
@@ -617,13 +716,17 @@ function chatPage() {
         // Legacy thinking event (backward compat)
         case 'thinking':
           if (!this.messages.length || !this.messages[this.messages.length - 1].thinking) {
-            var thinkLabel = data.level ? 'Thinking (' + data.level + ')...' : 'Processing...';
+            var thinkLabel = data.level
+              ? this.t('agentChat.thinkingWithLevel', 'Thinking ({level})...', { level: data.level })
+              : this.t('agentChat.processing', 'Processing...');
             this.messages.push({ id: ++msgId, role: 'agent', text: thinkLabel, meta: '', thinking: true, streaming: true, tools: [] });
             this.scrollToBottom();
             this._resetTypingTimeout();
           } else if (data.level) {
             var lastThink = this.messages[this.messages.length - 1];
-            if (lastThink && lastThink.thinking) lastThink.text = 'Thinking (' + data.level + ')...';
+            if (lastThink && lastThink.thinking) {
+              lastThink.text = this.t('agentChat.thinkingWithLevel', 'Thinking ({level})...', { level: data.level });
+            }
           }
           break;
 
@@ -631,14 +734,16 @@ function chatPage() {
         case 'typing':
           if (data.state === 'start') {
             if (!this.messages.length || !this.messages[this.messages.length - 1].thinking) {
-              this.messages.push({ id: ++msgId, role: 'agent', text: 'Processing...', meta: '', thinking: true, streaming: true, tools: [] });
+              this.messages.push({ id: ++msgId, role: 'agent', text: this.t('agentChat.processing', 'Processing...'), meta: '', thinking: true, streaming: true, tools: [] });
               this.scrollToBottom();
             }
             this._resetTypingTimeout();
           } else if (data.state === 'tool') {
             var typingMsg = this.messages.length ? this.messages[this.messages.length - 1] : null;
             if (typingMsg && (typingMsg.thinking || typingMsg.streaming)) {
-              typingMsg.text = 'Using ' + (data.tool || 'tool') + '...';
+              typingMsg.text = this.t('agentChat.usingTool', 'Using {tool}...', {
+                tool: data.tool || 'tool'
+              });
             }
             this._resetTypingTimeout();
           } else if (data.state === 'stop') {
@@ -669,11 +774,13 @@ function chatPage() {
               // receiving streamed content) to avoid overwriting accumulated text.
               var phaseDetail;
               if (data.phase === 'tool_use') {
-                phaseDetail = 'Using ' + (data.detail || 'tool') + '...';
+                phaseDetail = this.t('agentChat.usingTool', 'Using {tool}...', {
+                  tool: data.detail || 'tool'
+                });
               } else if (data.phase === 'thinking') {
-                phaseDetail = 'Thinking...';
+                phaseDetail = this.t('agentChat.thinking', 'Thinking...');
               } else {
-                phaseDetail = data.detail || 'Working...';
+                phaseDetail = data.detail || this.t('agentChat.working', 'Working...');
               }
               phaseMsg.text = phaseDetail;
             }
@@ -835,7 +942,14 @@ function chatPage() {
         case 'error':
           this._clearTypingTimeout();
           this.messages = this.messages.filter(function(m) { return !m.thinking && !m.streaming; });
-          this.messages.push({ id: ++msgId, role: 'system', text: 'Error: ' + data.content, meta: '', tools: [], ts: Date.now() });
+          this.messages.push({
+            id: ++msgId,
+            role: 'system',
+            text: this.t('agentChat.errorPrefix', 'Error: {message}', { message: data.content }),
+            meta: '',
+            tools: [],
+            ts: Date.now()
+          });
           this.sending = false;
           this.tokenCount = 0;
           this.scrollToBottom();
@@ -938,7 +1052,9 @@ function chatPage() {
             fileRefs.push('[File: ' + att.file.name + ']');
             uploadedFiles.push({ file_id: uploadRes.file_id, filename: uploadRes.filename, content_type: uploadRes.content_type });
           } catch(e) {
-            LibreFangToast.error('Failed to upload ' + att.file.name);
+            LibreFangToast.error(this.t('agentChat.failedUploadFile', 'Failed to upload {name}', {
+              name: att.file.name
+            }));
             fileRefs.push('[File: ' + att.file.name + ' (upload failed)]');
           }
           att.uploading = false;
@@ -987,7 +1103,7 @@ function chatPage() {
 
       // HTTP fallback
       if (!LibreFangAPI.isWsConnected()) {
-        LibreFangToast.info('Using HTTP mode (no streaming)');
+        LibreFangToast.info(this.t('agentChat.usingHttpMode', 'Using HTTP mode (no streaming)'));
       }
       this.messages.push({ id: ++msgId, role: 'agent', text: '', meta: '', thinking: true, tools: [], ts: Date.now() });
       this.scrollToBottom();
@@ -1003,7 +1119,14 @@ function chatPage() {
         this.messages.push({ id: ++msgId, role: 'agent', text: res.response, meta: httpMeta, tools: [], ts: Date.now() });
       } catch(e) {
         this.messages = this.messages.filter(function(m) { return !m.thinking; });
-        this.messages.push({ id: ++msgId, role: 'system', text: 'Error: ' + e.message, meta: '', tools: [], ts: Date.now() });
+        this.messages.push({
+          id: ++msgId,
+          role: 'system',
+          text: this.t('agentChat.errorPrefix', 'Error: {message}', { message: e.message }),
+          meta: '',
+          tools: [],
+          ts: Date.now()
+        });
       }
       this.sending = false;
       this.scrollToBottom();
@@ -1020,28 +1143,44 @@ function chatPage() {
       if (!this.currentAgent) return;
       var self = this;
       LibreFangAPI.post('/api/agents/' + this.currentAgent.id + '/stop', {}).then(function(res) {
-        self.messages.push({ id: ++msgId, role: 'system', text: res.message || 'Run cancelled', meta: '', tools: [], ts: Date.now() });
+        self.messages.push({
+          id: ++msgId,
+          role: 'system',
+          text: res.message || self.t('agentChat.runCancelled', 'Run cancelled'),
+          meta: '',
+          tools: [],
+          ts: Date.now()
+        });
         self.sending = false;
         self.scrollToBottom();
         self.$nextTick(function() { self._processQueue(); });
-      }).catch(function(e) { LibreFangToast.error('Stop failed: ' + e.message); });
+      }).catch(function(e) {
+        LibreFangToast.error(self.t('agentChat.stopFailed', 'Stop failed: {message}', {
+          message: e.message
+        }));
+      });
     },
 
     killAgent() {
       if (!this.currentAgent) return;
       var self = this;
       var name = this.currentAgent.name;
-      LibreFangToast.confirm('Stop Agent', 'Stop agent "' + name + '"? The agent will be shut down.', async function() {
+      LibreFangToast.confirm(
+        this.t('agentChat.stopAgentTitle', 'Stop Agent'),
+        this.t('agentChat.stopAgentConfirm', 'Stop agent "{name}"? The agent will be shut down.', { name: name }),
+        async function() {
         try {
           await LibreFangAPI.del('/api/agents/' + self.currentAgent.id);
           LibreFangAPI.wsDisconnect();
           self._wsAgent = null;
           self.currentAgent = null;
           self.messages = [];
-          LibreFangToast.success('Agent "' + name + '" stopped');
+          LibreFangToast.success(self.t('agentChat.agentStopped', 'Agent "{name}" stopped', { name: name }));
           Alpine.store('app').refreshAgents();
         } catch(e) {
-          LibreFangToast.error('Failed to stop agent: ' + e.message);
+          LibreFangToast.error(self.t('agentChat.stopFailed', 'Stop failed: {message}', {
+            message: e.message
+          }));
         }
       });
     },
@@ -1060,7 +1199,9 @@ function chatPage() {
       for (var i = 0; i < files.length; i++) {
         var file = files[i];
         if (file.size > 10 * 1024 * 1024) {
-          LibreFangToast.warn('File "' + file.name + '" exceeds 10MB limit');
+          LibreFangToast.warn(this.t('agentChat.fileTooLarge', 'File "{name}" exceeds 10MB limit', {
+            name: file.name
+          }));
           continue;
         }
         var typeOk = allowed.indexOf(file.type) !== -1;
@@ -1069,7 +1210,9 @@ function chatPage() {
           typeOk = allowedExts.indexOf(ext) !== -1 || file.type.startsWith('image/');
         }
         if (!typeOk) {
-          LibreFangToast.warn('File type not supported: ' + file.name);
+          LibreFangToast.warn(this.t('agentChat.fileTypeNotSupported', 'File type not supported: {name}', {
+            name: file.name
+          }));
           continue;
         }
         var preview = null;
@@ -1145,7 +1288,9 @@ function chatPage() {
         this.recordingTime = 0;
         this._recordingTimer = setInterval(function() { self.recordingTime++; }, 1000);
       } catch(e) {
-        if (typeof LibreFangToast !== 'undefined') LibreFangToast.error('Microphone access denied');
+        if (typeof LibreFangToast !== 'undefined') {
+          LibreFangToast.error(this.t('agentChat.microphoneDenied', 'Microphone access denied'));
+        }
       }
     },
 
@@ -1165,7 +1310,14 @@ function chatPage() {
       if (blob.size < 100) return; // too small
 
       // Show a temporary "Transcribing..." message
-      this.messages.push({ id: ++msgId, role: 'system', text: 'Transcribing audio...', thinking: true, ts: Date.now(), tools: [] });
+      this.messages.push({
+        id: ++msgId,
+        role: 'system',
+        text: this.t('agentChat.transcribingAudio', 'Transcribing audio...'),
+        thinking: true,
+        ts: Date.now(),
+        tools: []
+      });
       this.scrollToBottom();
 
       try {
@@ -1184,7 +1336,11 @@ function chatPage() {
         this._sendPayload(text, [upload], []);
       } catch(e) {
         this.messages = this.messages.filter(function(m) { return !m.thinking || m.role !== 'system'; });
-        if (typeof LibreFangToast !== 'undefined') LibreFangToast.error('Failed to upload audio: ' + (e.message || 'unknown error'));
+        if (typeof LibreFangToast !== 'undefined') {
+          LibreFangToast.error(this.t('agentChat.failedUploadAudio', 'Failed to upload audio: {message}', {
+            message: e.message || 'unknown error'
+          }));
+        }
       }
     },
 
