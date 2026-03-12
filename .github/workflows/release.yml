@@ -49,7 +49,7 @@ jobs:
 
     runs-on: ${{ matrix.platform.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
@@ -208,7 +208,7 @@ jobs:
             archive: zip
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -258,7 +258,7 @@ jobs:
     name: Docker Image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
@@ -290,7 +290,7 @@ jobs:
     needs: [cli]
     steps:
       - name: Check out tap repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: librefang/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -423,13 +423,13 @@ jobs:
     needs: [cli]
     steps:
       - name: Check out source repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.ref_name }}
           path: source
 
       - name: Check out website repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: librefang/librefang-website
           token: ${{ secrets.WEBSITE_REPO_TOKEN }}
