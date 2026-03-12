@@ -114,6 +114,8 @@ enum Commands {
     },
     /// Start the LibreFang kernel daemon (API server + kernel).
     Start,
+    /// Restart the running daemon (or start it if not running).
+    Restart,
     /// Stop the running daemon.
     Stop,
     /// Manage agents (new, list, chat, kill, spawn) [*].
@@ -591,6 +593,8 @@ enum ModelsCommands {
 enum GatewayCommands {
     /// Start the kernel daemon.
     Start,
+    /// Restart the kernel daemon.
+    Restart,
     /// Stop the running daemon.
     Stop,
     /// Show daemon status.
@@ -877,6 +881,7 @@ fn main() {
         Some(Commands::Tui) => tui::run(cli.config),
         Some(Commands::Init { quick }) => cmd_init(quick),
         Some(Commands::Start) => cmd_start(cli.config),
+        Some(Commands::Restart) => cmd_restart(cli.config),
         Some(Commands::Stop) => cmd_stop(),
         Some(Commands::Agent(sub)) => match sub {
             AgentCommands::New { template } => cmd_agent_new(cli.config, template),
@@ -967,6 +972,7 @@ fn main() {
         },
         Some(Commands::Gateway(sub)) => match sub {
             GatewayCommands::Start => cmd_start(cli.config),
+            GatewayCommands::Restart => cmd_restart(cli.config),
             GatewayCommands::Stop => cmd_stop(),
             GatewayCommands::Status { json } => cmd_status(cli.config, json),
         },
@@ -1533,6 +1539,17 @@ fn cmd_stop() {
             );
         }
     }
+}
+
+fn cmd_restart(config: Option<PathBuf>) {
+    if find_daemon().is_some() {
+        ui::hint("Restarting daemon...");
+        cmd_stop();
+    } else {
+        ui::hint("No running daemon found; starting a new daemon");
+    }
+
+    cmd_start(config);
 }
 
 fn force_kill_pid(pid: u32) {
@@ -6489,8 +6506,25 @@ fn remove_self_binary(exe_path: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
+    use super::{Cli, Commands, GatewayCommands};
+    use clap::Parser;
 
     // --- Doctor command unit tests ---
+
+    #[test]
+    fn test_restart_command_parses() {
+        let cli = Cli::parse_from(["librefang", "restart"]);
+        assert!(matches!(cli.command, Some(Commands::Restart)));
+    }
+
+    #[test]
+    fn test_gateway_restart_command_parses() {
+        let cli = Cli::parse_from(["librefang", "gateway", "restart"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Gateway(GatewayCommands::Restart))
+        ));
+    }
 
     #[test]
     fn test_doctor_skill_registry_loads_bundled() {

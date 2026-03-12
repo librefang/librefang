@@ -155,6 +155,28 @@ librefang start --config /path/to/config.toml
 
 ---
 
+### librefang restart
+
+Restart the LibreFang daemon.
+
+```
+librefang restart [--config <PATH>]
+```
+
+**Behavior:**
+
+- If a daemon is running, sends a shutdown request and waits for it to stop.
+- Starts the daemon again using the same startup flow as `librefang start`.
+- If no daemon is running, behaves like `librefang start` and prints a hint.
+
+**Example:**
+
+```bash
+librefang restart
+```
+
+---
+
 ### librefang status
 
 Show the current kernel/daemon status.
