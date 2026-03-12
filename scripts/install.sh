@@ -175,6 +175,12 @@ install() {
         echo "  Added $INSTALL_DIR to PATH in $SHELL_RC"
     fi
 
+    SESSION_NEEDS_PATH_REFRESH=0
+    case ":$PATH:" in
+        *":$INSTALL_DIR:"*) ;;
+        *) SESSION_NEEDS_PATH_REFRESH=1 ;;
+    esac
+
     # Verify installation
     if "$INSTALL_DIR/librefang" --version >/dev/null 2>&1; then
         INSTALLED_VERSION=$("$INSTALL_DIR/librefang" --version 2>/dev/null || echo "$VERSION")
@@ -186,8 +192,30 @@ install() {
     fi
 
     echo ""
-    echo "  Get started:"
-    echo "    librefang init"
+    echo "  Get started now:"
+    echo "    $INSTALL_DIR/librefang init"
+    if [ "$SESSION_NEEDS_PATH_REFRESH" -eq 1 ]; then
+        echo ""
+        echo "  To use 'librefang' in this shell, run:"
+        case "$USER_SHELL" in
+            */fish)
+                echo "    set -gx PATH \"$INSTALL_DIR\" \$PATH"
+                ;;
+            *)
+                echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
+                ;;
+        esac
+        if [ -n "$SHELL_RC" ]; then
+            echo "  New shells will pick it up from $SHELL_RC."
+        fi
+        echo ""
+        echo "  After refreshing PATH, you can also run:"
+        echo "    librefang init"
+    else
+        echo ""
+        echo "  Or run:"
+        echo "    librefang init"
+    fi
     echo ""
     echo "  The setup wizard will guide you through provider selection"
     echo "  and configuration."
