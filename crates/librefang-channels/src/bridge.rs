@@ -1127,7 +1127,10 @@ async fn dispatch_with_blocks(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
-    match handle.send_message_with_blocks(agent_id, blocks.clone()).await {
+    match handle
+        .send_message_with_blocks(agent_id, blocks.clone())
+        .await
+    {
         Ok(response) => {
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
             send_response(adapter, &message.sender, response, thread_id, output_format).await;

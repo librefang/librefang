@@ -408,12 +408,24 @@ mod tests {
         let new_id = AgentId(Uuid::new_v4());
 
         router.set_channel_default_with_name(channel.clone(), old_id, "assistant".to_string());
-        assert_eq!(router.channel_default_name(&channel), Some("assistant".to_string()));
-        assert_eq!(router.resolve(&ChannelType::Telegram, "u1", None), Some(old_id));
+        assert_eq!(
+            router.channel_default_name(&channel),
+            Some("assistant".to_string())
+        );
+        assert_eq!(
+            router.resolve(&ChannelType::Telegram, "u1", None),
+            Some(old_id)
+        );
 
         router.update_channel_default(&channel, new_id);
-        assert_eq!(router.channel_default_name(&channel), Some("assistant".to_string()));
-        assert_eq!(router.resolve(&ChannelType::Telegram, "u1", None), Some(new_id));
+        assert_eq!(
+            router.channel_default_name(&channel),
+            Some("assistant".to_string())
+        );
+        assert_eq!(
+            router.resolve(&ChannelType::Telegram, "u1", None),
+            Some(new_id)
+        );
     }
 
     #[test]
