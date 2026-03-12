@@ -281,3 +281,181 @@ jobs:
             ghcr.io/librefang/librefang:${{ steps.version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  sync_homebrew:
+    name: Sync to Homebrew Tap
+    runs-on: ubuntu-latest
+    needs: [desktop, cli, docker]
+    steps:
+      - name: Check out tap repo
+        uses: actions/checkout@v5
+        with:
+          repository: librefang/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Download and calculate checksums
+        run: |
+          TAG="${{ github.ref_name }}"
+          curl -fsSL "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" > releases.json
+
+          rm -f tap/checksums.txt
+
+          for url in $(jq -r '.assets[] | select(.name | endswith(".tar.gz") or endswith(".zip")) | .browser_download_url' releases.json); do
+            sha=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
+            echo "$url $sha" >> tap/checksums.txt
+          done
+
+          cat tap/checksums.txt
+
+      - name: Generate formula
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+
+          ARM64_DARWIN_SHA=$(grep "aarch64-apple-darwin" tap/checksums.txt | awk '{print $2}')
+          X86_DARWIN_SHA=$(grep "x86_64-apple-darwin" tap/checksums.txt | awk '{print $2}')
+          ARM64_LINUX_SHA=$(grep "aarch64-unknown-linux-gnu" tap/checksums.txt | awk '{print $2}')
+          X86_LINUX_SHA=$(grep "x86_64-unknown-linux-gnu" tap/checksums.txt | awk '{print $2}')
+
+          ARM64_DARWIN_URL=$(grep "aarch64-apple-darwin" tap/checksums.txt | awk '{print $1}')
+          X86_DARWIN_URL=$(grep "x86_64-apple-darwin" tap/checksums.txt | awk '{print $1}')
+          ARM64_LINUX_URL=$(grep "aarch64-unknown-linux-gnu" tap/checksums.txt | awk '{print $1}')
+          X86_LINUX_URL=$(grep "x86_64-unknown-linux-gnu" tap/checksums.txt | awk '{print $1}')
+
+          cat > tap/Formula/librefang.rb <<EOF
+          class Librefang < Formula
+            desc "Community-Maintained Agent Operating System written in Rust"
+            homepage "https://librefang.ai"
+            license "MIT"
+            version "$VERSION"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "$ARM64_DARWIN_URL"
+                sha256 "$ARM64_DARWIN_SHA"
+              else
+                url "$X86_DARWIN_URL"
+                sha256 "$X86_DARWIN_SHA"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "$ARM64_LINUX_URL"
+                sha256 "$ARM64_LINUX_SHA"
+              else
+                url "$X86_LINUX_URL"
+                sha256 "$X86_LINUX_SHA"
+              end
+            end
+
+            def install
+              bin.install "librefang"
+            end
+
+            test do
+              system "#{bin}/librefang", "--version"
+            end
+          end
+          EOF
+
+          cat tap/Formula/librefang.rb
+
+      - name: Commit and push
+        working-directory: tap
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add .
+          git commit -m "chore: update formula to ${{ github.ref_name }}" || echo "No changes"
+          git push
+
+  sync_installers:
+    name: Sync Installers to Website
+    runs-on: ubuntu-latest
+    needs: [desktop, cli, docker]
+    steps:
+      - name: Check out source repo
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.ref_name }}
+          path: source
+
+      - name: Check out website repo
+        uses: actions/checkout@v5
+        with:
+          repository: librefang/librefang-website
+          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
+          path: website
+
+      - name: Fetch release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+            > release.json
+
+          jq -e '.tag_name and (.assets | type == "array")' release.json >/dev/null
+
+      - name: Sync install scripts
+        run: |
+          cp source/scripts/install.sh website/install.sh
+          cp source/scripts/install.ps1 website/install.ps1
+
+      - name: Generate install manifest
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          jq \
+            --arg repo "${{ github.repository }}" \
+            --arg tag "$TAG" \
+            '
+            def artifact_for($target; $ext):
+              .assets[]
+              | select(.name == ("librefang-" + $target + "." + $ext))
+              | {
+                  name,
+                  target: $target,
+                  archive: $ext,
+                  url: .browser_download_url,
+                  checksum_url: (.browser_download_url + ".sha256")
+                };
+
+            {
+              repo: $repo,
+              version: $tag,
+              published_at: .published_at,
+              generated_from: ("https://github.com/" + $repo + "/releases/tag/" + $tag),
+              channels: {
+                stable: $tag
+              },
+              installers: {
+                shell: "/install.sh",
+                powershell: "/install.ps1"
+              },
+              assets: {
+                "x86_64-unknown-linux-gnu": artifact_for("x86_64-unknown-linux-gnu"; "tar.gz"),
+                "aarch64-unknown-linux-gnu": artifact_for("aarch64-unknown-linux-gnu"; "tar.gz"),
+                "x86_64-apple-darwin": artifact_for("x86_64-apple-darwin"; "tar.gz"),
+                "aarch64-apple-darwin": artifact_for("aarch64-apple-darwin"; "tar.gz"),
+                "x86_64-pc-windows-msvc": artifact_for("x86_64-pc-windows-msvc"; "zip"),
+                "aarch64-pc-windows-msvc": artifact_for("aarch64-pc-windows-msvc"; "zip")
+              }
+            }
+            ' release.json > website/install-manifest.json
+
+          cat website/install-manifest.json
+
+      - name: Commit and push
+        working-directory: website
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add install.sh install.ps1 install-manifest.json
+          git commit -m "chore: sync installers for ${{ github.ref_name }}" || echo "No changes"
+          git push
