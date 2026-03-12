@@ -632,6 +632,9 @@ pub struct AgentEntry {
     pub children: Vec<AgentId>,
     /// Active session ID.
     pub session_id: SessionId,
+    /// Original TOML manifest path, if this agent was spawned from disk.
+    #[serde(default)]
+    pub source_toml_path: Option<PathBuf>,
     /// Tags for categorization.
     pub tags: Vec<String>,
     /// Visual identity for dashboard display.
@@ -1003,6 +1006,7 @@ mod tests {
             parent: None,
             children: vec![],
             session_id: SessionId::new(),
+            source_toml_path: None,
             tags: vec![],
             identity: AgentIdentity::default(),
             onboarding_completed: false,
@@ -1060,6 +1064,7 @@ mod tests {
             parent: None,
             children: vec![],
             session_id: SessionId::new(),
+            source_toml_path: None,
             tags: vec![],
             identity: AgentIdentity {
                 emoji: Some("\u{1F525}".to_string()),

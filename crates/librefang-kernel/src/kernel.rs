@@ -1018,12 +1018,14 @@ impl LibreFangKernel {
 
                     // Check if TOML on disk is newer/different — if so, update from file
                     let mut entry = entry;
-                    let toml_path = kernel
-                        .config
-                        .home_dir
-                        .join("agents")
-                        .join(&name)
-                        .join("agent.toml");
+                    let toml_path = entry.source_toml_path.clone().unwrap_or_else(|| {
+                        kernel
+                            .config
+                            .home_dir
+                            .join("agents")
+                            .join(&name)
+                            .join("agent.toml")
+                    });
                     if toml_path.exists() {
                         match std::fs::read_to_string(&toml_path) {
                             Ok(toml_str) => {
@@ -1032,20 +1034,12 @@ impl LibreFangKernel {
                                 ) {
                                     Ok(disk_manifest) => {
                                         // Compare key fields to detect changes
-                                        let changed = disk_manifest.name != entry.manifest.name
-                                            || disk_manifest.description
-                                                != entry.manifest.description
-                                            || disk_manifest.model.system_prompt
-                                                != entry.manifest.model.system_prompt
-                                            || disk_manifest.model.provider
-                                                != entry.manifest.model.provider
-                                            || disk_manifest.model.model
-                                                != entry.manifest.model.model
-                                            || disk_manifest.capabilities.tools
-                                                != entry.manifest.capabilities.tools;
+                                        let changed = serde_json::to_value(&disk_manifest).ok()
+                                            != serde_json::to_value(&entry.manifest).ok();
                                         if changed {
                                             info!(
                                                 agent = %name,
+                                                path = %toml_path.display(),
                                                 "Agent TOML on disk differs from DB, updating"
                                             );
                                             entry.manifest = disk_manifest;
@@ -1199,7 +1193,16 @@ impl LibreFangKernel {
 
     /// Spawn a new agent from a manifest, optionally linking to a parent agent.
     pub fn spawn_agent(&self, manifest: AgentManifest) -> KernelResult<AgentId> {
-        self.spawn_agent_with_parent(manifest, None)
+        self.spawn_agent_with_source(manifest, None)
+    }
+
+    /// Spawn a new agent from a manifest and record its source TOML path.
+    pub fn spawn_agent_with_source(
+        &self,
+        manifest: AgentManifest,
+        source_toml_path: Option<PathBuf>,
+    ) -> KernelResult<AgentId> {
+        self.spawn_agent_with_parent_and_source(manifest, None, source_toml_path)
     }
 
     /// Spawn a new agent with an optional parent for lineage tracking.
@@ -1207,6 +1210,16 @@ impl LibreFangKernel {
         &self,
         manifest: AgentManifest,
         parent: Option<AgentId>,
+    ) -> KernelResult<AgentId> {
+        self.spawn_agent_with_parent_and_source(manifest, parent, None)
+    }
+
+    /// Spawn a new agent with optional parent and source TOML path.
+    fn spawn_agent_with_parent_and_source(
+        &self,
+        manifest: AgentManifest,
+        parent: Option<AgentId>,
+        source_toml_path: Option<PathBuf>,
     ) -> KernelResult<AgentId> {
         let agent_id = AgentId::new();
         let session_id = SessionId::new();
@@ -1301,6 +1314,7 @@ impl LibreFangKernel {
             parent,
             children: vec![],
             session_id,
+            source_toml_path,
             tags,
             identity: Default::default(),
             onboarding_completed: false,
@@ -3184,7 +3198,19 @@ impl LibreFangKernel {
         }
 
         // Spawn the agent
-        let agent_id = self.spawn_agent(manifest)?;
+        let hand_manifest_dir = self.config.home_dir.join("hands").join(&manifest.name);
+        let hand_manifest_path = hand_manifest_dir.join("agent.toml");
+        if !hand_manifest_path.exists() {
+            if let Err(e) = std::fs::create_dir_all(&hand_manifest_dir) {
+                warn!(path = %hand_manifest_dir.display(), "Failed to create hand manifest directory: {e}");
+            } else if let Ok(toml_str) = toml::to_string_pretty(&manifest) {
+                if let Err(e) = std::fs::write(&hand_manifest_path, toml_str) {
+                    warn!(path = %hand_manifest_path.display(), "Failed to write hand manifest snapshot: {e}");
+                }
+            }
+        }
+
+        let agent_id = self.spawn_agent_with_source(manifest, Some(hand_manifest_path.clone()))?;
 
         // Restore triggers from the old agent under the new agent ID (#519).
         if !saved_triggers.is_empty() {
@@ -3220,6 +3246,7 @@ impl LibreFangKernel {
             hand = %hand_id,
             instance = %instance.instance_id,
             agent = %agent_id,
+            source = %hand_manifest_path.display(),
             "Hand activated with agent"
         );
 
