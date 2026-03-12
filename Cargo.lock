@@ -1853,6 +1853,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
+
+[[package]]
 name = "foreign-types"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2350,9 +2356,9 @@ dependencies = [
 
 [[package]]
 name = "governor"
-version = "0.8.1"
+version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be93b4ec2e4710b04d9264c0c7350cdd62a8c20e5e4ac732552ebb8f0debe8eb"
+checksum = "9efcab3c1958580ff1f25a2a41be1668f7603d849bb63af523b208a3cc1223b8"
 dependencies = [
  "cfg-if",
  "dashmap",
@@ -2360,7 +2366,7 @@ dependencies = [
  "futures-timer",
  "futures-util",
  "getrandom 0.3.4",
- "no-std-compat",
+ "hashbrown 0.16.1",
  "nonzero_ext",
  "parking_lot",
  "portable-atomic",
@@ -2447,7 +2453,7 @@ checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
  "allocator-api2",
  "equivalent",
- "foldhash",
+ "foldhash 0.1.5",
  "serde",
 ]
 
@@ -2456,6 +2462,11 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "hashlink"
@@ -3515,12 +3526,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
-name = "no-std-compat"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b93853da6d84c2e3c7d730d6473e8817692dd89be387eb01b94d7f108ecb5b8c"
-
-[[package]]
 name = "nodrop"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3792,7 +3797,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-api"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "async-trait",
  "axum",
@@ -3829,7 +3834,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-channels"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "async-trait",
  "axum",
@@ -3861,7 +3866,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-cli"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "clap",
  "clap_complete",
@@ -3888,7 +3893,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-desktop"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "axum",
  "open",
@@ -3914,7 +3919,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-extensions"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3942,7 +3947,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-hands"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "chrono",
  "dashmap",
@@ -3959,7 +3964,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-kernel"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3996,7 +4001,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-memory"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4015,7 +4020,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-migrate"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -4034,7 +4039,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-runtime"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4068,7 +4073,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-skills"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "chrono",
  "hex",
@@ -4091,7 +4096,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-types"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4110,7 +4115,7 @@ dependencies = [
 
 [[package]]
 name = "openfang-wire"
-version = "0.3.46"
+version = "0.3.47"
 dependencies = [
  "async-trait",
  "chrono",
@@ -8773,7 +8778,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "0.3.46"
+version = "0.3.47"
 
 [[package]]
 name = "yoke"
