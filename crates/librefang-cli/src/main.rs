@@ -1534,8 +1534,10 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool) {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             if let Some(base) = find_daemon() {
+                let pid = child.id();
+                std::mem::forget(child);
                 ui::success("Daemon started in background");
-                ui::kv("PID", &child.id().to_string());
+                ui::kv("PID", &pid.to_string());
                 ui::kv("API", &base);
                 ui::kv("Dashboard", &format!("{base}/"));
                 ui::kv("Log", &log_path.display().to_string());
@@ -1568,8 +1570,10 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool) {
             }
 
             if Instant::now() >= deadline {
+                let pid = child.id();
+                std::mem::forget(child);
                 ui::success("Daemon launched in background and is still starting");
-                ui::kv("PID", &child.id().to_string());
+                ui::kv("PID", &pid.to_string());
                 ui::kv("Log", &log_path.display().to_string());
                 if tail {
                     ui::hint("Ctrl+C stops log tailing; the daemon keeps running");
@@ -5726,7 +5730,7 @@ fn show_log_file(log_path: &std::path::Path, lines: usize, follow: bool) {
         {
             let _ = std::process::Command::new("tail")
                 .args(["-f", "-n", &lines.to_string()])
-                .arg(&log_path)
+                .arg(log_path)
                 .status();
         }
         #[cfg(windows)]
@@ -5751,7 +5755,7 @@ fn show_log_file(log_path: &std::path::Path, lines: usize, follow: bool) {
             }
         }
     } else {
-        let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let content = std::fs::read_to_string(log_path).unwrap_or_default();
         let all_lines: Vec<&str> = content.lines().collect();
         let start = all_lines.len().saturating_sub(lines);
         for line in &all_lines[start..] {
