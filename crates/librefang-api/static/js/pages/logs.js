@@ -3,6 +3,7 @@
 
 function logsPage() {
   return {
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     tab: 'live',
     // -- Live logs state --
     entries: [],
@@ -26,6 +27,48 @@ function logsPage() {
     filterAction: '',
     auditLoading: false,
     auditLoadError: '',
+
+    init() {
+      var self = this;
+      window.addEventListener('i18n-changed', function(event) {
+        self._currentLang = event.detail.language;
+      });
+    },
+
+    interpolate(text, params) {
+      if (!params || typeof text !== 'string') return text;
+      return text.replace(/\{(\w+)\}/g, function(match, key) {
+        return params[key] !== undefined ? params[key] : match;
+      });
+    },
+
+    t(key, fallback, params) {
+      if (typeof i18n === 'undefined') return this.interpolate(fallback || key, params);
+      var translated = i18n.t(key, params);
+      if (!translated || translated.charAt(0) === '[') {
+        return this.interpolate(fallback || key, params);
+      }
+      return translated;
+    },
+
+    entriesCountText() {
+      return this.t('logsPage.entriesCount', '{filtered} of {total} entries', {
+        filtered: this.filteredAuditEntries.length,
+        total: this.auditEntries.length
+      });
+    },
+
+    tipHashText() {
+      return this.t('logsPage.tipHash', 'tip: {hash}', {
+        hash: this.tipHash.substring(0, 16) + '...'
+      });
+    },
+
+    chainStatusText() {
+      if (this.chainValid === true) return this.t('logsPage.valid', 'VALID');
+      if (this.chainValid === false) return this.t('logsPage.broken', 'BROKEN');
+      return '';
+    },
 
     startStreaming: function() {
       var self = this;
@@ -116,7 +159,7 @@ function logsPage() {
         if (this.loading) this.loading = false;
       } catch(e) {
         if (this.loading) {
-          this.loadError = e.message || 'Could not load logs.';
+          this.loadError = e.message || this.t('logsPage.loadError', 'Could not load logs.');
           this.loading = false;
         }
       }
@@ -166,10 +209,10 @@ function logsPage() {
     },
 
     get connectionLabel() {
-      if (this.streamPaused) return 'Paused';
-      if (this.streamConnected) return 'Live';
-      if (this._pollTimer) return 'Polling';
-      return 'Disconnected';
+      if (this.streamPaused) return this.t('logsPage.paused', 'Paused');
+      if (this.streamConnected) return this.t('logsPage.live', 'Live');
+      if (this._pollTimer) return this.t('logsPage.polling', 'Polling');
+      return this.t('logsPage.disconnected', 'Disconnected');
     },
 
     get connectionClass() {
@@ -208,7 +251,7 @@ function logsPage() {
         this.tipHash = data.tip_hash || '';
       } catch(e) {
         this.auditEntries = [];
-        this.auditLoadError = e.message || 'Could not load audit log.';
+        this.auditLoadError = e.message || this.t('logsPage.auditLoadError', 'Could not load audit log.');
       }
       this.auditLoading = false;
     },
@@ -221,15 +264,25 @@ function logsPage() {
     },
 
     friendlyAction: function(action) {
-      if (!action) return 'Unknown';
+      if (!action) return this.t('overview.actionUnknown', 'Unknown');
       var map = {
-        'AgentSpawn': 'Agent Created', 'AgentKill': 'Agent Stopped', 'AgentTerminated': 'Agent Stopped',
-        'ToolInvoke': 'Tool Used', 'ToolResult': 'Tool Completed', 'AgentMessage': 'Message',
-        'NetworkAccess': 'Network Access', 'ShellExec': 'Shell Command', 'FileAccess': 'File Access',
-        'MemoryAccess': 'Memory Access', 'AuthAttempt': 'Login Attempt', 'AuthSuccess': 'Login Success',
-        'AuthFailure': 'Login Failed', 'CapabilityDenied': 'Permission Denied', 'RateLimited': 'Rate Limited'
+        AgentSpawn: 'overview.actionAgentCreated',
+        AgentKill: 'overview.actionAgentStopped',
+        AgentTerminated: 'overview.actionAgentStopped',
+        ToolInvoke: 'overview.actionToolUsed',
+        ToolResult: 'overview.actionToolCompleted',
+        AgentMessage: 'overview.actionMessageIn',
+        NetworkAccess: 'overview.actionNetworkAccess',
+        ShellExec: 'overview.actionShellCommand',
+        FileAccess: 'overview.actionFileAccess',
+        MemoryAccess: 'overview.actionMemoryAccess',
+        AuthAttempt: 'overview.actionLoginAttempt',
+        AuthSuccess: 'overview.actionLoginOk',
+        AuthFailure: 'overview.actionLoginFailed',
+        CapabilityDenied: 'overview.actionDenied',
+        RateLimited: 'overview.actionRateLimited'
       };
-      return map[action] || action.replace(/([A-Z])/g, ' $1').trim();
+      return this.t(map[action] || '', action.replace(/([A-Z])/g, ' $1').trim());
     },
 
     async verifyChain() {
@@ -237,13 +290,13 @@ function logsPage() {
         var data = await LibreFangAPI.get('/api/audit/verify');
         this.chainValid = data.valid === true;
         if (this.chainValid) {
-          LibreFangToast.success('Audit chain verified — ' + (data.entries || 0) + ' entries valid');
+          LibreFangToast.success(this.t('logsPage.chainVerified', 'Audit chain verified - {count} entries valid', { count: data.entries || 0 }));
         } else {
-          LibreFangToast.error('Audit chain broken!');
+          LibreFangToast.error(this.t('logsPage.chainBrokenToast', 'Audit chain broken!'));
         }
       } catch(e) {
         this.chainValid = false;
-        LibreFangToast.error('Chain verification failed: ' + e.message);
+        LibreFangToast.error(this.t('logsPage.chainVerifyFailed', 'Chain verification failed: {message}', { message: e.message }));
       }
     },
 

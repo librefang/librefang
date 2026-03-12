@@ -21,6 +21,20 @@ function agentsPage() {
     tab: 'agents',
     activeChatAgent: null,
     _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
+    interpolate(text, params) {
+      if (!params || typeof text !== 'string') return text;
+      return text.replace(/\{(\w+)\}/g, function(match, key) {
+        return params[key] !== undefined ? params[key] : match;
+      });
+    },
+    t(key, fallback, params) {
+      if (typeof i18n === 'undefined') return this.interpolate(fallback || key, params);
+      var translated = i18n.t(key, params);
+      if (!translated || translated.charAt(0) === '[') {
+        return this.interpolate(fallback || key, params);
+      }
+      return translated;
+    },
     // -- Agents state --
     showSpawnModal: false,
     showDetailModal: false,
@@ -220,7 +234,33 @@ function agentsPage() {
       full: { label: 'Full', desc: 'All 35+ tools' }
     },
     profileInfo: function(name) {
-      return this.profileDescriptions[name] || { label: name, desc: '' };
+      var info = this.profileDescriptions[name] || { label: name, desc: '' };
+      return {
+        label: this.t('profile.' + name + '.label', info.label),
+        desc: this.t('profile.' + name + '.desc', info.desc)
+      };
+    },
+    archetypeLabel(name) {
+      if (!name) return this.t('detail.noneValue', 'None');
+      return this.t('agentsPage.archetype.' + name.toLowerCase(), name);
+    },
+    vibeLabel(name) {
+      if (!name) return this.t('detail.noneValue', 'None');
+      return this.t('agentsPage.vibe.' + name.toLowerCase(), name);
+    },
+    modeLabel(name) {
+      if (!name) return this.t('detail.noneValue', 'None');
+      return this.t('mode.' + name.toLowerCase(), name);
+    },
+    personalityLabel(preset) {
+      return this.t('agentsPage.vibe.' + preset.id, preset.label);
+    },
+    fileStatusText(file) {
+      if (!file || !file.exists) return this.t('detail.notCreated', 'Not created');
+      return this.t('agentsPage.fileBytes', '{count} bytes', { count: file.size_bytes || 0 });
+    },
+    removeToolTitle(tool) {
+      return this.t('detail.removeTool', 'Click to remove {tool}', { tool: tool });
     },
 
     // ── Tool Preview in Spawn Modal ──
@@ -306,7 +346,7 @@ function agentsPage() {
       try {
         await Alpine.store('app').refreshAgents();
       } catch(e) {
-        this.loadError = e.message || 'Could not load agents. Is the daemon running?';
+        this.loadError = e.message || this.t('agentsPage.loadAgentsFailed', 'Could not load agents. Is the daemon running?');
       }
       this.loading = false;
 
@@ -329,7 +369,7 @@ function agentsPage() {
       try {
         await Alpine.store('app').refreshAgents();
       } catch(e) {
-        this.loadError = e.message || 'Could not load agents.';
+        this.loadError = e.message || this.t('agentsPage.loadAgentsFailedShort', 'Could not load agents.');
       }
       this.loading = false;
     },
@@ -346,7 +386,7 @@ function agentsPage() {
         this.tplProviders = results[1].providers || [];
       } catch(e) {
         this.tplTemplates = [];
-        this.tplLoadError = e.message || 'Could not load templates.';
+        this.tplLoadError = e.message || this.t('agentsPage.loadTemplatesFailed', 'Could not load templates.');
       }
       this.tplLoading = false;
     },
@@ -388,14 +428,17 @@ function agentsPage() {
 
     killAgent(agent) {
       var self = this;
-      LibreFangToast.confirm('Stop Agent', 'Stop agent "' + agent.name + '"? The agent will be shut down.', async function() {
+      LibreFangToast.confirm(
+        self.t('agentsPage.stopAgentTitle', 'Stop Agent'),
+        self.t('agentsPage.stopAgentConfirm', 'Stop agent "{name}"? The agent will be shut down.', { name: agent.name }),
+        async function() {
         try {
           await LibreFangAPI.del('/api/agents/' + agent.id);
-          LibreFangToast.success('Agent "' + agent.name + '" stopped');
+          LibreFangToast.success(self.t('agentsPage.agentStopped', 'Agent "{name}" stopped', { name: agent.name }));
           self.showDetailModal = false;
           await Alpine.store('app').refreshAgents();
         } catch(e) {
-          LibreFangToast.error('Failed to stop agent: ' + e.message);
+          LibreFangToast.error(self.t('agentsPage.stopAgentFailed', 'Failed to stop agent: {message}', { message: e.message }));
         }
       });
     },
@@ -403,7 +446,11 @@ function agentsPage() {
     killAllAgents() {
       var list = this.filteredAgents;
       if (!list.length) return;
-      LibreFangToast.confirm('Stop All Agents', 'Stop ' + list.length + ' agent(s)? All agents will be shut down.', async function() {
+      var self = this;
+      LibreFangToast.confirm(
+        this.t('agentsPage.stopAllTitle', 'Stop All Agents'),
+        this.t('agentsPage.stopAllConfirm', 'Stop {count} agent(s)? All agents will be shut down.', { count: list.length }),
+        async function() {
         var errors = [];
         for (var i = 0; i < list.length; i++) {
           try {
@@ -412,9 +459,9 @@ function agentsPage() {
         }
         await Alpine.store('app').refreshAgents();
         if (errors.length) {
-          LibreFangToast.error('Some agents failed to stop: ' + errors.join(', '));
+          LibreFangToast.error(self.t('agentsPage.stopSomeFailed', 'Some agents failed to stop: {errors}', { errors: errors.join(', ') }));
         } else {
-          LibreFangToast.success(list.length + ' agent(s) stopped');
+          LibreFangToast.success(self.t('agentsPage.agentsStopped', '{count} agent(s) stopped', { count: list.length }));
         }
       });
     },
@@ -434,7 +481,7 @@ function agentsPage() {
 
     nextStep() {
       if (this.spawnStep === 1 && !this.spawnForm.name.trim()) {
-        LibreFangToast.warn('Please enter an agent name');
+        LibreFangToast.warn(this.t('agentsPage.pleaseEnterAgentName', 'Please enter an agent name'));
         return;
       }
       if (this.spawnStep < 5) this.spawnStep++;
@@ -478,10 +525,10 @@ function agentsPage() {
       try {
         await LibreFangAPI.put('/api/agents/' + agent.id + '/mode', { mode: mode });
         agent.mode = mode;
-        LibreFangToast.success('Mode set to ' + mode);
+        LibreFangToast.success(this.t('agentsPage.modeSet', 'Mode set to {mode}', { mode: this.modeLabel(mode) }));
         await Alpine.store('app').refreshAgents();
       } catch(e) {
-        LibreFangToast.error('Failed to set mode: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.setModeFailed', 'Failed to set mode: {message}', { message: e.message }));
       }
     },
 
@@ -490,7 +537,7 @@ function agentsPage() {
       var toml = this.spawnMode === 'wizard' ? this.generateToml() : this.spawnToml;
       if (!toml.trim()) {
         this.spawning = false;
-        LibreFangToast.warn('Manifest is empty \u2014 enter agent config first');
+        LibreFangToast.warn(this.t('agentsPage.manifestEmpty', 'Manifest is empty - enter agent config first'));
         return;
       }
 
@@ -515,14 +562,14 @@ function agentsPage() {
           this.spawnForm.name = '';
           this.spawnToml = '';
           this.spawnStep = 1;
-          LibreFangToast.success('Agent "' + (res.name || 'new') + '" spawned');
+          LibreFangToast.success(this.t('agentsPage.agentSpawned', 'Agent "{name}" spawned', { name: res.name || this.t('agentsPage.newAgentName', 'new') }));
           await Alpine.store('app').refreshAgents();
           this.chatWithAgent({ id: res.agent_id, name: res.name, model_provider: '?', model_name: '?' });
         } else {
-          LibreFangToast.error('Spawn failed: ' + (res.error || 'Unknown error'));
+          LibreFangToast.error(this.t('agentsPage.spawnFailed', 'Spawn failed: {message}', { message: res.error || this.t('agentsPage.unknownError', 'Unknown error') }));
         }
       } catch(e) {
-        LibreFangToast.error('Failed to spawn agent: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.spawnAgentFailed', 'Failed to spawn agent: {message}', { message: e.message }));
       }
       this.spawning = false;
     },
@@ -536,7 +583,7 @@ function agentsPage() {
         this.agentFiles = data.files || [];
       } catch(e) {
         this.agentFiles = [];
-        LibreFangToast.error('Failed to load files: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.loadFilesFailed', 'Failed to load files: {message}', { message: e.message }));
       }
       this.filesLoading = false;
     },
@@ -553,7 +600,7 @@ function agentsPage() {
         this.editingFile = file.name;
         this.fileContent = data.content || '';
       } catch(e) {
-        LibreFangToast.error('Failed to read file: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.readFileFailed', 'Failed to read file: {message}', { message: e.message }));
       }
     },
 
@@ -562,10 +609,10 @@ function agentsPage() {
       this.fileSaving = true;
       try {
         await LibreFangAPI.put('/api/agents/' + this.detailAgent.id + '/files/' + encodeURIComponent(this.editingFile), { content: this.fileContent });
-        LibreFangToast.success(this.editingFile + ' saved');
+        LibreFangToast.success(this.t('agentsPage.fileSaved', '{file} saved', { file: this.editingFile }));
         await this.loadAgentFiles();
       } catch(e) {
-        LibreFangToast.error('Failed to save file: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.saveFileFailed', 'Failed to save file: {message}', { message: e.message }));
       }
       this.fileSaving = false;
     },
@@ -581,10 +628,10 @@ function agentsPage() {
       this.configSaving = true;
       try {
         await LibreFangAPI.patch('/api/agents/' + this.detailAgent.id + '/config', this.configForm);
-        LibreFangToast.success('Config updated');
+        LibreFangToast.success(this.t('agentsPage.configUpdated', 'Config updated'));
         await Alpine.store('app').refreshAgents();
       } catch(e) {
-        LibreFangToast.error('Failed to save config: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.saveConfigFailed', 'Failed to save config: {message}', { message: e.message }));
       }
       this.configSaving = false;
     },
@@ -595,12 +642,12 @@ function agentsPage() {
       try {
         var res = await LibreFangAPI.post('/api/agents/' + agent.id + '/clone', { new_name: newName });
         if (res.agent_id) {
-          LibreFangToast.success('Cloned as "' + res.name + '"');
+          LibreFangToast.success(this.t('agentsPage.clonedAs', 'Cloned as "{name}"', { name: res.name }));
           await Alpine.store('app').refreshAgents();
           this.showDetailModal = false;
         }
       } catch(e) {
-        LibreFangToast.error('Clone failed: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.cloneFailed', 'Clone failed: {message}', { message: e.message }));
       }
     },
 
@@ -611,25 +658,28 @@ function agentsPage() {
         if (data.manifest_toml) {
           var res = await LibreFangAPI.post('/api/agents', { manifest_toml: data.manifest_toml });
           if (res.agent_id) {
-            LibreFangToast.success('Agent "' + (res.name || name) + '" spawned from template');
+            LibreFangToast.success(this.t('agentsPage.spawnedFromTemplate', 'Agent "{name}" spawned from template', { name: res.name || name }));
             await Alpine.store('app').refreshAgents();
             this.chatWithAgent({ id: res.agent_id, name: res.name || name, model_provider: '?', model_name: '?' });
           }
         }
       } catch(e) {
-        LibreFangToast.error('Failed to spawn from template: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.spawnFromTemplateFailed', 'Failed to spawn from template: {message}', { message: e.message }));
       }
     },
 
     // ── Clear agent history ──
     async clearHistory(agent) {
       var self = this;
-      LibreFangToast.confirm('Clear History', 'Clear all conversation history for "' + agent.name + '"? This cannot be undone.', async function() {
+      LibreFangToast.confirm(
+        self.t('agentsPage.clearHistoryTitle', 'Clear History'),
+        self.t('agentsPage.clearHistoryConfirm', 'Clear all conversation history for "{name}"? This cannot be undone.', { name: agent.name }),
+        async function() {
         try {
           await LibreFangAPI.del('/api/agents/' + agent.id + '/history');
-          LibreFangToast.success('History cleared for "' + agent.name + '"');
+          LibreFangToast.success(self.t('agentsPage.historyCleared', 'History cleared for "{name}"', { name: agent.name }));
         } catch(e) {
-          LibreFangToast.error('Failed to clear history: ' + e.message);
+          LibreFangToast.error(self.t('agentsPage.clearHistoryFailed', 'Failed to clear history: {message}', { message: e.message }));
         }
       });
     },
@@ -640,8 +690,10 @@ function agentsPage() {
       this.modelSaving = true;
       try {
         var resp = await LibreFangAPI.put('/api/agents/' + this.detailAgent.id + '/model', { model: this.newModelValue.trim() });
-        var providerInfo = (resp && resp.provider) ? ' (provider: ' + resp.provider + ')' : '';
-        LibreFangToast.success('Model changed' + providerInfo + ' (memory reset)');
+        var providerInfo = (resp && resp.provider)
+          ? this.t('agentsPage.providerSuffix', ' (provider: {provider})', { provider: resp.provider })
+          : '';
+        LibreFangToast.success(this.t('agentsPage.modelChanged', 'Model changed{provider} (memory reset)', { provider: providerInfo }));
         this.editingModel = false;
         await Alpine.store('app').refreshAgents();
         // Refresh detailAgent
@@ -650,7 +702,7 @@ function agentsPage() {
           if (agents[i].id === this.detailAgent.id) { this.detailAgent = agents[i]; break; }
         }
       } catch(e) {
-        LibreFangToast.error('Failed to change model: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.changeModelFailed', 'Failed to change model: {message}', { message: e.message }));
       }
       this.modelSaving = false;
     },
@@ -667,9 +719,9 @@ function agentsPage() {
         await LibreFangAPI.patch('/api/agents/' + this.detailAgent.id + '/config', {
           fallback_models: this.detailAgent._fallbacks
         });
-        LibreFangToast.success('Fallback added: ' + provider + '/' + model);
+        LibreFangToast.success(this.t('agentsPage.fallbackAdded', 'Fallback added: {value}', { value: provider + '/' + model }));
       } catch(e) {
-        LibreFangToast.error('Failed to save fallbacks: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.saveFallbacksFailed', 'Failed to save fallbacks: {message}', { message: e.message }));
         this.detailAgent._fallbacks.pop();
       }
       this.editingFallback = false;
@@ -683,9 +735,9 @@ function agentsPage() {
         await LibreFangAPI.patch('/api/agents/' + this.detailAgent.id + '/config', {
           fallback_models: this.detailAgent._fallbacks
         });
-        LibreFangToast.success('Fallback removed');
+        LibreFangToast.success(this.t('agentsPage.fallbackRemoved', 'Fallback removed'));
       } catch(e) {
-        LibreFangToast.error('Failed to save fallbacks: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.saveFallbacksFailed', 'Failed to save fallbacks: {message}', { message: e.message }));
         this.detailAgent._fallbacks.splice(idx, 0, removed[0]);
       }
     },
@@ -735,7 +787,7 @@ function agentsPage() {
       try {
         await LibreFangAPI.put('/api/agents/' + this.detailAgent.id + '/tools', this.toolFilters);
       } catch(e) {
-        LibreFangToast.error('Failed to update tool filters: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.updateToolFiltersFailed', 'Failed to update tool filters: {message}', { message: e.message }));
       }
     },
 
@@ -750,12 +802,12 @@ function agentsPage() {
       try {
         var res = await LibreFangAPI.post('/api/agents', { manifest_toml: toml });
         if (res.agent_id) {
-          LibreFangToast.success('Agent "' + t.name + '" spawned');
+          LibreFangToast.success(this.t('agentsPage.agentSpawned', 'Agent "{name}" spawned', { name: t.name }));
           await Alpine.store('app').refreshAgents();
           this.chatWithAgent({ id: res.agent_id, name: t.name, model_provider: t.provider, model_name: t.model });
         }
       } catch(e) {
-        LibreFangToast.error('Failed to spawn agent: ' + e.message);
+        LibreFangToast.error(this.t('agentsPage.spawnBuiltinFailed', 'Failed to spawn agent: {message}', { message: e.message }));
       }
     }
   };

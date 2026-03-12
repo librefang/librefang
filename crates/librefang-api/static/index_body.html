@@ -950,103 +950,103 @@
                         </template>
                         <template x-if="editingFallback">
                           <div class="flex gap-1 mt-1" style="align-items:center">
-                            <input class="form-input" style="width:220px;font-size:12px" x-model="newFallbackValue" placeholder="provider/model" @keydown.enter="addFallback()" @keydown.escape="editingFallback = false">
-                            <button class="btn btn-primary btn-sm" @click="addFallback()" style="padding:2px 10px;font-size:11px">Add</button>
-                            <button class="btn btn-ghost btn-sm" @click="editingFallback = false" style="padding:2px 8px;font-size:11px">Cancel</button>
+                            <input class="form-input" style="width:220px;font-size:12px" x-model="newFallbackValue" :placeholder="t('agentsPage.providerModelPlaceholder', 'provider/model')" @keydown.enter="addFallback()" @keydown.escape="editingFallback = false">
+                            <button class="btn btn-primary btn-sm" @click="addFallback()" style="padding:2px 10px;font-size:11px" data-i18n="btn.add">Add</button>
+                            <button class="btn btn-ghost btn-sm" @click="editingFallback = false" style="padding:2px 8px;font-size:11px" data-i18n="btn.cancel">Cancel</button>
                           </div>
                         </template>
                       </div>
                     </div>
                   </div>
                   <div class="flex gap-2 mt-4">
-                    <button class="btn btn-primary" @click="chatWithAgent(detailAgent); showDetailModal = false">Chat</button>
-                    <button class="btn btn-ghost" @click="cloneAgent(detailAgent)">Clone</button>
-                    <button class="btn btn-ghost" @click="clearHistory(detailAgent)">Clear History</button>
-                    <button class="btn btn-danger" @click="killAgent(detailAgent)">Stop</button>
+                    <button class="btn btn-primary" @click="chatWithAgent(detailAgent); showDetailModal = false" data-i18n="btn.chat">Chat</button>
+                    <button class="btn btn-ghost" @click="cloneAgent(detailAgent)" data-i18n="detail.clone">Clone</button>
+                    <button class="btn btn-ghost" @click="clearHistory(detailAgent)" data-i18n="detail.clearHistory">Clear History</button>
+                    <button class="btn btn-danger" @click="killAgent(detailAgent)" data-i18n="btn.stop">Stop</button>
                   </div>
                 </div>
 
                 <!-- Tab: Files -->
                 <div x-show="detailTab === 'files'">
-                  <div x-show="filesLoading" class="text-center text-dim" style="padding:24px">Loading files...</div>
+                  <div x-show="filesLoading" class="text-center text-dim" style="padding:24px" data-i18n="detail.loadingFiles">Loading files...</div>
                   <div x-show="!filesLoading && !editingFile">
                     <template x-for="file in agentFiles" :key="file.name">
                       <div class="file-list-item" @click="openFile(file)">
                         <span class="font-mono" style="font-size:13px" x-text="file.name"></span>
-                        <span class="text-xs text-dim" x-text="file.exists ? (file.size_bytes + ' bytes') : 'Not created'"></span>
+                        <span class="text-xs text-dim" x-text="fileStatusText(file)"></span>
                       </div>
                     </template>
-                    <div x-show="!agentFiles.length && !filesLoading" class="text-center text-dim" style="padding:24px">No workspace files found</div>
+                    <div x-show="!agentFiles.length && !filesLoading" class="text-center text-dim" style="padding:24px" data-i18n="detail.noWorkspaceFiles">No workspace files found</div>
                   </div>
                   <div x-show="editingFile">
                     <div class="flex justify-between items-center mb-2">
                       <span class="font-bold font-mono" x-text="editingFile"></span>
-                      <button class="btn btn-ghost btn-sm" @click="closeFileEditor()">&larr; Back</button>
+                      <button class="btn btn-ghost btn-sm" @click="closeFileEditor()"><span>&larr; </span><span data-i18n="btn.back">Back</span></button>
                     </div>
                     <textarea class="file-editor" x-model="fileContent" style="width:100%;height:280px;resize:vertical"></textarea>
                     <div class="flex gap-2 mt-2">
-                      <button class="btn btn-primary btn-sm" @click="saveFile()" :disabled="fileSaving"><span x-show="!fileSaving">Save</span><span x-show="fileSaving">Saving...</span></button>
-                      <button class="btn btn-ghost btn-sm" @click="closeFileEditor()">Cancel</button>
+                      <button class="btn btn-primary btn-sm" @click="saveFile()" :disabled="fileSaving"><span x-show="!fileSaving" data-i18n="btn.save">Save</span><span x-show="fileSaving" data-i18n="detail.saving">Saving...</span></button>
+                      <button class="btn btn-ghost btn-sm" @click="closeFileEditor()" data-i18n="btn.cancel">Cancel</button>
                     </div>
                   </div>
                 </div>
 
                 <!-- Tab: Config (inline editable) -->
                 <div x-show="detailTab === 'config'">
-                  <div class="form-group"><label>Name</label><input class="form-input" x-model="configForm.name"></div>
-                  <div class="form-group"><label>System Prompt</label><textarea class="form-textarea" x-model="configForm.system_prompt" style="height:80px"></textarea></div>
-                  <div class="form-group"><label>Emoji</label>
+                  <div class="form-group"><label data-i18n="detail.name">Name</label><input class="form-input" x-model="configForm.name"></div>
+                  <div class="form-group"><label data-i18n="detail.systemPrompt">System Prompt</label><textarea class="form-textarea" x-model="configForm.system_prompt" style="height:80px"></textarea></div>
+                  <div class="form-group"><label data-i18n="detail.emoji">Emoji</label>
                     <div class="emoji-grid">
                       <template x-for="em in emojiOptions" :key="em">
                         <button class="emoji-grid-item" :class="{ active: configForm.emoji === em }" @click="configForm.emoji = em" x-text="em"></button>
                       </template>
                     </div>
                   </div>
-                  <div class="form-group"><label>Color</label><input type="color" x-model="configForm.color" style="width:48px;height:32px;border:none;cursor:pointer;background:none"></div>
-                  <div class="form-group"><label>Archetype</label>
+                  <div class="form-group"><label data-i18n="detail.color">Color</label><input type="color" x-model="configForm.color" style="width:48px;height:32px;border:none;cursor:pointer;background:none"></div>
+                  <div class="form-group"><label data-i18n="detail.archetype">Archetype</label>
                     <select class="form-select" x-model="configForm.archetype">
-                      <option value="">None</option>
-                      <template x-for="a in archetypeOptions" :key="a"><option :value="a.toLowerCase()" x-text="a"></option></template>
+                      <option value="" x-text="t('detail.noneValue', 'None')">None</option>
+                      <template x-for="a in archetypeOptions" :key="a"><option :value="a.toLowerCase()" x-text="archetypeLabel(a)"></option></template>
                     </select>
                   </div>
-                  <div class="form-group"><label>Vibe</label>
+                  <div class="form-group"><label data-i18n="detail.vibe">Vibe</label>
                     <select class="form-select" x-model="configForm.vibe">
-                      <option value="">None</option>
-                      <option value="professional">Professional</option><option value="friendly">Friendly</option>
-                      <option value="technical">Technical</option><option value="creative">Creative</option>
-                      <option value="concise">Concise</option><option value="mentor">Mentor</option>
+                      <option value="" x-text="t('detail.noneValue', 'None')">None</option>
+                      <option value="professional" x-text="vibeLabel('professional')">Professional</option><option value="friendly" x-text="vibeLabel('friendly')">Friendly</option>
+                      <option value="technical" x-text="vibeLabel('technical')">Technical</option><option value="creative" x-text="vibeLabel('creative')">Creative</option>
+                      <option value="concise" x-text="vibeLabel('concise')">Concise</option><option value="mentor" x-text="vibeLabel('mentor')">Mentor</option>
                     </select>
                   </div>
                   <button class="btn btn-primary mt-4" @click="saveConfig()" :disabled="configSaving">
-                    <span x-show="!configSaving">Save Config</span><span x-show="configSaving">Saving...</span>
+                    <span x-show="!configSaving" data-i18n="detail.saveConfig">Save Config</span><span x-show="configSaving" data-i18n="detail.saving">Saving...</span>
                   </button>
 
                   <!-- Tool Filters -->
                   <div class="mt-4" style="border-top:1px solid var(--border);padding-top:16px">
-                    <h4 style="margin-bottom:8px;font-size:13px">Tool Filters</h4>
-                    <p class="text-xs text-dim" style="margin-bottom:12px">Allowlist: only these tools available (empty = all). Blocklist: these tools excluded.</p>
+                    <h4 style="margin-bottom:8px;font-size:13px" data-i18n="detail.toolFilters">Tool Filters</h4>
+                    <p class="text-xs text-dim" style="margin-bottom:12px" data-i18n="detail.toolFiltersDesc">Allowlist: only these tools available (empty = all). Blocklist: these tools excluded.</p>
                     <div class="form-group">
-                      <label style="font-size:12px">Allowlist <span class="text-dim" x-text="'(' + toolFilters.tool_allowlist.length + ')'"></span></label>
+                      <label style="font-size:12px"><span data-i18n="detail.allowlist">Allowlist</span> <span class="text-dim" x-text="'(' + toolFilters.tool_allowlist.length + ')'"></span></label>
                       <div class="flex flex-wrap gap-1 mb-1">
                         <template x-for="(t, i) in toolFilters.tool_allowlist" :key="'al-'+i">
-                          <span class="badge" style="cursor:pointer" @click="removeAllowTool(t)" :title="'Click to remove ' + t"><span x-text="t"></span> &times;</span>
+                          <span class="badge" style="cursor:pointer" @click="removeAllowTool(t)" :title="removeToolTitle(t)"><span x-text="t"></span> &times;</span>
                         </template>
                       </div>
                       <div class="flex gap-1">
-                        <input class="form-input" style="font-size:12px;flex:1" x-model="newAllowTool" placeholder="tool name" @keydown.enter="addAllowTool()">
-                        <button class="btn btn-ghost btn-sm" @click="addAllowTool()">Add</button>
+                        <input class="form-input" style="font-size:12px;flex:1" x-model="newAllowTool" :placeholder="t('detail.toolNamePlaceholder', 'tool name')" @keydown.enter="addAllowTool()">
+                        <button class="btn btn-ghost btn-sm" @click="addAllowTool()" data-i18n="btn.add">Add</button>
                       </div>
                     </div>
                     <div class="form-group">
-                      <label style="font-size:12px">Blocklist <span class="text-dim" x-text="'(' + toolFilters.tool_blocklist.length + ')'"></span></label>
+                      <label style="font-size:12px"><span data-i18n="detail.blocklist">Blocklist</span> <span class="text-dim" x-text="'(' + toolFilters.tool_blocklist.length + ')'"></span></label>
                       <div class="flex flex-wrap gap-1 mb-1">
                         <template x-for="(t, i) in toolFilters.tool_blocklist" :key="'bl-'+i">
-                          <span class="badge badge-danger" style="cursor:pointer" @click="removeBlockTool(t)" :title="'Click to remove ' + t"><span x-text="t"></span> &times;</span>
+                          <span class="badge badge-danger" style="cursor:pointer" @click="removeBlockTool(t)" :title="removeToolTitle(t)"><span x-text="t"></span> &times;</span>
                         </template>
                       </div>
                       <div class="flex gap-1">
-                        <input class="form-input" style="font-size:12px;flex:1" x-model="newBlockTool" placeholder="tool name" @keydown.enter="addBlockTool()">
-                        <button class="btn btn-ghost btn-sm" @click="addBlockTool()">Add</button>
+                        <input class="form-input" style="font-size:12px;flex:1" x-model="newBlockTool" :placeholder="t('detail.toolNamePlaceholder', 'tool name')" @keydown.enter="addBlockTool()">
+                        <button class="btn btn-ghost btn-sm" @click="addBlockTool()" data-i18n="btn.add">Add</button>
                       </div>
                     </div>
                   </div>
@@ -1060,24 +1060,24 @@
             <div class="modal-overlay" @click.self="showSpawnModal = false" @keydown.escape.window="showSpawnModal = false">
               <div class="modal" style="max-width:560px">
                 <div class="modal-header">
-                  <h3>Create Agent</h3>
+                  <h3 data-i18n="agentsPage.createAgent">Create Agent</h3>
                   <button class="modal-close" @click="showSpawnModal = false">&times;</button>
                 </div>
 
                 <!-- Wizard / TOML toggle -->
                 <div class="tabs" style="margin-bottom:12px">
-                  <div class="tab" :class="{ active: spawnMode === 'wizard' }" @click="spawnMode = 'wizard'">Wizard</div>
-                  <div class="tab" :class="{ active: spawnMode === 'toml' }" @click="spawnMode = 'toml'">Raw TOML</div>
+                  <div class="tab" :class="{ active: spawnMode === 'wizard' }" @click="spawnMode = 'wizard'" data-i18n="agentsPage.wizard">Wizard</div>
+                  <div class="tab" :class="{ active: spawnMode === 'toml' }" @click="spawnMode = 'toml'" data-i18n="agentsPage.rawToml">Raw TOML</div>
                 </div>
 
                 <!-- Raw TOML mode (unchanged) -->
                 <div x-show="spawnMode === 'toml'">
                   <div class="form-group">
-                    <label>Agent Manifest (TOML)</label>
+                    <label data-i18n="agentsPage.agentManifest">Agent Manifest (TOML)</label>
                     <textarea class="form-textarea" style="height:200px;font-size:11px" x-model="spawnToml" placeholder='name = "my-agent"&#10;module = "builtin:chat"&#10;[model]&#10;provider = "groq"&#10;model = "llama-3.3-70b-versatile"&#10;system_prompt = "You are helpful."'></textarea>
                   </div>
                   <button class="btn btn-primary btn-block mt-4" @click="spawnAgent()" :disabled="spawning">
-                    <span x-show="!spawning">Spawn Agent</span><span x-show="spawning">Spawning...</span>
+                    <span x-show="!spawning" data-i18n="agentsPage.spawnAgent">Spawn Agent</span><span x-show="spawning" data-i18n="agentsPage.spawning">Spawning...</span>
                   </button>
                 </div>
 
@@ -1095,11 +1095,11 @@
                   <!-- Step 1: Name + Identity -->
                   <div x-show="spawnStep === 1">
                     <div class="form-group">
-                      <label>Agent Name</label>
-                      <input class="form-input" x-model="spawnForm.name" placeholder="my-agent" @keydown.enter="if(!$event.isComposing && $event.keyCode !== 229) nextStep()">
+                      <label data-i18n="agentsPage.agentName">Agent Name</label>
+                      <input class="form-input" x-model="spawnForm.name" :placeholder="t('agentsPage.agentNamePlaceholder', 'my-agent')" @keydown.enter="if(!$event.isComposing && $event.keyCode !== 229) nextStep()">
                     </div>
                     <div class="form-group">
-                      <label>Emoji</label>
+                      <label data-i18n="detail.emoji">Emoji</label>
                       <div class="emoji-grid">
                         <template x-for="em in emojiOptions" :key="em">
                           <button class="emoji-grid-item" :class="{ active: spawnIdentity.emoji === em }" @click="spawnIdentity.emoji = em" x-text="em"></button>
@@ -1107,14 +1107,14 @@
                       </div>
                     </div>
                     <div class="form-group">
-                      <label>Color</label>
+                      <label data-i18n="detail.color">Color</label>
                       <input type="color" x-model="spawnIdentity.color" style="width:48px;height:32px;border:none;cursor:pointer;background:none">
                     </div>
                     <div class="form-group">
-                      <label>Archetype</label>
+                      <label data-i18n="detail.archetype">Archetype</label>
                       <select class="form-select" x-model="spawnIdentity.archetype">
-                        <option value="">Choose...</option>
-                        <template x-for="a in archetypeOptions" :key="a"><option :value="a.toLowerCase()" x-text="a"></option></template>
+                        <option value="" x-text="t('agentsPage.choose', 'Choose...')">Choose...</option>
+                        <template x-for="a in archetypeOptions" :key="a"><option :value="a.toLowerCase()" x-text="archetypeLabel(a)"></option></template>
                       </select>
                     </div>
                   </div>
@@ -1122,7 +1122,7 @@
                   <!-- Step 2: Model Selection -->
                   <div x-show="spawnStep === 2">
                     <div class="form-group">
-                      <label>Provider</label>
+                      <label data-i18n="label.provider">Provider</label>
                       <select class="form-select" x-model="spawnForm.provider">
                         <option value="anthropic">Anthropic</option><option value="openai">OpenAI</option>
                         <option value="groq">Groq</option><option value="ollama">Ollama</option>
@@ -1133,44 +1133,44 @@
                       </select>
                     </div>
                     <div class="form-group">
-                      <label>Model</label>
+                      <label data-i18n="label.model">Model</label>
                       <input class="form-input" x-model="spawnForm.model" placeholder="e.g. llama-3.3-70b-versatile">
                     </div>
                     <div class="form-group">
-                      <label>System Prompt</label>
-                      <textarea class="form-textarea" x-model="spawnForm.systemPrompt" placeholder="You are a helpful assistant."></textarea>
+                      <label data-i18n="detail.systemPrompt">System Prompt</label>
+                      <textarea class="form-textarea" x-model="spawnForm.systemPrompt" :placeholder="t('agentsPage.systemPromptPlaceholder', 'You are a helpful assistant.')"></textarea>
                     </div>
                   </div>
 
                   <!-- Step 3: Personality Presets -->
                   <div x-show="spawnStep === 3">
-                    <label class="mb-2" style="display:block;font-size:13px;font-weight:600">Personality</label>
+                    <label class="mb-2" style="display:block;font-size:13px;font-weight:600" data-i18n="agentsPage.personality">Personality</label>
                     <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">
                       <template x-for="preset in personalityPresets" :key="preset.id">
-                        <button class="personality-pill" :class="{ active: selectedPreset === preset.id }" @click="selectPreset(preset)" x-text="preset.label"></button>
+                        <button class="personality-pill" :class="{ active: selectedPreset === preset.id }" @click="selectPreset(preset)" x-text="personalityLabel(preset)"></button>
                       </template>
                     </div>
                     <div class="form-group">
-                      <label>Soul / Persona <span class="text-xs text-dim">(editable)</span></label>
-                      <textarea class="form-textarea" x-model="soulContent" style="height:100px" placeholder="Describe this agent's personality and communication style..."></textarea>
+                      <label><span data-i18n="agentsPage.soulPersona">Soul / Persona</span> <span class="text-xs text-dim" data-i18n="agentsPage.editable">(editable)</span></label>
+                      <textarea class="form-textarea" x-model="soulContent" style="height:100px" :placeholder="t('agentsPage.soulPlaceholder', 'Describe this agent\\'s personality and communication style...')"></textarea>
                     </div>
                   </div>
 
                   <!-- Step 4: Tools & Capabilities -->
                   <div x-show="spawnStep === 4">
                     <div class="form-group">
-                      <label>Tool Profile</label>
+                      <label data-i18n="agentsPage.toolProfile">Tool Profile</label>
                       <select class="form-select" x-model="spawnForm.profile" @focus="loadSpawnProfiles()">
-                        <option value="minimal">Minimal &mdash; Read-only file access</option>
-                        <option value="coding">Coding &mdash; Files + shell + web fetch</option>
-                        <option value="research">Research &mdash; Web search + file read/write</option>
-                        <option value="messaging">Messaging &mdash; Agents + memory access</option>
-                        <option value="automation">Automation &mdash; All tools except custom</option>
-                        <option value="full" selected>Full &mdash; All 35+ tools</option>
-                        <option value="custom">Custom (manual capabilities)</option>
+                        <option value="minimal" x-text="profileInfo('minimal').label + ' - ' + profileInfo('minimal').desc">Minimal - Read-only file access</option>
+                        <option value="coding" x-text="profileInfo('coding').label + ' - ' + profileInfo('coding').desc">Coding - Files + shell + web fetch</option>
+                        <option value="research" x-text="profileInfo('research').label + ' - ' + profileInfo('research').desc">Research - Web search + file read/write</option>
+                        <option value="messaging" x-text="profileInfo('messaging').label + ' - ' + profileInfo('messaging').desc">Messaging - Agents + memory access</option>
+                        <option value="automation" x-text="profileInfo('automation').label + ' - ' + profileInfo('automation').desc">Automation - All tools except custom</option>
+                        <option value="full" selected x-text="profileInfo('full').label + ' - ' + profileInfo('full').desc">Full - All 35+ tools</option>
+                        <option value="custom" x-text="t('agentsPage.customCapabilities', 'Custom (manual capabilities)')">Custom (manual capabilities)</option>
                       </select>
                       <div class="capability-preview" x-show="selectedProfileTools.length > 0" style="margin-top:8px">
-                        <div class="capability-preview-title">Tools included</div>
+                        <div class="capability-preview-title" data-i18n="agentsPage.toolsIncluded">Tools included</div>
                         <div style="display:flex;flex-wrap:wrap;gap:2px">
                           <template x-for="tool in selectedProfileTools" :key="tool"><span class="tool-badge" x-text="tool"></span></template>
                           <span class="tool-badge" x-show="selectedProfileTools.length >= 15" style="opacity:0.6">...</span>
@@ -1178,13 +1178,13 @@
                       </div>
                     </div>
                     <div class="form-group" x-show="spawnForm.profile === 'custom'">
-                      <label>Capabilities</label>
+                      <label data-i18n="agentsPage.capabilities">Capabilities</label>
                       <div class="flex gap-3" style="flex-wrap:wrap">
-                        <label class="form-checkbox"><input type="checkbox" x-model="spawnForm.caps.memory_read"> Memory Read</label>
-                        <label class="form-checkbox"><input type="checkbox" x-model="spawnForm.caps.memory_write"> Memory Write</label>
-                        <label class="form-checkbox"><input type="checkbox" x-model="spawnForm.caps.network"> Network</label>
-                        <label class="form-checkbox"><input type="checkbox" x-model="spawnForm.caps.shell"> Shell</label>
-                        <label class="form-checkbox"><input type="checkbox" x-model="spawnForm.caps.agent_spawn"> Agent Spawn</label>
+                        <label class="form-checkbox"><input type="checkbox" x-model="spawnForm.caps.memory_read"> <span data-i18n="agentsPage.memoryRead">Memory Read</span></label>
+                        <label class="form-checkbox"><input type="checkbox" x-model="spawnForm.caps.memory_write"> <span data-i18n="agentsPage.memoryWrite">Memory Write</span></label>
+                        <label class="form-checkbox"><input type="checkbox" x-model="spawnForm.caps.network"> <span data-i18n="agentsPage.network">Network</span></label>
+                        <label class="form-checkbox"><input type="checkbox" x-model="spawnForm.caps.shell"> <span data-i18n="agentsPage.shell">Shell</span></label>
+                        <label class="form-checkbox"><input type="checkbox" x-model="spawnForm.caps.agent_spawn"> <span data-i18n="agentsPage.agentSpawn">Agent Spawn</span></label>
                       </div>
                     </div>
                   </div>
@@ -1197,26 +1197,26 @@
                           <span x-text="spawnIdentity.emoji || '\u{1F916}'"></span>
                         </div>
                         <div>
-                          <div class="font-bold" style="font-size:15px" x-text="spawnForm.name || 'Unnamed'"></div>
-                          <div class="text-xs text-dim" x-text="spawnIdentity.archetype || 'agent'"></div>
+                          <div class="font-bold" style="font-size:15px" x-text="spawnForm.name || t('agentsPage.unnamed', 'Unnamed')"></div>
+                          <div class="text-xs text-dim" x-text="spawnIdentity.archetype ? archetypeLabel(spawnIdentity.archetype) : t('agentsPage.genericAgent', 'agent')"></div>
                         </div>
                       </div>
                       <div class="detail-grid" style="gap:6px">
-                        <div class="detail-row"><span class="detail-label">Provider</span><span class="detail-value" x-text="spawnForm.provider"></span></div>
-                        <div class="detail-row"><span class="detail-label">Model</span><span class="detail-value" x-text="spawnForm.model"></span></div>
-                        <div class="detail-row"><span class="detail-label">Profile</span><span class="detail-value" x-text="spawnForm.profile"></span></div>
-                        <div class="detail-row" x-show="selectedPreset"><span class="detail-label">Personality</span><span class="detail-value" style="text-transform:capitalize" x-text="selectedPreset"></span></div>
+                        <div class="detail-row"><span class="detail-label" data-i18n="label.provider">Provider</span><span class="detail-value" x-text="spawnForm.provider"></span></div>
+                        <div class="detail-row"><span class="detail-label" data-i18n="label.model">Model</span><span class="detail-value" x-text="spawnForm.model"></span></div>
+                        <div class="detail-row"><span class="detail-label" data-i18n="detail.profile">Profile</span><span class="detail-value" x-text="profileInfo(spawnForm.profile).label"></span></div>
+                        <div class="detail-row" x-show="selectedPreset"><span class="detail-label" data-i18n="agentsPage.personality">Personality</span><span class="detail-value" style="text-transform:capitalize" x-text="vibeLabel(selectedPreset)"></span></div>
                       </div>
                     </div>
                   </div>
 
                   <!-- Navigation buttons -->
                   <div class="flex justify-between mt-4">
-                    <button class="btn btn-ghost" x-show="spawnStep > 1" @click="prevStep()">Back</button>
+                    <button class="btn btn-ghost" x-show="spawnStep > 1" @click="prevStep()" data-i18n="btn.back">Back</button>
                     <div x-show="spawnStep <= 1"></div>
-                    <button class="btn btn-primary" x-show="spawnStep < 5" @click="nextStep()">Next</button>
+                    <button class="btn btn-primary" x-show="spawnStep < 5" @click="nextStep()" data-i18n="btn.next">Next</button>
                     <button class="btn btn-primary" x-show="spawnStep === 5" @click="spawnAgent()" :disabled="spawning">
-                      <span x-show="!spawning">Spawn Agent</span><span x-show="spawning">Spawning...</span>
+                      <span x-show="!spawning" data-i18n="agentsPage.spawnAgent">Spawn Agent</span><span x-show="spawning" data-i18n="agentsPage.spawning">Spawning...</span>
                     </button>
                   </div>
                 </div>
@@ -1232,44 +1232,44 @@
     <template x-if="page === 'approvals'">
       <div x-data="approvalsPage" x-init="loadData()">
         <div class="page-header">
-          <h2>Execution Approvals</h2>
+          <h2 data-i18n="approvals.title">Execution Approvals</h2>
           <div class="flex items-center gap-2">
-            <span class="badge badge-warn" x-show="pendingCount > 0" x-text="pendingCount + ' pending'"></span>
-            <button class="btn btn-ghost btn-sm" @click="loadData()">Refresh</button>
+            <span class="badge badge-warn" x-show="pendingCount > 0" x-text="pendingCountText()"></span>
+            <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n="btn.refresh">Refresh</button>
           </div>
         </div>
         <div class="page-body">
-          <div x-show="loading" class="loading-state"><div class="spinner"></div><span>Loading...</span></div>
+          <div x-show="loading" class="loading-state"><div class="spinner"></div><span data-i18n="approvals.loading">Loading...</span></div>
           <div x-show="!loading && loadError" class="error-state">
             <span class="error-icon">!</span>
             <p x-text="loadError"></p>
-            <button class="btn btn-ghost btn-sm" @click="loadData()">Retry</button>
+            <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n="btn.retry">Retry</button>
           </div>
           <template x-if="!loading && !loadError">
             <div>
               <div class="filter-pills mb-4">
-                <button class="filter-pill" :class="{ active: filterStatus === 'all' }" @click="filterStatus = 'all'">All</button>
-                <button class="filter-pill" :class="{ active: filterStatus === 'pending' }" @click="filterStatus = 'pending'">Pending</button>
-                <button class="filter-pill" :class="{ active: filterStatus === 'approved' }" @click="filterStatus = 'approved'">Approved</button>
-                <button class="filter-pill" :class="{ active: filterStatus === 'rejected' }" @click="filterStatus = 'rejected'">Rejected</button>
+                <button class="filter-pill" :class="{ active: filterStatus === 'all' }" @click="filterStatus = 'all'" data-i18n="approvals.filter.all">All</button>
+                <button class="filter-pill" :class="{ active: filterStatus === 'pending' }" @click="filterStatus = 'pending'" data-i18n="approvals.filter.pending">Pending</button>
+                <button class="filter-pill" :class="{ active: filterStatus === 'approved' }" @click="filterStatus = 'approved'" data-i18n="approvals.filter.approved">Approved</button>
+                <button class="filter-pill" :class="{ active: filterStatus === 'rejected' }" @click="filterStatus = 'rejected'" data-i18n="approvals.filter.rejected">Rejected</button>
               </div>
               <div x-show="filtered.length === 0" class="empty-state">
-                <h4>No approvals</h4>
-                <p class="hint">When agents request permission for sensitive actions, they'll appear here.</p>
+                <h4 data-i18n="approvals.emptyTitle">No approvals</h4>
+                <p class="hint" data-i18n="approvals.emptyDesc">When agents request permission for sensitive actions, they'll appear here.</p>
               </div>
               <div class="card-grid">
                 <template x-for="a in filtered" :key="a.id">
                   <div class="card approval-card" :class="{ approved: a.status === 'approved', rejected: a.status === 'rejected', expired: a.status === 'expired' }">
                     <div class="flex justify-between items-center mb-2">
-                      <span class="card-header" style="margin:0" x-text="a.action"></span>
-                      <span class="badge" :class="{ 'badge-warn': a.status === 'pending', 'badge-success': a.status === 'approved', 'badge-error': a.status === 'rejected', 'badge-muted': a.status === 'expired' }" x-text="a.status"></span>
+                      <span class="card-header" style="margin:0" x-text="actionLabel(a.action)"></span>
+                      <span class="badge" :class="{ 'badge-warn': a.status === 'pending', 'badge-success': a.status === 'approved', 'badge-error': a.status === 'rejected', 'badge-muted': a.status === 'expired' }" x-text="statusLabel(a.status)"></span>
                     </div>
                     <div class="text-sm text-dim mb-2" x-text="a.description"></div>
-                    <div class="text-xs text-dim">Agent: <span x-text="a.agent_name"></span> &middot; <span x-text="timeAgo(a.created_at)"></span></div>
+                    <div class="text-xs text-dim" x-text="agentMetaText(a)"></div>
                     <template x-if="a.status === 'pending'">
                       <div class="approval-actions" style="display:flex;gap:8px;margin-top:12px">
-                        <button class="btn btn-success btn-sm" @click="approve(a.id)">Approve</button>
-                        <button class="btn btn-danger btn-sm" @click="reject(a.id)">Reject</button>
+                        <button class="btn btn-success btn-sm" @click="approve(a.id)" data-i18n="approvals.approve">Approve</button>
+                        <button class="btn btn-danger btn-sm" @click="reject(a.id)" data-i18n="approvals.reject">Reject</button>
                       </div>
                     </template>
                   </div>
@@ -4086,7 +4086,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
     <template x-if="page === 'logs'">
       <div x-data="logsPage">
         <div class="page-header">
-          <h2>Logs</h2>
+          <h2 data-i18n="logsPage.title">Logs</h2>
           <div class="flex gap-2 items-center" x-show="tab === 'live'">
             <!-- Connection status indicator -->
             <span class="live-indicator" :class="connectionClass">
@@ -4094,35 +4094,35 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               <span x-text="connectionLabel"></span>
             </span>
             <select class="form-select" style="width:100px" x-model="levelFilter">
-              <option value="">All</option>
+              <option value="" data-i18n="logsPage.allLevels">All</option>
               <option value="info">INFO</option>
               <option value="warn">WARN</option>
               <option value="error">ERROR</option>
             </select>
-            <input class="form-input" style="width:180px" placeholder="Search..." x-model="textFilter">
-            <button class="btn btn-ghost btn-sm" @click="togglePause()" x-text="streamPaused ? 'Resume' : 'Pause'"></button>
-            <button class="btn btn-ghost btn-sm" @click="clearLogs()">Clear</button>
-            <button class="btn btn-ghost btn-sm" @click="exportLogs()">Export</button>
-            <div class="toggle" :class="{ active: autoRefresh }" @click="autoRefresh = !autoRefresh" title="Auto-scroll"></div>
-            <span class="text-xs text-dim" x-text="autoRefresh ? 'Auto-scroll' : 'Scroll locked'"></span>
+            <input class="form-input" style="width:180px" data-i18n-placeholder="logsPage.searchPlaceholder" placeholder="Search..." x-model="textFilter">
+            <button class="btn btn-ghost btn-sm" @click="togglePause()" x-text="streamPaused ? t('logsPage.resume', 'Resume') : t('logsPage.pause', 'Pause')"></button>
+            <button class="btn btn-ghost btn-sm" @click="clearLogs()" data-i18n="logsPage.clear">Clear</button>
+            <button class="btn btn-ghost btn-sm" @click="exportLogs()" data-i18n="logsPage.export">Export</button>
+            <div class="toggle" :class="{ active: autoRefresh }" @click="autoRefresh = !autoRefresh" :title="t('logsPage.autoScroll', 'Auto-scroll')"></div>
+            <span class="text-xs text-dim" x-text="autoRefresh ? t('logsPage.autoScroll', 'Auto-scroll') : t('logsPage.scrollLocked', 'Scroll locked')"></span>
           </div>
           <div class="flex gap-2 items-center" x-show="tab === 'audit'">
-            <button class="btn btn-ghost btn-sm" @click="verifyChain()">Verify Chain</button>
-            <span class="badge" :class="chainValid === true ? 'badge-running' : chainValid === false ? 'badge-crashed' : ''" x-text="chainValid === true ? 'VALID' : chainValid === false ? 'BROKEN' : ''" x-show="chainValid !== null"></span>
+            <button class="btn btn-ghost btn-sm" @click="verifyChain()" data-i18n="logsPage.verifyChain">Verify Chain</button>
+            <span class="badge" :class="chainValid === true ? 'badge-running' : chainValid === false ? 'badge-crashed' : ''" x-text="chainStatusText()" x-show="chainValid !== null"></span>
           </div>
         </div>
         <div class="tabs">
-          <div class="tab" :class="{ active: tab === 'live' }" @click="tab = 'live'">Live</div>
-          <div class="tab" :class="{ active: tab === 'audit' }" @click="tab = 'audit'; if (!auditEntries.length && !auditLoading) loadAudit()">Audit Trail</div>
+          <div class="tab" :class="{ active: tab === 'live' }" @click="tab = 'live'" data-i18n="logsPage.liveTab">Live</div>
+          <div class="tab" :class="{ active: tab === 'audit' }" @click="tab = 'audit'; if (!auditEntries.length && !auditLoading) loadAudit()" data-i18n="logsPage.auditTab">Audit Trail</div>
         </div>
         <div class="page-body" x-init="startStreaming()">
           <!-- Live logs tab -->
           <div x-show="tab === 'live'">
-            <div x-show="loading" class="loading-state"><div class="spinner"></div><span>Connecting to log stream...</span></div>
+            <div x-show="loading" class="loading-state"><div class="spinner"></div><span data-i18n="logsPage.connectingStream">Connecting to log stream...</span></div>
             <div x-show="!loading && loadError" class="error-state">
               <span class="error-icon">!</span>
               <p x-text="loadError"></p>
-              <button class="btn btn-ghost btn-sm" @click="loadData()">Retry</button>
+              <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n="btn.retry">Retry</button>
             </div>
             <div x-show="!loading && !loadError">
             <div class="card" style="font-family:monospace;max-height:70vh;overflow-y:auto" id="log-container" @mouseenter="hovering = true" @mouseleave="hovering = false">
@@ -4135,8 +4135,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 </div>
               </template>
               <div class="empty-state" x-show="!filteredEntries.length" style="padding:20px">
-                <h4>No log entries yet</h4>
-                <p class="hint">Activity will appear here as agents run.</p>
+                <h4 data-i18n="logsPage.noEntries">No log entries yet</h4>
+                <p class="hint" data-i18n="logsPage.noEntriesHint">Activity will appear here as agents run.</p>
               </div>
             </div>
             </div>
@@ -4144,38 +4144,36 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
           <!-- Audit trail tab -->
           <div x-show="tab === 'audit'">
-            <div x-show="auditLoading" class="loading-state"><div class="spinner"></div><span>Loading audit log...</span></div>
+            <div x-show="auditLoading" class="loading-state"><div class="spinner"></div><span data-i18n="logsPage.loadingAudit">Loading audit log...</span></div>
             <div x-show="!auditLoading && auditLoadError" class="error-state">
               <span class="error-icon">!</span>
               <p x-text="auditLoadError"></p>
-              <button class="btn btn-ghost btn-sm" @click="loadAudit()">Retry</button>
+              <button class="btn btn-ghost btn-sm" @click="loadAudit()" data-i18n="btn.retry">Retry</button>
             </div>
             <div x-show="!auditLoading && !auditLoadError">
             <div class="card mb-4" style="border-left:3px solid var(--accent)">
-              <div class="font-bold" style="font-size:13px;margin-bottom:4px">Tamper-Evident Audit Trail</div>
-              <div class="text-sm text-dim" style="line-height:1.6">
-                Every agent action is logged with a cryptographic hash chain. Use "Verify Chain" to confirm no entries have been altered or deleted.
-              </div>
+              <div class="font-bold" style="font-size:13px;margin-bottom:4px" data-i18n="logsPage.auditTitle">Tamper-Evident Audit Trail</div>
+              <div class="text-sm text-dim" style="line-height:1.6" data-i18n="logsPage.auditDesc">Every agent action is logged with a cryptographic hash chain. Use "Verify Chain" to confirm no entries have been altered or deleted.</div>
             </div>
             <div class="flex gap-2 mb-4 items-center">
               <select class="form-select" style="width:180px" x-model="filterAction">
-                <option value="">All Actions</option>
-                <option value="AgentSpawn">Agent Created</option>
-                <option value="AgentKill">Agent Stopped</option>
-                <option value="AgentMessage">Message</option>
-                <option value="ToolInvoke">Tool Used</option>
-                <option value="NetworkAccess">Network Access</option>
-                <option value="ShellExec">Shell Command</option>
-                <option value="FileAccess">File Access</option>
-                <option value="MemoryAccess">Memory Access</option>
-                <option value="AuthAttempt">Login Attempt</option>
+                <option value="" data-i18n="logsPage.allActions">All Actions</option>
+                <option value="AgentSpawn" x-text="friendlyAction('AgentSpawn')">Agent Created</option>
+                <option value="AgentKill" x-text="friendlyAction('AgentKill')">Agent Stopped</option>
+                <option value="AgentMessage" x-text="friendlyAction('AgentMessage')">Message</option>
+                <option value="ToolInvoke" x-text="friendlyAction('ToolInvoke')">Tool Used</option>
+                <option value="NetworkAccess" x-text="friendlyAction('NetworkAccess')">Network Access</option>
+                <option value="ShellExec" x-text="friendlyAction('ShellExec')">Shell Command</option>
+                <option value="FileAccess" x-text="friendlyAction('FileAccess')">File Access</option>
+                <option value="MemoryAccess" x-text="friendlyAction('MemoryAccess')">Memory Access</option>
+                <option value="AuthAttempt" x-text="friendlyAction('AuthAttempt')">Login Attempt</option>
               </select>
-              <span class="text-sm text-dim" x-text="filteredAuditEntries.length + ' of ' + auditEntries.length + ' entries'"></span>
-              <span class="text-xs text-dim" x-show="tipHash" x-text="'tip: ' + tipHash.substring(0, 16) + '...'"></span>
+              <span class="text-sm text-dim" x-text="entriesCountText()"></span>
+              <span class="text-xs text-dim" x-show="tipHash" x-text="tipHashText()"></span>
             </div>
             <div class="table-wrap" x-show="filteredAuditEntries.length">
               <table>
-                <thead><tr><th>#</th><th>Timestamp</th><th>Agent</th><th>Action</th><th>Detail</th><th>Outcome</th></tr></thead>
+                <thead><tr><th>#</th><th data-i18n="logsPage.timestamp">Timestamp</th><th data-i18n="label.agent">Agent</th><th data-i18n="logsPage.action">Action</th><th data-i18n="logsPage.detail">Detail</th><th data-i18n="logsPage.outcome">Outcome</th></tr></thead>
                 <tbody>
                   <template x-for="e in filteredAuditEntries" :key="e.seq">
                     <tr>
@@ -4191,8 +4189,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               </table>
             </div>
             <div class="empty-state" x-show="!auditEntries.length">
-              <h4>No audit entries yet</h4>
-              <p class="hint">Activity will appear here as agents operate.</p>
+              <h4 data-i18n="logsPage.noAuditEntries">No audit entries yet</h4>
+              <p class="hint" data-i18n="logsPage.noAuditEntriesHint">Activity will appear here as agents operate.</p>
             </div>
             </div>
           </div>
@@ -4759,54 +4757,59 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
     <!-- ─── Runtime page ─── -->
     <template x-if="page === 'runtime'">
       <div x-data="runtimePage">
-        <div class="page-header"><h2>Runtime</h2></div>
+        <div class="page-header"><h2 data-i18n="runtimePage.title">Runtime</h2></div>
         <div class="page-body" x-init="loadData()">
-          <div x-show="loading" class="loading-state"><div class="spinner"></div><span>Loading runtime info...</span></div>
-          <div x-show="!loading">
+          <div x-show="loading" class="loading-state"><div class="spinner"></div><span data-i18n="runtimePage.loading">Loading runtime info...</span></div>
+          <div x-show="!loading && loadError" class="error-state">
+            <span class="error-icon">!</span>
+            <p x-text="loadError"></p>
+            <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n="btn.retry">Retry</button>
+          </div>
+          <div x-show="!loading && !loadError">
             <div class="grid grid-cols-4" style="gap:16px;margin-bottom:24px">
               <div class="card stat-card">
-                <div class="stat-label">Uptime</div>
+                <div class="stat-label" data-i18n="stat.uptime">Uptime</div>
                 <div class="stat-value" x-text="uptime"></div>
               </div>
               <div class="card stat-card">
-                <div class="stat-label">Agents</div>
+                <div class="stat-label" data-i18n="runtimePage.agents">Agents</div>
                 <div class="stat-value" x-text="agentCount"></div>
               </div>
               <div class="card stat-card">
-                <div class="stat-label">Version</div>
+                <div class="stat-label" data-i18n="label.version">Version</div>
                 <div class="stat-value" x-text="version"></div>
               </div>
               <div class="card stat-card">
-                <div class="stat-label">Default Model</div>
+                <div class="stat-label" data-i18n="runtimePage.defaultModel">Default Model</div>
                 <div class="stat-value" style="font-size:13px" x-text="defaultModel"></div>
               </div>
             </div>
 
             <div class="card" style="margin-bottom:16px">
-              <div class="card-header">System</div>
+              <div class="card-header" data-i18n="runtimePage.system">System</div>
               <table class="table" style="margin-top:8px">
                 <tbody>
-                  <tr><td style="width:180px;font-weight:500">Platform</td><td x-text="platform"></td></tr>
-                  <tr><td style="font-weight:500">Architecture</td><td x-text="arch"></td></tr>
-                  <tr><td style="font-weight:500">API Listen</td><td x-text="apiListen"></td></tr>
-                  <tr><td style="font-weight:500">Home Directory</td><td x-text="homeDir"></td></tr>
-                  <tr><td style="font-weight:500">Log Level</td><td x-text="logLevel"></td></tr>
-                  <tr><td style="font-weight:500">Network</td><td x-text="networkEnabled ? 'Enabled' : 'Disabled'"></td></tr>
+                  <tr><td style="width:180px;font-weight:500" data-i18n="runtimePage.platform">Platform</td><td x-text="platform"></td></tr>
+                  <tr><td style="font-weight:500" data-i18n="runtimePage.architecture">Architecture</td><td x-text="arch"></td></tr>
+                  <tr><td style="font-weight:500" data-i18n="runtimePage.apiListen">API Listen</td><td x-text="apiListen"></td></tr>
+                  <tr><td style="font-weight:500" data-i18n="runtimePage.homeDirectory">Home Directory</td><td x-text="homeDir"></td></tr>
+                  <tr><td style="font-weight:500" data-i18n="runtimePage.logLevel">Log Level</td><td x-text="logLevel"></td></tr>
+                  <tr><td style="font-weight:500" data-i18n="runtimePage.network">Network</td><td x-text="networkStatusText()"></td></tr>
                 </tbody>
               </table>
             </div>
 
             <div class="card" style="margin-bottom:16px">
-              <div class="card-header">Providers</div>
+              <div class="card-header" data-i18n="runtimePage.providers">Providers</div>
               <table class="table" style="margin-top:8px">
-                <thead><tr><th>Provider</th><th>Status</th><th>Models</th><th>Latency</th></tr></thead>
+                <thead><tr><th data-i18n="label.provider">Provider</th><th data-i18n="label.status">Status</th><th data-i18n="runtimePage.models">Models</th><th data-i18n="runtimePage.latency">Latency</th></tr></thead>
                 <tbody>
                   <template x-for="p in providers" :key="p.id">
                     <tr>
                       <td x-text="p.display_name || p.id"></td>
-                      <td><span class="badge" :class="p.reachable ? 'badge-success' : (p.auth_status === 'Configured' ? 'badge-success' : 'badge-dim')" x-text="p.reachable ? 'Online' : (p.auth_status === 'Configured' ? 'Ready' : 'Not configured')"></span></td>
+                      <td><span class="badge" :class="p.reachable ? 'badge-success' : ((p.auth_status === 'Configured' || p.auth_status === 'configured') ? 'badge-success' : 'badge-dim')" x-text="providerStatusText(p)"></span></td>
                       <td x-text="p.model_count"></td>
-                      <td x-text="p.latency_ms ? p.latency_ms + 'ms' : '-'"></td>
+                      <td x-text="latencyText(p)"></td>
                     </tr>
                   </template>
                 </tbody>
@@ -4814,7 +4817,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             </div>
 
             <div class="flex gap-2">
-              <button class="btn btn-ghost btn-sm" @click="loadData()">Refresh</button>
+              <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n="btn.refresh">Refresh</button>
             </div>
           </div>
         </div>
