@@ -447,6 +447,44 @@ async fn send_lifecycle_reaction(
     let _ = adapter.send_reaction(user, message_id, &reaction).await;
 }
 
+/// On stale cached agent IDs, re-resolve the channel default by name and retry once.
+async fn try_reresolution(
+    error: &str,
+    channel_key: &str,
+    handle: &Arc<dyn ChannelBridgeHandle>,
+    router: &Arc<AgentRouter>,
+) -> Option<AgentId> {
+    if !error.contains("Agent not found") {
+        return None;
+    }
+
+    let agent_name = router.channel_default_name(channel_key)?;
+    info!(
+        channel = channel_key,
+        agent_name = %agent_name,
+        "Channel default agent ID is stale; re-resolving by name"
+    );
+
+    match handle.find_agent_by_name(&agent_name).await {
+        Ok(Some(agent_id)) => {
+            router.update_channel_default(channel_key, agent_id);
+            Some(agent_id)
+        }
+        Ok(None) => {
+            warn!(
+                channel = channel_key,
+                agent_name = %agent_name,
+                "Could not re-resolve default agent by name"
+            );
+            None
+        }
+        Err(e) => {
+            warn!(channel = channel_key, error = %e, "Failed to re-resolve default agent");
+            None
+        }
+    }
+}
+
 /// Dispatch a single incoming message — handles bot commands or routes to an agent.
 ///
 /// Applies per-channel policies (DM/group filtering, rate limiting, formatting, threading).
@@ -719,6 +757,7 @@ async fn dispatch_message(
         &message.sender.platform_id,
         message.sender.librefang_user.as_deref(),
     );
+    let channel_key = format!("{:?}", message.channel);
 
     let agent_id = match agent_id {
         Some(id) => id,
@@ -811,6 +850,59 @@ async fn dispatch_message(
                 .await;
         }
         Err(e) => {
+            if let Some(new_id) = try_reresolution(&e, &channel_key, handle, router).await {
+                send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking)
+                    .await;
+                match handle.send_message(new_id, &text).await {
+                    Ok(response) => {
+                        send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done)
+                            .await;
+                        send_response(adapter, &message.sender, response, thread_id, output_format)
+                            .await;
+                        handle
+                            .record_delivery(
+                                new_id,
+                                ct_str,
+                                &message.sender.platform_id,
+                                true,
+                                None,
+                                thread_id,
+                            )
+                            .await;
+                    }
+                    Err(e2) => {
+                        send_lifecycle_reaction(
+                            adapter,
+                            &message.sender,
+                            msg_id,
+                            AgentPhase::Error,
+                        )
+                        .await;
+                        warn!("Agent error for {new_id} (after re-resolution): {e2}");
+                        let err_msg = format!("Agent error: {e2}");
+                        send_response(
+                            adapter,
+                            &message.sender,
+                            err_msg.clone(),
+                            thread_id,
+                            output_format,
+                        )
+                        .await;
+                        handle
+                            .record_delivery(
+                                new_id,
+                                ct_str,
+                                &message.sender.platform_id,
+                                false,
+                                Some(&err_msg),
+                                thread_id,
+                            )
+                            .await;
+                    }
+                }
+                return;
+            }
+
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Error).await;
             warn!("Agent error for {agent_id}: {e}");
             let err_msg = format!("Agent error: {e}");
@@ -979,6 +1071,7 @@ async fn dispatch_with_blocks(
         &message.sender.platform_id,
         message.sender.librefang_user.as_deref(),
     );
+    let channel_key = format!("{:?}", message.channel);
 
     let agent_id = match agent_id {
         Some(id) => id,
@@ -1034,7 +1127,7 @@ async fn dispatch_with_blocks(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
-    match handle.send_message_with_blocks(agent_id, blocks).await {
+    match handle.send_message_with_blocks(agent_id, blocks.clone()).await {
         Ok(response) => {
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
             send_response(adapter, &message.sender, response, thread_id, output_format).await;
@@ -1050,6 +1143,59 @@ async fn dispatch_with_blocks(
                 .await;
         }
         Err(e) => {
+            if let Some(new_id) = try_reresolution(&e, &channel_key, handle, router).await {
+                send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking)
+                    .await;
+                match handle.send_message_with_blocks(new_id, blocks).await {
+                    Ok(response) => {
+                        send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done)
+                            .await;
+                        send_response(adapter, &message.sender, response, thread_id, output_format)
+                            .await;
+                        handle
+                            .record_delivery(
+                                new_id,
+                                ct_str,
+                                &message.sender.platform_id,
+                                true,
+                                None,
+                                thread_id,
+                            )
+                            .await;
+                    }
+                    Err(e2) => {
+                        send_lifecycle_reaction(
+                            adapter,
+                            &message.sender,
+                            msg_id,
+                            AgentPhase::Error,
+                        )
+                        .await;
+                        warn!("Agent error for {new_id} (after re-resolution): {e2}");
+                        let err_msg = format!("Agent error: {e2}");
+                        send_response(
+                            adapter,
+                            &message.sender,
+                            err_msg.clone(),
+                            thread_id,
+                            output_format,
+                        )
+                        .await;
+                        handle
+                            .record_delivery(
+                                new_id,
+                                ct_str,
+                                &message.sender.platform_id,
+                                false,
+                                Some(&err_msg),
+                                thread_id,
+                            )
+                            .await;
+                    }
+                }
+                return;
+            }
+
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Error).await;
             warn!("Agent error for {agent_id}: {e}");
             let err_msg = format!("Agent error: {e}");

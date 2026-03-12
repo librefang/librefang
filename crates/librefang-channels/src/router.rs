@@ -34,6 +34,8 @@ pub struct AgentRouter {
     default_agent: Option<AgentId>,
     /// Per-channel-type default agent (e.g., Telegram -> agent_a, Discord -> agent_b).
     channel_defaults: DashMap<String, AgentId>,
+    /// Per-channel-type default agent name for stale-ID re-resolution after respawn.
+    channel_default_names: DashMap<String, String>,
     /// Sorted bindings (most specific first). Uses Mutex for runtime updates via Arc.
     bindings: Mutex<Vec<(AgentBinding, String)>>,
     /// Broadcast configuration. Uses Mutex for runtime updates via Arc.
@@ -50,6 +52,7 @@ impl AgentRouter {
             direct_routes: DashMap::new(),
             default_agent: None,
             channel_defaults: DashMap::new(),
+            channel_default_names: DashMap::new(),
             bindings: Mutex::new(Vec::new()),
             broadcast: Mutex::new(BroadcastConfig::default()),
             agent_name_cache: DashMap::new(),
@@ -64,6 +67,25 @@ impl AgentRouter {
     /// Set a per-channel-type default agent (e.g., "Telegram" -> agent_id).
     pub fn set_channel_default(&self, channel_key: String, agent_id: AgentId) {
         self.channel_defaults.insert(channel_key, agent_id);
+    }
+
+    /// Set a per-channel-type default agent and preserve its configured name.
+    pub fn set_channel_default_with_name(
+        &self,
+        channel_key: String,
+        agent_id: AgentId,
+        agent_name: String,
+    ) {
+        self.channel_default_names
+            .insert(channel_key.clone(), agent_name);
+        self.channel_defaults.insert(channel_key, agent_id);
+    }
+
+    /// Get the configured default agent name for a channel type.
+    pub fn channel_default_name(&self, channel_key: &str) -> Option<String> {
+        self.channel_default_names
+            .get(channel_key)
+            .map(|entry| entry.value().clone())
     }
 
     /// Set a user's default agent.
@@ -105,6 +127,12 @@ impl AgentRouter {
     /// Register an agent name -> ID mapping for binding resolution.
     pub fn register_agent(&self, name: String, id: AgentId) {
         self.agent_name_cache.insert(name, id);
+    }
+
+    /// Update the cached channel default agent ID after a successful re-resolution.
+    pub fn update_channel_default(&self, channel_key: &str, agent_id: AgentId) {
+        self.channel_defaults
+            .insert(channel_key.to_string(), agent_id);
     }
 
     /// Resolve which agent should handle a message.
@@ -339,6 +367,7 @@ impl Default for AgentRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn test_routing_priority() {
@@ -369,6 +398,22 @@ mod tests {
         let router = AgentRouter::new();
         let resolved = router.resolve(&ChannelType::CLI, "local", None);
         assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn test_channel_default_name_and_id_can_be_updated_independently() {
+        let router = AgentRouter::new();
+        let channel = "Telegram".to_string();
+        let old_id = AgentId(Uuid::new_v4());
+        let new_id = AgentId(Uuid::new_v4());
+
+        router.set_channel_default_with_name(channel.clone(), old_id, "assistant".to_string());
+        assert_eq!(router.channel_default_name(&channel), Some("assistant".to_string()));
+        assert_eq!(router.resolve(&ChannelType::Telegram, "u1", None), Some(old_id));
+
+        router.update_channel_default(&channel, new_id);
+        assert_eq!(router.channel_default_name(&channel), Some("assistant".to_string()));
+        assert_eq!(router.resolve(&ChannelType::Telegram, "u1", None), Some(new_id));
     }
 
     #[test]
