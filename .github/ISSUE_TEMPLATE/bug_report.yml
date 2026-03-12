@@ -26,7 +26,7 @@ body:
       description: How can we reproduce this?
       placeholder: |
         1. Run `librefang start`
-        2. Open dashboard at http://localhost:4200
+        2. Open dashboard at http://localhost:4545
         3. Click ...
     validations:
       required: true

@@ -3536,6 +3536,7 @@ dependencies = [
  "clap_complete",
  "colored",
  "dirs 6.0.0",
+ "libc",
  "librefang-api",
  "librefang-extensions",
  "librefang-kernel",
