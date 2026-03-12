@@ -805,7 +805,7 @@ pub fn run_chat_tui(config: Option<PathBuf>, agent_name: Option<String>) {
     ratatui::restore();
 }
 
-fn preferred_daemon_agent<'a>(agents: &'a [serde_json::Value]) -> Option<&'a serde_json::Value> {
+fn preferred_daemon_agent(agents: &[serde_json::Value]) -> Option<&serde_json::Value> {
     for preferred in DEFAULT_ENTRY_AGENTS {
         if let Some(agent) = agents
             .iter()
@@ -817,7 +817,7 @@ fn preferred_daemon_agent<'a>(agents: &'a [serde_json::Value]) -> Option<&'a ser
     agents.first()
 }
 
-fn preferred_inprocess_agent<'a>(agents: &'a [AgentEntry]) -> Option<&'a AgentEntry> {
+fn preferred_inprocess_agent(agents: &[AgentEntry]) -> Option<&AgentEntry> {
     for preferred in DEFAULT_ENTRY_AGENTS {
         if let Some(agent) = agents.iter().find(|agent| agent.name == *preferred) {
             return Some(agent);
@@ -826,9 +826,9 @@ fn preferred_inprocess_agent<'a>(agents: &'a [AgentEntry]) -> Option<&'a AgentEn
     agents.first()
 }
 
-fn preferred_template<'a>(
-    templates: &'a [crate::templates::AgentTemplate],
-) -> Option<&'a crate::templates::AgentTemplate> {
+fn preferred_template(
+    templates: &[crate::templates::AgentTemplate],
+) -> Option<&crate::templates::AgentTemplate> {
     for preferred in DEFAULT_ENTRY_AGENTS {
         if let Some(template) = templates
             .iter()

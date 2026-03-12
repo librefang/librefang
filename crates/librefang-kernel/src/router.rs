@@ -749,7 +749,7 @@ fn manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandidate> {
         weak_source.extend(
             template
                 .to_lowercase()
-                .split(|ch| ch == '-' || ch == '_')
+                .split(['-', '_'])
                 .filter(|token| token.len() >= 3 && !GENERIC_ENGLISH_WORDS.contains(token))
                 .map(str::to_string),
         );
@@ -846,7 +846,7 @@ fn english_variants(text: &str) -> Vec<String> {
         variants.push(normalized.replace(['-', '_'], " "));
         variants.extend(
             normalized
-                .split(|ch| ch == '-' || ch == '_')
+                .split(['-', '_'])
                 .filter(|part| part.len() >= 3)
                 .map(str::to_string),
         );
@@ -866,8 +866,7 @@ fn description_phrases(description: &str) -> Vec<String> {
 
     let normalized = text
         .replace("以及", "、")
-        .replace('并', "、")
-        .replace('与', "、");
+        .replace(['并', '与'], "、");
     let mut phrases = Vec::new();
 
     for raw in normalized.split(|ch| "、，,。；;：:（）()/".contains(ch)) {
