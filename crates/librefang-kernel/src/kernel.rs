@@ -8,6 +8,7 @@ use crate::error::{KernelError, KernelResult};
 use crate::event_bus::EventBus;
 use crate::metering::MeteringEngine;
 use crate::registry::AgentRegistry;
+use crate::router;
 use crate::scheduler::AgentScheduler;
 use crate::supervisor::Supervisor;
 use crate::triggers::{TriggerEngine, TriggerId, TriggerPattern};
@@ -1478,15 +1479,23 @@ impl LibreFangKernel {
         })?;
 
         // Dispatch based on module type
-        let result = if entry.manifest.module.starts_with("wasm:") {
-            self.execute_wasm_agent(&entry, message, kernel_handle)
-                .await
-        } else if entry.manifest.module.starts_with("python:") {
-            self.execute_python_agent(&entry, agent_id, message).await
-        } else {
-            // Default: LLM agent loop (builtin:chat or any unrecognized module)
-            self.execute_llm_agent(&entry, agent_id, message, kernel_handle, content_blocks)
-                .await
+        let result = match entry.manifest.module.as_str() {
+            module if module.starts_with("wasm:") => {
+                self.execute_wasm_agent(&entry, message, kernel_handle)
+                    .await
+            }
+            module if module.starts_with("python:") => {
+                self.execute_python_agent(&entry, agent_id, message).await
+            }
+            "builtin:router" => {
+                self.execute_router_agent(&entry, agent_id, message, kernel_handle, content_blocks)
+                    .await
+            }
+            _ => {
+                // Default: LLM agent loop (builtin:chat or any unrecognized module)
+                self.execute_llm_agent(&entry, agent_id, message, kernel_handle, content_blocks)
+                    .await
+            }
         };
 
         match result {
@@ -2088,6 +2097,199 @@ impl LibreFangKernel {
             silent: false,
             directives: Default::default(),
         })
+    }
+
+    async fn execute_router_agent(
+        &self,
+        entry: &AgentEntry,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
+    ) -> KernelResult<AgentLoopResult> {
+        let hand_selection = router::auto_select_hand(message);
+        let template_selection =
+            router::auto_select_template(message, &self.config.home_dir.join("agents"));
+
+        if let Some(hand_id) = hand_selection.hand_id {
+            info!(
+                router = %entry.name,
+                route_type = "hand",
+                target = hand_id,
+                reason = %hand_selection.reason,
+                "Router selected hand"
+            );
+            match self
+                .execute_routed_hand(
+                    hand_id,
+                    message,
+                    kernel_handle.clone(),
+                    content_blocks.clone(),
+                )
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err) => warn!(
+                    router = %entry.name,
+                    hand_id,
+                    error = %err,
+                    "Router hand dispatch failed, falling back"
+                ),
+            }
+        }
+
+        if template_selection.score > 0 {
+            info!(
+                router = %entry.name,
+                route_type = "template",
+                target = %template_selection.template,
+                reason = %template_selection.reason,
+                "Router selected template"
+            );
+            match self
+                .execute_routed_template(
+                    agent_id,
+                    &template_selection.template,
+                    message,
+                    kernel_handle.clone(),
+                    content_blocks.clone(),
+                )
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(err) => warn!(
+                    router = %entry.name,
+                    template = %template_selection.template,
+                    error = %err,
+                    "Router template dispatch failed, falling back to assistant"
+                ),
+            }
+        }
+
+        info!(
+            router = %entry.name,
+            route_type = "template",
+            target = "assistant",
+            reason = "no specialist match; routed to assistant",
+            "Router selected fallback template"
+        );
+        self.execute_routed_template(
+            agent_id,
+            "assistant",
+            message,
+            kernel_handle,
+            content_blocks,
+        )
+        .await
+    }
+
+    async fn execute_routed_hand(
+        &self,
+        hand_id: &str,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
+    ) -> KernelResult<AgentLoopResult> {
+        let target_id = if let Some(active_id) = self.active_hand_agent_id(hand_id) {
+            active_id
+        } else {
+            let instance = self
+                .activate_hand(hand_id, std::collections::HashMap::new())
+                .map_err(|e| {
+                    KernelError::LibreFang(LibreFangError::Internal(format!(
+                        "Failed to activate hand '{hand_id}': {e}"
+                    )))
+                })?;
+            instance.agent_id.ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Hand '{hand_id}' activated without an agent id"
+                )))
+            })?
+        };
+
+        let downstream = Box::pin(self.send_message_with_handle_and_blocks(
+            target_id,
+            message,
+            kernel_handle,
+            content_blocks,
+        ))
+        .await?;
+        Ok(Self::wrap_routed_result(downstream))
+    }
+
+    async fn execute_routed_template(
+        &self,
+        router_agent_id: AgentId,
+        template: &str,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
+    ) -> KernelResult<AgentLoopResult> {
+        let existing = self.registry.find_by_name(template).map(|entry| entry.id);
+        let keep_spawned = template == "assistant";
+        let mut spawned = false;
+
+        let target_id = if let Some(existing) = existing {
+            existing
+        } else {
+            let manifest = router::load_template_manifest(&self.config.home_dir, template)
+                .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?;
+            let spawned_id = self.spawn_agent_with_parent(manifest, Some(router_agent_id))?;
+            spawned = true;
+            spawned_id
+        };
+
+        let result = Box::pin(self.send_message_with_handle_and_blocks(
+            target_id,
+            message,
+            kernel_handle,
+            content_blocks,
+        ))
+        .await;
+
+        if spawned && !keep_spawned {
+            if let Err(err) = self.kill_agent(target_id) {
+                warn!(
+                    template,
+                    agent_id = %target_id,
+                    error = %err,
+                    "Failed to clean up spawned routed agent"
+                );
+            }
+        }
+
+        result.map(Self::wrap_routed_result)
+    }
+
+    fn active_hand_agent_id(&self, hand_id: &str) -> Option<AgentId> {
+        self.hand_registry
+            .list_instances()
+            .into_iter()
+            .find(|instance| {
+                instance.hand_id == hand_id
+                    && instance.status == librefang_hands::HandStatus::Active
+            })
+            .and_then(|instance| instance.agent_id)
+            .or_else(|| {
+                self.hand_registry
+                    .get_definition(hand_id)
+                    .and_then(|definition| self.registry.find_by_name(&definition.agent.name))
+                    .map(|entry| entry.id)
+            })
+    }
+
+    fn wrap_routed_result(result: AgentLoopResult) -> AgentLoopResult {
+        AgentLoopResult {
+            response: result.response,
+            total_usage: librefang_types::message::TokenUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+            },
+            iterations: result.iterations,
+            cost_usd: None,
+            silent: result.silent,
+            directives: result.directives,
+        }
     }
 
     /// Execute the default LLM-based agent loop.
