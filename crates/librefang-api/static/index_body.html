@@ -1285,47 +1285,46 @@
     <template x-if="page === 'workflows'">
       <div x-data="{ wfTab: 'list' }">
         <div class="page-header">
-          <h2>Workflows</h2>
+          <h2 data-i18n="workflowsPage.title">Workflows</h2>
           <div class="flex gap-2">
-            <button class="btn btn-ghost btn-sm" :class="{ active: wfTab === 'list' }" @click="wfTab = 'list'">List</button>
-            <button class="btn btn-ghost btn-sm" :class="{ active: wfTab === 'builder' }" @click="wfTab = 'builder'">Visual Builder</button>
+            <button class="btn btn-ghost btn-sm" :class="{ active: wfTab === 'list' }" @click="wfTab = 'list'" data-i18n="workflowsPage.listTab">List</button>
+            <button class="btn btn-ghost btn-sm" :class="{ active: wfTab === 'builder' }" @click="wfTab = 'builder'" data-i18n="workflowsPage.builderTab">Visual Builder</button>
           </div>
         </div>
 
         <!-- Tab: List -->
         <template x-if="wfTab === 'list'">
-        <div x-data="workflowsPage">
+        <div x-data="workflowsPage" x-init="init()">
         <div class="page-body" x-init="loadWorkflows()">
-          <div x-show="loading" class="loading-state"><div class="spinner"></div><span>Loading workflows...</span></div>
+          <div x-show="loading" class="loading-state"><div class="spinner"></div><span data-i18n="workflowsPage.loading">Loading workflows...</span></div>
           <div x-show="!loading && loadError" class="error-state">
             <span class="error-icon">!</span>
             <p x-text="loadError"></p>
-            <button class="btn btn-ghost btn-sm" @click="loadData()">Retry</button>
+            <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n="btn.retry">Retry</button>
           </div>
           <div x-show="!loading && !loadError">
           <div class="card mb-4" style="border-left:3px solid var(--accent)">
-            <div class="font-bold" style="font-size:13px;margin-bottom:4px">What are Workflows?</div>
+            <div class="font-bold" style="font-size:13px;margin-bottom:4px" data-i18n="workflowsPage.whatAreWorkflows">What are Workflows?</div>
             <div class="text-sm text-dim" style="line-height:1.6">
-              Workflows chain multiple agents into automated pipelines. Each step runs an agent with a prompt template,
-              passing output from one step as input to the next. Steps can run sequentially, fan out in parallel, loop, or branch conditionally.
-              <br><span style="margin-top:4px;display:inline-block">Try the <strong style="color:var(--accent);cursor:pointer" @click="$dispatch('wf-switch-tab','builder')">Visual Builder</strong> to drag and drop workflow steps.</span>
+              <span data-i18n="workflowsPage.whatAreWorkflowsDesc">Workflows chain multiple agents into automated pipelines. Each step runs an agent with a prompt template, passing output from one step as input to the next. Steps can run sequentially, fan out in parallel, loop, or branch conditionally.</span>
+              <br><span style="margin-top:4px;display:inline-block"><span data-i18n="workflowsPage.tryVisualBuilderPrefix">Try the</span> <strong style="color:var(--accent);cursor:pointer" @click="$dispatch('wf-switch-tab','builder')" data-i18n="workflowsPage.builderTab">Visual Builder</strong> <span data-i18n="workflowsPage.tryVisualBuilderSuffix">to drag and drop workflow steps.</span></span>
             </div>
           </div>
           <div class="flex gap-2 mb-4">
-            <button class="btn btn-primary btn-sm" @click="showCreateModal = true">+ New Workflow</button>
+            <button class="btn btn-primary btn-sm" @click="showCreateModal = true" data-i18n="workflowsPage.newWorkflow">+ New Workflow</button>
           </div>
           <div class="table-wrap" x-show="workflows.length">
             <table>
-              <thead><tr><th>Name</th><th>Steps</th><th>Created</th><th>Actions</th></tr></thead>
+              <thead><tr><th data-i18n="label.name">Name</th><th data-i18n="workflowsPage.steps">Steps</th><th data-i18n="detail.created">Created</th><th data-i18n="label.actions">Actions</th></tr></thead>
               <tbody>
                 <template x-for="wf in workflows" :key="wf.id">
                   <tr>
                     <td><span class="font-bold" x-text="wf.name"></span><br><span class="text-xs text-dim" x-text="wf.description"></span></td>
-                    <td x-text="Array.isArray(wf.steps) ? wf.steps.length + ' step' + (wf.steps.length !== 1 ? 's' : '') : wf.steps"></td>
+                    <td x-text="stepCountText(wf)"></td>
                     <td class="text-xs" x-text="new Date(wf.created_at).toLocaleDateString()"></td>
                     <td>
-                      <button class="btn btn-primary btn-sm" @click="showRunModal(wf)">Run</button>
-                      <button class="btn btn-ghost btn-sm" @click="viewRuns(wf)">History</button>
+                      <button class="btn btn-primary btn-sm" @click="showRunModal(wf)" data-i18n="workflowsPage.run">Run</button>
+                      <button class="btn btn-ghost btn-sm" @click="viewRuns(wf)" data-i18n="workflowsPage.history">History</button>
                     </td>
                   </tr>
                 </template>
@@ -1336,41 +1335,41 @@
             <div class="empty-state-icon">
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3v12M18 9a9 9 0 0 1-9 9"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/></svg>
             </div>
-            <h3>No workflows yet</h3>
-            <p>Chain multiple agents into automated pipelines with branching, fan-out, and loops.</p>
-            <button class="btn btn-primary" @click="showCreateModal = true">Create Workflow</button>
+            <h3 data-i18n="workflowsPage.noWorkflows">No workflows yet</h3>
+            <p data-i18n="workflowsPage.noWorkflowsDesc">Chain multiple agents into automated pipelines with branching, fan-out, and loops.</p>
+            <button class="btn btn-primary" @click="showCreateModal = true" data-i18n="workflowsPage.createWorkflow">Create Workflow</button>
           </div>
           </div>
           <!-- Create modal -->
           <template x-if="showCreateModal">
             <div class="modal-overlay" @click.self="showCreateModal = false" @keydown.escape.window="showCreateModal = false">
               <div class="modal">
-                <div class="modal-header"><h3>Create Workflow</h3><button class="modal-close" @click="showCreateModal = false">&times;</button></div>
-                <div class="form-group"><label>Name</label><input class="form-input" x-model="newWf.name" placeholder="my-workflow"></div>
-                <div class="form-group"><label>Description</label><input class="form-input" x-model="newWf.description" placeholder="What does this workflow do?"></div>
+                <div class="modal-header"><h3 data-i18n="workflowsPage.createWorkflow">Create Workflow</h3><button class="modal-close" @click="showCreateModal = false">&times;</button></div>
+                <div class="form-group"><label data-i18n="label.name">Name</label><input class="form-input" x-model="newWf.name" data-i18n-placeholder="workflowsPage.workflowNamePlaceholder" placeholder="my-workflow"></div>
+                <div class="form-group"><label data-i18n="settingsPage.description">Description</label><input class="form-input" x-model="newWf.description" data-i18n-placeholder="workflowsPage.workflowDescPlaceholder" placeholder="What does this workflow do?"></div>
                 <div class="mb-4">
-                  <div class="form-group" style="margin:0"><label>Steps</label></div>
-                  <div class="text-xs text-dim mb-2">Each step runs an agent. Use <code style="color:var(--accent)">{{input}}</code> in prompts to pass the previous step's output.</div>
+                  <div class="form-group" style="margin:0"><label data-i18n="workflowsPage.steps">Steps</label></div>
+                  <div class="text-xs text-dim mb-2"><span data-i18n="workflowsPage.stepsDescPrefix">Each step runs an agent. Use</span> <code style="color:var(--accent)">{{input}}</code> <span data-i18n="workflowsPage.stepsDescSuffix">in prompts to pass the previous step's output.</span></div>
                   <template x-for="(step, i) in newWf.steps" :key="i">
                     <div class="card mt-2" style="padding:10px">
                       <div class="flex gap-2 items-center">
                         <span class="text-xs text-dim font-bold" x-text="'#' + (i+1)" style="width:24px"></span>
-                        <input class="form-input" style="flex:1" x-model="step.name" placeholder="Step name">
-                        <input class="form-input" style="flex:1" x-model="step.agent_name" placeholder="Agent name">
+                        <input class="form-input" style="flex:1" x-model="step.name" data-i18n-placeholder="workflowsPage.stepNamePlaceholder" placeholder="Step name">
+                        <input class="form-input" style="flex:1" x-model="step.agent_name" data-i18n-placeholder="workflowsPage.agentNamePlaceholder" placeholder="Agent name">
                         <select class="form-select" style="width:120px" x-model="step.mode">
-                          <option value="sequential">Sequential</option>
-                          <option value="fan_out">Fan Out</option>
-                          <option value="conditional">Conditional</option>
-                          <option value="loop">Loop</option>
+                          <option value="sequential" data-i18n="workflowsPage.mode.sequential">Sequential</option>
+                          <option value="fan_out" data-i18n="workflowsPage.mode.fanOut">Fan Out</option>
+                          <option value="conditional" data-i18n="workflowsPage.mode.conditional">Conditional</option>
+                          <option value="loop" data-i18n="workflowsPage.mode.loop">Loop</option>
                         </select>
                         <button class="btn btn-danger btn-sm" @click="newWf.steps.splice(i,1)">&times;</button>
                       </div>
-                      <input class="form-input mt-2" x-model="step.prompt" placeholder="Prompt template (use {{input}})">
+                      <input class="form-input mt-2" x-model="step.prompt" data-i18n-placeholder="workflowsPage.promptPlaceholder" placeholder="Prompt template (use {{input}})">
                     </div>
                   </template>
-                  <button class="btn btn-ghost btn-sm mt-2" @click="newWf.steps.push({name:'',agent_name:'',mode:'sequential',prompt:'{{input}}'})">+ Add Step</button>
+                  <button class="btn btn-ghost btn-sm mt-2" @click="newWf.steps.push({name:'',agent_name:'',mode:'sequential',prompt:'{{input}}'})" data-i18n="workflowsPage.addStep">+ Add Step</button>
                 </div>
-                <button class="btn btn-primary btn-block" @click="createWorkflow()">Create</button>
+                <button class="btn btn-primary btn-block" @click="createWorkflow()" data-i18n="workflowsPage.create">Create</button>
               </div>
             </div>
           </template>
@@ -1378,13 +1377,13 @@
           <template x-if="runModal">
             <div class="modal-overlay" @click.self="runModal = null" @keydown.escape.window="runModal = null">
               <div class="modal">
-                <div class="modal-header"><h3 x-text="'Run: ' + runModal.name"></h3><button class="modal-close" @click="runModal = null">&times;</button></div>
-                <div class="form-group"><label>Input</label><textarea class="form-textarea" x-model="runInput" placeholder="Enter workflow input..."></textarea></div>
+                <div class="modal-header"><h3 x-text="runModalTitle()"></h3><button class="modal-close" @click="runModal = null">&times;</button></div>
+                <div class="form-group"><label data-i18n="workflowsPage.input">Input</label><textarea class="form-textarea" x-model="runInput" data-i18n-placeholder="workflowsPage.runInputPlaceholder" placeholder="Enter workflow input..."></textarea></div>
                 <button class="btn btn-primary btn-block" @click="executeWorkflow()" :disabled="running">
-                  <span x-show="!running">Execute</span><span x-show="running">Running...</span>
+                  <span x-show="!running" data-i18n="workflowsPage.execute">Execute</span><span x-show="running" data-i18n="workflowsPage.running">Running...</span>
                 </button>
                 <div class="card mt-4" x-show="runResult">
-                  <div class="card-header">Result</div>
+                  <div class="card-header" data-i18n="workflowsPage.result">Result</div>
                   <pre style="font-size:11px;white-space:pre-wrap;margin-top:8px;color:var(--text-dim)" x-text="runResult"></pre>
                 </div>
               </div>
@@ -1400,8 +1399,8 @@
           <div class="wf-builder-layout">
             <!-- Node palette (left sidebar) -->
             <div class="wf-palette">
-              <div class="wf-palette-title">Node Palette</div>
-              <div class="text-xs text-dim mb-3">Drag nodes onto the canvas</div>
+              <div class="wf-palette-title" data-i18n="workflowBuilder.nodePalette">Node Palette</div>
+              <div class="text-xs text-dim mb-3" data-i18n="workflowBuilder.dragNodes">Drag nodes onto the canvas</div>
               <template x-for="nt in nodeTypes" :key="nt.type">
                 <div class="wf-palette-node" draggable="true" @dragstart="onPaletteDragStart(nt.type, $event)"
                      :style="'border-left: 3px solid ' + nt.color">
@@ -1410,18 +1409,18 @@
                 </div>
               </template>
               <hr style="border-color:var(--border);margin:12px 0">
-              <div class="text-xs text-dim mb-2">Workflow</div>
+              <div class="text-xs text-dim mb-2" data-i18n="workflowsPage.title">Workflow</div>
               <div class="form-group" style="margin-bottom:8px">
-                <input class="form-input" x-model="workflowName" placeholder="Workflow name" style="font-size:11px">
+                <input class="form-input" x-model="workflowName" data-i18n-placeholder="workflowsPage.workflowNamePlaceholder" placeholder="Workflow name" style="font-size:11px">
               </div>
               <div class="form-group" style="margin-bottom:8px">
-                <input class="form-input" x-model="workflowDescription" placeholder="Description" style="font-size:11px">
+                <input class="form-input" x-model="workflowDescription" data-i18n-placeholder="workflowsPage.workflowDescPlaceholder" placeholder="Description" style="font-size:11px">
               </div>
               <div class="flex flex-col gap-1">
-                <button class="btn btn-primary btn-sm btn-block" @click="generateToml()">Export TOML</button>
-                <button class="btn btn-primary btn-sm btn-block" @click="showSaveModal = true">Save Workflow</button>
-                <button class="btn btn-ghost btn-sm btn-block" @click="autoLayout()">Auto Layout</button>
-                <button class="btn btn-ghost btn-sm btn-block" @click="clearCanvas()">Clear</button>
+                <button class="btn btn-primary btn-sm btn-block" @click="generateToml()" data-i18n="workflowBuilder.exportToml">Export TOML</button>
+                <button class="btn btn-primary btn-sm btn-block" @click="showSaveModal = true" data-i18n="workflowBuilder.saveWorkflow">Save Workflow</button>
+                <button class="btn btn-ghost btn-sm btn-block" @click="autoLayout()" data-i18n="workflowBuilder.autoLayout">Auto Layout</button>
+                <button class="btn btn-ghost btn-sm btn-block" @click="clearCanvas()" data-i18n="logsPage.clear">Clear</button>
               </div>
             </div>
 
@@ -1429,10 +1428,10 @@
             <div class="wf-canvas-wrap">
               <!-- Zoom controls -->
               <div class="wf-zoom-controls">
-                <button class="btn btn-ghost btn-sm" @click="zoomOut()" title="Zoom out">-</button>
+                <button class="btn btn-ghost btn-sm" @click="zoomOut()" data-i18n-title="workflowBuilder.zoomOut" title="Zoom out">-</button>
                 <span class="text-xs" x-text="Math.round(zoom * 100) + '%'" style="min-width:36px;text-align:center"></span>
-                <button class="btn btn-ghost btn-sm" @click="zoomIn()" title="Zoom in">+</button>
-                <button class="btn btn-ghost btn-sm" @click="zoomReset()" title="Reset view">Fit</button>
+                <button class="btn btn-ghost btn-sm" @click="zoomIn()" data-i18n-title="workflowBuilder.zoomIn" title="Zoom in">+</button>
+                <button class="btn btn-ghost btn-sm" @click="zoomReset()" data-i18n-title="workflowBuilder.resetView" title="Reset view" data-i18n="workflowBuilder.fit">Fit</button>
               </div>
 
               <svg id="wf-canvas" class="wf-canvas"
@@ -1459,7 +1458,7 @@
 
               <!-- Canvas hints -->
               <div class="wf-canvas-hint" x-show="nodes.length <= 1">
-                Drag nodes from the palette onto the canvas. Connect output ports (bottom) to input ports (top). Double-click to edit.
+                <span data-i18n="workflowBuilder.canvasHint">Drag nodes from the palette onto the canvas. Connect output ports (bottom) to input ports (top). Double-click to edit.</span>
               </div>
             </div>
 
@@ -1472,7 +1471,7 @@
               <template x-if="selectedNode">
                 <div>
                   <div class="form-group">
-                    <label class="text-xs">Label</label>
+                    <label class="text-xs" data-i18n="workflowBuilder.label">Label</label>
                     <input class="form-input" x-model="selectedNode.label" @input="applyNodeEdit()" style="font-size:11px">
                   </div>
 
@@ -1480,21 +1479,21 @@
                   <template x-if="selectedNode.type === 'agent'">
                     <div>
                       <div class="form-group">
-                        <label class="text-xs">Agent</label>
+                        <label class="text-xs" data-i18n="label.agent">Agent</label>
                         <select class="form-select" x-model="selectedNode.config.agent_name" @change="applyNodeEdit()" style="font-size:11px">
-                          <option value="">Select agent...</option>
+                          <option value="" data-i18n="workflowBuilder.selectAgent">Select agent...</option>
                           <template x-for="a in agents" :key="a.id || a.name">
                             <option :value="a.name" x-text="a.name"></option>
                           </template>
                         </select>
                       </div>
                       <div class="form-group">
-                        <label class="text-xs">Prompt Template</label>
+                        <label class="text-xs" data-i18n="workflowBuilder.promptTemplate">Prompt Template</label>
                         <textarea class="form-textarea" x-model="selectedNode.config.prompt" @input="applyNodeEdit()" style="font-size:11px;min-height:60px" placeholder="{{input}}"></textarea>
                       </div>
                       <div class="form-group">
-                        <label class="text-xs">Model (optional)</label>
-                        <input class="form-input" x-model="selectedNode.config.model" @input="applyNodeEdit()" style="font-size:11px" placeholder="Default model">
+                        <label class="text-xs" data-i18n="workflowBuilder.modelOptional">Model (optional)</label>
+                        <input class="form-input" x-model="selectedNode.config.model" @input="applyNodeEdit()" style="font-size:11px" data-i18n-placeholder="workflowBuilder.defaultModelPlaceholder" placeholder="Default model">
                       </div>
                     </div>
                   </template>
@@ -1503,10 +1502,10 @@
                   <template x-if="selectedNode.type === 'condition'">
                     <div>
                       <div class="form-group">
-                        <label class="text-xs">Expression</label>
+                        <label class="text-xs" data-i18n="workflowBuilder.expression">Expression</label>
                         <input class="form-input" x-model="selectedNode.config.expression" @input="applyNodeEdit()" style="font-size:11px" placeholder="output.contains('yes')">
                       </div>
-                      <div class="text-xs text-dim">Top port = true, bottom port = false</div>
+                      <div class="text-xs text-dim" data-i18n="workflowBuilder.conditionPorts">Top port = true, bottom port = false</div>
                     </div>
                   </template>
 
@@ -1514,11 +1513,11 @@
                   <template x-if="selectedNode.type === 'loop'">
                     <div>
                       <div class="form-group">
-                        <label class="text-xs">Max Iterations</label>
+                        <label class="text-xs" data-i18n="workflowBuilder.maxIterations">Max Iterations</label>
                         <input type="number" class="form-input" x-model.number="selectedNode.config.max_iterations" @input="applyNodeEdit()" style="font-size:11px" min="1" max="100">
                       </div>
                       <div class="form-group">
-                        <label class="text-xs">Until (stop condition)</label>
+                        <label class="text-xs" data-i18n="workflowBuilder.untilStopCondition">Until (stop condition)</label>
                         <input class="form-input" x-model="selectedNode.config.until" @input="applyNodeEdit()" style="font-size:11px" placeholder="output === 'done'">
                       </div>
                     </div>
@@ -1528,7 +1527,7 @@
                   <template x-if="selectedNode.type === 'parallel'">
                     <div>
                       <div class="form-group">
-                        <label class="text-xs">Fan-out Count</label>
+                        <label class="text-xs" data-i18n="workflowBuilder.fanOutCount">Fan-out Count</label>
                         <input type="number" class="form-input" x-model.number="selectedNode.config.fan_count" @input="applyNodeEdit()" style="font-size:11px" min="2" max="10">
                       </div>
                     </div>
@@ -1538,11 +1537,11 @@
                   <template x-if="selectedNode.type === 'collect'">
                     <div>
                       <div class="form-group">
-                        <label class="text-xs">Strategy</label>
+                        <label class="text-xs" data-i18n="workflowBuilder.strategyLabel">Strategy</label>
                         <select class="form-select" x-model="selectedNode.config.strategy" @change="applyNodeEdit()" style="font-size:11px">
-                          <option value="all">Wait for all</option>
-                          <option value="first">First to finish</option>
-                          <option value="majority">Majority vote</option>
+                          <option value="all" data-i18n="workflowBuilder.strategy.all">Wait for all</option>
+                          <option value="first" data-i18n="workflowBuilder.strategy.first">First to finish</option>
+                          <option value="majority" data-i18n="workflowBuilder.strategy.majority">Majority vote</option>
                         </select>
                       </div>
                     </div>
@@ -1550,8 +1549,8 @@
 
                   <hr style="border-color:var(--border);margin:12px 0">
                   <div class="flex gap-2">
-                    <button class="btn btn-ghost btn-sm" @click="duplicateNode(selectedNode)">Duplicate</button>
-                    <button class="btn btn-danger btn-sm" @click="deleteNode(selectedNode.id)">Delete</button>
+                    <button class="btn btn-ghost btn-sm" @click="duplicateNode(selectedNode)" data-i18n="workflowBuilder.duplicate">Duplicate</button>
+                    <button class="btn btn-danger btn-sm" @click="deleteNode(selectedNode.id)" data-i18n="btn.delete">Delete</button>
                   </div>
                 </div>
               </template>
@@ -1560,17 +1559,17 @@
 
           <!-- Delete connection hint -->
           <div class="wf-conn-hint" x-show="selectedConnection" x-transition>
-            <span class="text-xs">Connection selected</span>
-            <button class="btn btn-danger btn-sm" @click="deleteConnection(selectedConnection.id)">Delete Connection</button>
+            <span class="text-xs" data-i18n="workflowBuilder.connectionSelected">Connection selected</span>
+            <button class="btn btn-danger btn-sm" @click="deleteConnection(selectedConnection.id)" data-i18n="workflowBuilder.deleteConnection">Delete Connection</button>
           </div>
 
           <!-- TOML Preview modal -->
           <template x-if="showTomlPreview">
             <div class="modal-overlay" @click.self="showTomlPreview = false" @keydown.escape.window="showTomlPreview = false">
               <div class="modal" style="max-width:600px">
-                <div class="modal-header"><h3>Generated TOML</h3><button class="modal-close" @click="showTomlPreview = false">&times;</button></div>
+                <div class="modal-header"><h3 data-i18n="workflowBuilder.generatedToml">Generated TOML</h3><button class="modal-close" @click="showTomlPreview = false">&times;</button></div>
                 <pre class="wf-toml-preview" x-text="tomlOutput"></pre>
-                <button class="btn btn-ghost btn-block mt-2" @click="navigator.clipboard.writeText(tomlOutput); LibreFangToast.success('Copied!')">Copy to Clipboard</button>
+                <button class="btn btn-ghost btn-block mt-2" @click="copyToml()" data-i18n="workflowBuilder.copyToClipboard">Copy to Clipboard</button>
               </div>
             </div>
           </template>
@@ -1579,11 +1578,11 @@
           <template x-if="showSaveModal">
             <div class="modal-overlay" @click.self="showSaveModal = false" @keydown.escape.window="showSaveModal = false">
               <div class="modal">
-                <div class="modal-header"><h3>Save Workflow</h3><button class="modal-close" @click="showSaveModal = false">&times;</button></div>
-                <div class="form-group"><label>Name</label><input class="form-input" x-model="workflowName" placeholder="my-workflow"></div>
-                <div class="form-group"><label>Description</label><input class="form-input" x-model="workflowDescription" placeholder="What does this workflow do?"></div>
-                <div class="text-xs text-dim mb-4" x-text="nodes.filter(function(n){return n.type!=='start'&&n.type!=='end'}).length + ' steps, ' + connections.length + ' connections'"></div>
-                <button class="btn btn-primary btn-block" @click="saveWorkflow()">Save</button>
+                <div class="modal-header"><h3 data-i18n="workflowBuilder.saveWorkflow">Save Workflow</h3><button class="modal-close" @click="showSaveModal = false">&times;</button></div>
+                <div class="form-group"><label data-i18n="label.name">Name</label><input class="form-input" x-model="workflowName" data-i18n-placeholder="workflowsPage.workflowNamePlaceholder" placeholder="my-workflow"></div>
+                <div class="form-group"><label data-i18n="settingsPage.description">Description</label><input class="form-input" x-model="workflowDescription" data-i18n-placeholder="workflowsPage.workflowDescPlaceholder" placeholder="What does this workflow do?"></div>
+                <div class="text-xs text-dim mb-4" x-text="t('workflowBuilder.summary', '{steps} steps, {connections} connections', { steps: nodes.filter(function(n){return n.type!== 'start' && n.type !== 'end';}).length, connections: connections.length })"></div>
+                <button class="btn btn-primary btn-block" @click="saveWorkflow()" data-i18n="btn.save">Save</button>
               </div>
             </div>
           </template>
@@ -1594,43 +1593,42 @@
 
     <!-- Page: Scheduler -->
     <template x-if="page === 'scheduler'">
-      <div x-data="schedulerPage()">
+      <div x-data="schedulerPage()" x-init="init()">
         <div class="page-header">
-          <h2>Scheduler</h2>
+          <h2 data-i18n="schedulerPage.title">Scheduler</h2>
           <div class="flex gap-2">
-            <button class="btn btn-primary btn-sm" x-show="tab === 'jobs'" @click="showCreateForm = true">+ New Job</button>
+            <button class="btn btn-primary btn-sm" x-show="tab === 'jobs'" @click="showCreateForm = true" data-i18n="schedulerPage.newJob">+ New Job</button>
           </div>
         </div>
         <div class="tabs" role="tablist">
           <div class="tab" role="tab" :class="{ active: tab === 'jobs' }" @click="tab = 'jobs'">
-            Scheduled Jobs <span class="badge badge-dim" x-show="jobs.length" x-text="jobCount() + '/' + jobs.length + ' active'" style="margin-left:4px"></span>
+            <span data-i18n="schedulerPage.scheduledJobsTab">Scheduled Jobs</span> <span class="badge badge-dim" x-show="jobs.length" x-text="activeJobsCountText()" style="margin-left:4px"></span>
           </div>
           <div class="tab" role="tab" :class="{ active: tab === 'triggers' }" @click="tab = 'triggers'; if (!triggers.length && !trigLoading) loadTriggers()">
-            Event Triggers <span class="badge badge-dim" x-show="triggers.length" x-text="triggers.length" style="margin-left:4px"></span>
+            <span data-i18n="schedulerPage.eventTriggersTab">Event Triggers</span> <span class="badge badge-dim" x-show="triggers.length" x-text="triggerCountText()" style="margin-left:4px"></span>
           </div>
           <div class="tab" :class="{ active: tab === 'history' }" @click="tab = 'history'; loadHistory()">
-            Run History
+            <span data-i18n="schedulerPage.runHistoryTab">Run History</span>
           </div>
         </div>
         <div class="page-body" x-init="loadData()">
 
           <!-- ── TAB: Scheduled Jobs ── -->
           <div x-show="tab === 'jobs'">
-            <div x-show="loading" class="loading-state"><div class="spinner"></div><span>Loading scheduled jobs...</span></div>
+            <div x-show="loading" class="loading-state"><div class="spinner"></div><span data-i18n="schedulerPage.loadingJobs">Loading scheduled jobs...</span></div>
             <div x-show="!loading && loadError" class="error-state">
               <span class="error-icon">!</span>
               <p x-text="loadError"></p>
-              <button class="btn btn-ghost btn-sm" @click="loadData()">Retry</button>
+              <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n="btn.retry">Retry</button>
             </div>
             <div x-show="!loading && !loadError">
               <!-- Explainer -->
               <div class="card mb-4" style="border-left:3px solid var(--accent)">
-                <div class="font-bold" style="font-size:13px;margin-bottom:4px">Scheduled Jobs</div>
+                <div class="font-bold" style="font-size:13px;margin-bottom:4px" data-i18n="schedulerPage.scheduledJobsTitle">Scheduled Jobs</div>
                 <div class="text-sm text-dim" style="line-height:1.6">
-                  Create cron-based scheduled jobs that send messages to agents on a recurring schedule.
-                  Use cron expressions like <code style="color:var(--accent)">*/5 * * * *</code> (every 5 min) or
-                  <code style="color:var(--accent)">0 9 * * 1-5</code> (weekdays at 9am). You can also run any job
-                  manually with the "Run Now" button.
+                  <span data-i18n="schedulerPage.scheduledJobsDescPrefix">Create cron-based scheduled jobs that send messages to agents on a recurring schedule. Use cron expressions like</span>
+                  <code style="color:var(--accent)">*/5 * * * *</code> <span data-i18n="schedulerPage.scheduledJobsDescMiddle">(every 5 min) or</span>
+                  <code style="color:var(--accent)">0 9 * * 1-5</code> <span data-i18n="schedulerPage.scheduledJobsDescSuffix">(weekdays at 9am). You can also run any job manually with the "Run Now" button.</span>
                 </div>
               </div>
 
@@ -1639,20 +1637,20 @@
                 <table>
                   <thead>
                     <tr>
-                      <th>Name</th>
-                      <th>Schedule</th>
-                      <th>Agent</th>
-                      <th>Status</th>
-                      <th>Last Run</th>
-                      <th>Next Run</th>
-                      <th>Actions</th>
+                      <th data-i18n="label.name">Name</th>
+                      <th data-i18n="schedulerPage.schedule">Schedule</th>
+                      <th data-i18n="label.agent">Agent</th>
+                      <th data-i18n="label.status">Status</th>
+                      <th data-i18n="schedulerPage.lastRun">Last Run</th>
+                      <th data-i18n="schedulerPage.nextRun">Next Run</th>
+                      <th data-i18n="label.actions">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     <template x-for="job in jobs" :key="job.id">
                       <tr>
                         <td>
-                          <span class="font-bold" x-text="job.name || job.description || '(unnamed)'"></span>
+                          <span class="font-bold" x-text="job.name || job.description || t('schedulerPage.unnamed', '(unnamed)')"></span>
                           <div class="text-xs text-dim" x-show="job.message" x-text="(job.message || '').substring(0, 60) + ((job.message || '').length > 60 ? '...' : '')" :title="job.message"></div>
                         </td>
                         <td>
@@ -1661,18 +1659,18 @@
                         </td>
                         <td class="truncate" style="max-width:120px" x-text="agentName(job.agent_id || job.agent)" :title="job.agent_id || job.agent"></td>
                         <td>
-                          <span class="badge" :class="job.enabled ? 'badge-success' : 'badge-dim'" x-text="job.enabled ? 'Active' : 'Paused'"></span>
+                          <span class="badge" :class="job.enabled ? 'badge-success' : 'badge-dim'" x-text="statusText(job.enabled)"></span>
                         </td>
                         <td class="text-xs" :title="formatTime(job.last_run)" x-text="relativeTime(job.last_run)"></td>
                         <td class="text-xs" :title="formatTime(job.next_run)" x-text="relativeTime(job.next_run)"></td>
                         <td>
                           <div class="flex gap-1">
                             <button class="btn btn-primary btn-sm" @click="runNow(job)" :disabled="runningJobId === job.id">
-                              <span x-show="runningJobId !== job.id">Run</span>
+                              <span x-show="runningJobId !== job.id" data-i18n="workflowsPage.run">Run</span>
                               <span x-show="runningJobId === job.id">...</span>
                             </button>
-                            <button class="btn btn-ghost btn-sm" @click="toggleJob(job)" x-text="job.enabled ? 'Pause' : 'Enable'"></button>
-                            <button class="btn btn-danger btn-sm" @click="deleteJob(job)">Del</button>
+                            <button class="btn btn-ghost btn-sm" @click="toggleJob(job)" x-text="job.enabled ? t('schedulerPage.pause', 'Pause') : t('schedulerPage.enable', 'Enable')"></button>
+                            <button class="btn btn-danger btn-sm" @click="deleteJob(job)" data-i18n="schedulerPage.deleteShort">Del</button>
                           </div>
                         </td>
                       </tr>
@@ -1683,9 +1681,9 @@
 
               <!-- Empty State -->
               <div class="empty-state" x-show="!jobs.length">
-                <h4>No scheduled jobs</h4>
-                <p class="hint">Create a cron job to run agents on a recurring schedule. Jobs are stored persistently and survive restarts.</p>
-                <button class="btn btn-primary mt-4" @click="showCreateForm = true">+ Create Scheduled Job</button>
+                <h4 data-i18n="schedulerPage.noJobs">No scheduled jobs</h4>
+                <p class="hint" data-i18n="schedulerPage.noJobsDesc">Create a cron job to run agents on a recurring schedule. Jobs are stored persistently and survive restarts.</p>
+                <button class="btn btn-primary mt-4" @click="showCreateForm = true" data-i18n="schedulerPage.createScheduledJob">+ Create Scheduled Job</button>
               </div>
             </div>
 
@@ -1694,58 +1692,58 @@
               <div class="modal-overlay" @click.self="showCreateForm = false" @keydown.escape.window="showCreateForm = false">
                 <div class="modal">
                   <div class="modal-header">
-                    <h3>Create Scheduled Job</h3>
+                    <h3 data-i18n="schedulerPage.createScheduledJobTitle">Create Scheduled Job</h3>
                     <button class="modal-close" @click="showCreateForm = false">&times;</button>
                   </div>
 
                   <div class="form-group">
-                    <label>Job Name</label>
-                    <input class="form-input" x-model="newJob.name" placeholder="daily-report">
+                    <label data-i18n="schedulerPage.jobName">Job Name</label>
+                    <input class="form-input" x-model="newJob.name" data-i18n-placeholder="schedulerPage.jobNamePlaceholder" placeholder="daily-report">
                   </div>
 
                   <div class="form-group">
-                    <label>Cron Expression</label>
-                    <input class="form-input" x-model="newJob.cron" placeholder="0 9 * * 1-5" style="font-family:monospace">
+                    <label data-i18n="schedulerPage.cronExpression">Cron Expression</label>
+                    <input class="form-input" x-model="newJob.cron" data-i18n-placeholder="schedulerPage.cronPlaceholder" placeholder="0 9 * * 1-5" style="font-family:monospace">
                     <div class="text-xs text-dim mt-1" x-show="newJob.cron" x-text="describeCron(newJob.cron)"></div>
-                    <div class="text-xs text-dim mt-1">Format: <code>minute hour day-of-month month day-of-week</code></div>
+                    <div class="text-xs text-dim mt-1"><span data-i18n="schedulerPage.cronFormat">Format:</span> <code>minute hour day-of-month month day-of-week</code></div>
                   </div>
 
                   <div class="form-group">
-                    <label>Quick Presets</label>
+                    <label data-i18n="schedulerPage.quickPresets">Quick Presets</label>
                     <div class="flex gap-1 flex-wrap">
                       <template x-for="preset in cronPresets" :key="preset.cron">
-                        <button class="btn btn-sm" :class="newJob.cron === preset.cron ? 'btn-primary' : 'btn-ghost'" @click="applyCronPreset(preset)" x-text="preset.label"></button>
+                        <button class="btn btn-sm" :class="newJob.cron === preset.cron ? 'btn-primary' : 'btn-ghost'" @click="applyCronPreset(preset)" x-text="presetLabel(preset)"></button>
                       </template>
                     </div>
                   </div>
 
                   <div class="form-group">
-                    <label>Target Agent</label>
+                    <label data-i18n="schedulerPage.targetAgent">Target Agent</label>
                     <select class="form-select" x-model="newJob.agent_id">
-                      <option value="">Any available agent</option>
+                      <option value="" data-i18n="schedulerPage.anyAvailableAgent">Any available agent</option>
                       <template x-for="a in availableAgents" :key="a.id">
                         <option :value="a.id" x-text="a.name + ' (' + (a.model_provider || 'unknown') + ':' + (a.model_name || 'unknown') + ')'"></option>
                       </template>
                     </select>
-                    <div class="text-xs text-dim mt-1" x-show="!availableAgents.length">No agents running. <a href="#agents" style="color:var(--accent)">Spawn one first.</a></div>
+                    <div class="text-xs text-dim mt-1" x-show="!availableAgents.length"><span data-i18n="schedulerPage.noAgentsRunningPrefix">No agents running.</span> <a href="#agents" style="color:var(--accent)" data-i18n="schedulerPage.spawnOneFirst">Spawn one first.</a></div>
                   </div>
 
                   <div class="form-group">
-                    <label>Message to Send</label>
-                    <textarea class="form-textarea" x-model="newJob.message" placeholder="Generate and email the daily status report..." rows="3"></textarea>
-                    <div class="text-xs text-dim mt-1">The message sent to the agent each time this job runs.</div>
+                    <label data-i18n="schedulerPage.messageToSend">Message to Send</label>
+                    <textarea class="form-textarea" x-model="newJob.message" data-i18n-placeholder="schedulerPage.messagePlaceholder" placeholder="Generate and email the daily status report..." rows="3"></textarea>
+                    <div class="text-xs text-dim mt-1" data-i18n="schedulerPage.messageHelp">The message sent to the agent each time this job runs.</div>
                   </div>
 
                   <div class="form-group">
                     <label class="flex items-center gap-2">
                       <div class="toggle" :class="{ active: newJob.enabled }" @click="newJob.enabled = !newJob.enabled"></div>
-                      <span x-text="newJob.enabled ? 'Enabled (will start running immediately)' : 'Disabled (create paused)'"></span>
+                      <span x-text="newJob.enabled ? t('schedulerPage.enabledCreate', 'Enabled (will start running immediately)') : t('schedulerPage.disabledCreate', 'Disabled (create paused)')"></span>
                     </label>
                   </div>
 
                   <button class="btn btn-primary btn-block mt-4" @click="createJob()" :disabled="creating">
-                    <span x-show="!creating">Create Schedule</span>
-                    <span x-show="creating">Creating...</span>
+                    <span x-show="!creating" data-i18n="schedulerPage.createSchedule">Create Schedule</span>
+                    <span x-show="creating" data-i18n="schedulerPage.creating">Creating...</span>
                   </button>
                 </div>
               </div>
@@ -1754,24 +1752,23 @@
 
           <!-- ── TAB: Event Triggers ── -->
           <div x-show="tab === 'triggers'">
-            <div x-show="trigLoading" class="loading-state"><div class="spinner"></div><span>Loading triggers...</span></div>
+            <div x-show="trigLoading" class="loading-state"><div class="spinner"></div><span data-i18n="schedulerPage.loadingTriggers">Loading triggers...</span></div>
             <div x-show="!trigLoading && trigLoadError" class="error-state">
               <span class="error-icon">!</span>
               <p x-text="trigLoadError"></p>
-              <button class="btn btn-ghost btn-sm" @click="loadTriggers()">Retry</button>
+              <button class="btn btn-ghost btn-sm" @click="loadTriggers()" data-i18n="btn.retry">Retry</button>
             </div>
             <div x-show="!trigLoading && !trigLoadError">
               <div class="card mb-4" style="border-left:3px solid var(--accent)">
-                <div class="font-bold" style="font-size:13px;margin-bottom:4px">Event Triggers</div>
+                <div class="font-bold" style="font-size:13px;margin-bottom:4px" data-i18n="schedulerPage.eventTriggersTitle">Event Triggers</div>
                 <div class="text-sm text-dim" style="line-height:1.6">
-                  Event triggers fire agents in response to system events (agent lifecycle, memory updates, custom events).
-                  Create and manage triggers on the <a href="#workflows" style="color:var(--accent)">Workflows</a> page.
-                  This view shows all active triggers for monitoring.
+                  <span data-i18n="schedulerPage.eventTriggersDescPrefix">Event triggers fire agents in response to system events (agent lifecycle, memory updates, custom events). Create and manage triggers on the</span>
+                  <a href="#workflows" style="color:var(--accent)" data-i18n="workflowsPage.title">Workflows</a> <span data-i18n="schedulerPage.eventTriggersDescSuffix">page. This view shows all active triggers for monitoring.</span>
                 </div>
               </div>
               <div class="table-wrap" x-show="triggers.length">
                 <table>
-                  <thead><tr><th>Agent</th><th>Pattern</th><th>Prompt</th><th>Fires</th><th>Enabled</th><th>Created</th><th>Actions</th></tr></thead>
+                  <thead><tr><th data-i18n="label.agent">Agent</th><th data-i18n="schedulerPage.pattern">Pattern</th><th data-i18n="workflowBuilder.promptTemplate">Prompt</th><th data-i18n="schedulerPage.fires">Fires</th><th data-i18n="schedulerPage.enabledColumn">Enabled</th><th data-i18n="detail.created">Created</th><th data-i18n="label.actions">Actions</th></tr></thead>
                   <tbody>
                     <template x-for="t in triggers" :key="t.id">
                       <tr>
@@ -1792,31 +1789,29 @@
                 </table>
               </div>
               <div class="empty-state" x-show="!triggers.length">
-                <h4>No event triggers</h4>
-                <p class="hint">Create event triggers on the <a href="#workflows" style="color:var(--accent)">Workflows page</a> to fire agents in response to system events.</p>
+                <h4 data-i18n="schedulerPage.noTriggers">No event triggers</h4>
+                <p class="hint"><span data-i18n="schedulerPage.noTriggersPrefix">Create event triggers on the</span> <a href="#workflows" style="color:var(--accent)" data-i18n="workflowsPage.title">Workflows</a> <span data-i18n="schedulerPage.noTriggersSuffix">page to fire agents in response to system events.</span></p>
               </div>
             </div>
           </div>
 
           <!-- ── TAB: Run History ── -->
           <div x-show="tab === 'history'">
-            <div x-show="historyLoading" class="loading-state"><div class="spinner"></div><span>Loading run history...</span></div>
+            <div x-show="historyLoading" class="loading-state"><div class="spinner"></div><span data-i18n="schedulerPage.loadingHistory">Loading run history...</span></div>
             <div x-show="!historyLoading">
               <div class="card mb-4" style="border-left:3px solid var(--accent)">
-                <div class="font-bold" style="font-size:13px;margin-bottom:4px">Run History</div>
-                <div class="text-sm text-dim" style="line-height:1.6">
-                  Recent executions of scheduled jobs and event trigger fires. History is aggregated from schedule run counts and trigger fire counts.
-                </div>
+                <div class="font-bold" style="font-size:13px;margin-bottom:4px" data-i18n="schedulerPage.runHistoryTitle">Run History</div>
+                <div class="text-sm text-dim" style="line-height:1.6" data-i18n="schedulerPage.runHistoryDesc">Recent executions of scheduled jobs and event trigger fires. History is aggregated from schedule run counts and trigger fire counts.</div>
               </div>
               <div class="table-wrap" x-show="history.length">
                 <table>
-                  <thead><tr><th>Time</th><th>Name</th><th>Type</th><th>Status</th><th>Total Runs</th></tr></thead>
+                  <thead><tr><th data-i18n="schedulerPage.time">Time</th><th data-i18n="label.name">Name</th><th data-i18n="schedulerPage.type">Type</th><th data-i18n="label.status">Status</th><th data-i18n="schedulerPage.totalRuns">Total Runs</th></tr></thead>
                   <tbody>
                     <template x-for="(h, idx) in history" :key="idx">
                       <tr>
                         <td class="text-xs" style="white-space:nowrap" x-text="formatTime(h.timestamp)"></td>
                         <td class="font-bold" x-text="h.name"></td>
-                        <td><span class="badge" :class="h.type === 'schedule' ? 'badge-created' : 'badge-dim'" x-text="h.type === 'schedule' ? 'Cron Job' : 'Trigger'"></span></td>
+                        <td><span class="badge" :class="h.type === 'schedule' ? 'badge-created' : 'badge-dim'" x-text="historyTypeText(h.type)"></span></td>
                         <td><span class="badge badge-success" x-text="h.status"></span></td>
                         <td x-text="h.run_count"></td>
                       </tr>
@@ -1825,8 +1820,8 @@
                 </table>
               </div>
               <div class="empty-state" x-show="!history.length">
-                <h4>No run history yet</h4>
-                <p class="hint">Run history will appear here after scheduled jobs or triggers execute.</p>
+                <h4 data-i18n="schedulerPage.noHistory">No run history yet</h4>
+                <p class="hint" data-i18n="schedulerPage.noHistoryDesc">Run history will appear here after scheduled jobs or triggers execute.</p>
               </div>
             </div>
           </div>
@@ -1837,16 +1832,16 @@
 
     <!-- Page: Channels -->
     <template x-if="page === 'channels'">
-      <div x-data="channelsPage">
+      <div x-data="channelsPage" x-init="init()">
         <div class="page-header">
-          <h2>Channels <span class="badge badge-muted" x-text="configuredCount + '/' + allChannels.length + ' configured'"></span></h2>
+          <h2><span data-i18n="channelsPage.title">Channels</span> <span class="badge badge-muted" x-text="configuredSummaryText()"></span></h2>
         </div>
         <div class="page-body" x-init="loadChannels()">
-          <div x-show="loading" class="loading-state"><div class="spinner"></div><span>Loading channels...</span></div>
+          <div x-show="loading" class="loading-state"><div class="spinner"></div><span data-i18n="channelsPage.loading">Loading channels...</span></div>
           <div x-show="!loading && loadError" class="error-state">
             <span class="error-icon">!</span>
             <p x-text="loadError"></p>
-            <button class="btn btn-ghost btn-sm" @click="loadData()">Retry</button>
+            <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n="btn.retry">Retry</button>
           </div>
           <div x-show="!loading && !loadError">
 
@@ -1856,14 +1851,14 @@
               <button class="btn btn-sm"
                       :class="categoryFilter === cat.key ? 'btn-primary' : 'btn-ghost'"
                       @click="categoryFilter = cat.key"
-                      x-text="cat.label + ' (' + categoryCount(cat.key) + ')'">
+                      x-text="categoryCountText(cat)">
               </button>
             </template>
           </div>
 
           <!-- Search bar -->
           <div class="mb-4">
-            <input class="form-input" type="text" placeholder="Search channels..."
+            <input class="form-input" type="text" placeholder="Search channels..." data-i18n-placeholder="channelsPage.searchPlaceholder"
                    x-model="searchQuery" style="max-width:400px">
           </div>
 
@@ -1881,14 +1876,14 @@
                 <div class="card-meta" x-text="ch.description"></div>
                 <div class="flex justify-between items-center mt-2">
                   <span class="difficulty-badge" :class="difficultyClass(ch.difficulty)" x-text="ch.difficulty + ' · ' + ch.setup_time"></span>
-                  <button class="btn btn-ghost btn-sm" @click.stop="openSetup(ch)" x-text="ch.configured ? 'Edit' : 'Set up'"></button>
+                  <button class="btn btn-ghost btn-sm" @click.stop="openSetup(ch)" x-text="setupButtonText(ch)"></button>
                 </div>
               </div>
             </template>
           </div>
 
           <div x-show="filteredChannels.length === 0" class="text-dim mt-4" style="text-align:center">
-            <p>No channels match your search.</p>
+            <p data-i18n="channelsPage.noResults">No channels match your search.</p>
           </div>
 
           </div>
@@ -1914,34 +1909,32 @@
                     <div class="channel-step-num" :class="{ active: setupStep === 1, done: setupStep > 1 }">
                       <span x-show="setupStep <= 1">1</span><span x-show="setupStep > 1">&#10003;</span>
                     </div>
-                    <span class="channel-step-label" :class="{ active: setupStep === 1, done: setupStep > 1 }">Configure</span>
+                    <span class="channel-step-label" :class="{ active: setupStep === 1, done: setupStep > 1 }" data-i18n="channelsPage.step.configure">Configure</span>
                   </div>
                   <div class="channel-step-line" :class="{ done: setupStep > 1 }"></div>
                   <div class="channel-step-item">
                     <div class="channel-step-num" :class="{ active: setupStep === 2, done: setupStep > 2 }">
                       <span x-show="setupStep <= 2">2</span><span x-show="setupStep > 2">&#10003;</span>
                     </div>
-                    <span class="channel-step-label" :class="{ active: setupStep === 2, done: setupStep > 2 }">Verify</span>
+                    <span class="channel-step-label" :class="{ active: setupStep === 2, done: setupStep > 2 }" data-i18n="channelsPage.step.verify">Verify</span>
                   </div>
                   <div class="channel-step-line" :class="{ done: setupStep > 2 }"></div>
                   <div class="channel-step-item">
                     <div class="channel-step-num" :class="{ active: setupStep === 3, done: setupStep >= 3 }">
                       <span x-show="setupStep < 3">3</span><span x-show="setupStep >= 3">&#10003;</span>
                     </div>
-                    <span class="channel-step-label" :class="{ active: setupStep === 3, done: setupStep >= 3 }">Ready</span>
+                    <span class="channel-step-label" :class="{ active: setupStep === 3, done: setupStep >= 3 }" data-i18n="channelsPage.step.ready">Ready</span>
                   </div>
                 </div>
 
                 <!-- Ready panel (step 3) for non-QR channels -->
                 <div x-show="!isQrChannel() && setupStep === 3 && testPassed" class="ready-panel">
                   <div class="ready-panel-icon">&#10003;</div>
-                  <div class="ready-panel-title" x-text="setupModal.display_name + ' is ready!'"></div>
-                  <div class="ready-panel-desc">
-                    Your channel is configured and verified. It will activate automatically.
-                  </div>
+                  <div class="ready-panel-title" x-text="t('channelsPage.readyTitle', '{name} is ready!', { name: setupModal.display_name })"></div>
+                  <div class="ready-panel-desc" data-i18n="channelsPage.readyDesc">Your channel is configured and verified. It will activate automatically.</div>
                   <div class="flex gap-2 mt-4" style="justify-content:center">
-                    <button class="btn btn-ghost btn-sm" @click="setupStep = 1">Edit Config</button>
-                    <button class="btn btn-primary btn-sm" @click="setupModal = null">Done</button>
+                    <button class="btn btn-ghost btn-sm" @click="setupStep = 1" data-i18n="channelsPage.editConfig">Edit Config</button>
+                    <button class="btn btn-primary btn-sm" @click="setupModal = null" data-i18n="channelsPage.done">Done</button>
                   </div>
                 </div>
 
@@ -1951,7 +1944,7 @@
                     <!-- QR: Loading -->
                     <div x-show="qr.loading" style="text-align:center;padding:2rem 0">
                       <div class="spinner"></div>
-                      <p class="text-sm text-dim mt-2">Connecting to WhatsApp Web gateway...</p>
+                      <p class="text-sm text-dim mt-2" data-i18n="channelsPage.connectingWhatsApp">Connecting to WhatsApp Web gateway...</p>
                     </div>
 
                     <!-- QR: Gateway available — show QR code -->
@@ -1965,42 +1958,42 @@
                         </template>
                       </ol>
                       <p class="text-xs text-dim" x-text="qr.message"></p>
-                      <button class="btn btn-ghost btn-sm mt-2" x-show="qr.expired" @click="startQR()">Generate New QR</button>
+                      <button class="btn btn-ghost btn-sm mt-2" x-show="qr.expired" @click="startQR()" data-i18n="channelsPage.generateNewQr">Generate New QR</button>
                     </div>
 
                     <!-- QR: Connected! -->
                     <div x-show="!qr.loading && qr.connected" style="text-align:center;padding:2rem 0">
                       <div style="font-size:3rem;margin-bottom:0.5rem">&#10003;</div>
-                      <p class="text-sm" style="font-weight:600" x-text="qr.message || 'WhatsApp linked successfully!'"></p>
-                      <p class="text-xs text-dim mt-1">Channel will activate automatically.</p>
+                      <p class="text-sm" style="font-weight:600" x-text="qr.message || t('channelsPage.whatsAppLinked', 'WhatsApp linked successfully!')"></p>
+                      <p class="text-xs text-dim mt-1" data-i18n="channelsPage.channelActivatesAutomatically">Channel will activate automatically.</p>
                     </div>
 
                     <!-- QR: Gateway not available — show setup hint -->
                     <div x-show="!qr.loading && !qr.available" style="padding:1rem 0">
                       <div style="background:var(--bg-secondary,#1a1a2e);border-radius:8px;padding:1.25rem;text-align:center">
                         <div style="font-size:2rem;margin-bottom:0.5rem;opacity:0.5">&#128241;</div>
-                        <p class="text-sm" x-text="qr.message || 'WhatsApp Web gateway not available'"></p>
+                        <p class="text-sm" x-text="qr.message || t('channelsPage.gatewayUnavailable', 'WhatsApp Web gateway not available')"></p>
                         <p class="text-xs text-dim mt-2" x-show="qr.help" x-text="qr.help"></p>
                         <p class="text-xs text-dim mt-1" x-show="qr.error" style="color:var(--red,#ef4444)" x-text="qr.error"></p>
                       </div>
                       <p class="text-xs text-dim mt-3" style="text-align:center">
-                        Or use the <button class="btn-link" @click="showBusinessApi = true" style="font-size:inherit;text-decoration:underline;cursor:pointer;background:none;border:none;color:var(--accent,#818cf8);padding:0">Business API</button> with a Meta developer account.
+                        <span data-i18n="channelsPage.orUseBusinessApiPrefix">Or use the</span> <button class="btn-link" @click="showBusinessApi = true" style="font-size:inherit;text-decoration:underline;cursor:pointer;background:none;border:none;color:var(--accent,#818cf8);padding:0" data-i18n="channelsPage.businessApi">Business API</button> <span data-i18n="channelsPage.orUseBusinessApiSuffix">with a Meta developer account.</span>
                       </p>
                     </div>
 
                     <!-- QR: Switch to Business API link (always visible when gateway is available) -->
                     <div x-show="!qr.loading && qr.available" class="text-xs text-dim mt-2" style="text-align:center">
-                      Have a Meta Business account? <button class="btn-link" @click="showBusinessApi = true" style="font-size:inherit;text-decoration:underline;cursor:pointer;background:none;border:none;color:var(--accent,#818cf8);padding:0">Use Business API instead</button>
+                      <span data-i18n="channelsPage.haveMetaBusiness">Have a Meta Business account?</span> <button class="btn-link" @click="showBusinessApi = true" style="font-size:inherit;text-decoration:underline;cursor:pointer;background:none;border:none;color:var(--accent,#818cf8);padding:0" data-i18n="channelsPage.useBusinessApiInstead">Use Business API instead</button>
                     </div>
 
                     <!-- Action buttons for QR mode -->
                     <div class="flex gap-2 mt-4" style="flex-wrap:wrap;justify-content:center" x-show="!qr.loading">
-                      <button class="btn btn-ghost" x-show="qr.available && !qr.connected && !qr.expired" @click="startQR()">Refresh QR</button>
+                      <button class="btn btn-ghost" x-show="qr.available && !qr.connected && !qr.expired" @click="startQR()" data-i18n="channelsPage.refreshQr">Refresh QR</button>
                       <button class="btn btn-ghost" x-show="setupModal.configured" @click="testChannel()"
                               :disabled="testing[setupModal.name]"
-                              x-text="testing[setupModal.name] ? 'Testing...' : 'Test Connection'">
+                              x-text="testing[setupModal.name] ? t('channelsPage.testingConnection', 'Testing...') : t('channelsPage.testConnection', 'Test Connection')">
                       </button>
-                      <button class="btn btn-ghost" style="color:var(--red,#ef4444)" x-show="setupModal.configured" @click="removeChannel()">Remove</button>
+                      <button class="btn btn-ghost" style="color:var(--red,#ef4444)" x-show="setupModal.configured" @click="removeChannel()" data-i18n="channelsPage.remove">Remove</button>
                     </div>
                   </div>
                 </template>
@@ -2010,13 +2003,13 @@
                   <div>
                     <!-- Back to QR link (only for QR channels in Business API mode) -->
                     <div x-show="isQrChannel() && showBusinessApi" class="mb-3">
-                      <button class="btn btn-ghost btn-sm" @click="showBusinessApi = false" style="font-size:0.8rem">&larr; Back to QR scan</button>
-                      <p class="text-xs text-dim mt-1">Configure via WhatsApp Cloud API (requires a Meta Business developer account).</p>
+                      <button class="btn btn-ghost btn-sm" @click="showBusinessApi = false" style="font-size:0.8rem" data-i18n="channelsPage.backToQr">&larr; Back to QR scan</button>
+                      <p class="text-xs text-dim mt-1" data-i18n="channelsPage.businessApiDesc">Configure via WhatsApp Cloud API (requires a Meta Business developer account).</p>
                     </div>
 
                     <!-- Quick setup steps (collapsed, minimal) -->
                     <details class="mb-4" style="font-size:0.8rem" x-show="!isQrChannel()">
-                      <summary class="text-dim" style="cursor:pointer">How to get credentials</summary>
+                      <summary class="text-dim" style="cursor:pointer" data-i18n="channelsPage.howToGetCredentials">How to get credentials</summary>
                       <ol class="setup-steps" style="margin-top:0.5rem">
                         <template x-for="(step, i) in setupModal.setup_steps || []" :key="i">
                           <li class="text-sm" x-text="step"></li>
@@ -2031,7 +2024,7 @@
                         <template x-if="f.type === 'secret'">
                           <input class="form-input" type="password"
                                  x-model="formValues[f.key]"
-                                 :placeholder="f.has_value ? '••••••• (set — leave blank to keep)' : f.placeholder"
+                                 :placeholder="f.has_value ? t('channelsPage.secretPlaceholderKeep', '••••••• (set - leave blank to keep)') : f.placeholder"
                                  :required="f.required">
                         </template>
                         <template x-if="f.type === 'number'">
@@ -2042,11 +2035,11 @@
                         <template x-if="f.type === 'text' || f.type === 'list'">
                           <input class="form-input" type="text"
                                  x-model="formValues[f.key]"
-                                 :placeholder="f.type === 'list' ? f.placeholder + ' (comma-separated)' : f.placeholder">
+                                 :placeholder="f.type === 'list' ? f.placeholder + ' ' + t('channelsPage.commaSeparated', '(comma-separated)') : f.placeholder">
                         </template>
                         <div class="text-xs text-dim" style="margin-top:2px"
                              x-show="f.env_var && f.has_value"
-                             x-text="f.env_var + ' is set'"></div>
+                             x-text="t('channelsPage.envVarSet', '{env} is set', { env: f.env_var })"></div>
                       </div>
                     </template>
 
@@ -2054,7 +2047,7 @@
                     <template x-if="!isQrChannel() && hasAdvanced()">
                       <div>
                         <button class="btn btn-ghost btn-sm mb-2" @click="showAdvanced = !showAdvanced"
-                                x-text="showAdvanced ? 'Hide advanced' : 'Show advanced (' + advancedFields().length + ')'"></button>
+                                x-text="showAdvanced ? t('channelsPage.hideAdvanced', 'Hide advanced') : t('channelsPage.showAdvanced', 'Show advanced ({count})', { count: advancedFields().length })"></button>
                         <template x-if="showAdvanced">
                           <div>
                             <template x-for="f in advancedFields()" :key="f.key">
@@ -2063,7 +2056,7 @@
                                 <template x-if="f.type === 'secret'">
                                   <input class="form-input" type="password"
                                          x-model="formValues[f.key]"
-                                         :placeholder="f.has_value ? '••••••• (set)' : f.placeholder">
+                                         :placeholder="f.has_value ? t('channelsPage.secretPlaceholderSet', '••••••• (set)') : f.placeholder">
                                 </template>
                                 <template x-if="f.type === 'number'">
                                   <input class="form-input" type="number"
@@ -2073,7 +2066,7 @@
                                 <template x-if="f.type === 'text' || f.type === 'list'">
                                   <input class="form-input" type="text"
                                          x-model="formValues[f.key]"
-                                         :placeholder="f.type === 'list' ? f.placeholder + ' (comma-separated)' : f.placeholder">
+                                         :placeholder="f.type === 'list' ? f.placeholder + ' ' + t('channelsPage.commaSeparated', '(comma-separated)') : f.placeholder">
                                 </template>
                               </div>
                             </template>
@@ -2085,13 +2078,13 @@
                     <!-- Action buttons -->
                     <div class="flex gap-2 mt-4" style="flex-wrap:wrap">
                       <button class="btn btn-primary" @click="saveChannel()" :disabled="configuring"
-                              x-text="configuring ? 'Saving...' : (setupModal.configured ? 'Update' : 'Save & Test')">
+                              x-text="saveButtonText()">
                       </button>
                       <button class="btn btn-ghost" x-show="setupModal.configured" @click="testChannel()"
                               :disabled="testing[setupModal.name]"
-                              x-text="testing[setupModal.name] ? 'Testing...' : 'Test'">
+                              x-text="testButtonText()">
                       </button>
-                      <button class="btn btn-ghost" style="color:var(--red,#ef4444)" x-show="setupModal.configured" @click="removeChannel()">Remove</button>
+                      <button class="btn btn-ghost" style="color:var(--red,#ef4444)" x-show="setupModal.configured" @click="removeChannel()" data-i18n="channelsPage.remove">Remove</button>
                     </div>
                   </div>
                 </template>
@@ -2105,33 +2098,34 @@
     <!-- Page: Skills -->
     <template x-if="page === 'skills'">
       <div x-data="skillsPage">
-        <div class="page-header"><h2>Skills</h2></div>
-        <div class="page-body" x-init="loadSkills()">
+        <div class="page-header"><h2 data-i18n="skillsPage.title">Skills</h2></div>
+        <div class="page-body" x-init="init(); loadSkills()">
           <div class="info-card">
-            <h4>Skills &amp; Ecosystem</h4>
-            <p>Skills extend your agents with new capabilities. LibreFang supports the <strong>OpenClaw/ClawHub</strong> ecosystem (3,000+ community skills) plus local skills.</p>
+            <h4 data-i18n="skillsPage.introTitle">Skills &amp; Ecosystem</h4>
+            <p data-i18n="skillsPage.introDesc">Skills extend your agents with new capabilities. LibreFang supports the <strong>OpenClaw/ClawHub</strong> ecosystem (3,000+ community skills) plus local skills.</p>
             <ul>
-              <li><strong>Prompt-only</strong> &mdash; inject context and instructions into the agent's system prompt (most ClawHub skills)</li>
-              <li><strong>Python / Node.js</strong> &mdash; executable tools that agents can call during conversations</li>
-              <li><strong>MCP Servers</strong> &mdash; external tools via Model Context Protocol (GitHub, filesystem, databases, etc.)</li>
+              <li data-i18n="skillsPage.introPromptOnly"><strong>Prompt-only</strong> &mdash; inject context and instructions into the agent's system prompt (most ClawHub skills)</li>
+              <li data-i18n="skillsPage.introCode"><strong>Python / Node.js</strong> &mdash; executable tools that agents can call during conversations</li>
+              <li data-i18n="skillsPage.introMcp"><strong>MCP Servers</strong> &mdash; external tools via Model Context Protocol (GitHub, filesystem, databases, etc.)</li>
             </ul>
           </div>
-          <div x-show="loading" class="loading-state"><div class="spinner"></div><span>Loading skills...</span></div>
+          <div x-show="loading" class="loading-state"><div class="spinner"></div><span data-i18n="skillsPage.loading">Loading skills...</span></div>
           <div x-show="!loading && loadError" class="error-state">
             <span class="error-icon">!</span>
             <p x-text="loadError"></p>
-            <button class="btn btn-ghost btn-sm" @click="loadData()">Retry</button>
+            <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n="btn.retry">Retry</button>
           </div>
           <div x-show="!loading && !loadError">
 
           <!-- Main tabs -->
           <div class="tabs" role="tablist">
             <div class="tab" role="tab" :class="{ active: tab === 'installed' }" @click="tab = 'installed'">
-              Installed <span class="badge badge-dim" x-show="skills.length" x-text="skills.length" style="margin-left:4px"></span>
+              <span data-i18n="skillsPage.installedTab">Installed</span>
+              <span class="badge badge-dim" x-show="skills.length" x-text="skills.length" style="margin-left:4px"></span>
             </div>
-            <div class="tab" :class="{ active: tab === 'clawhub' }" @click="tab = 'clawhub'; if (!clawhubBrowseResults.length && !clawhubSearch) browseClawHub('trending')">ClawHub</div>
-            <div class="tab" :class="{ active: tab === 'mcp' }" @click="tab = 'mcp'; loadMcpServers()">MCP Servers</div>
-            <div class="tab" :class="{ active: tab === 'create' }" @click="tab = 'create'">Quick Start</div>
+            <div class="tab" :class="{ active: tab === 'clawhub' }" @click="tab = 'clawhub'; if (!clawhubBrowseResults.length && !clawhubSearch) browseClawHub('trending')" data-i18n="skillsPage.clawHubTab">ClawHub</div>
+            <div class="tab" :class="{ active: tab === 'mcp' }" @click="tab = 'mcp'; loadMcpServers()" data-i18n="skillsPage.mcpTab">MCP Servers</div>
+            <div class="tab" :class="{ active: tab === 'create' }" @click="tab = 'create'" data-i18n="skillsPage.quickStartTab">Quick Start</div>
           </div>
 
           <!-- TAB: Installed Skills -->
@@ -2150,11 +2144,11 @@
                   <div class="card-meta" x-text="skill.description"></div>
                   <div class="flex justify-between items-center mt-2">
                     <div class="flex gap-2 items-center">
-                      <span class="text-xs text-dim" x-text="skill.tools_count + ' tool(s)'"></span>
+                      <span class="text-xs text-dim" x-text="toolCountText(skill.tools_count)"></span>
                       <span class="text-xs text-dim" x-show="skill.version" x-text="'v' + skill.version"></span>
-                      <span class="text-xs text-dim" x-show="skill.has_prompt_context">(prompt context)</span>
+                      <span class="text-xs text-dim" x-show="skill.has_prompt_context" x-text="promptContextText()"></span>
                     </div>
-                    <button class="btn btn-danger btn-sm" @click="uninstallSkill(skill.name)">Uninstall</button>
+                    <button class="btn btn-danger btn-sm" @click="uninstallSkill(skill.name)" data-i18n="skillsPage.uninstall">Uninstall</button>
                   </div>
                 </div>
               </template>
@@ -2163,11 +2157,11 @@
               <div class="empty-state-icon">
                 <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/></svg>
               </div>
-              <h3>No skills installed</h3>
-              <p>Skills add new capabilities to your agents. Browse ClawHub for 3,000+ community skills or create your own.</p>
+              <h3 data-i18n="skillsPage.noSkillsTitle">No skills installed</h3>
+              <p data-i18n="skillsPage.noSkillsDesc">Skills add new capabilities to your agents. Browse ClawHub for 3,000+ community skills or create your own.</p>
               <div class="flex gap-2">
-                <button class="btn btn-primary" @click="tab = 'clawhub'; if (!clawhubBrowseResults.length) browseClawHub('trending')">Browse ClawHub</button>
-                <button class="btn btn-ghost" @click="tab = 'create'">Quick Start</button>
+                <button class="btn btn-primary" @click="tab = 'clawhub'; if (!clawhubBrowseResults.length) browseClawHub('trending')" data-i18n="skillsPage.browseClawHub">Browse ClawHub</button>
+                <button class="btn btn-ghost" @click="tab = 'create'" data-i18n="skillsPage.quickStartTab">Quick Start</button>
               </div>
             </div>
           </div>
@@ -2177,58 +2171,58 @@
             <!-- Search bar with live search and clear button -->
             <div class="search-input mb-4" style="position:relative">
               <span style="color:var(--text-muted)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></span>
-              <input placeholder="Search ClawHub skills... (type to search)" x-model="clawhubSearch" @input="onSearchInput()" @keydown.enter="if(!$event.isComposing && $event.keyCode !== 229) searchClawHub()" @keydown.escape="clearSearch()" x-ref="clawhubSearchInput">
-              <button x-show="clawhubSearch" @click="clearSearch()" class="search-clear-btn" title="Clear search (Esc)">&times;</button>
+              <input placeholder="Search ClawHub skills... (type to search)" data-i18n-placeholder="skillsPage.searchPlaceholder" x-model="clawhubSearch" @input="onSearchInput()" @keydown.enter="if(!$event.isComposing && $event.keyCode !== 229) searchClawHub()" @keydown.escape="clearSearch()" x-ref="clawhubSearchInput">
+              <button x-show="clawhubSearch" @click="clearSearch()" class="search-clear-btn" data-i18n-title="skillsPage.clearSearchTitle" title="Clear search (Esc)">&times;</button>
             </div>
 
             <!-- Sort pills (always visible when not searching) -->
             <div class="filter-pills mb-4" x-show="!clawhubSearch">
-              <span class="filter-pill" :class="{ active: clawhubSort === 'trending' }" @click="browseClawHub('trending')">Trending</span>
-              <span class="filter-pill" :class="{ active: clawhubSort === 'downloads' }" @click="browseClawHub('downloads')">Most Downloaded</span>
-              <span class="filter-pill" :class="{ active: clawhubSort === 'stars' }" @click="browseClawHub('stars')">Most Starred</span>
-              <span class="filter-pill" :class="{ active: clawhubSort === 'updated' }" @click="browseClawHub('updated')">Recently Updated</span>
+              <span class="filter-pill" :class="{ active: clawhubSort === 'trending' }" @click="browseClawHub('trending')" data-i18n="skillsPage.sort.trending">Trending</span>
+              <span class="filter-pill" :class="{ active: clawhubSort === 'downloads' }" @click="browseClawHub('downloads')" data-i18n="skillsPage.sort.downloads">Most Downloaded</span>
+              <span class="filter-pill" :class="{ active: clawhubSort === 'stars' }" @click="browseClawHub('stars')" data-i18n="skillsPage.sort.stars">Most Starred</span>
+              <span class="filter-pill" :class="{ active: clawhubSort === 'updated' }" @click="browseClawHub('updated')" data-i18n="skillsPage.sort.updated">Recently Updated</span>
             </div>
 
             <!-- Category quick-search chips (always visible when not searching) -->
             <div class="mb-4" x-show="!clawhubSearch">
-              <div class="text-xs text-dim mb-2" style="letter-spacing:0.5px">CATEGORIES</div>
+              <div class="text-xs text-dim mb-2" style="letter-spacing:0.5px" data-i18n="skillsPage.categoriesTitle">CATEGORIES</div>
               <div class="flex flex-wrap gap-1">
                 <template x-for="cat in categories" :key="cat.id">
-                  <span class="filter-pill" style="font-size:0.7rem;padding:2px 8px" @click="searchCategory(cat)" x-text="cat.name"></span>
+                  <span class="filter-pill" style="font-size:0.7rem;padding:2px 8px" @click="searchCategory(cat)" x-text="categoryLabel(cat)"></span>
                 </template>
               </div>
             </div>
 
             <!-- Loading spinner -->
-            <div x-show="clawhubLoading" class="loading-state"><div class="spinner"></div><span x-text="clawhubSearch ? 'Searching ClawHub...' : 'Loading skills...'"></span></div>
+            <div x-show="clawhubLoading" class="loading-state"><div class="spinner"></div><span x-text="searchLoadingText()"></span></div>
 
             <!-- Error -->
             <div x-show="clawhubError && !clawhubLoading" class="error-state">
               <span class="error-icon">!</span>
               <p x-text="clawhubError"></p>
-              <p class="hint mt-2">ClawHub may be temporarily unavailable. The OpenClaw ecosystem is hosted at clawhub.ai.</p>
-              <button class="btn btn-ghost btn-sm mt-2" @click="clawhubSearch ? searchClawHub() : browseClawHub(clawhubSort)">Retry</button>
+              <p class="hint mt-2" data-i18n="skillsPage.clawHubUnavailable">ClawHub may be temporarily unavailable. The OpenClaw ecosystem is hosted at clawhub.ai.</p>
+              <button class="btn btn-ghost btn-sm mt-2" @click="clawhubSearch ? searchClawHub() : browseClawHub(clawhubSort)" data-i18n="btn.retry">Retry</button>
             </div>
 
             <!-- Search results -->
             <div x-show="clawhubSearch && clawhubResults.length && !clawhubLoading">
               <div class="flex justify-between items-center mb-3">
-                <div class="text-sm text-dim" x-text="clawhubResults.length + ' result(s) for &quot;' + clawhubSearch + '&quot;'"></div>
-                <button class="btn btn-ghost btn-sm" @click="clearSearch()">Clear search</button>
+                <div class="text-sm text-dim" x-text="resultsText()"></div>
+                <button class="btn btn-ghost btn-sm" @click="clearSearch()" data-i18n="skillsPage.clearSearch">Clear search</button>
               </div>
               <div class="card-grid">
                 <template x-for="skill in clawhubResults" :key="skill.slug">
                   <div class="card card-glow" @click="showSkillDetail(skill.slug)" style="cursor:pointer">
                     <div class="flex justify-between items-center mb-2">
                       <div class="card-header" style="margin:0" x-text="skill.name || skill.slug"></div>
-                      <span class="badge badge-info" style="font-size:0.6rem">ClawHub</span>
+                      <span class="badge badge-info" style="font-size:0.6rem" data-i18n="skillsPage.source.clawhub">ClawHub</span>
                     </div>
                     <div class="card-meta" x-text="skill.description" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden"></div>
                     <div class="flex justify-between items-center mt-3">
                       <div class="flex gap-3 items-center">
                         <span class="text-xs text-dim" x-show="skill.version" x-text="'v' + skill.version"></span>
                       </div>
-                      <button class="btn btn-primary btn-sm" @click.stop="installFromClawHub(skill.slug)" :disabled="installingSlug === skill.slug || isSkillInstalled(skill.slug)" x-text="isSkillInstalled(skill.slug) ? 'Installed' : installingSlug === skill.slug ? 'Installing...' : 'Install'"></button>
+                      <button class="btn btn-primary btn-sm" @click.stop="installFromClawHub(skill.slug)" :disabled="installingSlug === skill.slug || isSkillInstalled(skill.slug)" x-text="isSkillInstalled(skill.slug) ? t('skillsPage.installed', 'Installed') : installingSlug === skill.slug ? t('skillsPage.installing', 'Installing...') : t('skillsPage.install', 'Install')"></button>
                     </div>
                   </div>
                 </template>
@@ -2242,63 +2236,63 @@
                   <div class="card card-glow" @click="showSkillDetail(skill.slug)" style="cursor:pointer">
                     <div class="flex justify-between items-center mb-2">
                       <div class="card-header" style="margin:0" x-text="skill.name || skill.slug"></div>
-                      <span class="badge badge-info" style="font-size:0.6rem">ClawHub</span>
+                      <span class="badge badge-info" style="font-size:0.6rem" data-i18n="skillsPage.source.clawhub">ClawHub</span>
                     </div>
                     <div class="card-meta" x-text="skill.description" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden"></div>
                     <div class="flex justify-between items-center mt-3">
                       <div class="flex gap-3 items-center">
-                        <span class="text-xs text-dim" x-show="skill.downloads" x-text="formatDownloads(skill.downloads) + ' downloads'"></span>
-                        <span class="text-xs text-dim" x-show="skill.stars" x-text="skill.stars + ' stars'"></span>
+                        <span class="text-xs text-dim" x-show="skill.downloads" x-text="downloadsText(skill.downloads)"></span>
+                        <span class="text-xs text-dim" x-show="skill.stars" x-text="starsText(skill.stars)"></span>
                         <span class="text-xs text-dim" x-show="skill.version" x-text="'v' + skill.version"></span>
                       </div>
-                      <button class="btn btn-primary btn-sm" @click.stop="installFromClawHub(skill.slug)" :disabled="installingSlug === skill.slug || isSkillInstalled(skill.slug)" x-text="isSkillInstalled(skill.slug) ? 'Installed' : installingSlug === skill.slug ? 'Installing...' : 'Install'"></button>
+                      <button class="btn btn-primary btn-sm" @click.stop="installFromClawHub(skill.slug)" :disabled="installingSlug === skill.slug || isSkillInstalled(skill.slug)" x-text="isSkillInstalled(skill.slug) ? t('skillsPage.installed', 'Installed') : installingSlug === skill.slug ? t('skillsPage.installing', 'Installing...') : t('skillsPage.install', 'Install')"></button>
                     </div>
                   </div>
                 </template>
               </div>
               <!-- Load more button -->
               <div class="text-center mt-4" x-show="clawhubNextCursor">
-                <button class="btn btn-ghost" @click="loadMoreClawHub()" :disabled="clawhubLoading">Load More</button>
+                <button class="btn btn-ghost" @click="loadMoreClawHub()" :disabled="clawhubLoading" data-i18n="skillsPage.loadMore">Load More</button>
               </div>
             </div>
 
             <!-- Empty search results -->
             <div class="empty-state" x-show="clawhubSearch && !clawhubResults.length && !clawhubLoading && !clawhubError">
-              <p>No skills found for "<span x-text="clawhubSearch"></span>"</p>
-              <p class="hint mt-1">Try a different search term or browse by category.</p>
-              <button class="btn btn-ghost btn-sm mt-2" @click="clearSearch()">Back to browse</button>
+              <p x-text="t('skillsPage.noResultsFor', 'No skills found for \"{query}\"', { query: clawhubSearch })"></p>
+              <p class="hint mt-1" data-i18n="skillsPage.noResultsHint">Try a different search term or browse by category.</p>
+              <button class="btn btn-ghost btn-sm mt-2" @click="clearSearch()" data-i18n="skillsPage.backToBrowse">Back to browse</button>
             </div>
           </div>
 
           <!-- TAB: MCP Servers -->
           <div x-show="tab === 'mcp'">
             <div class="info-card">
-              <h4>MCP Servers (Model Context Protocol)</h4>
-              <p>MCP servers provide external tools to your agents &mdash; GitHub, filesystem, databases, APIs, and more. LibreFang is compatible with all OpenClaw MCP servers.</p>
-              <p class="mt-2" style="font-size:0.8rem;color:var(--text-dim)">Configure MCP servers in your <code>config.toml</code> under <code>[mcp_servers]</code>.</p>
+              <h4 data-i18n="skillsPage.mcpTitle">MCP Servers (Model Context Protocol)</h4>
+              <p data-i18n="skillsPage.mcpDesc">MCP servers provide external tools to your agents &mdash; GitHub, filesystem, databases, APIs, and more. LibreFang is compatible with all OpenClaw MCP servers.</p>
+              <p class="mt-2" style="font-size:0.8rem;color:var(--text-dim)" data-i18n="skillsPage.mcpConfigHint">Configure MCP servers in your <code>config.toml</code> under <code>[mcp_servers]</code>.</p>
             </div>
-            <div x-show="mcpLoading" class="loading-state"><div class="spinner"></div><span>Loading MCP servers...</span></div>
+            <div x-show="mcpLoading" class="loading-state"><div class="spinner"></div><span data-i18n="skillsPage.loadingMcp">Loading MCP servers...</span></div>
             <div x-show="!mcpLoading">
               <!-- Connected servers -->
               <div x-show="mcpServers.total_connected > 0" class="mb-4">
-                <div class="text-sm font-bold mb-2" style="color:var(--text-dim);letter-spacing:0.5px">CONNECTED SERVERS</div>
+                <div class="text-sm font-bold mb-2" style="color:var(--text-dim);letter-spacing:0.5px" data-i18n="skillsPage.connectedServers">CONNECTED SERVERS</div>
                 <div class="card-grid">
                   <template x-for="srv in mcpServers.connected" :key="srv.name">
                     <div class="card">
                       <div class="flex justify-between items-center mb-2">
                         <div class="card-header" style="margin:0" x-text="srv.name"></div>
-                        <span class="badge badge-success">Connected</span>
+                        <span class="badge badge-success" data-i18n="skillsPage.connected">Connected</span>
                       </div>
-                      <div class="card-meta" x-text="srv.tools_count + ' tool(s) available'"></div>
+                      <div class="card-meta" x-text="toolsAvailableText(srv.tools_count)"></div>
                       <div class="mt-2" x-show="srv.tools && srv.tools.length">
-                        <div class="text-xs text-dim mb-1">Tools:</div>
+                        <div class="text-xs text-dim mb-1" data-i18n="skillsPage.toolsLabel">Tools:</div>
                         <template x-for="tool in srv.tools.slice(0, 10)" :key="tool.name">
                           <div class="text-xs" style="padding:2px 0">
                             <code x-text="tool.name" style="font-size:0.7rem"></code>
                             <span class="text-dim" x-show="tool.description" x-text="' — ' + tool.description" style="font-size:0.65rem"></span>
                           </div>
                         </template>
-                        <div class="text-xs text-dim" x-show="srv.tools.length > 10" x-text="'... and ' + (srv.tools.length - 10) + ' more'"></div>
+                        <div class="text-xs text-dim" x-show="srv.tools.length > 10" x-text="andMoreText(srv.tools.length - 10)"></div>
                       </div>
                     </div>
                   </template>
@@ -2306,7 +2300,7 @@
               </div>
               <!-- Configured but not connected -->
               <div x-show="mcpServers.total_configured > 0" class="mb-4">
-                <div class="text-sm font-bold mb-2" style="color:var(--text-dim);letter-spacing:0.5px">CONFIGURED SERVERS</div>
+                <div class="text-sm font-bold mb-2" style="color:var(--text-dim);letter-spacing:0.5px" data-i18n="skillsPage.configuredServers">CONFIGURED SERVERS</div>
                 <div class="card-grid">
                   <template x-for="srv in mcpServers.configured" :key="srv.name">
                     <div class="card card-unconfigured">
@@ -2333,15 +2327,15 @@
                           <div class="text-xs text-dim" x-show="srv.transport.tools.length > 5" x-text="'... and ' + (srv.transport.tools.length - 5) + ' more'"></div>
                         </div>
                       </div>
-                      <div class="text-xs text-dim mt-1" x-show="srv.env && srv.env.length" x-text="'Env: ' + srv.env.join(', ')"></div>
+                      <div class="text-xs text-dim mt-1" x-show="srv.env && srv.env.length" x-text="envText(srv.env)"></div>
                     </div>
                   </template>
                 </div>
               </div>
               <!-- Empty state -->
               <div class="empty-state" x-show="mcpServers.total_configured === 0 && mcpServers.total_connected === 0">
-                <h4>No MCP servers configured</h4>
-                <p class="hint">MCP servers extend your agents with external tools. Add servers to your config.toml:</p>
+                <h4 data-i18n="skillsPage.noMcpTitle">No MCP servers configured</h4>
+                <p class="hint" data-i18n="skillsPage.noMcpDesc">MCP servers extend your agents with external tools. Add servers to your config.toml:</p>
                 <pre style="text-align:left;font-size:0.75rem;margin-top:8px;background:var(--bg-secondary);padding:12px;border-radius:6px;max-width:400px;margin-left:auto;margin-right:auto">[[mcp_servers]]
 name = "filesystem"
 timeout_secs = 30
@@ -2350,7 +2344,7 @@ timeout_secs = 30
 type = "stdio"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
-                <p class="hint mt-2" style="font-size:0.75rem">LibreFang supports native MCP servers and declarative <code>http_compat</code> backends.</p>
+                <p class="hint mt-2" style="font-size:0.75rem" data-i18n="skillsPage.noMcpHint">LibreFang supports native MCP servers and declarative <code>http_compat</code> backends.</p>
               </div>
             </div>
           </div>
@@ -2358,19 +2352,19 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <!-- TAB: Quick Start (Create prompt-only skills) -->
           <div x-show="tab === 'create'">
             <div class="info-card">
-              <h4>Quick Start Skills</h4>
-              <p>Create prompt-only skills with one click. These inject context into your agent's system prompt &mdash; no code required. Perfect for adding domain expertise or workflow guidelines.</p>
+              <h4 data-i18n="skillsPage.quickStartTitle">Quick Start Skills</h4>
+              <p data-i18n="skillsPage.quickStartDesc">Create prompt-only skills with one click. These inject context into your agent's system prompt &mdash; no code required. Perfect for adding domain expertise or workflow guidelines.</p>
             </div>
             <div class="card-grid">
               <template x-for="qs in quickStartSkills" :key="qs.name">
                 <div class="card card-glow">
                   <div class="flex justify-between items-center mb-2">
-                    <div class="card-header" style="margin:0" x-text="qs.name"></div>
-                    <span class="runtime-badge runtime-badge-prompt">PROMPT</span>
+                    <div class="card-header" style="margin:0" x-text="quickStartName(qs)"></div>
+                    <span class="runtime-badge runtime-badge-prompt" x-text="t('skillsPage.runtime.prompt', 'PROMPT')"></span>
                   </div>
-                  <div class="card-meta" x-text="qs.description"></div>
+                  <div class="card-meta" x-text="quickStartDescription(qs)"></div>
                   <div class="flex justify-end mt-2">
-                    <button class="btn btn-ghost btn-sm" @click="createDemoSkill(qs)" :disabled="isSkillInstalledByName(qs.name)" x-text="isSkillInstalledByName(qs.name) ? 'Created' : 'Create Skill'"></button>
+                    <button class="btn btn-ghost btn-sm" @click="createDemoSkill(qs)" :disabled="isSkillInstalledByName(qs.name)" x-text="isSkillInstalledByName(qs.name) ? t('skillsPage.createdShort', 'Created') : t('skillsPage.createSkill', 'Create Skill')"></button>
                   </div>
                 </div>
               </template>
@@ -2382,7 +2376,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             <div class="modal-overlay" @click.self="closeDetail()" @keydown.escape.window="closeDetail()">
               <div class="modal" style="max-width:600px">
                 <!-- Loading state -->
-                <div x-show="detailLoading" class="loading-state" style="padding:40px 0"><div class="spinner"></div><span>Loading skill details...</span></div>
+                <div x-show="detailLoading" class="loading-state" style="padding:40px 0"><div class="spinner"></div><span data-i18n="skillsPage.loadingDetail">Loading skill details...</span></div>
                 <!-- Loaded content -->
                 <template x-if="skillDetail">
                   <div>
@@ -2392,17 +2386,17 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     </div>
                     <div class="mb-3">
                       <div class="flex gap-2 items-center flex-wrap">
-                        <span class="badge badge-info">ClawHub</span>
+                        <span class="badge badge-info" data-i18n="skillsPage.source.clawhub">ClawHub</span>
                         <span class="text-xs text-dim" x-show="skillDetail.version" x-text="'v' + skillDetail.version"></span>
                         <span class="text-xs" x-show="skillDetail.author_name || skillDetail.author" style="color:var(--text-dim)">
                           <span x-show="skillDetail.author_image" style="display:inline-block;vertical-align:middle;margin-right:4px"><img :src="skillDetail.author_image" style="width:16px;height:16px;border-radius:50%"></span>
-                          <span x-text="'by ' + (skillDetail.author_name || skillDetail.author)"></span>
+                          <span x-text="t('skillsPage.byAuthor', 'by {name}', { name: skillDetail.author_name || skillDetail.author })"></span>
                         </span>
                       </div>
                     </div>
                     <div class="flex gap-4 items-center mb-3" x-show="skillDetail.downloads || skillDetail.stars">
-                      <span class="text-sm" x-show="skillDetail.downloads" x-text="formatDownloads(skillDetail.downloads) + ' downloads'" style="color:var(--text-dim)"></span>
-                      <span class="text-sm" x-show="skillDetail.stars" x-text="skillDetail.stars + ' stars'" style="color:var(--text-dim)"></span>
+                      <span class="text-sm" x-show="skillDetail.downloads" x-text="downloadsText(skillDetail.downloads)" style="color:var(--text-dim)"></span>
+                      <span class="text-sm" x-show="skillDetail.stars" x-text="starsText(skillDetail.stars)" style="color:var(--text-dim)"></span>
                     </div>
                     <div class="mb-4" x-show="skillDetail.description">
                       <p x-text="skillDetail.description"></p>
@@ -2415,14 +2409,14 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                       </div>
                     </div>
                     <div class="mb-4" x-show="installResult && installResult.warnings && installResult.warnings.length">
-                      <div class="form-group"><label>Security Warnings</label></div>
+                      <div class="form-group"><label data-i18n="skillsPage.securityWarnings">Security Warnings</label></div>
                       <template x-for="w in (installResult ? installResult.warnings : [])" :key="w.message">
                         <div class="text-xs" :class="w.severity === 'Critical' ? 'text-danger' : 'text-dim'" x-text="'[' + w.severity + '] ' + w.message" style="padding:2px 0"></div>
                       </template>
                     </div>
                     <div class="flex gap-2">
-                      <button class="btn btn-primary" style="flex:1" @click="installFromClawHub(skillDetail.slug)" :disabled="installingSlug === skillDetail.slug || skillDetail.installed || isSkillInstalled(skillDetail.slug)" x-text="skillDetail.installed || isSkillInstalled(skillDetail.slug) ? 'Already Installed' : installingSlug === skillDetail.slug ? 'Installing...' : 'Install from ClawHub'"></button>
-                      <button class="btn btn-ghost" @click="viewSkillCode(skillDetail.slug)" :disabled="skillCodeLoading" x-text="skillCodeLoading ? 'Loading...' : showSkillCode ? 'Hide Code' : 'View Code'"></button>
+                      <button class="btn btn-primary" style="flex:1" @click="installFromClawHub(skillDetail.slug)" :disabled="installingSlug === skillDetail.slug || skillDetail.installed || isSkillInstalled(skillDetail.slug)" x-text="skillDetail.installed || isSkillInstalled(skillDetail.slug) ? t('skillsPage.alreadyInstalled', 'Already Installed') : installingSlug === skillDetail.slug ? t('skillsPage.installing', 'Installing...') : t('skillsPage.installFromClawHub', 'Install from ClawHub')"></button>
+                      <button class="btn btn-ghost" @click="viewSkillCode(skillDetail.slug)" :disabled="skillCodeLoading" x-text="skillCodeLoading ? t('skillsPage.loadingShort', 'Loading...') : showSkillCode ? t('skillsPage.hideCode', 'Hide Code') : t('skillsPage.viewCode', 'View Code')"></button>
                     </div>
                     <div x-show="showSkillCode && skillCode" x-transition class="mt-3" style="max-height:300px;overflow:auto;border:1px solid var(--border);border-radius:8px;background:var(--bg-inset)">
                       <div class="flex justify-between items-center" style="padding:6px 12px;border-bottom:1px solid var(--border)">
@@ -2430,7 +2424,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                       </div>
                       <pre style="margin:0;padding:12px;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-all" x-text="skillCode"></pre>
                     </div>
-                    <div class="text-xs text-dim mt-2 text-center">Skills are security-scanned before installation. Prompt injection and malware patterns are blocked.</div>
+                    <div class="text-xs text-dim mt-2 text-center" data-i18n="skillsPage.securityScanned">Skills are security-scanned before installation. Prompt injection and malware patterns are blocked.</div>
                   </div>
                 </template>
               </div>
@@ -2445,28 +2439,30 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
     <!-- Page: Hands -->
     <template x-if="page === 'hands'">
       <div x-data="handsPage">
-        <div class="page-header"><h2>Hands</h2></div>
-        <div class="page-body" x-init="loadData()">
+        <div class="page-header"><h2 data-i18n="handsPage.title">Hands</h2></div>
+        <div class="page-body" x-init="init(); loadData()">
           <div class="info-card">
-            <h4>Hands &mdash; Curated Autonomous Capability Packages</h4>
-            <p>Hands are pre-configured AI agents that autonomously handle specific tasks. Each hand includes a tuned system prompt, required tools, and a dashboard for tracking work.</p>
+            <h4 data-i18n="handsPage.introTitle">Hands &mdash; Curated Autonomous Capability Packages</h4>
+            <p data-i18n="handsPage.introDesc">Hands are pre-configured AI agents that autonomously handle specific tasks. Each hand includes a tuned system prompt, required tools, and a dashboard for tracking work.</p>
           </div>
 
-          <div x-show="loading" class="loading-state"><div class="spinner"></div><span>Loading hands...</span></div>
+          <div x-show="loading" class="loading-state"><div class="spinner"></div><span data-i18n="handsPage.loading">Loading hands...</span></div>
           <div x-show="!loading && loadError" class="error-state">
             <span class="error-icon">!</span>
             <p x-text="loadError"></p>
-            <button class="btn btn-ghost btn-sm" @click="loadData()">Retry</button>
+            <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n="btn.retry">Retry</button>
           </div>
 
           <div x-show="!loading && !loadError">
             <!-- Tabs -->
             <div class="tabs">
               <div class="tab" :class="{ active: tab === 'available' }" @click="tab = 'available'">
-                Available <span class="badge badge-dim" x-show="hands.length" x-text="hands.length" style="margin-left:4px"></span>
+                <span data-i18n="handsPage.availableTab">Available</span>
+                <span class="badge badge-dim" x-show="hands.length" x-text="hands.length" style="margin-left:4px"></span>
               </div>
               <div class="tab" :class="{ active: tab === 'active' }" @click="tab = 'active'; loadActive()">
-                Active <span class="badge badge-success" x-show="instances.length" x-text="instances.length" style="margin-left:4px"></span>
+                <span data-i18n="handsPage.activeTab">Active</span>
+                <span class="badge badge-success" x-show="instances.length" x-text="instances.length" style="margin-left:4px"></span>
               </div>
             </div>
 
@@ -2480,13 +2476,13 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                         <span style="font-size:1.4rem" x-text="hand.icon"></span>
                         <div class="card-header" style="margin:0" x-text="hand.name"></div>
                       </div>
-                      <span class="badge" :class="hand.requirements_met ? 'badge-success' : 'badge-dim'" x-text="hand.requirements_met ? 'Ready' : 'Setup needed'"></span>
+                      <span class="badge" :class="hand.requirements_met ? 'badge-success' : 'badge-dim'" x-text="availabilityText(hand)"></span>
                     </div>
                     <div class="card-meta" x-text="hand.description"></div>
 
                     <!-- Requirements -->
                     <div class="mt-3" x-show="hand.requirements && hand.requirements.length">
-                      <div class="text-xs text-dim mb-1" style="letter-spacing:0.5px">REQUIREMENTS</div>
+                      <div class="text-xs text-dim mb-1" style="letter-spacing:0.5px" data-i18n="handsPage.requirementsTitle">REQUIREMENTS</div>
                       <template x-for="req in hand.requirements" :key="req.key">
                         <div class="flex items-center gap-2 text-xs" style="padding:2px 0">
                           <span :style="req.satisfied ? 'color:var(--success)' : 'color:var(--danger)'" x-text="req.satisfied ? '\u2713' : '\u2717'"></span>
@@ -2497,15 +2493,15 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
                     <!-- Tools -->
                     <div class="mt-2">
-                      <span class="text-xs text-dim" x-text="hand.tools.length + ' tool(s)'"></span>
-                      <span class="text-xs text-dim" style="margin-left:8px" x-text="hand.dashboard_metrics + ' metric(s)'"></span>
+                      <span class="text-xs text-dim" x-text="toolsCountText(hand)"></span>
+                      <span class="text-xs text-dim" style="margin-left:8px" x-text="metricsCountText(hand)"></span>
                       <span class="category-badge" style="margin-left:8px;font-size:0.65rem" x-text="hand.category"></span>
                     </div>
 
                     <!-- Actions -->
                     <div class="flex justify-between items-center mt-3">
-                      <button class="btn btn-ghost btn-sm" @click="showDetail(hand.id)">Details</button>
-                      <button class="btn btn-primary btn-sm" @click="openSetupWizard(hand.id)" :disabled="setupLoading || activatingId === hand.id" x-text="setupLoading ? 'Loading...' : 'Activate'"></button>
+                      <button class="btn btn-ghost btn-sm" @click="showDetail(hand.id)" data-i18n="handsPage.details">Details</button>
+                      <button class="btn btn-primary btn-sm" @click="openSetupWizard(hand.id)" :disabled="setupLoading || activatingId === hand.id" x-text="setupLoading ? t('handsPage.loadingShort', 'Loading...') : t('handsPage.activate', 'Activate')"></button>
                     </div>
                   </div>
                 </template>
@@ -2514,14 +2510,14 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 <div class="empty-state-icon">
                   <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v6"/><path d="M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-5.7-2.4L3.4 16a2 2 0 0 1 3.2-2.4L8 15"/></svg>
                 </div>
-                <h3>No hands available</h3>
-                <p>Hands are curated AI capability packages. They will appear once the kernel loads bundled hands.</p>
+                <h3 data-i18n="handsPage.noHandsTitle">No hands available</h3>
+                <p data-i18n="handsPage.noHandsDesc">Hands are curated AI capability packages. They will appear once the kernel loads bundled hands.</p>
               </div>
             </div>
 
             <!-- TAB: Active Instances -->
             <div x-show="tab === 'active'">
-              <div x-show="activeLoading" class="loading-state"><div class="spinner"></div><span>Loading active hands...</span></div>
+              <div x-show="activeLoading" class="loading-state"><div class="spinner"></div><span data-i18n="handsPage.loadingActive">Loading active hands...</span></div>
               <div class="card-grid" x-show="instances.length && !activeLoading">
                 <template x-for="inst in instances" :key="inst.instance_id">
                   <div class="card">
@@ -2530,10 +2526,10 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                         <span style="font-size:1.4rem" x-text="getHandIcon(inst.hand_id)"></span>
                         <div class="card-header" style="margin:0" x-text="inst.agent_name || inst.hand_id"></div>
                       </div>
-                      <span class="badge" :class="{ 'badge-success': inst.status === 'Active', 'badge-dim': inst.status === 'Paused', 'badge-warn': inst.status && inst.status.startsWith('Error'), 'badge-info': inst.status === 'Inactive' }" x-text="inst.status"></span>
+                      <span class="badge" :class="{ 'badge-success': inst.status === 'Active', 'badge-dim': inst.status === 'Paused', 'badge-warn': inst.status && inst.status.startsWith('Error'), 'badge-info': inst.status === 'Inactive' }" x-text="instanceStatusText(inst)"></span>
                     </div>
-                    <div class="text-xs text-dim" x-text="'Activated: ' + new Date(inst.activated_at).toLocaleString()"></div>
-                    <div class="text-xs text-dim" x-show="inst.agent_id" x-text="'Agent: ' + inst.agent_id"></div>
+                    <div class="text-xs text-dim" x-text="activatedAtText(inst)"></div>
+                    <div class="text-xs text-dim" x-show="inst.agent_id" x-text="agentIdText(inst)"></div>
 
                     <!-- Stats (loaded on demand) -->
                     <div class="mt-3" x-show="inst._stats">
@@ -2547,28 +2543,28 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
                     <!-- Actions -->
                     <div class="flex gap-2 mt-3">
-                      <button class="btn btn-ghost btn-sm" @click="loadStats(inst)">Stats</button>
+                      <button class="btn btn-ghost btn-sm" @click="loadStats(inst)" data-i18n="handsPage.stats">Stats</button>
                       <template x-if="isBrowserHand(inst)">
-                        <button class="btn btn-ghost btn-sm" @click="openBrowserViewer(inst)">View Browser</button>
+                        <button class="btn btn-ghost btn-sm" @click="openBrowserViewer(inst)" data-i18n="handsPage.viewBrowser">View Browser</button>
                       </template>
                       <template x-if="inst.status === 'Active'">
-                        <button class="btn btn-ghost btn-sm" @click="pauseHand(inst)">Pause</button>
+                        <button class="btn btn-ghost btn-sm" @click="pauseHand(inst)" data-i18n="handsPage.pause">Pause</button>
                       </template>
                       <template x-if="inst.status === 'Paused'">
-                        <button class="btn btn-ghost btn-sm" @click="resumeHand(inst)">Resume</button>
+                        <button class="btn btn-ghost btn-sm" @click="resumeHand(inst)" data-i18n="handsPage.resume">Resume</button>
                       </template>
                       <template x-if="inst.status && inst.status.startsWith('Error')">
-                        <span class="text-xs text-dim">Error — deactivate and reactivate</span>
+                        <span class="text-xs text-dim" data-i18n="handsPage.errorHint">Error — deactivate and reactivate</span>
                       </template>
-                      <button class="btn btn-danger btn-sm" @click="deactivate(inst)">Deactivate</button>
+                      <button class="btn btn-danger btn-sm" @click="deactivate(inst)" data-i18n="handsPage.deactivate">Deactivate</button>
                     </div>
                   </div>
                 </template>
               </div>
               <div class="empty-state" x-show="!instances.length && !activeLoading">
-                <h4>No active hands</h4>
-                <p class="hint">Activate a hand from the Available tab to get started. Each hand spawns a dedicated agent.</p>
-                <button class="btn btn-primary mt-4" @click="tab = 'available'">Browse Hands</button>
+                <h4 data-i18n="handsPage.noActiveTitle">No active hands</h4>
+                <p class="hint" data-i18n="handsPage.noActiveDesc">Activate a hand from the Available tab to get started. Each hand spawns a dedicated agent.</p>
+                <button class="btn btn-primary mt-4" @click="tab = 'available'" data-i18n="handsPage.browseHands">Browse Hands</button>
               </div>
             </div>
 
@@ -2584,14 +2580,14 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     <p x-text="detailHand.description"></p>
                   </div>
                   <div class="mb-3">
-                    <div class="text-xs text-dim mb-1" style="letter-spacing:0.5px">AGENT CONFIG</div>
+                    <div class="text-xs text-dim mb-1" style="letter-spacing:0.5px" data-i18n="handsPage.agentConfig">AGENT CONFIG</div>
                     <div class="text-sm" x-show="detailHand.agent">
-                      <div class="flex justify-between" style="padding:2px 0"><span class="text-dim">Provider</span><span x-text="detailHand.agent.provider"></span></div>
-                      <div class="flex justify-between" style="padding:2px 0"><span class="text-dim">Model</span><span x-text="detailHand.agent.model"></span></div>
+                      <div class="flex justify-between" style="padding:2px 0"><span class="text-dim" data-i18n="label.provider">Provider</span><span x-text="detailHand.agent.provider"></span></div>
+                      <div class="flex justify-between" style="padding:2px 0"><span class="text-dim" data-i18n="label.model">Model</span><span x-text="detailHand.agent.model"></span></div>
                     </div>
                   </div>
                   <div class="mb-3">
-                    <div class="text-xs text-dim mb-1" style="letter-spacing:0.5px">REQUIREMENTS</div>
+                    <div class="text-xs text-dim mb-1" style="letter-spacing:0.5px" data-i18n="handsPage.requirementsTitle">REQUIREMENTS</div>
                     <template x-for="req in (detailHand.requirements || [])" :key="req.key">
                       <div class="flex items-center gap-2 text-sm" style="padding:3px 0">
                         <span :style="req.satisfied ? 'color:var(--success)' : 'color:var(--danger)'" x-text="req.satisfied ? '\u2713' : '\u2717'"></span>
@@ -2601,7 +2597,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     </template>
                   </div>
                   <div class="mb-3">
-                    <div class="text-xs text-dim mb-1" style="letter-spacing:0.5px">TOOLS</div>
+                    <div class="text-xs text-dim mb-1" style="letter-spacing:0.5px" data-i18n="handsPage.toolsLabel">TOOLS</div>
                     <div class="flex flex-wrap gap-1">
                       <template x-for="tool in (detailHand.tools || [])" :key="tool">
                         <span class="category-badge" x-text="tool" style="font-size:0.7rem"></span>
@@ -2609,13 +2605,13 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     </div>
                   </div>
                   <div class="mb-3" x-show="detailHand.dashboard && detailHand.dashboard.length">
-                    <div class="text-xs text-dim mb-1" style="letter-spacing:0.5px">DASHBOARD METRICS</div>
+                    <div class="text-xs text-dim mb-1" style="letter-spacing:0.5px" data-i18n="handsPage.dashboardMetrics">DASHBOARD METRICS</div>
                     <template x-for="m in (detailHand.dashboard || [])" :key="m.memory_key">
                       <div class="text-sm" style="padding:2px 0"><span x-text="m.label"></span> <code class="text-xs text-dim" x-text="'(' + m.format + ')'"></code></div>
                     </template>
                   </div>
                   <div class="flex gap-2">
-                    <button class="btn btn-primary btn-block" @click="var hid = detailHand.id; detailHand = null; openSetupWizard(hid)" :disabled="setupLoading">Activate</button>
+                    <button class="btn btn-primary btn-block" @click="var hid = detailHand.id; detailHand = null; openSetupWizard(hid)" :disabled="setupLoading" data-i18n="handsPage.activate">Activate</button>
                   </div>
                 </div>
               </div>
@@ -2629,7 +2625,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <div class="hand-wizard-header">
                     <span class="wizard-icon" x-text="setupWizard.icon"></span>
                     <div>
-                      <div class="wizard-title" x-text="'Set up ' + setupWizard.name"></div>
+                      <div class="wizard-title" x-text="t('handsPage.setupTitle', 'Set up {name}', { name: setupWizard.name })"></div>
                       <div class="wizard-subtitle" x-text="setupWizard.description"></div>
                     </div>
                     <button class="wizard-close" @click="closeSetupWizard()">&times;</button>
@@ -2640,7 +2636,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     <template x-if="setupHasReqs">
                       <div class="hand-step-item" :class="{ active: setupStep === 1, done: setupStep > 1 }">
                         <div class="hand-step-num" x-text="setupStep > 1 ? '\u2713' : '1'"></div>
-                        <div class="hand-step-label">Dependencies</div>
+                        <div class="hand-step-label" data-i18n="handsPage.step.dependencies">Dependencies</div>
                       </div>
                     </template>
                     <template x-if="setupHasReqs">
@@ -2648,12 +2644,12 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     </template>
                     <div class="hand-step-item" :class="{ active: setupStep === 2, done: setupStep > 2 }">
                       <div class="hand-step-num" x-text="setupStep > 2 ? '\u2713' : (setupHasReqs ? '2' : '1')"></div>
-                      <div class="hand-step-label">Configure</div>
+                      <div class="hand-step-label" data-i18n="handsPage.step.configure">Configure</div>
                     </div>
                     <div class="hand-step-line" :class="{ done: setupStep > 2 }"></div>
                     <div class="hand-step-item" :class="{ active: setupStep === 3 }">
                       <div class="hand-step-num" x-text="setupHasReqs ? '3' : '2'"></div>
-                      <div class="hand-step-label">Launch</div>
+                      <div class="hand-step-label" data-i18n="handsPage.step.launch">Launch</div>
                     </div>
                   </div>
 
@@ -2674,7 +2670,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
                         <!-- Satisfied: green message -->
                         <template x-if="req.satisfied">
-                          <div class="dep-met-msg">&check; Detected on your system</div>
+                          <div class="dep-met-msg" data-i18n="handsPage.detectedOnSystem">&check; Detected on your system</div>
                         </template>
 
                         <!-- Not satisfied: show install instructions -->
@@ -2690,8 +2686,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                                   <button class="install-platform-pill" :class="{ active: (installPlatforms[req.key] || detectedPlatform) === 'pip' }" @click="installPlatforms[req.key] = 'pip'" x-show="req.install.pip && !req.install.macos">pip</button>
                                 </div>
                                 <div class="install-cmd">
-                                  <code x-text="getInstallCmd(req) || 'No command available'"></code>
-                                  <button class="copy-btn" :class="{ copied: clipboardMsg === getInstallCmd(req) }" @click="copyToClipboard(getInstallCmd(req))" x-text="clipboardMsg === getInstallCmd(req) ? 'Copied!' : 'Copy'"></button>
+                                  <code x-text="getInstallCmd(req) || t('handsPage.noCommand', 'No command available')"></code>
+                                  <button class="copy-btn" :class="{ copied: clipboardMsg === getInstallCmd(req) }" @click="copyToClipboard(getInstallCmd(req))" x-text="copyButtonText(getInstallCmd(req))"></button>
                                 </div>
                               </div>
                             </template>
@@ -2719,16 +2715,16 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                                   <div class="install-block" style="margin-top:8px">
                                     <div class="install-cmd">
                                       <code x-text="req.install.env_example"></code>
-                                      <button class="copy-btn" :class="{ copied: clipboardMsg === req.install.env_example }" @click="copyToClipboard(req.install.env_example)" x-text="clipboardMsg === req.install.env_example ? 'Copied!' : 'Copy'"></button>
+                                      <button class="copy-btn" :class="{ copied: clipboardMsg === req.install.env_example }" @click="copyToClipboard(req.install.env_example)" x-text="copyButtonText(req.install.env_example)"></button>
                                     </div>
                                   </div>
                                 </template>
                                 <div class="flex gap-2 mt-2">
                                   <template x-if="req.install.signup_url">
-                                    <a :href="req.install.signup_url" target="_blank" rel="noopener" class="btn btn-primary btn-sm">Get API Key &rarr;</a>
+                                    <a :href="req.install.signup_url" target="_blank" rel="noopener" class="btn btn-primary btn-sm" data-i18n="handsPage.getApiKey">Get API Key &rarr;</a>
                                   </template>
                                   <template x-if="req.install.docs_url">
-                                    <a :href="req.install.docs_url" target="_blank" rel="noopener" class="btn btn-ghost btn-sm">Docs</a>
+                                    <a :href="req.install.docs_url" target="_blank" rel="noopener" class="btn btn-ghost btn-sm" data-i18n="handsPage.docs">Docs</a>
                                   </template>
                                 </div>
                               </div>
@@ -2737,7 +2733,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                             <!-- Manual download link -->
                             <template x-if="req.install && req.install.manual_url && req.type !== 'ApiKey'">
                               <div style="margin-top:6px">
-                                <a :href="req.install.manual_url" target="_blank" rel="noopener" class="text-xs" style="color:var(--accent)">Manual download &rarr;</a>
+                                <a :href="req.install.manual_url" target="_blank" rel="noopener" class="text-xs" style="color:var(--accent)" data-i18n="handsPage.manualDownload">Manual download &rarr;</a>
                               </div>
                             </template>
                           </div>
@@ -2752,13 +2748,13 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                           <template x-if="installProgress.status === 'installing'">
                             <div class="flex items-center gap-2">
                               <span class="spinner-sm"></span>
-                              <span class="text-sm font-bold">Installing dependencies...</span>
+                              <span class="text-sm font-bold" data-i18n="handsPage.installingDeps">Installing dependencies...</span>
                             </div>
                           </template>
                           <template x-if="installProgress.status === 'done' && !installProgress.error">
                             <div class="flex items-center gap-2">
                               <span style="color:var(--green);font-size:16px">&check;</span>
-                              <span class="text-sm font-bold" style="color:var(--green)">Installation complete!</span>
+                              <span class="text-sm font-bold" style="color:var(--green)" data-i18n="handsPage.installComplete">Installation complete!</span>
                             </div>
                           </template>
                           <template x-if="installProgress.error">
@@ -2789,7 +2785,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                               <div class="install-result-row">
                                 <span class="spinner-sm"></span>
                                 <span class="text-sm" x-text="req.label"></span>
-                                <span class="text-xs text-dim" style="margin-left:auto">Waiting...</span>
+                                <span class="text-xs text-dim" style="margin-left:auto" data-i18n="handsPage.waiting">Waiting...</span>
                               </div>
                             </template>
                           </div>
@@ -2800,8 +2796,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     <!-- Progress bar -->
                     <div class="dep-progress">
                       <div class="dep-progress-label">
-                        <span x-text="setupReqsMet + ' of ' + setupReqsTotal + ' ready'"></span>
-                        <span class="text-dim" x-text="setupAllReqsMet ? 'All set!' : 'Install missing dependencies above'"></span>
+                        <span x-text="progressReadyText()"></span>
+                        <span class="text-dim" x-text="progressHintText()"></span>
                       </div>
                       <div class="dep-progress-bar">
                         <div class="dep-progress-fill" :style="'width:' + (setupReqsTotal ? Math.round(setupReqsMet / setupReqsTotal * 100) : 0) + '%'"></div>
@@ -2812,7 +2808,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <!-- ═══ Step 2: Configure ═══ -->
                   <div class="hand-wizard-body" x-show="setupStep === 2">
                     <template x-if="!setupHasSettings">
-                      <div class="text-sm text-dim" style="text-align:center;padding:20px 0">No configuration needed for this hand. Click Next to continue.</div>
+                      <div class="text-sm text-dim" style="text-align:center;padding:20px 0" data-i18n="handsPage.noConfigNeeded">No configuration needed for this hand. Click Next to continue.</div>
                     </template>
                     <template x-for="setting in (setupWizard.settings || [])" :key="setting.key">
                       <div class="mb-4">
@@ -2827,9 +2823,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                                 <div>
                                   <div class="text-sm" x-text="opt.label"></div>
                                   <div class="text-xs text-dim" x-show="opt.provider_env" x-text="opt.provider_env"></div>
-                                  <div class="text-xs text-dim" x-show="opt.binary" x-text="'Requires: ' + opt.binary"></div>
+                                  <div class="text-xs text-dim" x-show="opt.binary" x-text="t('handsPage.requiresBinary', 'Requires: {binary}', { binary: opt.binary })"></div>
                                 </div>
-                                <span class="badge" :class="opt.available ? 'badge-success' : 'badge-dim'" x-text="opt.available ? 'Ready' : 'Missing'" style="font-size:0.65rem"></span>
+                                <span class="badge" :class="opt.available ? 'badge-success' : 'badge-dim'" x-text="settingAvailabilityText(opt)" style="font-size:0.65rem"></span>
                               </div>
                             </template>
                           </div>
@@ -2839,7 +2835,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                         <template x-if="setting.setting_type === 'toggle'">
                           <label class="flex items-center gap-2" style="cursor:pointer">
                             <input type="checkbox" :checked="settingsValues[setting.key] === 'true'" @change="settingsValues[setting.key] = $event.target.checked ? 'true' : 'false'">
-                            <span class="text-sm" x-text="settingsValues[setting.key] === 'true' ? 'Enabled' : 'Disabled'"></span>
+                            <span class="text-sm" x-text="toggleSettingText(setting.key)"></span>
                           </label>
                         </template>
 
@@ -2861,7 +2857,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                         <!-- Dependencies summary -->
                         <template x-if="setupHasReqs">
                           <div class="launch-summary-row">
-                            <span class="row-label">Dependencies</span>
+                            <span class="row-label" data-i18n="handsPage.step.dependencies">Dependencies</span>
                             <span class="row-check" x-text="setupReqsMet + '/' + setupReqsTotal + ' \u2713'"></span>
                           </div>
                         </template>
@@ -2877,7 +2873,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                         <!-- Provider / Model -->
                         <template x-if="setupWizard.agent">
                           <div class="launch-summary-row">
-                            <span class="row-label">Model</span>
+                            <span class="row-label" data-i18n="label.model">Model</span>
                             <span class="row-value" x-text="(setupWizard.agent.provider || 'default') + ' / ' + (setupWizard.agent.model || 'default')"></span>
                           </div>
                         </template>
@@ -2888,28 +2884,28 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <!-- Navigation -->
                   <div class="hand-wizard-nav">
                     <div>
-                      <button class="btn btn-ghost" @click="closeSetupWizard()">Cancel</button>
-                      <button class="btn btn-ghost" x-show="(setupStep === 2 && setupHasReqs) || setupStep === 3" @click="setupPrevStep()" style="margin-left:4px">Back</button>
+                      <button class="btn btn-ghost" @click="closeSetupWizard()" data-i18n="btn.cancel">Cancel</button>
+                      <button class="btn btn-ghost" x-show="(setupStep === 2 && setupHasReqs) || setupStep === 3" @click="setupPrevStep()" style="margin-left:4px" data-i18n="btn.back">Back</button>
                     </div>
                     <div class="flex gap-2">
                       <!-- Step 1: Install + Verify + Next -->
                       <template x-if="setupStep === 1">
                         <div class="flex gap-2">
                           <template x-if="!setupAllReqsMet">
-                            <button class="btn btn-success" @click="installDeps()" :disabled="installProgress && installProgress.status === 'installing'" x-text="(installProgress && installProgress.status === 'installing') ? 'Installing...' : 'Install All'">
+                            <button class="btn btn-success" @click="installDeps()" :disabled="installProgress && installProgress.status === 'installing'" x-text="(installProgress && installProgress.status === 'installing') ? t('handsPage.installingShort', 'Installing...') : t('handsPage.installAll', 'Install All')">
                             </button>
                           </template>
-                          <button class="btn btn-ghost" @click="recheckDeps()" :disabled="setupChecking" x-text="setupChecking ? 'Checking...' : 'Verify'"></button>
-                          <button class="btn btn-primary" @click="setupNextStep()" :disabled="!setupAllReqsMet">Next</button>
+                          <button class="btn btn-ghost" @click="recheckDeps()" :disabled="setupChecking" x-text="setupChecking ? t('handsPage.checking', 'Checking...') : t('handsPage.verify', 'Verify')"></button>
+                          <button class="btn btn-primary" @click="setupNextStep()" :disabled="!setupAllReqsMet" data-i18n="btn.next">Next</button>
                         </div>
                       </template>
                       <!-- Step 2: Next -->
                       <template x-if="setupStep === 2">
-                        <button class="btn btn-primary" @click="setupNextStep()">Next</button>
+                        <button class="btn btn-primary" @click="setupNextStep()" data-i18n="btn.next">Next</button>
                       </template>
                       <!-- Step 3: Activate -->
                       <template x-if="setupStep === 3">
-                        <button class="btn btn-success btn-launch" @click="launchHand()" :disabled="activatingId" x-text="activatingId ? 'Activating...' : 'Activate ' + setupWizard.name"></button>
+                        <button class="btn btn-success btn-launch" @click="launchHand()" :disabled="activatingId" x-text="activatingId ? t('handsPage.activating', 'Activating...') : t('handsPage.activateNamed', 'Activate {name}', { name: setupWizard.name })"></button>
                       </template>
                     </div>
                   </div>
@@ -2927,15 +2923,15 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     <span class="browser-dot red"></span>
                     <span class="browser-dot yellow"></span>
                     <span class="browser-dot green"></span>
-                    <span class="browser-url" x-text="browserViewer ? (browserViewer.url || 'about:blank') : 'about:blank'"></span>
+                    <span class="browser-url" x-text="browserUrlText()"></span>
                   </div>
-                  <button class="btn btn-ghost btn-sm" @click="refreshBrowserView()">Refresh</button>
-                  <button class="btn btn-ghost btn-sm" @click="closeBrowserViewer()">Close</button>
+                  <button class="btn btn-ghost btn-sm" @click="refreshBrowserView()" data-i18n="btn.refresh">Refresh</button>
+                  <button class="btn btn-ghost btn-sm" @click="closeBrowserViewer()" data-i18n="btn.close">Close</button>
                 </div>
                 <div class="browser-viewer-body">
                   <!-- Loading -->
                   <div x-show="browserViewer && browserViewer.loading" class="text-center text-dim" style="padding:40px">
-                    Loading browser state...
+                    <span data-i18n="handsPage.loadingBrowser">Loading browser state...</span>
                   </div>
                   <!-- Error -->
                   <div x-show="browserViewer && browserViewer.error && !browserViewer.loading" class="text-center" style="padding:40px;color:var(--error)">
@@ -2948,7 +2944,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   </div>
                   <!-- Page info -->
                   <div class="browser-info" x-show="browserViewer && !browserViewer.loading && !browserViewer.error">
-                    <div class="text-dim text-sm">Title: <span x-text="browserViewer ? (browserViewer.title || '-') : '-'"></span></div>
+                    <div class="text-dim text-sm"><span data-i18n="handsPage.browserTitle">Title:</span> <span x-text="browserViewer ? (browserViewer.title || '-') : '-'"></span></div>
                   </div>
                 </div>
               </div>
@@ -3478,6 +3474,20 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             editMode: false,
             editHourly: '', editDaily: '', editMonthly: '', editAlert: '', editTokenLimit: '',
             saving: false,
+            interpolate(text, params) {
+              if (!params || typeof text !== 'string') return text;
+              return text.replace(/\{(\w+)\}/g, function(match, key) {
+                return params[key] !== undefined ? params[key] : match;
+              });
+            },
+            msg(key, fallback, params) {
+              if (typeof i18n === 'undefined') return this.interpolate(fallback || key, params);
+              var translated = i18n.t(key, params);
+              if (!translated || translated.charAt(0) === '[') {
+                return this.interpolate(fallback || key, params);
+              }
+              return translated;
+            },
             async loadBudget() {
               this.budgetLoading = true;
               try {
@@ -3511,89 +3521,90 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 await LibreFangAPI.put('/api/budget', body);
                 this.editMode = false;
                 await this.loadBudget();
-              } catch(e) { LibreFangToast.error('Failed to save: ' + (e.message || e)); }
+              } catch(e) { LibreFangToast.error(this.msg('settingsPage.saveFailed', 'Failed to save: {message}', { message: e.message || e })); }
               this.saving = false;
             },
-            fmtTokens(v) { return v > 0 ? (v >= 1000000 ? (v/1000000).toFixed(1)+'M' : v >= 1000 ? (v/1000).toFixed(0)+'K' : v) : 'per-agent'; },
+            fmtTokens(v) { return v > 0 ? (v >= 1000000 ? (v/1000000).toFixed(1)+'M' : v >= 1000 ? (v/1000).toFixed(0)+'K' : v) : this.msg('settingsPage.perAgent', 'per-agent'); },
             pctColor(pct) { return pct >= 0.8 ? '#ef4444' : pct >= 0.5 ? '#eab308' : '#22c55e'; },
-            fmtUsd(v) { return v > 0 ? '$' + v.toFixed(4) : 'unlimited'; }
+            fmtUsd(v) { return v > 0 ? '$' + v.toFixed(4) : this.msg('settingsPage.unlimited', 'unlimited'); },
+            ofLimitText(v) { return this.msg('settingsPage.ofLimit', 'of {value}', { value: this.fmtUsd(v) }); }
           }" x-init="loadBudget()">
             <div class="info-card" style="display:flex;justify-content:space-between;align-items:start">
               <div>
-                <h4>Budget & Spending Limits</h4>
-                <p>Monitor and control spending across all agents.</p>
+                <h4 data-i18n="settingsPage.budgetTitle">Budget & Spending Limits</h4>
+                <p data-i18n="settingsPage.budgetDesc">Monitor and control spending across all agents.</p>
               </div>
-              <button class="btn btn-sm" @click="editMode ? saveBudget() : startEdit()" :disabled="saving" x-text="editMode ? (saving ? 'Saving...' : 'Save') : 'Edit Limits'" style="white-space:nowrap"></button>
+              <button class="btn btn-sm" @click="editMode ? saveBudget() : startEdit()" :disabled="saving" x-text="editMode ? (saving ? t('settingsPage.saving', 'Saving...') : t('btn.save', 'Save')) : t('settingsPage.editLimits', 'Edit Limits')" style="white-space:nowrap"></button>
             </div>
-            <div x-show="budgetLoading" class="loading-state"><div class="spinner"></div><span>Loading budget...</span></div>
+            <div x-show="budgetLoading" class="loading-state"><div class="spinner"></div><span data-i18n="settingsPage.loadingBudget">Loading budget...</span></div>
             <div x-show="!budgetLoading && budgetData">
               <!-- Global budget meters -->
               <div class="stats-row" style="margin-bottom:16px">
                 <div class="stat-card" style="flex:1">
-                  <div class="stat-label">Hourly</div>
+                  <div class="stat-label" data-i18n="settingsPage.hourly">Hourly</div>
                   <div class="stat-value" style="font-size:18px" x-text="'$' + (budgetData.hourly_spend || 0).toFixed(4)"></div>
-                  <div class="text-xs text-dim" x-text="'of ' + fmtUsd(budgetData.hourly_limit)"></div>
+                  <div class="text-xs text-dim" x-text="ofLimitText(budgetData.hourly_limit)"></div>
                   <div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px;overflow:hidden" x-show="budgetData.hourly_limit > 0">
                     <div style="height:100%;border-radius:2px;transition:width 0.3s" :style="{width: Math.min(budgetData.hourly_pct*100,100)+'%', background: pctColor(budgetData.hourly_pct)}"></div>
                   </div>
                 </div>
                 <div class="stat-card" style="flex:1">
-                  <div class="stat-label">Daily</div>
+                  <div class="stat-label" data-i18n="settingsPage.daily">Daily</div>
                   <div class="stat-value" style="font-size:18px" x-text="'$' + (budgetData.daily_spend || 0).toFixed(4)"></div>
-                  <div class="text-xs text-dim" x-text="'of ' + fmtUsd(budgetData.daily_limit)"></div>
+                  <div class="text-xs text-dim" x-text="ofLimitText(budgetData.daily_limit)"></div>
                   <div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px;overflow:hidden" x-show="budgetData.daily_limit > 0">
                     <div style="height:100%;border-radius:2px;transition:width 0.3s" :style="{width: Math.min(budgetData.daily_pct*100,100)+'%', background: pctColor(budgetData.daily_pct)}"></div>
                   </div>
                 </div>
                 <div class="stat-card" style="flex:1">
-                  <div class="stat-label">Monthly</div>
+                  <div class="stat-label" data-i18n="settingsPage.monthly">Monthly</div>
                   <div class="stat-value" style="font-size:18px" x-text="'$' + (budgetData.monthly_spend || 0).toFixed(4)"></div>
-                  <div class="text-xs text-dim" x-text="'of ' + fmtUsd(budgetData.monthly_limit)"></div>
+                  <div class="text-xs text-dim" x-text="ofLimitText(budgetData.monthly_limit)"></div>
                   <div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px;overflow:hidden" x-show="budgetData.monthly_limit > 0">
                     <div style="height:100%;border-radius:2px;transition:width 0.3s" :style="{width: Math.min(budgetData.monthly_pct*100,100)+'%', background: pctColor(budgetData.monthly_pct)}"></div>
                   </div>
                 </div>
               </div>
               <div class="text-xs text-dim mb-1" x-show="budgetData.alert_threshold > 0 && !editMode">
-                Alert threshold: <span x-text="(budgetData.alert_threshold * 100).toFixed(0) + '%'"></span> of any limit
+                <span data-i18n="settingsPage.alertThreshold">Alert threshold:</span> <span x-text="(budgetData.alert_threshold * 100).toFixed(0) + '%'"></span> <span data-i18n="settingsPage.ofAnyLimit">of any limit</span>
               </div>
               <div class="text-xs text-dim mb-3" x-show="!editMode">
-                Hourly token limit (per agent): <span x-text="fmtTokens(budgetData.default_max_llm_tokens_per_hour || 0)"></span>
+                <span data-i18n="settingsPage.hourlyTokenLimitPerAgent">Hourly token limit (per agent):</span> <span x-text="fmtTokens(budgetData.default_max_llm_tokens_per_hour || 0)"></span>
               </div>
 
               <!-- Edit limits form -->
               <div x-show="editMode" class="card" style="margin:12px 0;padding:12px;border:1px solid var(--accent);border-radius:6px">
                 <div class="stats-row" style="margin-bottom:8px;gap:8px">
                   <div style="flex:1">
-                    <label class="text-xs text-dim">Hourly Limit ($)</label>
-                    <input type="number" step="0.1" min="0" x-model="editHourly" class="input" style="width:100%;margin-top:2px" placeholder="0 = unlimited">
+                    <label class="text-xs text-dim" data-i18n="settingsPage.hourlyLimit">Hourly Limit ($)</label>
+                    <input type="number" step="0.1" min="0" x-model="editHourly" class="input" style="width:100%;margin-top:2px" data-i18n-placeholder="settingsPage.unlimitedPlaceholder" placeholder="0 = unlimited">
                   </div>
                   <div style="flex:1">
-                    <label class="text-xs text-dim">Daily Limit ($)</label>
-                    <input type="number" step="1" min="0" x-model="editDaily" class="input" style="width:100%;margin-top:2px" placeholder="0 = unlimited">
+                    <label class="text-xs text-dim" data-i18n="settingsPage.dailyLimit">Daily Limit ($)</label>
+                    <input type="number" step="1" min="0" x-model="editDaily" class="input" style="width:100%;margin-top:2px" data-i18n-placeholder="settingsPage.unlimitedPlaceholder" placeholder="0 = unlimited">
                   </div>
                   <div style="flex:1">
-                    <label class="text-xs text-dim">Monthly Limit ($)</label>
-                    <input type="number" step="1" min="0" x-model="editMonthly" class="input" style="width:100%;margin-top:2px" placeholder="0 = unlimited">
+                    <label class="text-xs text-dim" data-i18n="settingsPage.monthlyLimit">Monthly Limit ($)</label>
+                    <input type="number" step="1" min="0" x-model="editMonthly" class="input" style="width:100%;margin-top:2px" data-i18n-placeholder="settingsPage.unlimitedPlaceholder" placeholder="0 = unlimited">
                   </div>
                   <div style="flex:0.6">
-                    <label class="text-xs text-dim">Alert (%)</label>
+                    <label class="text-xs text-dim" data-i18n="settingsPage.alertPercent">Alert (%)</label>
                     <input type="number" step="5" min="0" max="100" x-model="editAlert" class="input" style="width:100%;margin-top:2px" placeholder="80">
                   </div>
                 </div>
                 <div style="margin-bottom:8px">
-                  <label class="text-xs text-dim">Hourly Token Limit (per agent, 0 = use per-agent values)</label>
-                  <input type="number" step="100000" min="0" x-model="editTokenLimit" class="input" style="width:260px;margin-top:2px" placeholder="0 = per-agent default">
+                  <label class="text-xs text-dim" data-i18n="settingsPage.hourlyTokenLimitEdit">Hourly Token Limit (per agent, 0 = use per-agent values)</label>
+                  <input type="number" step="100000" min="0" x-model="editTokenLimit" class="input" style="width:260px;margin-top:2px" data-i18n-placeholder="settingsPage.perAgentDefaultPlaceholder" placeholder="0 = per-agent default">
                 </div>
-                <div class="text-xs text-dim">Set to 0 for unlimited/per-agent default. Changes apply immediately (in-memory, not persisted to config.toml).</div>
-                <button class="btn btn-sm mt-2" @click="editMode = false" style="margin-right:8px">Cancel</button>
+                <div class="text-xs text-dim" data-i18n="settingsPage.budgetEditHint">Set to 0 for unlimited/per-agent default. Changes apply immediately (in-memory, not persisted to config.toml).</div>
+                <button class="btn btn-sm mt-2" @click="editMode = false" style="margin-right:8px" data-i18n="btn.cancel">Cancel</button>
               </div>
 
               <!-- Per-agent cost ranking -->
-              <h4 style="margin-top:16px;margin-bottom:8px">Top Spenders (Today)</h4>
+              <h4 style="margin-top:16px;margin-bottom:8px" data-i18n="settingsPage.topSpendersToday">Top Spenders (Today)</h4>
               <div class="table-wrap" x-show="agentRanking.length">
                 <table>
-                  <thead><tr><th>Agent</th><th>Today</th><th>Hourly Limit</th><th>Daily Limit</th><th>Monthly Limit</th><th>Token Limit/hr</th></tr></thead>
+                  <thead><tr><th data-i18n="label.agent">Agent</th><th data-i18n="settingsPage.today">Today</th><th data-i18n="settingsPage.hourlyLimitShort">Hourly Limit</th><th data-i18n="settingsPage.dailyLimitShort">Daily Limit</th><th data-i18n="settingsPage.monthlyLimitShort">Monthly Limit</th><th data-i18n="settingsPage.tokenLimitPerHour">Token Limit/hr</th></tr></thead>
                   <tbody>
                     <template x-for="a in agentRanking" :key="a.agent_id">
                       <tr>
@@ -3608,94 +3619,92 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   </tbody>
                 </table>
               </div>
-              <div class="text-xs text-dim" x-show="!agentRanking.length">No spending recorded today.</div>
+              <div class="text-xs text-dim" x-show="!agentRanking.length" data-i18n="settingsPage.noSpendingToday">No spending recorded today.</div>
             </div>
           </div>
 
           <!-- Migration tab -->
           <div x-show="tab === 'migration'">
             <div class="card mb-4" style="border-left:3px solid var(--accent)" x-show="migStep === 'intro'">
-              <div class="font-bold" style="font-size:14px;margin-bottom:6px">Migrate from OpenClaw</div>
-              <div class="text-sm text-dim" style="line-height:1.7">
-                Seamlessly transfer your agents, memory, workspace files, and channel configurations from OpenClaw to LibreFang.
-              </div>
+              <div class="font-bold" style="font-size:14px;margin-bottom:6px" data-i18n="settingsPage.migrateFromOpenClaw">Migrate from OpenClaw</div>
+              <div class="text-sm text-dim" style="line-height:1.7" data-i18n="settingsPage.migrateFromOpenClawDesc">Seamlessly transfer your agents, memory, workspace files, and channel configurations from OpenClaw to LibreFang.</div>
               <ul class="text-sm text-dim" style="margin:8px 0 0 16px;line-height:1.8">
-                <li>Converts agent.yaml to agent.toml with proper capabilities</li>
-                <li>Maps tools (read_file &rarr; file_read, execute_command &rarr; shell_exec, etc.)</li>
-                <li>Merges channel configs into config.toml</li>
-                <li>Copies workspace files and memory data</li>
+                <li data-i18n="settingsPage.migrationFeature.manifest">Converts agent.yaml to agent.toml with proper capabilities</li>
+                <li data-i18n="settingsPage.migrationFeature.tools">Maps tools (read_file &rarr; file_read, execute_command &rarr; shell_exec, etc.)</li>
+                <li data-i18n="settingsPage.migrationFeature.channels">Merges channel configs into config.toml</li>
+                <li data-i18n="settingsPage.migrationFeature.workspace">Copies workspace files and memory data</li>
               </ul>
               <div class="flex gap-2 mt-4">
                 <button class="btn btn-primary" @click="autoDetect()" :disabled="detecting">
-                  <span x-show="!detecting">Auto-Detect OpenClaw</span>
-                  <span x-show="detecting">Scanning...</span>
+                  <span x-show="!detecting" data-i18n="settingsPage.autoDetectOpenClaw">Auto-Detect OpenClaw</span>
+                  <span x-show="detecting" data-i18n="settingsPage.scanning">Scanning...</span>
                 </button>
-                <button class="btn btn-ghost" @click="migStep = 'manual'">Enter Path Manually</button>
+                <button class="btn btn-ghost" @click="migStep = 'manual'" data-i18n="settingsPage.enterPathManually">Enter Path Manually</button>
               </div>
             </div>
 
             <div class="card mb-4" x-show="migStep === 'manual'" style="border-left:3px solid var(--accent)">
-              <div class="font-bold" style="font-size:14px;margin-bottom:8px">Specify OpenClaw Path</div>
+              <div class="font-bold" style="font-size:14px;margin-bottom:8px" data-i18n="settingsPage.specifyOpenClawPath">Specify OpenClaw Path</div>
               <div class="form-group">
-                <label>OpenClaw Home Directory</label>
+                <label data-i18n="settingsPage.openClawHomeDirectory">OpenClaw Home Directory</label>
                 <input class="form-input" type="text" x-model="sourcePath" placeholder="~/.openclaw" style="font-family:monospace;font-size:12px">
               </div>
               <div class="form-group mt-2">
-                <label>LibreFang Target Directory</label>
+                <label data-i18n="settingsPage.libreFangTargetDirectory">LibreFang Target Directory</label>
                 <input class="form-input" type="text" x-model="targetPath" placeholder="~/.librefang (default)" style="font-family:monospace;font-size:12px">
               </div>
               <div class="flex gap-2 mt-4">
                 <button class="btn btn-primary" @click="scanPath()" :disabled="!sourcePath || scanning">
-                  <span x-show="!scanning">Scan Directory</span>
-                  <span x-show="scanning">Scanning...</span>
+                  <span x-show="!scanning" data-i18n="settingsPage.scanDirectory">Scan Directory</span>
+                  <span x-show="scanning" data-i18n="settingsPage.scanning">Scanning...</span>
                 </button>
-                <button class="btn btn-ghost" @click="migStep = 'intro'">Back</button>
+                <button class="btn btn-ghost" @click="migStep = 'intro'" data-i18n="btn.back">Back</button>
               </div>
             </div>
 
             <div x-show="migStep === 'preview' && scanResult">
               <div class="card mb-4" style="border-left:3px solid var(--success, #22c55e)">
                 <div class="flex justify-between items-center mb-2">
-                  <div class="font-bold" style="font-size:14px">OpenClaw Workspace Found</div>
-                  <span class="badge badge-connected">Ready to Migrate</span>
+                  <div class="font-bold" style="font-size:14px" data-i18n="settingsPage.openClawWorkspaceFound">OpenClaw Workspace Found</div>
+                  <span class="badge badge-connected" data-i18n="settingsPage.readyToMigrate">Ready to Migrate</span>
                 </div>
                 <div class="text-sm text-dim" style="font-family:monospace" x-text="scanResult.path"></div>
               </div>
               <div class="stats-row mb-4">
-                <div class="stat-card"><div class="stat-value" x-text="scanResult.agents ? scanResult.agents.length : 0"></div><div class="stat-label">Agents</div></div>
-                <div class="stat-card"><div class="stat-value" x-text="scanResult.channels ? scanResult.channels.length : 0"></div><div class="stat-label">Channels</div></div>
-                <div class="stat-card"><div class="stat-value" x-text="scanResult.skills ? scanResult.skills.length : 0"></div><div class="stat-label">Skills</div></div>
+                <div class="stat-card"><div class="stat-value" x-text="scanResult.agents ? scanResult.agents.length : 0"></div><div class="stat-label" data-i18n="runtimePage.agents">Agents</div></div>
+                <div class="stat-card"><div class="stat-value" x-text="scanResult.channels ? scanResult.channels.length : 0"></div><div class="stat-label" data-i18n="stat.channels">Channels</div></div>
+                <div class="stat-card"><div class="stat-value" x-text="scanResult.skills ? scanResult.skills.length : 0"></div><div class="stat-label" data-i18n="stat.skills">Skills</div></div>
               </div>
               <div class="flex gap-2 mb-4">
                 <button class="btn btn-primary" @click="runMigration(false)" :disabled="migrating">
-                  <span x-show="!migrating">Migrate Now</span>
-                  <span x-show="migrating">Migrating...</span>
+                  <span x-show="!migrating" data-i18n="settingsPage.migrateNow">Migrate Now</span>
+                  <span x-show="migrating" data-i18n="settingsPage.migrating">Migrating...</span>
                 </button>
-                <button class="btn btn-ghost" @click="runMigration(true)" :disabled="migrating">Dry Run</button>
-                <button class="btn btn-ghost" @click="migStep = 'intro'; scanResult = null">Start Over</button>
+                <button class="btn btn-ghost" @click="runMigration(true)" :disabled="migrating" data-i18n="settingsPage.dryRun">Dry Run</button>
+                <button class="btn btn-ghost" @click="migStep = 'intro'; scanResult = null" data-i18n="settingsPage.startOver">Start Over</button>
               </div>
             </div>
 
             <div x-show="migStep === 'result' && migResult">
               <div class="card mb-4" :style="'border-left:3px solid ' + (migResult.status === 'completed' ? 'var(--success, #22c55e)' : 'var(--error)')">
                 <div class="flex justify-between items-center mb-2">
-                  <div class="font-bold" style="font-size:14px" x-text="migResult.dry_run ? 'Dry Run Complete' : 'Migration Complete!'"></div>
-                  <span class="badge" :class="migResult.status === 'completed' ? 'badge-connected' : 'badge-crashed'" x-text="migResult.status === 'completed' ? 'SUCCESS' : 'FAILED'"></span>
+                  <div class="font-bold" style="font-size:14px" x-text="migResult.dry_run ? t('settingsPage.dryRunComplete', 'Dry Run Complete') : t('settingsPage.migrationComplete', 'Migration Complete!')"></div>
+                  <span class="badge" :class="migResult.status === 'completed' ? 'badge-connected' : 'badge-crashed'" x-text="migResult.status === 'completed' ? t('settingsPage.success', 'SUCCESS') : t('settingsPage.failedShort', 'FAILED')"></span>
                 </div>
                 <div class="text-sm text-dim" x-show="migResult.error" style="color:var(--error)" x-text="migResult.error"></div>
               </div>
               <div class="flex gap-2">
-                <button class="btn btn-primary" x-show="migResult.dry_run" @click="runMigration(false)" :disabled="migrating">Run Migration for Real</button>
-                <button class="btn btn-ghost" @click="migStep = 'intro'; migResult = null; scanResult = null">Start New Migration</button>
+                <button class="btn btn-primary" x-show="migResult.dry_run" @click="runMigration(false)" :disabled="migrating" data-i18n="settingsPage.runMigrationForReal">Run Migration for Real</button>
+                <button class="btn btn-ghost" @click="migStep = 'intro'; migResult = null; scanResult = null" data-i18n="settingsPage.startNewMigration">Start New Migration</button>
               </div>
             </div>
 
             <div class="card" x-show="migStep === 'not_found'" style="border-left:3px solid var(--warning, #f59e0b)">
-              <div class="font-bold mb-2" style="font-size:14px">OpenClaw Not Found</div>
-              <div class="text-sm text-dim">Could not auto-detect an OpenClaw installation.</div>
+              <div class="font-bold mb-2" style="font-size:14px" data-i18n="settingsPage.openClawNotFound">OpenClaw Not Found</div>
+              <div class="text-sm text-dim" data-i18n="settingsPage.openClawNotFoundDesc">Could not auto-detect an OpenClaw installation.</div>
               <div class="flex gap-2 mt-4">
-                <button class="btn btn-primary" @click="migStep = 'manual'">Enter Path Manually</button>
-                <button class="btn btn-ghost" @click="migStep = 'intro'">Back</button>
+                <button class="btn btn-primary" @click="migStep = 'manual'" data-i18n="settingsPage.enterPathManually">Enter Path Manually</button>
+                <button class="btn btn-ghost" @click="migStep = 'intro'" data-i18n="btn.back">Back</button>
               </div>
             </div>
           </div>
