@@ -20,6 +20,7 @@ function agentsPage() {
   return {
     tab: 'agents',
     activeChatAgent: null,
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     // -- Agents state --
     showSpawnModal: false,
     showDetailModal: false,
@@ -183,6 +184,29 @@ function agentsPage() {
       }
     ],
 
+    get localizedTemplates() {
+      var lang = this._currentLang;
+      if (typeof i18n === 'undefined' || lang === 'en') {
+        return this.builtinTemplates;
+      }
+
+      return this.builtinTemplates.map(function(template) {
+        var key = template.name.replace(/\s+/g, '');
+        var translatedName = i18n.t('template.' + key + '.name');
+        var translatedDesc = i18n.t('template.' + key + '.desc');
+        var translatedCategory = i18n.t('category.' + template.category.toLowerCase());
+        return {
+          name: translatedName && !translatedName.startsWith('[') ? translatedName : template.name,
+          description: translatedDesc && !translatedDesc.startsWith('[') ? translatedDesc : template.description,
+          category: translatedCategory && !translatedCategory.startsWith('[') ? translatedCategory : template.category,
+          provider: template.provider,
+          model: template.model,
+          profile: template.profile,
+          system_prompt: template.system_prompt
+        };
+      });
+    },
+
     // ── Profile Descriptions ──
     profileDescriptions: {
       minimal: { label: 'Minimal', desc: 'Read-only file access' },
@@ -274,6 +298,9 @@ function agentsPage() {
 
     async init() {
       var self = this;
+      window.addEventListener('i18n-changed', function(event) {
+        self._currentLang = event.detail.language;
+      });
       this.loading = true;
       this.loadError = '';
       try {

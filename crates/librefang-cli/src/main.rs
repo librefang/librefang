@@ -5,6 +5,7 @@
 
 mod bundled_agents;
 mod dotenv;
+pub mod i18n;
 mod launcher;
 mod mcp;
 pub mod progress;
@@ -883,9 +884,19 @@ fn init_tracing_file() {
     }
 }
 
+fn load_language_from_config() -> Option<String> {
+    let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let config: toml::Value = toml::from_str(&content).ok()?;
+    config.get("language")?.as_str().map(|s| s.to_string())
+}
+
 fn main() {
     // Load ~/.librefang/.env into process environment (system env takes priority).
     dotenv::load_dotenv();
+
+    let language = load_language_from_config().unwrap_or_else(|| "en".to_string());
+    i18n::init(&language);
 
     let cli = Cli::parse();
 
@@ -1642,6 +1653,11 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
         }
     }
 
+    ui::banner();
+    ui::blank();
+    println!("  {}", i18n::t("daemon-starting"));
+    ui::blank();
+
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
         let kernel = match LibreFangKernel::boot(config.as_deref()) {
@@ -1654,12 +1670,53 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
 
         let listen_addr = kernel.config.api_listen.clone();
         let daemon_info_path = kernel.config.home_dir.join("daemon.json");
+        let provider = kernel.config.default_model.provider.clone();
+        let model = kernel.config.default_model.model.clone();
+        let agent_count = kernel.registry.count();
+        let model_count = kernel
+            .model_catalog
+            .read()
+            .map(|c| c.list_models().len())
+            .unwrap_or(0);
+
+        ui::success(&i18n::t_args(
+            "kernel-booted",
+            &[("provider", &provider), ("model", &model)],
+        ));
+        if model_count > 0 {
+            ui::success(&i18n::t_args(
+                "models-available",
+                &[("count", &model_count.to_string())],
+            ));
+        }
+        if agent_count > 0 {
+            ui::success(&i18n::t_args(
+                "agents-loaded",
+                &[("count", &agent_count.to_string())],
+            ));
+        }
+        ui::blank();
+        ui::kv(&i18n::t("label-api"), &format!("http://{listen_addr}"));
+        ui::kv(
+            &i18n::t("label-dashboard"),
+            &format!("http://{listen_addr}/"),
+        );
+        ui::kv(&i18n::t("label-provider"), &provider);
+        ui::kv(&i18n::t("label-model"), &model);
+        ui::blank();
+        ui::hint(&i18n::t("hint-open-dashboard"));
+        ui::hint(&i18n::t("hint-stop-daemon"));
+        ui::blank();
+
         if let Err(e) =
             librefang_api::server::run_daemon(kernel, &listen_addr, Some(&daemon_info_path)).await
         {
             ui::error(&format!("Daemon error: {e}"));
             std::process::exit(1);
         }
+
+        ui::blank();
+        println!("  {}", i18n::t("daemon-stopped"));
     });
 }
 

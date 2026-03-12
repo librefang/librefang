@@ -1,6 +1,12 @@
 // LibreFang App — Alpine.js init, hash router, global store
 'use strict';
 
+if (typeof i18n !== 'undefined') {
+  i18n.init().then(function(lang) {
+    console.log('LibreFang i18n initialized:', lang);
+  });
+}
+
 // Marked.js configuration
 if (typeof marked !== 'undefined') {
   marked.setOptions({

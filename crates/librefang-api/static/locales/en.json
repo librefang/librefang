@@ -1,0 +1,136 @@
+{
+  "nav": {
+    "chat": "Chat",
+    "monitor": "Monitor",
+    "overview": "Overview",
+    "analytics": "Analytics",
+    "logs": "Logs",
+    "agents": "Agents",
+    "sessions": "Sessions",
+    "approvals": "Approvals",
+    "comms": "Comms",
+    "automation": "Automation",
+    "workflows": "Workflows",
+    "scheduler": "Scheduler",
+    "extensions": "Extensions",
+    "channels": "Channels",
+    "skills": "Skills",
+    "hands": "Hands",
+    "system": "System",
+    "runtime": "Runtime",
+    "settings": "Settings"
+  },
+  "status": {
+    "connecting": "Connecting...",
+    "reconnecting": "Reconnecting...",
+    "disconnected": "disconnected"
+  },
+  "btn": {
+    "refresh": "Refresh",
+    "unlock": "Unlock Dashboard"
+  },
+  "label": {
+    "agents": "agent(s) running"
+  },
+  "auth": {
+    "title": "API Key Required",
+    "description": "This instance requires an API key. Enter the key from your config.toml.",
+    "placeholder": "Enter API key...",
+    "hint": "Add api_key = \"your-key\" at the top of ~/.librefang/config.toml"
+  },
+  "page": {
+    "overview": "Overview"
+  },
+  "health": {
+    "healthy": "Healthy",
+    "unreachable": "Unreachable"
+  },
+  "stat": {
+    "agentsRunning": "Agents Running",
+    "tokensUsed": "Tokens Used",
+    "totalCost": "Total Cost",
+    "uptime": "Uptime",
+    "channels": "Channels",
+    "skills": "Skills",
+    "mcpServers": "MCP Servers",
+    "toolCalls": "Tool Calls",
+    "providers": "Providers"
+  },
+  "agents": {
+    "newAgent": "+ New Agent",
+    "stopAll": "Stop All",
+    "yourAgents": "Your Agents",
+    "startNew": "Or Start a New Agent",
+    "startChatting": "Start Chatting"
+  },
+  "detail": {
+    "info": "Info",
+    "files": "Files",
+    "config": "Config",
+    "id": "ID",
+    "state": "State",
+    "mode": "Mode",
+    "profile": "Profile",
+    "provider": "Provider",
+    "model": "Model",
+    "change": "Change",
+    "created": "Created",
+    "fallbacks": "Fallbacks",
+    "none": "None - add a fallback chain",
+    "addFallback": "+ Add"
+  },
+  "mode": {
+    "observe": "Observe",
+    "assist": "Assist",
+    "full": "Full"
+  },
+  "category": {
+    "general": "General",
+    "development": "Development",
+    "research": "Research",
+    "writing": "Writing",
+    "business": "Business"
+  },
+  "template": {
+    "GeneralAssistant": {
+      "name": "General Assistant",
+      "desc": "A versatile conversational agent that can help with everyday tasks, answer questions, and provide recommendations."
+    },
+    "CodeHelper": {
+      "name": "Code Helper",
+      "desc": "A programming-focused agent that writes, reviews, and debugs code across multiple languages."
+    },
+    "Researcher": {
+      "name": "Researcher",
+      "desc": "An analytical agent that breaks down complex topics, synthesizes information, and provides cited summaries."
+    },
+    "Writer": {
+      "name": "Writer",
+      "desc": "A creative writing agent that helps with drafting, editing, and improving written content of all kinds."
+    },
+    "DataAnalyst": {
+      "name": "Data Analyst",
+      "desc": "A data-focused agent that helps analyze datasets, create queries, and interpret statistical results."
+    },
+    "DevOpsEngineer": {
+      "name": "DevOps Engineer",
+      "desc": "A systems-focused agent for CI/CD, infrastructure, Docker, and deployment troubleshooting."
+    },
+    "CustomerSupport": {
+      "name": "Customer Support",
+      "desc": "A professional, empathetic agent for handling customer inquiries and resolving issues."
+    },
+    "Tutor": {
+      "name": "Tutor",
+      "desc": "A patient educational agent that explains concepts step-by-step and adapts to the learner's level."
+    },
+    "APIDesigner": {
+      "name": "API Designer",
+      "desc": "An agent specialized in RESTful API design, OpenAPI specs, and integration architecture."
+    },
+    "MeetingNotes": {
+      "name": "Meeting Notes",
+      "desc": "Summarizes meeting transcripts into structured notes with action items and key decisions."
+    }
+  }
+}

@@ -1,0 +1,11 @@
+daemon-starting = 正在启动守护进程...
+daemon-stopped = LibreFang 守护进程已停止。
+kernel-booted = 内核已启动 ({ $provider }/{ $model })
+models-available = { $count } 个模型可用
+agents-loaded = 已加载 { $count } 个智能体
+label-api = API
+label-dashboard = 控制台
+label-provider = 提供商
+label-model = 模型
+hint-open-dashboard = 在浏览器中打开控制台，或运行 `librefang chat`
+hint-stop-daemon = 按 Ctrl+C 停止守护进程

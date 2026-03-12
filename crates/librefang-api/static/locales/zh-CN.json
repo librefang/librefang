@@ -1,0 +1,136 @@
+{
+  "nav": {
+    "chat": "对话",
+    "monitor": "监控",
+    "overview": "概览",
+    "analytics": "分析",
+    "logs": "日志",
+    "agents": "智能体",
+    "sessions": "会话",
+    "approvals": "审批",
+    "comms": "通讯",
+    "automation": "自动化",
+    "workflows": "工作流",
+    "scheduler": "调度器",
+    "extensions": "扩展",
+    "channels": "频道",
+    "skills": "技能",
+    "hands": "Hands",
+    "system": "系统",
+    "runtime": "运行时",
+    "settings": "设置"
+  },
+  "status": {
+    "connecting": "连接中...",
+    "reconnecting": "重新连接中...",
+    "disconnected": "已断开"
+  },
+  "btn": {
+    "refresh": "刷新",
+    "unlock": "解锁控制台"
+  },
+  "label": {
+    "agents": "个智能体运行中"
+  },
+  "auth": {
+    "title": "需要 API 密钥",
+    "description": "此实例需要 API 密钥。请输入 config.toml 中的密钥。",
+    "placeholder": "输入 API 密钥...",
+    "hint": "在 ~/.librefang/config.toml 顶部添加 api_key = \"your-key\""
+  },
+  "page": {
+    "overview": "概览"
+  },
+  "health": {
+    "healthy": "健康",
+    "unreachable": "不可达"
+  },
+  "stat": {
+    "agentsRunning": "运行中智能体",
+    "tokensUsed": "已使用令牌",
+    "totalCost": "总费用",
+    "uptime": "运行时间",
+    "channels": "频道",
+    "skills": "技能",
+    "mcpServers": "MCP 服务器",
+    "toolCalls": "工具调用",
+    "providers": "提供商"
+  },
+  "agents": {
+    "newAgent": "+ 新建智能体",
+    "stopAll": "全部停止",
+    "yourAgents": "你的智能体",
+    "startNew": "或新建一个智能体",
+    "startChatting": "开始对话"
+  },
+  "detail": {
+    "info": "信息",
+    "files": "文件",
+    "config": "配置",
+    "id": "ID",
+    "state": "状态",
+    "mode": "模式",
+    "profile": "配置档",
+    "provider": "提供商",
+    "model": "模型",
+    "change": "更改",
+    "created": "创建时间",
+    "fallbacks": "回退链",
+    "none": "暂无，可添加回退模型链",
+    "addFallback": "+ 添加"
+  },
+  "mode": {
+    "observe": "观察",
+    "assist": "辅助",
+    "full": "完全"
+  },
+  "category": {
+    "general": "通用",
+    "development": "开发",
+    "research": "研究",
+    "writing": "写作",
+    "business": "业务"
+  },
+  "template": {
+    "GeneralAssistant": {
+      "name": "通用助手",
+      "desc": "适合日常任务、答疑和建议的多用途对话智能体。"
+    },
+    "CodeHelper": {
+      "name": "代码助手",
+      "desc": "专注编程，可跨多种语言编写、审查和调试代码。"
+    },
+    "Researcher": {
+      "name": "研究员",
+      "desc": "擅长拆解复杂主题、综合信息并输出带引用的总结。"
+    },
+    "Writer": {
+      "name": "写作助手",
+      "desc": "帮助起草、编辑和润色各类书面内容的创作型智能体。"
+    },
+    "DataAnalyst": {
+      "name": "数据分析师",
+      "desc": "帮助分析数据集、编写查询并解释统计结果。"
+    },
+    "DevOpsEngineer": {
+      "name": "DevOps 工程师",
+      "desc": "面向 CI/CD、基础设施、Docker 和部署排障。"
+    },
+    "CustomerSupport": {
+      "name": "客服助手",
+      "desc": "专业且富有同理心，适合处理客户咨询和问题。"
+    },
+    "Tutor": {
+      "name": "导师",
+      "desc": "耐心讲解概念，分步骤教学，并根据学习者水平调整。"
+    },
+    "APIDesigner": {
+      "name": "API 设计师",
+      "desc": "专注 RESTful API 设计、OpenAPI 规范和集成架构。"
+    },
+    "MeetingNotes": {
+      "name": "会议纪要",
+      "desc": "把会议内容整理成结构化纪要、行动项和关键决策。"
+    }
+  }
+}

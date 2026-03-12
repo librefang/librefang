@@ -1,0 +1,11 @@
+daemon-starting = Starting daemon...
+daemon-stopped = LibreFang daemon stopped.
+kernel-booted = Kernel booted ({ $provider }/{ $model })
+models-available = { $count } models available
+agents-loaded = { $count } agent(s) loaded
+label-api = API
+label-dashboard = Dashboard
+label-provider = Provider
+label-model = Model
+hint-open-dashboard = Open the dashboard in your browser, or run `librefang chat`
+hint-stop-daemon = Press Ctrl+C to stop the daemon
