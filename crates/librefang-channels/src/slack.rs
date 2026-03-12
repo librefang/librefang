@@ -337,7 +337,7 @@ async fn parse_slack_event(
     allowed_channels: &[String],
 ) -> Option<ChannelMessage> {
     let event_type = event["type"].as_str()?;
-    if event_type != "message" {
+    if event_type != "message" && event_type != "app_mention" {
         return None;
     }
 
@@ -413,6 +413,11 @@ async fn parse_slack_event(
         ChannelContent::Text(text.to_string())
     };
 
+    let mut metadata = HashMap::new();
+    if event_type == "app_mention" {
+        metadata.insert("was_mentioned".to_string(), serde_json::json!(true));
+    }
+
     Some(ChannelMessage {
         channel: ChannelType::Slack,
         platform_message_id: ts.to_string(),
@@ -426,7 +431,7 @@ async fn parse_slack_event(
         timestamp,
         is_group: true,
         thread_id: None,
-        metadata: HashMap::new(),
+        metadata,
     })
 }
 
@@ -539,6 +544,24 @@ mod tests {
             }
             other => panic!("Expected Command, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_app_mention_sets_was_mentioned() {
+        let bot_id = Arc::new(RwLock::new(None));
+        let event = serde_json::json!({
+            "type": "app_mention",
+            "user": "U456",
+            "channel": "C789",
+            "text": "<@U123> hello there",
+            "ts": "1700000000.000100"
+        });
+
+        let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
+        assert_eq!(
+            msg.metadata.get("was_mentioned").and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 
     #[tokio::test]
