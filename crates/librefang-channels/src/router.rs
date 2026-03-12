@@ -88,6 +88,13 @@ impl AgentRouter {
             .map(|entry| entry.value().clone())
     }
 
+    /// Get the cached default agent ID for a channel type.
+    pub fn channel_default(&self, channel_key: &str) -> Option<AgentId> {
+        self.channel_defaults
+            .get(channel_key)
+            .map(|entry| *entry.value())
+    }
+
     /// Set a user's default agent.
     pub fn set_user_default(&self, user_key: String, agent_id: AgentId) {
         self.user_defaults.insert(user_key, agent_id);

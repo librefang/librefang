@@ -450,11 +450,16 @@ async fn send_lifecycle_reaction(
 /// On stale cached agent IDs, re-resolve the channel default by name and retry once.
 async fn try_reresolution(
     error: &str,
+    failed_agent_id: AgentId,
     channel_key: &str,
     handle: &Arc<dyn ChannelBridgeHandle>,
     router: &Arc<AgentRouter>,
 ) -> Option<AgentId> {
-    if !error.contains("Agent not found") {
+    if error != format!("Agent not found: {failed_agent_id}") {
+        return None;
+    }
+
+    if router.channel_default(channel_key) != Some(failed_agent_id) {
         return None;
     }
 
@@ -850,7 +855,8 @@ async fn dispatch_message(
                 .await;
         }
         Err(e) => {
-            if let Some(new_id) = try_reresolution(&e, &channel_key, handle, router).await {
+            if let Some(new_id) = try_reresolution(&e, agent_id, &channel_key, handle, router).await
+            {
                 send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking)
                     .await;
                 match handle.send_message(new_id, &text).await {
@@ -1146,7 +1152,8 @@ async fn dispatch_with_blocks(
                 .await;
         }
         Err(e) => {
-            if let Some(new_id) = try_reresolution(&e, &channel_key, handle, router).await {
+            if let Some(new_id) = try_reresolution(&e, agent_id, &channel_key, handle, router).await
+            {
                 send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking)
                     .await;
                 match handle.send_message_with_blocks(new_id, blocks).await {
