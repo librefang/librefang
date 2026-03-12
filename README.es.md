@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/assets/librefang-logo.svg" width="160" alt="LibreFang Logo" />
+  <img src="public/assets/logo.png" width="160" alt="LibreFang Logo" />
 </p>
 
 <h1 align="center">LibreFang</h1>
