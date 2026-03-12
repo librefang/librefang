@@ -354,6 +354,8 @@ librefang trigger delete <id>           # Delete a trigger
 librefang skill install <source>        # Install a skill
 librefang skill list                    # List installed skills
 librefang skill search <query>          # Search FangHub
+librefang skill test [path]             # Validate a local skill
+librefang skill publish [path]          # Package/publish a skill bundle
 librefang skill create                  # Scaffold a new skill
 
 librefang channel list                  # List channel status

@@ -431,8 +431,9 @@ FangHub is the community skill marketplace for LibreFang.
 3. Test your skill locally:
 
 ```bash
-librefang skill install /path/to/my-skill
-# Spawn an agent with the skill's tools and test them
+librefang skill test /path/to/my-skill
+# Optionally execute a specific tool with JSON input
+librefang skill test /path/to/my-skill --tool summarize_url --input '{"url":"https://example.com"}'
 ```
 
 ### Searching FangHub
@@ -457,13 +458,15 @@ Skills matching "web scraping":
 
 ### Publishing
 
-Publishing to FangHub will be available via:
+Publish a skill bundle to a FangHub GitHub release:
 
 ```bash
-librefang skill publish
+librefang skill publish /path/to/my-skill
+# Preview the bundle without uploading
+librefang skill publish /path/to/my-skill --dry-run
 ```
 
-This validates the manifest, packages the skill, and uploads it to the FangHub registry.
+This validates the manifest, packages the skill into a zip bundle, and uploads it to the configured GitHub release repo for FangHub distribution.
 
 ---
 
@@ -483,6 +486,12 @@ librefang skill remove <name>
 
 # Search FangHub for skills
 librefang skill search <query>
+
+# Validate a skill locally and optionally execute one tool
+librefang skill test [path] [--tool <name>] [--input <json>]
+
+# Package and publish a skill bundle to FangHub
+librefang skill publish [path] [--repo <owner/name>] [--tag <tag>] [--dry-run]
 
 # Create a new skill scaffold (interactive)
 librefang skill create
