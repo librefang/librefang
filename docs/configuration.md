@@ -200,7 +200,7 @@ slack = "U0123ABCDEF"
 [channels.telegram]
 bot_token_env = "TELEGRAM_BOT_TOKEN"
 allowed_users = []
-# default_agent = "assistant"
+# default_agent = "router"
 poll_interval_secs = 1
 
 [channels.discord]
@@ -423,7 +423,7 @@ Every channel config includes a `default_agent` field (optional agent name to ro
 [channels.telegram]
 bot_token_env = "TELEGRAM_BOT_TOKEN"
 allowed_users = []
-# default_agent = "assistant"
+# default_agent = "router"
 poll_interval_secs = 1
 ```
 
@@ -440,7 +440,7 @@ poll_interval_secs = 1
 [channels.discord]
 bot_token_env = "DISCORD_BOT_TOKEN"
 allowed_guilds = []
-# default_agent = "assistant"
+# default_agent = "router"
 intents = 33280
 ```
 

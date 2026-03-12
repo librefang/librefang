@@ -9,7 +9,7 @@ use super::screens::chat::{self, ChatAction, ChatState, Role};
 use super::theme;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::llm_driver::StreamEvent;
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentEntry, AgentId};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -19,6 +19,8 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 // ── Internal state ───────────────────────────────────────────────────────────
+
+const DEFAULT_ENTRY_AGENTS: &[&str] = &["router", "assistant"];
 
 enum Backend {
     Daemon { base_url: String },
@@ -577,7 +579,7 @@ impl StandaloneChat {
                     a["name"].as_str() == Some(name_or_id) || a["id"].as_str() == Some(name_or_id)
                 })
             }),
-            None => agents.and_then(|arr| arr.first()),
+            None => agents.and_then(|arr| preferred_daemon_agent(arr)),
         };
 
         if let Some(agent) = found {
@@ -591,12 +593,12 @@ impl StandaloneChat {
         }
 
         // Auto-spawn from template
-        let target_name = agent_name.unwrap_or("assistant");
         let all_templates = crate::templates::load_all_templates();
-        let template = all_templates
-            .iter()
-            .find(|t| t.name == target_name)
-            .or_else(|| all_templates.first());
+        let template = match agent_name {
+            Some(target_name) => all_templates.iter().find(|t| t.name == target_name),
+            None => preferred_template(&all_templates),
+        }
+        .or_else(|| all_templates.first());
 
         match template {
             Some(t) => {
@@ -626,26 +628,25 @@ impl StandaloneChat {
 
         // Check for existing agents
         let existing = kernel.registry.list();
-        if let Some(entry) = existing
-            .iter()
-            .find(|e| self.agent_name.is_empty() || e.name == self.agent_name)
-        {
+        let existing = if self.agent_name.is_empty() {
+            preferred_inprocess_agent(&existing)
+        } else {
+            existing.iter().find(|e| e.name == self.agent_name)
+        };
+        if let Some(entry) = existing {
             self.enter_chat_inprocess(entry.id, entry.name.clone());
             return;
         }
 
         // Spawn from template
-        let target_name = if self.agent_name.is_empty() {
-            "assistant"
-        } else {
-            &self.agent_name
-        };
         let all_templates = crate::templates::load_all_templates();
-        let template = all_templates
-            .iter()
-            .find(|t| t.name == target_name)
-            .or_else(|| all_templates.iter().find(|t| t.name == "assistant"))
-            .or_else(|| all_templates.first());
+        let template = if self.agent_name.is_empty() {
+            preferred_template(&all_templates)
+        } else {
+            all_templates.iter().find(|t| t.name == self.agent_name)
+        }
+        .or_else(|| all_templates.iter().find(|t| t.name == "assistant"))
+        .or_else(|| all_templates.first());
 
         match template {
             Some(t) => {
@@ -802,4 +803,73 @@ pub fn run_chat_tui(config: Option<PathBuf>, agent_name: Option<String>) {
     }
 
     ratatui::restore();
+}
+
+fn preferred_daemon_agent<'a>(agents: &'a [serde_json::Value]) -> Option<&'a serde_json::Value> {
+    for preferred in DEFAULT_ENTRY_AGENTS {
+        if let Some(agent) = agents
+            .iter()
+            .find(|agent| agent["name"].as_str() == Some(*preferred))
+        {
+            return Some(agent);
+        }
+    }
+    agents.first()
+}
+
+fn preferred_inprocess_agent<'a>(agents: &'a [AgentEntry]) -> Option<&'a AgentEntry> {
+    for preferred in DEFAULT_ENTRY_AGENTS {
+        if let Some(agent) = agents.iter().find(|agent| agent.name == *preferred) {
+            return Some(agent);
+        }
+    }
+    agents.first()
+}
+
+fn preferred_template<'a>(
+    templates: &'a [crate::templates::AgentTemplate],
+) -> Option<&'a crate::templates::AgentTemplate> {
+    for preferred in DEFAULT_ENTRY_AGENTS {
+        if let Some(template) = templates
+            .iter()
+            .find(|template| template.name == *preferred)
+        {
+            return Some(template);
+        }
+    }
+    templates.first()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_preferred_daemon_agent_prefers_router_then_assistant() {
+        let agents = vec![
+            serde_json::json!({"name": "coder", "id": "1"}),
+            serde_json::json!({"name": "assistant", "id": "2"}),
+            serde_json::json!({"name": "router", "id": "3"}),
+        ];
+        let preferred = preferred_daemon_agent(&agents).unwrap();
+        assert_eq!(preferred["name"].as_str(), Some("router"));
+    }
+
+    #[test]
+    fn test_preferred_template_prefers_router_then_assistant() {
+        let templates = vec![
+            crate::templates::AgentTemplate {
+                name: "assistant".to_string(),
+                description: String::new(),
+                content: String::new(),
+            },
+            crate::templates::AgentTemplate {
+                name: "router".to_string(),
+                description: String::new(),
+                content: String::new(),
+            },
+        ];
+        let preferred = preferred_template(&templates).unwrap();
+        assert_eq!(preferred.name, "router");
+    }
 }
