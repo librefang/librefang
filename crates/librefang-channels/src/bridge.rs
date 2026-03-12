@@ -501,7 +501,6 @@ async fn try_reresolution(
         }
     }
 }
-
 /// Dispatch a single incoming message — handles bot commands or routes to an agent.
 ///
 /// Applies per-channel policies (DM/group filtering, rate limiting, formatting, threading).
