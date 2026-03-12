@@ -65,6 +65,7 @@ const AFTER_HELP: &str = "\
 \x1b[1;36mExamples:\x1b[0m
   librefang init                 Initialize config and data directories
   librefang start                Start the kernel daemon
+  librefang update               Update the CLI to the latest release
   librefang tui                  Launch the interactive terminal dashboard
   librefang chat                 Quick chat with the default agent
   librefang agent new coder      Spawn a new agent from a template
@@ -116,6 +117,28 @@ enum Commands {
     Start,
     /// Restart the running daemon (or start it if not running).
     Restart,
+    /// Spawn an agent by template name or manifest path.
+    Spawn(SpawnAliasArgs),
+    /// List running agents (alias for `agent list`).
+    Agents {
+        /// Output as JSON for scripting.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Kill a running agent by ID (alias for `agent kill`).
+    Kill {
+        /// Agent ID (UUID).
+        agent_id: String,
+    },
+    /// Update the CLI to the latest published release.
+    Update {
+        /// Check whether a newer release exists without installing it.
+        #[arg(long)]
+        check: bool,
+        /// Install a specific GitHub release tag instead of the latest release.
+        #[arg(long)]
+        version: Option<String>,
+    },
     /// Stop the running daemon.
     Stop,
     /// Manage agents (new, list, chat, kill, spawn) [*].
@@ -135,7 +158,7 @@ enum Commands {
     /// Manage channel integrations (setup, test, enable, disable) [*].
     #[command(subcommand)]
     Channel(ChannelCommands),
-    /// Manage hands (list, activate, deactivate, info) [*].
+    /// Manage hands (list, activate, status, pause, info) [*].
     #[command(subcommand)]
     Hand(HandCommands),
     /// Show or edit configuration (show, edit, get, set, keys) [*].
@@ -330,6 +353,33 @@ struct MigrateArgs {
     dry_run: bool,
 }
 
+#[derive(clap::Args)]
+struct SpawnAliasArgs {
+    /// Template name (e.g. "coder") or manifest path. Interactive picker if omitted.
+    target: Option<String>,
+    /// Explicit manifest path (legacy alias for a template file path).
+    #[arg(long)]
+    template: Option<PathBuf>,
+    /// Override the agent name before spawning.
+    #[arg(long)]
+    name: Option<String>,
+    /// Parse and preview the manifest without spawning an agent.
+    #[arg(long)]
+    dry_run: bool,
+}
+
+#[derive(clap::Args)]
+struct AgentSpawnArgs {
+    /// Path to the agent manifest TOML file.
+    manifest: PathBuf,
+    /// Override the agent name before spawning.
+    #[arg(long)]
+    name: Option<String>,
+    /// Parse and preview the manifest without spawning an agent.
+    #[arg(long)]
+    dry_run: bool,
+}
+
 #[derive(Clone, clap::ValueEnum)]
 enum MigrateSourceArg {
     Openclaw,
@@ -355,6 +405,34 @@ enum SkillCommands {
     Search {
         /// Search query.
         query: String,
+    },
+    /// Validate a local skill and optionally execute one tool.
+    Test {
+        /// Skill directory, skill.toml, SKILL.md, or package.json. Defaults to the current directory.
+        path: Option<PathBuf>,
+        /// Tool name to execute after validation. Defaults to the first declared tool.
+        #[arg(long)]
+        tool: Option<String>,
+        /// JSON input payload passed to the selected tool.
+        #[arg(long)]
+        input: Option<String>,
+    },
+    /// Package a local skill and publish it to a FangHub GitHub release.
+    Publish {
+        /// Skill directory, skill.toml, SKILL.md, or package.json. Defaults to the current directory.
+        path: Option<PathBuf>,
+        /// Target GitHub repo in owner/name form. Defaults to librefang-skills/<skill-name>.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Release tag to create or update. Defaults to v<skill-version>.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Output directory for the generated bundle zip. Defaults to <skill-dir>/dist.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Validate and package locally without uploading to GitHub.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Create a new skill scaffold.
     Create,
@@ -392,6 +470,11 @@ enum HandCommands {
     List,
     /// Show currently active hand instances.
     Active,
+    /// Show active status for a hand or hand instance.
+    Status {
+        /// Optional hand ID or instance ID. Shows all active hands if omitted.
+        id: Option<String>,
+    },
     /// Install a hand from a local directory containing HAND.toml.
     Install {
         /// Path to the hand directory (must contain HAND.toml).
@@ -402,7 +485,7 @@ enum HandCommands {
         /// Hand ID (e.g. "clip", "lead", "researcher").
         id: String,
     },
-    /// Deactivate an active hand instance.
+    /// Deactivate an active hand by hand ID.
     Deactivate {
         /// Hand ID.
         id: String,
@@ -422,14 +505,14 @@ enum HandCommands {
         /// Hand ID.
         id: String,
     },
-    /// Pause a running hand instance.
+    /// Pause a running hand by hand ID or instance ID.
     Pause {
-        /// Instance ID (from `hand active`).
+        /// Hand ID or instance ID.
         id: String,
     },
-    /// Resume a paused hand instance.
+    /// Resume a paused hand by hand ID or instance ID.
     Resume {
-        /// Instance ID (from `hand active`).
+        /// Hand ID or instance ID.
         id: String,
     },
 }
@@ -482,10 +565,7 @@ enum AgentCommands {
         template: Option<String>,
     },
     /// Spawn a new agent from a manifest file.
-    Spawn {
-        /// Path to the agent manifest TOML file.
-        manifest: PathBuf,
-    },
+    Spawn(AgentSpawnArgs),
     /// List all running agents.
     List {
         /// Output as JSON for scripting.
@@ -882,10 +962,22 @@ fn main() {
         Some(Commands::Init { quick }) => cmd_init(quick),
         Some(Commands::Start) => cmd_start(cli.config),
         Some(Commands::Restart) => cmd_restart(cli.config),
+        Some(Commands::Spawn(args)) => cmd_spawn_alias(
+            cli.config,
+            args.target,
+            args.template,
+            args.name,
+            args.dry_run,
+        ),
+        Some(Commands::Agents { json }) => cmd_agent_list(cli.config, json),
+        Some(Commands::Kill { agent_id }) => cmd_agent_kill(cli.config, &agent_id),
+        Some(Commands::Update { check, version }) => cmd_update(check, version),
         Some(Commands::Stop) => cmd_stop(),
         Some(Commands::Agent(sub)) => match sub {
             AgentCommands::New { template } => cmd_agent_new(cli.config, template),
-            AgentCommands::Spawn { manifest } => cmd_agent_spawn(cli.config, manifest),
+            AgentCommands::Spawn(args) => {
+                cmd_agent_spawn(cli.config, args.manifest, args.name, args.dry_run)
+            }
             AgentCommands::List { json } => cmd_agent_list(cli.config, json),
             AgentCommands::Chat { agent_id } => cmd_agent_chat(cli.config, &agent_id),
             AgentCommands::Kill { agent_id } => cmd_agent_kill(cli.config, &agent_id),
@@ -916,6 +1008,14 @@ fn main() {
             SkillCommands::List => cmd_skill_list(),
             SkillCommands::Remove { name } => cmd_skill_remove(&name),
             SkillCommands::Search { query } => cmd_skill_search(&query),
+            SkillCommands::Test { path, tool, input } => cmd_skill_test(path, tool, input),
+            SkillCommands::Publish {
+                path,
+                repo,
+                tag,
+                output,
+                dry_run,
+            } => cmd_skill_publish(path, repo, tag, output, dry_run),
             SkillCommands::Create => cmd_skill_create(),
         },
         Some(Commands::Channel(sub)) => match sub {
@@ -928,6 +1028,7 @@ fn main() {
         Some(Commands::Hand(sub)) => match sub {
             HandCommands::List => cmd_hand_list(),
             HandCommands::Active => cmd_hand_active(),
+            HandCommands::Status { id } => cmd_hand_status(id.as_deref()),
             HandCommands::Install { path } => cmd_hand_install(&path),
             HandCommands::Activate { id } => cmd_hand_activate(&id),
             HandCommands::Deactivate { id } => cmd_hand_deactivate(&id),
@@ -1593,7 +1694,105 @@ fn boot_kernel_error(e: &librefang_kernel::error::KernelError) {
     }
 }
 
-fn cmd_agent_spawn(config: Option<PathBuf>, manifest_path: PathBuf) {
+struct PreparedAgentManifest {
+    manifest: AgentManifest,
+    manifest_toml: String,
+    source_label: String,
+}
+
+fn cmd_agent_spawn(
+    config: Option<PathBuf>,
+    manifest_path: PathBuf,
+    name_override: Option<String>,
+    dry_run: bool,
+) {
+    let prepared = prepared_agent_manifest_from_path(&manifest_path, name_override.as_deref());
+    if dry_run {
+        preview_agent_manifest(&prepared);
+        return;
+    }
+    spawn_prepared_agent(config, prepared);
+}
+
+fn cmd_spawn_alias(
+    config: Option<PathBuf>,
+    target: Option<String>,
+    template_path: Option<PathBuf>,
+    name_override: Option<String>,
+    dry_run: bool,
+) {
+    if template_path.is_some() && target.is_some() {
+        ui::error_with_fix(
+            "Choose either a positional target or `--template`, not both.",
+            "Use `librefang spawn coder` or `librefang spawn --template agents/custom/my-agent.toml`.",
+        );
+        std::process::exit(1);
+    }
+
+    if target.is_none() && template_path.is_none() {
+        if name_override.is_some() {
+            ui::error_with_fix(
+                "`--name` requires a template name or manifest path.",
+                "Use `librefang spawn coder --name backend-coder` or `librefang spawn --template path/to/agent.toml --name backend-coder`.",
+            );
+            std::process::exit(1);
+        }
+        if dry_run {
+            ui::error_with_fix(
+                "Dry run needs a template name or manifest path.",
+                "Use `librefang spawn coder --dry-run` or `librefang spawn --template path/to/agent.toml --dry-run`.",
+            );
+            std::process::exit(1);
+        }
+        cmd_agent_new(config, None);
+        return;
+    }
+
+    if let Some(path) = template_path {
+        let prepared = prepared_agent_manifest_from_path(&path, name_override.as_deref());
+        if dry_run {
+            preview_agent_manifest(&prepared);
+        } else {
+            spawn_prepared_agent(config, prepared);
+        }
+        return;
+    }
+
+    let target = target.expect("target checked above");
+    let manifest_path = PathBuf::from(&target);
+    if manifest_path.exists() {
+        let prepared = prepared_agent_manifest_from_path(&manifest_path, name_override.as_deref());
+        if dry_run {
+            preview_agent_manifest(&prepared);
+        } else {
+            spawn_prepared_agent(config, prepared);
+        }
+        return;
+    }
+
+    let templates = templates::load_all_templates();
+    let template = templates
+        .iter()
+        .find(|t| t.name == target)
+        .unwrap_or_else(|| {
+            ui::error_with_fix(
+                &format!("Template or manifest path not found: {target}"),
+                "Run `librefang agent new` to browse templates, or pass a valid manifest path.",
+            );
+            std::process::exit(1);
+        });
+    if dry_run {
+        let prepared = prepared_agent_manifest_from_template(template, name_override.as_deref());
+        preview_agent_manifest(&prepared);
+    } else {
+        spawn_template_agent(config, template, name_override.as_deref());
+    }
+}
+
+fn prepared_agent_manifest_from_path(
+    manifest_path: &std::path::Path,
+    name_override: Option<&str>,
+) -> PreparedAgentManifest {
     if !manifest_path.exists() {
         ui::error_with_fix(
             &format!("Manifest file not found: {}", manifest_path.display()),
@@ -1602,23 +1801,110 @@ fn cmd_agent_spawn(config: Option<PathBuf>, manifest_path: PathBuf) {
         std::process::exit(1);
     }
 
-    let contents = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        eprintln!("Error reading manifest: {e}");
+    let contents = std::fs::read_to_string(manifest_path).unwrap_or_else(|e| {
+        ui::error(&format!(
+            "Error reading manifest {}: {e}",
+            manifest_path.display()
+        ));
         std::process::exit(1);
     });
 
+    prepared_agent_manifest_from_contents(
+        &contents,
+        manifest_path.display().to_string(),
+        name_override,
+    )
+}
+
+fn prepared_agent_manifest_from_template(
+    template: &templates::AgentTemplate,
+    name_override: Option<&str>,
+) -> PreparedAgentManifest {
+    prepared_agent_manifest_from_contents(
+        &template.content,
+        format!("template:{}", template.name),
+        name_override,
+    )
+}
+
+fn prepared_agent_manifest_from_contents(
+    contents: &str,
+    source_label: String,
+    name_override: Option<&str>,
+) -> PreparedAgentManifest {
+    let mut manifest: AgentManifest = toml::from_str(contents).unwrap_or_else(|e| {
+        ui::error_with_fix(
+            &format!("Failed to parse agent manifest from {source_label}: {e}"),
+            "Check the manifest TOML syntax and required fields.",
+        );
+        std::process::exit(1);
+    });
+
+    if let Some(name) = name_override {
+        manifest.name = name.to_string();
+    }
+
+    let manifest_toml = if name_override.is_some() {
+        toml::to_string_pretty(&manifest).unwrap_or_else(|e| {
+            ui::error(&format!("Failed to serialize updated manifest: {e}"));
+            std::process::exit(1);
+        })
+    } else {
+        contents.to_string()
+    };
+
+    PreparedAgentManifest {
+        manifest,
+        manifest_toml,
+        source_label,
+    }
+}
+
+fn preview_agent_manifest(prepared: &PreparedAgentManifest) {
+    ui::section("Agent Dry Run");
+    ui::kv("Source", &prepared.source_label);
+    ui::kv("Name", &prepared.manifest.name);
+    ui::kv("Version", &prepared.manifest.version);
+    ui::kv("Module", &prepared.manifest.module);
+    ui::kv(
+        "Model",
+        &format!(
+            "{}/{}",
+            prepared.manifest.model.provider, prepared.manifest.model.model
+        ),
+    );
+    ui::kv(
+        "Tools",
+        &prepared.manifest.capabilities.tools.len().to_string(),
+    );
+    ui::kv("Skills", &prepared.manifest.skills.len().to_string());
+    if !prepared.manifest.tags.is_empty() {
+        ui::kv("Tags", &prepared.manifest.tags.join(", "));
+    }
+    if !prepared.manifest.description.is_empty() {
+        ui::kv("Description", &prepared.manifest.description);
+    }
+    ui::success("Manifest parsed successfully. No agent was spawned.");
+}
+
+fn spawn_prepared_agent(config: Option<PathBuf>, prepared: PreparedAgentManifest) {
     if let Some(base) = find_daemon() {
         let client = daemon_client();
         let body = daemon_json(
             client
                 .post(format!("{base}/api/agents"))
-                .json(&serde_json::json!({"manifest_toml": contents}))
+                .json(&serde_json::json!({"manifest_toml": prepared.manifest_toml}))
                 .send(),
         );
         if body.get("agent_id").is_some() {
             println!("Agent spawned successfully!");
             println!("  ID:   {}", body["agent_id"].as_str().unwrap_or("?"));
-            println!("  Name: {}", body["name"].as_str().unwrap_or("?"));
+            println!(
+                "  Name: {}",
+                body["name"]
+                    .as_str()
+                    .unwrap_or(prepared.manifest.name.as_str())
+            );
         } else {
             eprintln!(
                 "Failed to spawn agent: {}",
@@ -1627,15 +1913,13 @@ fn cmd_agent_spawn(config: Option<PathBuf>, manifest_path: PathBuf) {
             std::process::exit(1);
         }
     } else {
-        let manifest: AgentManifest = toml::from_str(&contents).unwrap_or_else(|e| {
-            eprintln!("Error parsing manifest: {e}");
-            std::process::exit(1);
-        });
+        let agent_name = prepared.manifest.name.clone();
         let kernel = boot_kernel(config);
-        match kernel.spawn_agent(manifest) {
+        match kernel.spawn_agent(prepared.manifest) {
             Ok(id) => {
                 println!("Agent spawned (in-process mode).");
-                println!("  ID: {id}");
+                println!("  ID:   {id}");
+                println!("  Name: {agent_name}");
                 println!("\n  Note: Agent will be lost when this process exits.");
                 println!("  For persistent agents, use `librefang start` first.");
             }
@@ -1848,29 +2132,36 @@ fn cmd_agent_new(config: Option<PathBuf>, template_name: Option<String>) {
     };
 
     // Spawn the agent
-    spawn_template_agent(config, chosen);
+    spawn_template_agent(config, chosen, None);
 }
 
 /// Spawn an agent from a template, via daemon or in-process.
-fn spawn_template_agent(config: Option<PathBuf>, template: &templates::AgentTemplate) {
+fn spawn_template_agent(
+    config: Option<PathBuf>,
+    template: &templates::AgentTemplate,
+    name_override: Option<&str>,
+) {
+    let prepared = prepared_agent_manifest_from_template(template, name_override);
+    let agent_name = prepared.manifest.name.clone();
+
     if let Some(base) = find_daemon() {
         let client = daemon_client();
         let body = daemon_json(
             client
                 .post(format!("{base}/api/agents"))
-                .json(&serde_json::json!({"manifest_toml": template.content}))
+                .json(&serde_json::json!({"manifest_toml": prepared.manifest_toml}))
                 .send(),
         );
         if let Some(id) = body["agent_id"].as_str() {
             ui::blank();
-            ui::success(&format!("Agent '{}' spawned", template.name));
+            ui::success(&format!("Agent '{}' spawned", agent_name));
             ui::kv("ID", id);
             if let Some(model) = body["model_name"].as_str() {
                 let provider = body["model_provider"].as_str().unwrap_or("?");
                 ui::kv("Model", &format!("{provider}/{model}"));
             }
             ui::blank();
-            ui::hint(&format!("Chat: librefang chat {}", template.name));
+            ui::hint(&format!("Chat: librefang chat {}", agent_name));
         } else {
             ui::error(&format!(
                 "Failed to spawn: {}",
@@ -1879,21 +2170,14 @@ fn spawn_template_agent(config: Option<PathBuf>, template: &templates::AgentTemp
             std::process::exit(1);
         }
     } else {
-        let manifest: AgentManifest = toml::from_str(&template.content).unwrap_or_else(|e| {
-            ui::error_with_fix(
-                &format!("Failed to parse template '{}': {e}", template.name),
-                "The template manifest may be corrupted",
-            );
-            std::process::exit(1);
-        });
         let kernel = boot_kernel(config);
-        match kernel.spawn_agent(manifest) {
+        match kernel.spawn_agent(prepared.manifest) {
             Ok(id) => {
                 ui::blank();
-                ui::success(&format!("Agent '{}' spawned (in-process)", template.name));
+                ui::success(&format!("Agent '{}' spawned (in-process)", agent_name));
                 ui::kv("ID", &id.to_string());
                 ui::blank();
-                ui::hint(&format!("Chat: librefang chat {}", template.name));
+                ui::hint(&format!("Chat: librefang chat {}", agent_name));
                 ui::hint("Note: Agent will be lost when this process exits");
                 ui::hint("For persistent agents, use `librefang start` first");
             }
@@ -3457,6 +3741,220 @@ fn cmd_skill_search(query: &str) {
     }
 }
 
+fn cmd_skill_test(path: Option<PathBuf>, tool: Option<String>, input: Option<String>) {
+    let skill_path = resolve_skill_path(path);
+    let prepared =
+        librefang_skills::publish::prepare_local_skill(&skill_path).unwrap_or_else(|e| {
+            eprintln!("Skill validation failed: {e}");
+            std::process::exit(1);
+        });
+
+    println!(
+        "Validated skill: {} v{}",
+        prepared.manifest.skill.name, prepared.manifest.skill.version
+    );
+    println!(
+        "  Runtime: {:?}\n  Source: {}",
+        prepared.manifest.runtime.runtime_type,
+        prepared.source_dir.display()
+    );
+    if !prepared.manifest.skill.description.is_empty() {
+        println!("  Description: {}", prepared.manifest.skill.description);
+    }
+    if !prepared.manifest.tools.provided.is_empty() {
+        println!(
+            "  Tools: {}",
+            prepared
+                .manifest
+                .tools
+                .provided
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    print_skill_warnings(&prepared.warnings);
+
+    if prepared.has_critical_warnings() {
+        eprintln!("Refusing to execute a skill with critical validation warnings.");
+        std::process::exit(1);
+    }
+
+    let Some(tool_name) = tool.or_else(|| {
+        prepared
+            .manifest
+            .tools
+            .provided
+            .first()
+            .map(|tool| tool.name.clone())
+    }) else {
+        println!("Validation only: no tool declared to execute.");
+        return;
+    };
+
+    let input_json = match input {
+        Some(input) => serde_json::from_str::<serde_json::Value>(&input).unwrap_or_else(|err| {
+            eprintln!("Invalid --input JSON: {err}");
+            std::process::exit(1);
+        }),
+        None => serde_json::json!({}),
+    };
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let result = rt.block_on(librefang_skills::loader::execute_skill_tool(
+        &prepared.manifest,
+        &prepared.source_dir,
+        &tool_name,
+        &input_json,
+    ));
+    match result {
+        Ok(result) => {
+            println!("\nTool result ({tool_name}):");
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&result.output).unwrap_or_default()
+            );
+            if result.is_error {
+                std::process::exit(1);
+            }
+        }
+        Err(librefang_skills::SkillError::RuntimeNotAvailable(message)) => {
+            println!("\nValidation complete.");
+            println!("Execution skipped: {message}");
+        }
+        Err(err) => {
+            eprintln!("Skill execution failed: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_skill_publish(
+    path: Option<PathBuf>,
+    repo: Option<String>,
+    tag: Option<String>,
+    output: Option<PathBuf>,
+    dry_run: bool,
+) {
+    let skill_path = resolve_skill_path(path);
+    let prepared =
+        librefang_skills::publish::prepare_local_skill(&skill_path).unwrap_or_else(|e| {
+            eprintln!("Skill validation failed: {e}");
+            std::process::exit(1);
+        });
+
+    println!(
+        "Preparing skill: {} v{}",
+        prepared.manifest.skill.name, prepared.manifest.skill.version
+    );
+    print_skill_warnings(&prepared.warnings);
+    if prepared.has_critical_warnings() {
+        eprintln!("Refusing to publish a skill with critical validation warnings.");
+        std::process::exit(1);
+    }
+
+    let output_dir = output.unwrap_or_else(|| prepared.source_dir.join("dist"));
+    let packaged = librefang_skills::publish::package_prepared_skill(&prepared, &output_dir)
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to package skill: {e}");
+            std::process::exit(1);
+        });
+
+    println!(
+        "Bundle created: {}\n  SHA256: {}\n  Size: {} bytes",
+        packaged.archive_path.display(),
+        packaged.sha256,
+        packaged.size_bytes
+    );
+
+    let repo = repo.unwrap_or_else(|| format!("librefang-skills/{}", packaged.manifest.skill.name));
+    let tag = tag.unwrap_or_else(|| format!("v{}", packaged.manifest.skill.version));
+
+    if dry_run {
+        println!("Dry run only.");
+        println!("  Repo: {repo}\n  Tag: {tag}");
+        return;
+    }
+
+    let token = std::env::var("GITHUB_TOKEN")
+        .or_else(|_| std::env::var("GH_TOKEN"))
+        .unwrap_or_else(|_| {
+            eprintln!("Set GITHUB_TOKEN or GH_TOKEN to publish, or re-run with --dry-run.");
+            std::process::exit(1);
+        });
+
+    let release_notes = format!(
+        "{}\n\nSHA256: `{}`\n\nInstall with:\n`librefang skill install {}`",
+        packaged.manifest.skill.description, packaged.sha256, packaged.manifest.skill.name
+    );
+    let release_name = format!(
+        "{} {}",
+        packaged.manifest.skill.name, packaged.manifest.skill.version
+    );
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let client = librefang_skills::marketplace::MarketplaceClient::new(
+        librefang_skills::marketplace::MarketplaceConfig::default(),
+    );
+    let published = rt
+        .block_on(
+            client.publish_bundle(librefang_skills::marketplace::MarketplacePublishRequest {
+                repo: &repo,
+                tag: &tag,
+                bundle_path: &packaged.archive_path,
+                release_name: &release_name,
+                release_notes: &release_notes,
+                token: &token,
+            }),
+        )
+        .unwrap_or_else(|e| {
+            eprintln!("Publish failed: {e}");
+            std::process::exit(1);
+        });
+
+    println!(
+        "Published {} to {}@{}",
+        published.asset_name, published.repo, published.tag
+    );
+    if !published.html_url.is_empty() {
+        println!("Release: {}", published.html_url);
+    }
+}
+
+fn resolve_skill_path(path: Option<PathBuf>) -> PathBuf {
+    path.unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|e| {
+            eprintln!("Could not determine current directory: {e}");
+            std::process::exit(1);
+        })
+    })
+}
+
+fn print_skill_warnings(warnings: &[librefang_skills::verify::SkillWarning]) {
+    if warnings.is_empty() {
+        println!("  Warnings: none");
+        return;
+    }
+
+    println!("  Warnings:");
+    for warning in warnings {
+        println!(
+            "    [{}] {}",
+            severity_label(warning.severity),
+            warning.message
+        );
+    }
+}
+
+fn severity_label(severity: librefang_skills::verify::WarningSeverity) -> &'static str {
+    match severity {
+        librefang_skills::verify::WarningSeverity::Info => "info",
+        librefang_skills::verify::WarningSeverity::Warning => "warn",
+        librefang_skills::verify::WarningSeverity::Critical => "critical",
+    }
+}
+
 fn cmd_skill_create() {
     let name = prompt_input("Skill name: ");
     let description = prompt_input("Description: ");
@@ -3539,7 +4037,10 @@ if __name__ == "__main__":
     println!("  {entry_path}");
     println!("\nNext steps:");
     println!("  1. Edit the entry point to implement your skill logic");
-    println!("  2. Test locally: librefang skill test");
+    println!(
+        "  2. Test locally: librefang skill test {}",
+        skill_dir.display()
+    );
     println!(
         "  3. Install: librefang skill install {}",
         skill_dir.display()
@@ -4060,14 +4561,7 @@ fn cmd_hand_list() {
 fn cmd_hand_active() {
     let base = require_daemon("hand active");
     let client = daemon_client();
-    let body = daemon_json(client.get(format!("{base}/api/hands/active")).send());
-    // API returns {"instances": [...]} or bare array
-    let arr = body
-        .get("instances")
-        .and_then(|v| v.as_array())
-        .or_else(|| body.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let arr = fetch_active_hand_instances(&base, &client);
     if arr.is_empty() {
         println!("No active hands.");
         return;
@@ -4082,6 +4576,53 @@ fn cmd_hand_active() {
             i["status"].as_str().unwrap_or("?"),
             i["agent_name"].as_str().unwrap_or("?"),
         );
+    }
+}
+
+fn cmd_hand_status(id: Option<&str>) {
+    if id.is_none() {
+        cmd_hand_active();
+        return;
+    }
+
+    let id = id.unwrap_or_default();
+    let base = require_daemon("hand status");
+    let client = daemon_client();
+    let active = fetch_active_hand_instances(&base, &client);
+
+    if let Some(instance) = resolve_hand_instance(&active, id) {
+        let hand_id = instance["hand_id"].as_str().unwrap_or(id);
+        let hand_body = daemon_json(client.get(format!("{base}/api/hands/{hand_id}")).send());
+        let name = hand_body["name"].as_str().unwrap_or(hand_id);
+        let status = instance["status"].as_str().unwrap_or("unknown");
+        let instance_id = instance["instance_id"].as_str().unwrap_or("?");
+        let agent_name = instance["agent_name"].as_str().unwrap_or("?");
+
+        ui::section("Hand Status");
+        ui::kv("Hand", hand_id);
+        ui::kv("Name", name);
+        ui::kv("Instance", instance_id);
+        ui::kv("Status", status);
+        ui::kv("Agent", agent_name);
+        return;
+    }
+
+    let hand_body = daemon_json(client.get(format!("{base}/api/hands/{id}")).send());
+    if hand_body.get("error").is_some() {
+        ui::error(&format!(
+            "No active hand or installed hand found for '{id}'."
+        ));
+        std::process::exit(1);
+    }
+
+    ui::section("Hand Status");
+    ui::kv("Hand", hand_body["id"].as_str().unwrap_or(id));
+    ui::kv("Name", hand_body["name"].as_str().unwrap_or(id));
+    ui::kv("Status", "inactive");
+    if let Some(description) = hand_body["description"].as_str() {
+        if !description.is_empty() {
+            ui::kv("Description", description);
+        }
     }
 }
 
@@ -4116,13 +4657,7 @@ fn cmd_hand_deactivate(id: &str) {
     let base = require_daemon("hand deactivate");
     let client = daemon_client();
     // First find the instance ID for this hand
-    let active = daemon_json(client.get(format!("{base}/api/hands/active")).send());
-    let arr = active
-        .get("instances")
-        .and_then(|v| v.as_array())
-        .or_else(|| active.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let arr = fetch_active_hand_instances(&base, &client);
     let instance_id = arr.iter().find_map(|i| {
         if i["hand_id"].as_str() == Some(id) {
             i["instance_id"].as_str().map(|s| s.to_string())
@@ -4217,9 +4752,19 @@ fn cmd_hand_install_deps(id: &str) {
 fn cmd_hand_pause(id: &str) {
     let base = require_daemon("hand pause");
     let client = daemon_client();
+    let active = fetch_active_hand_instances(&base, &client);
+    let resolved = resolve_hand_instance(&active, id);
+    let instance_id = resolved
+        .as_ref()
+        .and_then(|instance| instance["instance_id"].as_str())
+        .unwrap_or(id);
+    let hand_label = resolved
+        .as_ref()
+        .and_then(|instance| instance["hand_id"].as_str())
+        .unwrap_or(id);
     let body = daemon_json(
         client
-            .post(format!("{base}/api/hands/instances/{id}/pause"))
+            .post(format!("{base}/api/hands/instances/{instance_id}/pause"))
             .send(),
     );
     if body.get("error").is_some() {
@@ -4227,17 +4772,30 @@ fn cmd_hand_pause(id: &str) {
             "Failed: {}",
             body["error"].as_str().unwrap_or("?")
         ));
+        std::process::exit(1);
     } else {
-        ui::success(&format!("Hand instance '{id}' paused."));
+        ui::success(&format!(
+            "Hand '{hand_label}' paused (instance: {instance_id})."
+        ));
     }
 }
 
 fn cmd_hand_resume(id: &str) {
     let base = require_daemon("hand resume");
     let client = daemon_client();
+    let active = fetch_active_hand_instances(&base, &client);
+    let resolved = resolve_hand_instance(&active, id);
+    let instance_id = resolved
+        .as_ref()
+        .and_then(|instance| instance["instance_id"].as_str())
+        .unwrap_or(id);
+    let hand_label = resolved
+        .as_ref()
+        .and_then(|instance| instance["hand_id"].as_str())
+        .unwrap_or(id);
     let body = daemon_json(
         client
-            .post(format!("{base}/api/hands/instances/{id}/resume"))
+            .post(format!("{base}/api/hands/instances/{instance_id}/resume"))
             .send(),
     );
     if body.get("error").is_some() {
@@ -4245,9 +4803,37 @@ fn cmd_hand_resume(id: &str) {
             "Failed: {}",
             body["error"].as_str().unwrap_or("?")
         ));
+        std::process::exit(1);
     } else {
-        ui::success(&format!("Hand instance '{id}' resumed."));
+        ui::success(&format!(
+            "Hand '{hand_label}' resumed (instance: {instance_id})."
+        ));
     }
+}
+
+fn fetch_active_hand_instances(
+    base: &str,
+    client: &reqwest::blocking::Client,
+) -> Vec<serde_json::Value> {
+    let body = daemon_json(client.get(format!("{base}/api/hands/active")).send());
+    body.get("instances")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn resolve_hand_instance(
+    active_instances: &[serde_json::Value],
+    id_or_hand: &str,
+) -> Option<serde_json::Value> {
+    active_instances
+        .iter()
+        .find(|instance| {
+            instance["instance_id"].as_str() == Some(id_or_hand)
+                || instance["hand_id"].as_str() == Some(id_or_hand)
+        })
+        .cloned()
 }
 
 // ---------------------------------------------------------------------------
@@ -6154,6 +6740,415 @@ fn cmd_reset(confirm: bool) {
 }
 
 // ---------------------------------------------------------------------------
+// Update
+// ---------------------------------------------------------------------------
+
+const RELEASE_REPO: &str = "librefang/librefang";
+const RELEASES_LATEST_API: &str =
+    "https://api.github.com/repos/librefang/librefang/releases/latest";
+const SHELL_INSTALLER_URL: &str = "https://librefang.ai/install.sh";
+const POWERSHELL_INSTALLER_URL: &str = "https://librefang.ai/install.ps1";
+
+enum UpdateLaunch {
+    Completed,
+    #[cfg(windows)]
+    Detached,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReleaseComparison {
+    Newer,
+    SameCore,
+    Older,
+    Unknown,
+}
+
+fn cmd_update(check: bool, version: Option<String>) {
+    let current_exe = std::env::current_exe().unwrap_or_else(|e| {
+        ui::error(&format!("Cannot determine current executable path: {e}"));
+        std::process::exit(1);
+    });
+
+    let current_version = env!("CARGO_PKG_VERSION");
+    let current_exe_display = current_exe.display().to_string();
+    let requested_version = version.as_deref();
+
+    ui::section("Update");
+    ui::kv("Current", current_version);
+    ui::kv("Binary", &current_exe_display);
+
+    let latest_tag = if requested_version.is_none() {
+        match fetch_latest_release_tag() {
+            Ok(tag) => {
+                ui::kv("Latest", &tag);
+                Some(tag)
+            }
+            Err(err) => {
+                if check {
+                    ui::error(&format!("Failed to check latest release: {err}"));
+                    std::process::exit(1);
+                }
+                ui::warn_with_fix(
+                    &format!("Could not resolve the latest published release: {err}"),
+                    "Retry later, or pass `--version <tag>` to target a specific release.",
+                );
+                None
+            }
+        }
+    } else {
+        if let Some(target) = requested_version {
+            ui::kv("Target", target);
+        }
+        None
+    };
+    let target_tag = requested_version
+        .map(str::to_owned)
+        .or_else(|| latest_tag.clone());
+    let target_comparison = target_tag
+        .as_deref()
+        .map(|tag| compare_release_tag(tag, current_version));
+
+    if check {
+        match (target_tag.as_deref(), target_comparison) {
+            (Some(tag), Some(ReleaseComparison::Newer)) => {
+                ui::warn_with_fix(
+                    &format!("A newer published release is available: {tag}"),
+                    "Run `librefang update` to install it.",
+                );
+            }
+            (Some(tag), Some(ReleaseComparison::SameCore)) => {
+                ui::warn_with_fix(
+                    &format!(
+                        "The published release {tag} uses the same CLI version core as the current binary ({current_version})."
+                    ),
+                    "Run `librefang update` if you want the latest published build for this version line.",
+                );
+            }
+            (Some(tag), Some(ReleaseComparison::Older)) => {
+                ui::success(&format!(
+                    "Current binary version {current_version} is ahead of the published release {tag}."
+                ));
+            }
+            (Some(tag), Some(ReleaseComparison::Unknown)) => {
+                ui::warn_with_fix(
+                    &format!("Could not compare the current binary with release tag {tag}."),
+                    "If you want that exact release, run `librefang update --version <tag>`.",
+                );
+            }
+            _ => {
+                ui::warn_with_fix(
+                    "Unable to determine whether an update is available.",
+                    "Retry later when GitHub Releases is reachable.",
+                );
+            }
+        }
+        return;
+    }
+
+    if requested_version.is_none() {
+        match (latest_tag.as_deref(), target_comparison) {
+            (Some(tag), Some(ReleaseComparison::Older)) => {
+                ui::success(&format!(
+                    "Current binary version {current_version} is ahead of the latest published release {tag}."
+                ));
+                return;
+            }
+            (Some(tag), Some(ReleaseComparison::Unknown)) => {
+                ui::warn_with_fix(
+                    &format!(
+                        "Could not safely compare the current binary against release tag {tag}."
+                    ),
+                    &format!(
+                        "Re-run with `librefang update --version {tag}` to install it explicitly."
+                    ),
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    let default_install = default_install_executable();
+    let cargo_install = cargo_install_executable();
+    let target_version = target_tag.as_deref();
+
+    #[cfg(windows)]
+    if same_path(&current_exe, &default_install) && find_daemon().is_some() {
+        ui::error_with_fix(
+            "Stop the running daemon before updating on Windows.",
+            "Run `librefang stop`, then `librefang update`, then `librefang start`.",
+        );
+        std::process::exit(1);
+    }
+
+    if same_path(&current_exe, &default_install) {
+        match run_official_update(target_version) {
+            Ok(UpdateLaunch::Completed) => {
+                ui::success("LibreFang CLI updated.");
+                if let Some(installed) = installed_binary_version(&default_install) {
+                    ui::kv("Installed", &installed);
+                }
+                ui::hint("If the daemon is running, restart it with `librefang restart`.");
+            }
+            #[cfg(windows)]
+            Ok(UpdateLaunch::Detached) => {
+                ui::success("Update launched in the background.");
+                ui::hint("Open a new terminal after it finishes and run `librefang --version`.");
+                ui::hint("If the daemon is running, restart it after the update completes.");
+            }
+            Err(err) => {
+                ui::error(&format!("Update failed: {err}"));
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if same_path(&current_exe, &cargo_install) {
+        let cargo_cmd = cargo_update_command(target_version);
+        ui::warn_with_fix(
+            "This binary was installed with cargo. Running `cargo install` from inside the active executable is intentionally blocked.",
+            &cargo_cmd,
+        );
+        return;
+    }
+
+    let official_path = default_install.display().to_string();
+    ui::warn_with_fix(
+        &format!(
+            "Automatic update only supports the official install path ({official_path}). This binary is running from a different location."
+        ),
+        &manual_installer_command(target_version),
+    );
+    ui::hint("If this binary came from another package manager, update it with that package manager instead.");
+}
+
+fn fetch_latest_release_tag() -> Result<String, String> {
+    let client = update_http_client()?;
+    let response = client
+        .get(RELEASES_LATEST_API)
+        .send()
+        .map_err(|e| format!("GitHub request failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("GitHub API returned {status}"));
+    }
+
+    let body = response
+        .json::<serde_json::Value>()
+        .map_err(|e| format!("Failed to decode release metadata: {e}"))?;
+    body["tag_name"]
+        .as_str()
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Release metadata is missing `tag_name`".to_string())
+}
+
+fn update_http_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .user_agent(format!("librefang-cli/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {e}"))
+}
+
+fn compare_release_tag(tag: &str, current_version: &str) -> ReleaseComparison {
+    let Some(release_core) = parse_version_core(normalize_release_tag(tag)) else {
+        return ReleaseComparison::Unknown;
+    };
+    let Some(current_core) = parse_version_core(current_version) else {
+        return ReleaseComparison::Unknown;
+    };
+
+    match release_core.cmp(&current_core) {
+        std::cmp::Ordering::Greater => ReleaseComparison::Newer,
+        std::cmp::Ordering::Equal => ReleaseComparison::SameCore,
+        std::cmp::Ordering::Less => ReleaseComparison::Older,
+    }
+}
+
+fn parse_version_core(version: &str) -> Option<Vec<u64>> {
+    let core = version.split('-').next()?;
+    if core.is_empty() {
+        return None;
+    }
+    core.split('.')
+        .map(|part| part.parse::<u64>().ok())
+        .collect()
+}
+
+fn run_official_update(version: Option<&str>) -> Result<UpdateLaunch, String> {
+    let script_url = if cfg!(windows) {
+        POWERSHELL_INSTALLER_URL
+    } else {
+        SHELL_INSTALLER_URL
+    };
+    let script = download_text(script_url)?;
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+        let wrapped = format!(
+            "Start-Sleep -Seconds 1\r\n{script}\r\nRemove-Item $MyInvocation.MyCommand.Path -ErrorAction SilentlyContinue\r\n"
+        );
+        let script_path = write_update_script(&wrapped, "ps1")?;
+        let script_arg = script_path.to_string_lossy().to_string();
+
+        let mut command = std::process::Command::new("powershell");
+        command
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                &script_arg,
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+        if let Some(tag) = version {
+            command.env("LIBREFANG_VERSION", tag);
+        }
+
+        command
+            .spawn()
+            .map_err(|e| format!("Failed to launch PowerShell updater: {e}"))?;
+        Ok(UpdateLaunch::Detached)
+    }
+
+    #[cfg(not(windows))]
+    {
+        let script_path = write_update_script(&script, "sh")?;
+        let mut command = std::process::Command::new("sh");
+        command.arg(&script_path);
+        if let Some(tag) = version {
+            command.env("LIBREFANG_VERSION", tag);
+        }
+
+        let status = command
+            .status()
+            .map_err(|e| format!("Failed to run installer: {e}"))?;
+        let _ = std::fs::remove_file(&script_path);
+        if !status.success() {
+            return Err(format!("Installer exited with status {status}"));
+        }
+        Ok(UpdateLaunch::Completed)
+    }
+}
+
+fn download_text(url: &str) -> Result<String, String> {
+    let client = update_http_client()?;
+    let response = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("Download failed: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Download returned {status}"));
+    }
+    response
+        .text()
+        .map_err(|e| format!("Failed to read response body: {e}"))
+}
+
+fn installed_binary_version(path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if version.is_empty() {
+        None
+    } else {
+        Some(version)
+    }
+}
+
+fn write_update_script(contents: &str, extension: &str) -> Result<PathBuf, String> {
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!(
+        "librefang-update-{}-{unique}.{extension}",
+        std::process::id()
+    ));
+    std::fs::write(&path, contents).map_err(|e| format!("Failed to write updater script: {e}"))?;
+    restrict_file_permissions(&path);
+    Ok(path)
+}
+
+fn default_install_executable() -> PathBuf {
+    cli_librefang_home().join("bin").join(binary_name())
+}
+
+fn cargo_install_executable() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".cargo")
+        .join("bin")
+        .join(binary_name())
+}
+
+fn binary_name() -> &'static str {
+    if cfg!(windows) {
+        "librefang.exe"
+    } else {
+        "librefang"
+    }
+}
+
+fn same_path(left: &std::path::Path, right: &std::path::Path) -> bool {
+    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right
+}
+
+fn normalize_release_tag(tag: &str) -> &str {
+    tag.strip_prefix('v').unwrap_or(tag)
+}
+
+fn cargo_update_command(version: Option<&str>) -> String {
+    match version {
+        Some(tag) => format!(
+            "cargo install --git https://github.com/{RELEASE_REPO} --tag {tag} librefang-cli --force"
+        ),
+        None => format!(
+            "cargo install --git https://github.com/{RELEASE_REPO} librefang-cli --force"
+        ),
+    }
+}
+
+fn manual_installer_command(version: Option<&str>) -> String {
+    #[cfg(windows)]
+    {
+        match version {
+            Some(tag) => {
+                format!("$env:LIBREFANG_VERSION='{tag}'; irm {POWERSHELL_INSTALLER_URL} | iex")
+            }
+            None => format!("irm {POWERSHELL_INSTALLER_URL} | iex"),
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        match version {
+            Some(tag) => format!("curl -fsSL {SHELL_INSTALLER_URL} | LIBREFANG_VERSION={tag} sh"),
+            None => format!("curl -fsSL {SHELL_INSTALLER_URL} | sh"),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Uninstall
 // ---------------------------------------------------------------------------
 
@@ -6506,7 +7501,10 @@ fn remove_self_binary(exe_path: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, GatewayCommands};
+    use super::{
+        compare_release_tag, normalize_release_tag, parse_version_core, resolve_hand_instance, Cli,
+        Commands, GatewayCommands, ReleaseComparison,
+    };
     use clap::Parser;
 
     // --- Doctor command unit tests ---
@@ -6515,6 +7513,143 @@ mod tests {
     fn test_restart_command_parses() {
         let cli = Cli::parse_from(["librefang", "restart"]);
         assert!(matches!(cli.command, Some(Commands::Restart)));
+    }
+
+    #[test]
+    fn test_update_command_parses() {
+        let cli = Cli::parse_from(["librefang", "update"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Update {
+                check: false,
+                version: None
+            })
+        ));
+    }
+
+    #[test]
+    fn test_update_check_command_parses() {
+        let cli = Cli::parse_from(["librefang", "update", "--check"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Update {
+                check: true,
+                version: None
+            })
+        ));
+    }
+
+    #[test]
+    fn test_spawn_alias_parses() {
+        let cli = Cli::parse_from(["librefang", "spawn", "coder", "--name", "backend-coder"]);
+        assert!(matches!(cli.command, Some(Commands::Spawn(_))));
+    }
+
+    #[test]
+    fn test_agents_alias_parses() {
+        let cli = Cli::parse_from(["librefang", "agents", "--json"]);
+        assert!(matches!(cli.command, Some(Commands::Agents { json: true })));
+    }
+
+    #[test]
+    fn test_kill_alias_parses() {
+        let cli = Cli::parse_from(["librefang", "kill", "agent-123"]);
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Kill { agent_id }) if agent_id == "agent-123"
+        ));
+    }
+
+    #[test]
+    fn test_agent_spawn_dry_run_parses() {
+        let cli = Cli::parse_from(["librefang", "agent", "spawn", "--dry-run", "agent.toml"]);
+        assert!(matches!(cli.command, Some(Commands::Agent(_))));
+    }
+
+    #[test]
+    fn test_hand_status_parses() {
+        let cli = Cli::parse_from(["librefang", "hand", "status", "researcher"]);
+        assert!(matches!(cli.command, Some(Commands::Hand(_))));
+    }
+
+    #[test]
+    fn test_skill_test_parses() {
+        let cli = Cli::parse_from(["librefang", "skill", "test", ".", "--tool", "summarize"]);
+        assert!(matches!(cli.command, Some(Commands::Skill(_))));
+    }
+
+    #[test]
+    fn test_skill_publish_parses() {
+        let cli = Cli::parse_from([
+            "librefang",
+            "skill",
+            "publish",
+            ".",
+            "--repo",
+            "librefang-skills/demo",
+            "--dry-run",
+        ]);
+        assert!(matches!(cli.command, Some(Commands::Skill(_))));
+    }
+
+    #[test]
+    fn test_normalize_release_tag_strips_v_prefix() {
+        assert_eq!(normalize_release_tag("v0.3.56"), "0.3.56");
+        assert_eq!(normalize_release_tag("0.3.56"), "0.3.56");
+    }
+
+    #[test]
+    fn test_parse_version_core_strips_release_suffix() {
+        assert_eq!(parse_version_core("0.3.56-20260312"), Some(vec![0, 3, 56]));
+        assert_eq!(parse_version_core("0.3.56"), Some(vec![0, 3, 56]));
+    }
+
+    #[test]
+    fn test_compare_release_tag_detects_newer_release() {
+        assert_eq!(
+            compare_release_tag("v0.3.57-20260312", "0.3.56"),
+            ReleaseComparison::Newer
+        );
+    }
+
+    #[test]
+    fn test_compare_release_tag_detects_same_core_release() {
+        assert_eq!(
+            compare_release_tag("v0.3.56-20260312", "0.3.56"),
+            ReleaseComparison::SameCore
+        );
+    }
+
+    #[test]
+    fn test_compare_release_tag_detects_older_release() {
+        assert_eq!(
+            compare_release_tag("v0.3.55-20260312", "0.3.56"),
+            ReleaseComparison::Older
+        );
+    }
+
+    #[test]
+    fn test_resolve_hand_instance_matches_hand_id() {
+        let instances = vec![serde_json::json!({
+            "instance_id": "inst-1",
+            "hand_id": "researcher",
+            "status": "running",
+            "agent_name": "researcher-agent"
+        })];
+        let resolved =
+            resolve_hand_instance(&instances, "researcher").expect("hand should resolve");
+        assert_eq!(resolved["instance_id"].as_str(), Some("inst-1"));
+    }
+
+    #[test]
+    fn test_resolve_hand_instance_matches_instance_id() {
+        let instances = vec![serde_json::json!({
+            "instance_id": "inst-1",
+            "hand_id": "researcher"
+        })];
+        let resolved =
+            resolve_hand_instance(&instances, "inst-1").expect("instance should resolve");
+        assert_eq!(resolved["hand_id"].as_str(), Some("researcher"));
     }
 
     #[test]

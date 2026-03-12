@@ -12,6 +12,7 @@ pub mod clawhub;
 pub mod loader;
 pub mod marketplace;
 pub mod openclaw_compat;
+pub mod publish;
 pub mod registry;
 pub mod verify;
 

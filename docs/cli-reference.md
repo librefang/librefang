@@ -679,6 +679,79 @@ librefang skill search "docker kubernetes"
 
 ---
 
+### librefang skill test
+
+Validate a local skill and optionally execute one tool.
+
+```
+librefang skill test [<PATH>] [--tool <NAME>] [--input <JSON>]
+```
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<PATH>` | Skill directory, `skill.toml`, `SKILL.md`, or `package.json`. Defaults to the current directory. |
+
+**Options:**
+
+| Option | Description |
+|---|---|
+| `--tool <NAME>` | Tool to execute after validation. Defaults to the first declared tool. |
+| `--input <JSON>` | JSON payload passed to the selected tool. Defaults to `{}`. |
+
+**Behavior:**
+
+- Validates the manifest and runtime entrypoint.
+- Runs security and prompt-injection scans.
+- Executes the selected tool for Python, Node.js, and prompt-only skills when possible.
+
+**Example:**
+
+```bash
+librefang skill test ./my-skill --tool summarize_url --input '{"url":"https://example.com"}'
+```
+
+---
+
+### librefang skill publish
+
+Package a local skill and publish it to a FangHub GitHub release.
+
+```
+librefang skill publish [<PATH>] [--repo <OWNER/NAME>] [--tag <TAG>] [--output <DIR>] [--dry-run]
+```
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<PATH>` | Skill directory, `skill.toml`, `SKILL.md`, or `package.json`. Defaults to the current directory. |
+
+**Options:**
+
+| Option | Description |
+|---|---|
+| `--repo <OWNER/NAME>` | Target GitHub repo. Defaults to `librefang-skills/<skill-name>`. |
+| `--tag <TAG>` | Release tag to create or update. Defaults to `v<skill-version>`. |
+| `--output <DIR>` | Output directory for the generated zip bundle. Defaults to `<skill-dir>/dist`. |
+| `--dry-run` | Validate and package locally without uploading to GitHub. |
+
+**Behavior:**
+
+- Validates the skill locally before packaging.
+- Builds a zip bundle suitable for FangHub distribution.
+- Uploads the bundle to the selected GitHub release when `GITHUB_TOKEN` or `GH_TOKEN` is configured.
+
+**Example:**
+
+```bash
+librefang skill publish ./my-skill --dry-run
+librefang skill publish ./my-skill --repo librefang-skills/my-skill
+```
+
+---
+
 ### librefang skill create
 
 Interactively scaffold a new skill project.
