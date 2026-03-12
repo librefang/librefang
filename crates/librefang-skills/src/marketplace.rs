@@ -7,6 +7,23 @@ use crate::SkillError;
 use std::path::Path;
 use tracing::info;
 
+fn urlencoded(s: &str) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(char::from(b));
+            }
+            _ => {
+                let _ = write!(&mut out, "%{:02X}", b);
+            }
+        }
+    }
+    out
+}
+
 /// FangHub registry configuration.
 #[derive(Debug, Clone)]
 pub struct MarketplaceConfig {
@@ -45,9 +62,10 @@ impl MarketplaceClient {
 
     /// Search for skills by query string.
     pub async fn search(&self, query: &str) -> Result<Vec<SkillSearchResult>, SkillError> {
+        let encoded_query = urlencoded(query);
         let url = format!(
             "{}/search/repositories?q={}+org:{}&sort=stars",
-            self.config.registry_url, query, self.config.github_org
+            self.config.registry_url, encoded_query, self.config.github_org
         );
 
         let resp = self
@@ -196,5 +214,29 @@ mod tests {
     fn test_client_creation() {
         let client = MarketplaceClient::new(MarketplaceConfig::default());
         assert_eq!(client.config.github_org, "librefang-skills");
+    }
+
+    #[test]
+    fn test_urlencoded() {
+        assert_eq!(urlencoded("twitter"), "twitter");
+        assert_eq!(urlencoded("hello world"), "hello%20world");
+        assert_eq!(urlencoded("social&media"), "social%26media");
+        assert_eq!(urlencoded("key=value"), "key%3Dvalue");
+        assert_eq!(urlencoded("what?now#frag"), "what%3Fnow%23frag");
+    }
+
+    #[test]
+    fn test_search_query_encoding() {
+        let client = MarketplaceClient::new(MarketplaceConfig::default());
+        let query = "social&media tools";
+        let url = format!(
+            "{}/search/repositories?q={}+org:{}&sort=stars",
+            client.config.registry_url,
+            urlencoded(query),
+            client.config.github_org
+        );
+
+        assert!(url.contains("q=social%26media%20tools+org:librefang-skills"));
+        assert!(!url.contains("social&media tools"));
     }
 }
