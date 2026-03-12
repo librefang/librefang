@@ -81,7 +81,7 @@ const AFTER_HELP: &str = "\
   3. librefang chat              Start chatting!
 
 \x1b[1;36mMore:\x1b[0m
-  Docs:       https://github.com/RightNow-AI/openfang
+  Docs:       https://github.com/librefang/librefang
   Dashboard:  http://127.0.0.1:4545/ (when daemon is running)";
 
 /// LibreFang — the open-source Agent Operating System.
@@ -1397,7 +1397,7 @@ fn write_config_if_missing(
     } else {
         let default_config = format!(
             r#"# LibreFang Agent OS configuration
-# See https://github.com/RightNow-AI/openfang for documentation
+# See https://github.com/librefang/librefang for documentation
 
 # For Docker, change to "0.0.0.0:4545" or set LIBREFANG_LISTEN env var.
 api_listen = "127.0.0.1:4545"
@@ -2124,7 +2124,7 @@ fn cmd_doctor(json: bool, repair: bool) {
                 let (provider, api_key_env, model) = detect_best_provider();
                 let default_config = format!(
                     r#"# LibreFang Agent OS configuration
-# See https://github.com/RightNow-AI/openfang for documentation
+# See https://github.com/librefang/librefang for documentation
 
 # For Docker, change to "0.0.0.0:4545" or set LIBREFANG_LISTEN env var.
 api_listen = "127.0.0.1:4545"

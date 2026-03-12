@@ -1122,7 +1122,7 @@ complex_threshold = 500
 
     let config = format!(
         r#"# LibreFang Agent OS configuration
-# See https://github.com/RightNow-AI/openfang for documentation
+# See https://github.com/librefang/librefang for documentation
 
 api_listen = "127.0.0.1:4545"
 
@@ -1265,7 +1265,7 @@ fn draw_welcome(f: &mut Frame, area: Rect) {
     .split(area);
 
     let logo = Paragraph::new(Line::from(vec![Span::styled(
-        "O P E N F A N G",
+        "L I B R E F A N G",
         Style::default()
             .fg(theme::ACCENT)
             .add_modifier(Modifier::BOLD),
