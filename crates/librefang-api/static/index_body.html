@@ -2969,33 +2969,33 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
     <!-- Page: Settings -->
     <template x-if="page === 'settings'">
       <div x-data="settingsPage">
-        <div class="page-header"><h2>Settings</h2></div>
+        <div class="page-header"><h2 data-i18n="settingsPage.title">Settings</h2></div>
         <div class="page-body" x-init="loadSettings()">
-          <div x-show="loading" class="loading-state"><div class="spinner"></div><span>Loading settings...</span></div>
+          <div x-show="loading" class="loading-state"><div class="spinner"></div><span data-i18n="settingsPage.loading">Loading settings...</span></div>
           <div x-show="!loading && loadError" class="error-state">
             <span class="error-icon">!</span>
             <p x-text="loadError"></p>
-            <button class="btn btn-ghost btn-sm" @click="loadData()">Retry</button>
+            <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n="btn.retry">Retry</button>
           </div>
           <div x-show="!loading && !loadError">
           <div class="tabs" role="tablist">
-            <div class="tab" role="tab" :class="{ active: tab === 'providers' }" @click="tab = 'providers'">Providers</div>
-            <div class="tab" role="tab" :class="{ active: tab === 'models' }" @click="tab = 'models'">Models</div>
-            <div class="tab" role="tab" :class="{ active: tab === 'config' }" @click="tab = 'config'; if (!configSchema) loadConfigSchema()">Config</div>
+            <div class="tab" role="tab" :class="{ active: tab === 'providers' }" @click="tab = 'providers'" data-i18n="settingsPage.providersTab">Providers</div>
+            <div class="tab" role="tab" :class="{ active: tab === 'models' }" @click="tab = 'models'" data-i18n="settingsPage.modelsTab">Models</div>
+            <div class="tab" role="tab" :class="{ active: tab === 'config' }" @click="tab = 'config'; if (!configSchema) loadConfigSchema()" data-i18n="detail.config">Config</div>
             <div class="tabs-separator"></div>
-            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'tools' }" @click="tab = 'tools'">Tools</div>
-            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'security' }" @click="tab = 'security'; if (!securityData && !secLoading) loadSecurity()">Security</div>
-            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'network' }" @click="tab = 'network'; if (!peers.length && !peersLoading) { loadPeers(); startPeerPolling(); }">Network</div>
-            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'budget' }" @click="tab = 'budget'">Budget</div>
-            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'info' }" @click="tab = 'info'">System</div>
-            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'migration' }" @click="tab = 'migration'">Migration</div>
+            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'tools' }" @click="tab = 'tools'" data-i18n="settingsPage.toolsTab">Tools</div>
+            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'security' }" @click="tab = 'security'; if (!securityData && !secLoading) loadSecurity()" data-i18n="settingsPage.securityTab">Security</div>
+            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'network' }" @click="tab = 'network'; if (!peers.length && !peersLoading) { loadPeers(); startPeerPolling(); }" data-i18n="settingsPage.networkTab">Network</div>
+            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'budget' }" @click="tab = 'budget'" data-i18n="settingsPage.budgetTab">Budget</div>
+            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'info' }" @click="tab = 'info'" data-i18n="settingsPage.systemTab">System</div>
+            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'migration' }" @click="tab = 'migration'" data-i18n="settingsPage.migrationTab">Migration</div>
           </div>
 
           <!-- Providers tab -->
           <div x-show="tab === 'providers'">
             <div class="info-card">
-              <h4>LLM Providers</h4>
-              <p>LibreFang supports 12 LLM providers out of the box. Configure API keys to unlock models from each provider. Set environment variables and restart, or use the form below to save keys directly.</p>
+              <h4 data-i18n="settingsPage.llmProviders">LLM Providers</h4>
+              <p data-i18n="settingsPage.llmProvidersDesc">LibreFang supports 12 LLM providers out of the box. Configure API keys to unlock models from each provider. Set environment variables and restart, or use the form below to save keys directly.</p>
             </div>
             <div class="card-grid">
               <template x-for="p in providers" :key="p.id">
@@ -3004,55 +3004,55 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     <div class="card-header" style="margin:0" x-text="p.display_name"></div>
                     <span class="badge" :class="providerAuthClass(p)" x-text="providerAuthText(p)"></span>
                   </div>
-                  <div class="card-meta" x-text="(p.model_count || 0) + ' model(s) available'"></div>
-                  <div class="text-xs text-dim mt-2" x-show="p.api_key_env" x-text="'Env: ' + p.api_key_env"></div>
+                  <div class="card-meta" x-text="providerModelsText(p)"></div>
+                  <div class="text-xs text-dim mt-2" x-show="p.api_key_env" x-text="envText(p.api_key_env)"></div>
                   <!-- Key input for unconfigured providers -->
                   <template x-if="p.auth_status !== 'configured' && p.api_key_env">
                     <div class="key-input-group">
-                      <input type="password" :placeholder="'Enter ' + p.api_key_env" x-model="providerKeyInputs[p.id]">
-                      <button class="btn btn-primary btn-sm" @click="saveProviderKey(p)">Save</button>
+                      <input type="password" :placeholder="providerKeyPlaceholder(p.api_key_env)" x-model="providerKeyInputs[p.id]">
+                      <button class="btn btn-primary btn-sm" @click="saveProviderKey(p)" data-i18n="btn.save">Save</button>
                     </div>
                   </template>
                   <template x-if="p.auth_status !== 'configured' && p.api_key_env">
-                    <div class="text-xs text-dim mt-2">Or set <code style="color:var(--accent-light);background:var(--bg);padding:1px 4px;border-radius:2px" x-text="p.api_key_env"></code> in your environment and restart</div>
+                    <div class="text-xs text-dim mt-2" x-text="envRestartText(p.api_key_env)"></div>
                   </template>
                   <!-- Copilot OAuth button -->
                   <template x-if="p.id === 'github-copilot' && p.auth_status !== 'configured'">
                     <div class="mt-2">
-                      <button class="btn btn-primary btn-sm" @click="startCopilotOAuth()" :disabled="copilotOAuth.polling" x-show="!copilotOAuth.userCode">Login with GitHub</button>
+                      <button class="btn btn-primary btn-sm" @click="startCopilotOAuth()" :disabled="copilotOAuth.polling" x-show="!copilotOAuth.userCode" data-i18n="settingsPage.loginWithGitHub">Login with GitHub</button>
                       <div x-show="copilotOAuth.userCode" class="mt-2">
-                        <div class="text-sm">Visit <a :href="copilotOAuth.verificationUri" target="_blank" x-text="copilotOAuth.verificationUri" style="color:var(--accent-light)"></a> and enter:</div>
+                        <div class="text-sm"><span x-text="copilotVisitText()"></span></div>
                         <div style="font-size:24px;font-weight:bold;letter-spacing:4px;margin:8px 0;color:var(--accent-light)" x-text="copilotOAuth.userCode"></div>
-                        <div class="text-xs text-dim"><span class="spinner" style="width:10px;height:10px;border-width:2px;display:inline-block;vertical-align:middle"></span> Waiting for authorization...</div>
+                        <div class="text-xs text-dim"><span class="spinner" style="width:10px;height:10px;border-width:2px;display:inline-block;vertical-align:middle"></span> <span data-i18n="settingsPage.waitingForAuthorization">Waiting for authorization...</span></div>
                       </div>
                     </div>
                   </template>
                   <!-- Claude Code install hint -->
                   <template x-if="p.id === 'claude-code' && p.auth_status !== 'configured'">
-                    <div class="mt-2 text-xs text-dim">Install: <code style="color:var(--accent-light);background:var(--bg);padding:1px 4px;border-radius:2px">npm install -g @anthropic-ai/claude-code</code></div>
+                    <div class="mt-2 text-xs text-dim"><span data-i18n="settingsPage.installLabel">Install:</span> <code style="color:var(--accent-light);background:var(--bg);padding:1px 4px;border-radius:2px">npm install -g @anthropic-ai/claude-code</code></div>
                   </template>
                   <!-- Actions for configured providers -->
                   <template x-if="p.auth_status === 'configured'">
                     <div class="flex gap-2 mt-2">
                       <button class="btn btn-ghost btn-sm" @click="testProvider(p)" :disabled="providerTesting[p.id]">
-                        <span x-show="!providerTesting[p.id]">Test</span>
+                        <span x-show="!providerTesting[p.id]" data-i18n="btn.test">Test</span>
                         <span x-show="providerTesting[p.id]" class="spinner" style="width:10px;height:10px;border-width:2px"></span>
                       </button>
-                      <button class="btn btn-ghost btn-sm" style="color:var(--error)" @click="removeProviderKey(p)">Remove Key</button>
+                      <button class="btn btn-ghost btn-sm" style="color:var(--error)" @click="removeProviderKey(p)" data-i18n="settingsPage.removeKey">Remove Key</button>
                     </div>
                   </template>
                   <!-- No key needed -->
                   <template x-if="!p.api_key_env || p.key_required === false">
-                    <div class="text-xs mt-2" style="color:var(--success)" x-show="p.auth_status !== 'configured' && p.auth_status !== 'not_set' && p.auth_status !== 'missing'">No API key needed &mdash; runs locally or is free</div>
+                    <div class="text-xs mt-2" style="color:var(--success)" x-show="p.auth_status !== 'configured' && p.auth_status !== 'not_set' && p.auth_status !== 'missing'" data-i18n="settingsPage.noApiKeyNeeded">No API key needed - runs locally or is free</div>
                   </template>
                   <!-- Base URL editor for local providers -->
                   <template x-if="p.is_local">
                     <div class="mt-3" style="border-top:1px solid var(--border);padding-top:8px">
-                      <div class="text-xs text-dim mb-1">Base URL</div>
+                      <div class="text-xs text-dim mb-1" data-i18n="settingsPage.baseUrl">Base URL</div>
                       <div class="key-input-group">
-                        <input type="text" :placeholder="'http://localhost:...'" x-model="providerUrlInputs[p.id]" style="font-size:12px">
+                        <input type="text" :placeholder="t('settingsPage.localBaseUrlPlaceholder', 'http://localhost:...')" x-model="providerUrlInputs[p.id]" style="font-size:12px">
                         <button class="btn btn-primary btn-sm" @click="saveProviderUrl(p)" :disabled="providerUrlSaving[p.id]">
-                          <span x-show="!providerUrlSaving[p.id]">Save</span>
+                          <span x-show="!providerUrlSaving[p.id]" data-i18n="btn.save">Save</span>
                           <span x-show="providerUrlSaving[p.id]" class="spinner" style="width:10px;height:10px;border-width:2px"></span>
                         </button>
                       </div>
@@ -3063,93 +3063,93 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             </div>
             <!-- Add Custom Provider -->
             <div class="info-card mt-4" style="border:1px solid var(--border)">
-              <h4 style="margin-top:0">Add Custom Provider</h4>
-              <p class="text-xs text-dim mb-2">Connect any OpenAI-compatible API (vLLM, LiteLLM, LocalAI, etc.)</p>
+              <h4 style="margin-top:0" data-i18n="settingsPage.addCustomProvider">Add Custom Provider</h4>
+              <p class="text-xs text-dim mb-2" data-i18n="settingsPage.addCustomProviderDesc">Connect any OpenAI-compatible API (vLLM, LiteLLM, LocalAI, etc.)</p>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
                 <div>
-                  <label class="text-xs text-dim">Provider Name</label>
-                  <input class="form-input" x-model="customProviderName" placeholder="e.g. my-local-llm">
+                  <label class="text-xs text-dim" data-i18n="settingsPage.providerName">Provider Name</label>
+                  <input class="form-input" x-model="customProviderName" :placeholder="providerNamePlaceholder()">
                 </div>
                 <div>
-                  <label class="text-xs text-dim">Base URL (required)</label>
-                  <input class="form-input" x-model="customProviderUrl" placeholder="http://localhost:8080/v1">
+                  <label class="text-xs text-dim" data-i18n="settingsPage.baseUrlRequired">Base URL (required)</label>
+                  <input class="form-input" x-model="customProviderUrl" :placeholder="providerUrlPlaceholder()">
                 </div>
               </div>
               <div class="mt-2">
-                <label class="text-xs text-dim">API Key (optional)</label>
-                <input class="form-input" type="password" x-model="customProviderKey" placeholder="sk-... (leave blank if not needed)">
+                <label class="text-xs text-dim" data-i18n="settingsPage.apiKeyOptional">API Key (optional)</label>
+                <input class="form-input" type="password" x-model="customProviderKey" :placeholder="providerKeyOptionalPlaceholder()">
               </div>
               <button class="btn btn-primary btn-sm mt-2" @click="addCustomProvider()" :disabled="!customProviderName.trim() || !customProviderUrl.trim() || addingCustomProvider">
-                <span x-show="!addingCustomProvider">Add Provider</span>
+                <span x-show="!addingCustomProvider" data-i18n="settingsPage.addProvider">Add Provider</span>
                 <span x-show="addingCustomProvider" class="spinner" style="width:10px;height:10px;border-width:2px"></span>
               </button>
               <span class="text-xs text-dim ml-2" x-text="customProviderStatus"></span>
             </div>
             <div class="empty-state" x-show="!providers.length">
-              <h4>No providers found</h4>
-              <p class="hint">Provider information could not be loaded. Check that the API is running.</p>
+              <h4 data-i18n="settingsPage.noProvidersFound">No providers found</h4>
+              <p class="hint" data-i18n="settingsPage.noProvidersFoundDesc">Provider information could not be loaded. Check that the API is running.</p>
             </div>
           </div>
 
           <!-- Models tab -->
           <div x-show="tab === 'models'">
             <div class="info-card">
-              <h4>Model Catalog</h4>
-              <p>Browse all available models across providers. Models marked "Available" have their provider configured and ready to use.</p>
+              <h4 data-i18n="settingsPage.modelCatalog">Model Catalog</h4>
+              <p data-i18n="settingsPage.modelCatalogDesc">Browse all available models across providers. Models marked "Available" have their provider configured and ready to use.</p>
             </div>
             <div class="flex gap-2 mb-4" style="flex-wrap:wrap">
               <div class="search-input" style="flex:1;min-width:200px">
                 <span style="color:var(--text-muted)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></span>
-                <input placeholder="Search models..." x-model="modelSearch">
+                <input data-i18n-placeholder="settingsPage.searchModels" placeholder="Search models..." x-model="modelSearch">
               </div>
               <select class="form-select" style="width:160px" x-model="modelProviderFilter">
-                <option value="">All Providers</option>
+                <option value="" data-i18n="settingsPage.allProviders">All Providers</option>
                 <template x-for="pn in uniqueProviderNames" :key="pn">
                   <option :value="pn" x-text="pn"></option>
                 </template>
               </select>
               <select class="form-select" style="width:140px" x-model="modelTierFilter">
-                <option value="">All Tiers</option>
+                <option value="" data-i18n="settingsPage.allTiers">All Tiers</option>
                 <template x-for="t in uniqueTiers" :key="t">
                   <option :value="t" x-text="t"></option>
                 </template>
               </select>
-              <button class="btn btn-primary btn-sm" @click="showCustomModelForm = !showCustomModelForm" x-text="showCustomModelForm ? 'Cancel' : '+ Custom Model'"></button>
+              <button class="btn btn-primary btn-sm" @click="showCustomModelForm = !showCustomModelForm" x-text="customModelToggleText()"></button>
             </div>
             <!-- Custom model form -->
             <div x-show="showCustomModelForm" class="info-card mb-4" style="border:1px solid var(--accent,#7c3aed)">
-              <h4 style="margin-top:0">Add Custom Model</h4>
+              <h4 style="margin-top:0" data-i18n="settingsPage.addCustomModel">Add Custom Model</h4>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.5rem">
                 <div>
-                  <label class="text-xs text-dim">Model ID (required)</label>
-                  <input class="form-input" x-model="customModelId" placeholder="e.g. my-org/my-model">
+                  <label class="text-xs text-dim" data-i18n="settingsPage.modelIdRequired">Model ID (required)</label>
+                  <input class="form-input" x-model="customModelId" :placeholder="customModelIdPlaceholder()">
                 </div>
                 <div>
-                  <label class="text-xs text-dim">Provider</label>
-                  <input class="form-input" x-model="customModelProvider" placeholder="openrouter">
+                  <label class="text-xs text-dim" data-i18n="label.provider">Provider</label>
+                  <input class="form-input" x-model="customModelProvider" :placeholder="customModelProviderPlaceholder()">
                 </div>
                 <div>
-                  <label class="text-xs text-dim">Context Window</label>
+                  <label class="text-xs text-dim" data-i18n="settingsPage.contextWindow">Context Window</label>
                   <input class="form-input" type="number" x-model.number="customModelContext" placeholder="128000">
                 </div>
                 <div>
-                  <label class="text-xs text-dim">Max Output Tokens</label>
+                  <label class="text-xs text-dim" data-i18n="settingsPage.maxOutputTokens">Max Output Tokens</label>
                   <input class="form-input" type="number" x-model.number="customModelMaxOutput" placeholder="8192">
                 </div>
               </div>
-              <button class="btn btn-primary btn-sm mt-2" @click="addCustomModel()" :disabled="!customModelId.trim()">Add Model</button>
+              <button class="btn btn-primary btn-sm mt-2" @click="addCustomModel()" :disabled="!customModelId.trim()" data-i18n="settingsPage.addModel">Add Model</button>
               <span class="text-xs text-dim ml-2" x-text="customModelStatus"></span>
             </div>
-            <div class="text-xs text-dim mb-2" x-text="filteredModels.length + ' of ' + models.length + ' models'"></div>
+            <div class="text-xs text-dim mb-2" x-text="modelsSummaryText()"></div>
             <div x-show="!filteredModels.length && !settingsLoading" style="text-align:center;padding:32px 16px">
               <div style="font-size:32px;margin-bottom:8px;opacity:0.5">&#x1F916;</div>
-              <h3 style="margin:0 0 4px;font-size:14px" x-text="models.length ? 'No models match your search' : 'No models available'"></h3>
-              <p class="text-xs text-dim" x-text="models.length ? 'Try a different search term or clear filters.' : 'Configure an LLM provider to see available models.'"></p>
-              <button class="btn btn-ghost btn-sm mt-2" x-show="models.length && (modelSearch || modelProviderFilter)" @click="modelSearch=''; modelProviderFilter=''">Clear Filters</button>
+              <h3 style="margin:0 0 4px;font-size:14px" x-text="modelEmptyTitle()"></h3>
+              <p class="text-xs text-dim" x-text="modelEmptyDesc()"></p>
+              <button class="btn btn-ghost btn-sm mt-2" x-show="models.length && (modelSearch || modelProviderFilter)" @click="modelSearch=''; modelProviderFilter=''" data-i18n="settingsPage.clearFilters">Clear Filters</button>
             </div>
             <div class="table-wrap" x-show="filteredModels.length">
               <table>
-                <thead><tr><th>Model</th><th>Provider</th><th>Tier</th><th>Context</th><th>Input Cost</th><th>Output Cost</th><th>Status</th><th></th></tr></thead>
+                <thead><tr><th data-i18n="label.model">Model</th><th data-i18n="label.provider">Provider</th><th data-i18n="settingsPage.tier">Tier</th><th data-i18n="settingsPage.context">Context</th><th data-i18n="settingsPage.inputCost">Input Cost</th><th data-i18n="settingsPage.outputCost">Output Cost</th><th data-i18n="label.status">Status</th><th></th></tr></thead>
                 <tbody>
                   <template x-for="m in filteredModels" :key="m.id">
                     <tr>
@@ -3159,8 +3159,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                       <td class="text-xs" x-text="formatContext(m.context_window)"></td>
                       <td class="text-xs" x-text="formatCost(m.input_cost_per_m)"></td>
                       <td class="text-xs" x-text="formatCost(m.output_cost_per_m)"></td>
-                      <td><span class="badge" :class="m.available ? 'badge-success' : 'badge-muted'" x-text="m.available ? 'Available' : 'Needs Key'"></span></td>
-                      <td><button x-show="m.tier === 'custom'" class="btn btn-ghost btn-sm" @click="deleteCustomModel(m.id)" title="Delete custom model" style="padding:2px 6px;font-size:11px;color:var(--text-muted)">&#x2715;</button></td>
+                      <td><span class="badge" :class="m.available ? 'badge-success' : 'badge-muted'" x-text="modelStatusText(m)"></span></td>
+                      <td><button x-show="m.tier === 'custom'" class="btn btn-ghost btn-sm" @click="deleteCustomModel(m.id)" :title="t('settingsPage.deleteCustomModelTitle', 'Delete custom model')" style="padding:2px 6px;font-size:11px;color:var(--text-muted)">&#x2715;</button></td>
                     </tr>
                   </template>
                 </tbody>
@@ -3172,18 +3172,18 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <div x-show="tab === 'tools'">
             <div class="search-input mb-4">
               <span style="color:var(--text-muted)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></span>
-              <input placeholder="Search tools..." x-model="toolSearch">
+              <input data-i18n-placeholder="settingsPage.searchTools" placeholder="Search tools..." x-model="toolSearch">
             </div>
-            <div class="text-xs text-dim mb-2" x-text="filteredTools.length + ' of ' + tools.length + ' tools'"></div>
+            <div class="text-xs text-dim mb-2" x-text="toolsSummaryText()"></div>
             <div x-show="!filteredTools.length && !settingsLoading" style="text-align:center;padding:32px 16px">
               <div style="font-size:32px;margin-bottom:8px;opacity:0.5">&#x1F527;</div>
-              <h3 style="margin:0 0 4px;font-size:14px" x-text="tools.length ? 'No tools match your search' : 'No tools available'"></h3>
-              <p class="text-xs text-dim" x-text="tools.length ? 'Try a different search term.' : 'Tools will appear once agents are configured.'"></p>
-              <button class="btn btn-ghost btn-sm mt-2" x-show="tools.length && toolSearch" @click="toolSearch=''">Clear Search</button>
+              <h3 style="margin:0 0 4px;font-size:14px" x-text="toolsEmptyTitle()"></h3>
+              <p class="text-xs text-dim" x-text="toolsEmptyDesc()"></p>
+              <button class="btn btn-ghost btn-sm mt-2" x-show="tools.length && toolSearch" @click="toolSearch=''" data-i18n="settingsPage.clearSearch">Clear Search</button>
             </div>
             <div class="table-wrap" x-show="filteredTools.length">
               <table>
-                <thead><tr><th>Tool</th><th>Description</th></tr></thead>
+                <thead><tr><th data-i18n="settingsPage.tool">Tool</th><th data-i18n="settingsPage.description">Description</th></tr></thead>
                 <tbody>
                   <template x-for="t in filteredTools" :key="t.name">
                     <tr>
@@ -3199,13 +3199,13 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <!-- System Info tab -->
           <div x-show="tab === 'info'">
             <div class="stats-row">
-              <div class="stat-card"><div class="stat-value" x-text="sysInfo.version || '-'"></div><div class="stat-label">Version</div></div>
-              <div class="stat-card"><div class="stat-value" x-text="sysInfo.platform || '-'"></div><div class="stat-label">Platform</div></div>
-              <div class="stat-card"><div class="stat-value" x-text="formatUptime(sysInfo.uptime_seconds)"></div><div class="stat-label">Uptime</div></div>
-              <div class="stat-card"><div class="stat-value" x-text="sysInfo.agent_count || 0"></div><div class="stat-label">Agents</div></div>
+              <div class="stat-card"><div class="stat-value" x-text="sysInfo.version || '-'"></div><div class="stat-label" data-i18n="label.version">Version</div></div>
+              <div class="stat-card"><div class="stat-value" x-text="sysInfo.platform || '-'"></div><div class="stat-label" data-i18n="runtimePage.platform">Platform</div></div>
+              <div class="stat-card"><div class="stat-value" x-text="formatUptime(sysInfo.uptime_seconds)"></div><div class="stat-label" data-i18n="stat.uptime">Uptime</div></div>
+              <div class="stat-card"><div class="stat-value" x-text="sysInfo.agent_count || 0"></div><div class="stat-label" data-i18n="runtimePage.agents">Agents</div></div>
             </div>
             <div class="card mt-4" x-show="sysInfo.default_provider">
-              <div class="card-header">Default Model</div>
+              <div class="card-header" data-i18n="runtimePage.defaultModel">Default Model</div>
               <div class="card-meta" x-text="sysInfo.default_provider + ' : ' + sysInfo.default_model"></div>
             </div>
           </div>
@@ -3213,8 +3213,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <!-- Config tab -->
           <div x-show="tab === 'config'">
             <div class="info-card">
-              <h4>Runtime Configuration</h4>
-              <p>View and edit the active configuration. Changes are applied immediately. For advanced edits, modify <code style="color:var(--accent-light);background:var(--bg);padding:1px 4px;border-radius:2px">config.toml</code> in your LibreFang data directory.</p>
+              <h4 data-i18n="settingsPage.runtimeConfiguration">Runtime Configuration</h4>
+              <p><span data-i18n="settingsPage.runtimeConfigurationPrefix">View and edit the active configuration. Changes are applied immediately. For advanced edits, modify</span> <code style="color:var(--accent-light);background:var(--bg);padding:1px 4px;border-radius:2px">config.toml</code> <span data-i18n="settingsPage.runtimeConfigurationSuffix">in your LibreFang data directory.</span></p>
             </div>
 
             <!-- Dynamic config form (when schema is available) -->
@@ -3257,7 +3257,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                             <button class="btn btn-primary btn-sm" x-show="isConfigDirty(section, field.name)"
                               @click="saveConfigField(section, field.name, configValues[section] && configValues[section][field.name])"
                               :disabled="configSaving[section + '.' + field.name]">
-                              <span x-show="!configSaving[section + '.' + field.name]">Save</span>
+                              <span x-show="!configSaving[section + '.' + field.name]" data-i18n="btn.save">Save</span>
                               <span x-show="configSaving[section + '.' + field.name]" class="spinner" style="width:12px;height:12px;border-width:2px"></span>
                             </button>
                           </div>
@@ -3272,20 +3272,20 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
             <!-- Raw JSON fallback -->
             <div class="card mt-4" style="border-left:3px solid var(--border)">
-              <div class="card-header" style="font-size:12px;cursor:pointer" @click="$el.nextElementSibling.style.display = $el.nextElementSibling.style.display === 'none' ? 'block' : 'none'">Raw Config JSON (click to toggle)</div>
+              <div class="card-header" style="font-size:12px;cursor:pointer" @click="$el.nextElementSibling.style.display = $el.nextElementSibling.style.display === 'none' ? 'block' : 'none'" data-i18n="settingsPage.rawConfigJson">Raw Config JSON (click to toggle)</div>
               <pre style="font-size:11px;white-space:pre-wrap;overflow:auto;max-height:400px;color:var(--text-dim);line-height:1.5;display:none" x-text="JSON.stringify(config, null, 2)"></pre>
             </div>
           </div>
 
           <!-- Security tab -->
           <div x-show="tab === 'security'">
-            <div x-show="secLoading" class="loading-state"><div class="spinner"></div><span>Loading security data...</span></div>
+            <div x-show="secLoading" class="loading-state"><div class="spinner"></div><span data-i18n="settingsPage.loadingSecurityData">Loading security data...</span></div>
             <div x-show="!secLoading">
             <div class="security-hero">
               <div class="security-hero-shield"><svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
               <div>
-                <div class="security-hero-title">Defense in Depth</div>
-                <div class="security-hero-desc">LibreFang implements 15 layered security features across the entire stack &mdash; from network ingress to agent sandboxing to cryptographic audit trails. Core protections cannot be disabled.</div>
+                <div class="security-hero-title" data-i18n="settingsPage.securityHeroTitle">Defense in Depth</div>
+                <div class="security-hero-desc" data-i18n="settingsPage.securityHeroDesc">LibreFang implements 15 layered security features across the entire stack &mdash; from network ingress to agent sandboxing to cryptographic audit trails. Core protections cannot be disabled.</div>
               </div>
             </div>
 
@@ -3293,21 +3293,21 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               <div class="security-section-header">
                 <span class="security-shield shield-core"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span>
                 <div>
-                  <div class="font-bold">Core Protections</div>
-                  <div class="text-xs text-dim">Always active. Cannot be disabled.</div>
+                  <div class="font-bold" data-i18n="settingsPage.coreProtections">Core Protections</div>
+                  <div class="text-xs text-dim" data-i18n="settingsPage.coreProtectionsDesc">Always active. Cannot be disabled.</div>
                 </div>
               </div>
               <div class="security-grid">
                 <template x-for="f in coreFeatures" :key="f.key">
                   <div class="security-card">
                     <div class="flex justify-between items-center mb-2">
-                      <div class="security-card-name" x-text="f.name"></div>
-                      <span class="sec-badge sec-badge-core">ALWAYS ON</span>
+                      <div class="security-card-name" x-text="coreFeatureName(f)"></div>
+                      <span class="sec-badge sec-badge-core" data-i18n="settingsPage.alwaysOn">ALWAYS ON</span>
                     </div>
-                    <div class="security-card-desc" x-text="f.description"></div>
+                    <div class="security-card-desc" x-text="coreFeatureDescription(f)"></div>
                     <div class="security-card-threat">
-                      <span class="text-xs font-bold" style="color:var(--error)">Protects against:</span>
-                      <span class="text-xs" x-text="f.threat"></span>
+                      <span class="text-xs font-bold" style="color:var(--error)" data-i18n="settingsPage.protectsAgainst">Protects against:</span>
+                      <span class="text-xs" x-text="coreFeatureThreat(f)"></span>
                     </div>
                     <div class="text-xs text-dim" style="margin-top:6px;opacity:0.5" x-text="f.impl"></div>
                   </div>
@@ -3319,18 +3319,18 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               <div class="security-section-header">
                 <span class="security-shield shield-config"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg></span>
                 <div>
-                  <div class="font-bold">Configurable Controls</div>
-                  <div class="text-xs text-dim">Active with tunable parameters.</div>
+                  <div class="font-bold" data-i18n="settingsPage.configurableControls">Configurable Controls</div>
+                  <div class="text-xs text-dim" data-i18n="settingsPage.configurableControlsDesc">Active with tunable parameters.</div>
                 </div>
               </div>
               <div class="security-grid">
                 <template x-for="f in configurableFeatures" :key="f.key">
                   <div class="security-card">
                     <div class="flex justify-between items-center mb-2">
-                      <div class="security-card-name" x-text="f.name"></div>
-                      <span class="sec-badge sec-badge-config">CONFIGURABLE</span>
+                      <div class="security-card-name" x-text="configurableFeatureName(f)"></div>
+                      <span class="sec-badge sec-badge-config" data-i18n="settingsPage.configurable">CONFIGURABLE</span>
                     </div>
-                    <div class="security-card-desc" x-text="f.description"></div>
+                    <div class="security-card-desc" x-text="configurableFeatureDescription(f)"></div>
                     <div class="security-card-value" x-text="formatConfigValue(f)"></div>
                   </div>
                 </template>
@@ -3341,47 +3341,47 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               <div class="security-section-header">
                 <span class="security-shield shield-monitor"><svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1"/><path d="m9 14 2 2 4-4"/></svg></span>
                 <div>
-                  <div class="font-bold">Monitoring &amp; Analysis</div>
-                  <div class="text-xs text-dim">Active monitoring systems.</div>
+                  <div class="font-bold" data-i18n="settingsPage.monitoringAnalysis">Monitoring &amp; Analysis</div>
+                  <div class="text-xs text-dim" data-i18n="settingsPage.monitoringAnalysisDesc">Active monitoring systems.</div>
                 </div>
               </div>
               <div class="security-grid">
                 <template x-for="f in monitoringFeatures" :key="f.key">
                   <div class="security-card">
                     <div class="flex justify-between items-center mb-2">
-                      <div class="security-card-name" x-text="f.name"></div>
-                      <span class="sec-badge sec-badge-monitor">MONITORING</span>
+                      <div class="security-card-name" x-text="monitoringFeatureName(f)"></div>
+                      <span class="sec-badge sec-badge-monitor" data-i18n="settingsPage.monitoring">MONITORING</span>
                     </div>
-                    <div class="security-card-desc" x-text="f.description"></div>
+                    <div class="security-card-desc" x-text="monitoringFeatureDescription(f)"></div>
                     <div class="security-card-value" x-text="formatMonitoringValue(f)"></div>
                   </div>
                 </template>
                 <div class="security-card" style="border-color:var(--accent)">
                   <div class="flex justify-between items-center mb-2">
-                    <div class="security-card-name">Audit Chain Integrity</div>
+                    <div class="security-card-name" data-i18n="settingsPage.auditChainIntegrity">Audit Chain Integrity</div>
                     <button class="btn btn-ghost btn-sm" @click="verifyAuditChain()" :disabled="verifyingChain">
-                      <span x-show="!verifyingChain">Verify Now</span>
+                      <span x-show="!verifyingChain" data-i18n="settingsPage.verifyNow">Verify Now</span>
                       <span x-show="verifyingChain" class="spinner" style="width:12px;height:12px;border-width:2px"></span>
                     </button>
                   </div>
-                  <div class="security-card-desc">Run cryptographic verification of the entire SHA-256 Merkle hash chain.</div>
+                  <div class="security-card-desc" data-i18n="settingsPage.auditChainIntegrityDesc">Run cryptographic verification of the entire SHA-256 Merkle hash chain.</div>
                   <div x-show="chainResult" class="mt-2">
-                    <span class="sec-badge" :class="chainResult && chainResult.valid ? 'sec-badge-core' : 'sec-badge-warn'" x-text="chainResult && chainResult.valid ? 'CHAIN VALID — ' + (chainResult.entries || 0) + ' entries verified' : 'CHAIN BROKEN — ' + (chainResult ? chainResult.error : '')"></span>
+                    <span class="sec-badge" :class="chainResult && chainResult.valid ? 'sec-badge-core' : 'sec-badge-warn'" x-text="chainResultText()"></span>
                   </div>
                 </div>
               </div>
             </div>
 
             <div class="card mt-4" style="border-left:3px solid var(--accent)">
-              <div class="font-bold" style="font-size:13px;margin-bottom:6px">Security Dependencies</div>
+              <div class="font-bold" style="font-size:13px;margin-bottom:6px" data-i18n="settingsPage.securityDependencies">Security Dependencies</div>
               <div class="text-xs text-dim" style="line-height:1.8">
-                <code style="color:var(--accent-light)">sha2</code> SHA-256 &middot;
-                <code style="color:var(--accent-light)">hmac</code> HMAC-SHA256 &middot;
-                <code style="color:var(--accent-light)">subtle</code> constant-time &middot;
-                <code style="color:var(--accent-light)">ed25519-dalek</code> signing &middot;
-                <code style="color:var(--accent-light)">zeroize</code> secret wiping &middot;
-                <code style="color:var(--accent-light)">rand</code> randomness &middot;
-                <code style="color:var(--accent-light)">governor</code> rate limiting
+                <code style="color:var(--accent-light)">sha2</code> <span data-i18n="settingsPage.securityDependency.sha256">SHA-256</span> &middot;
+                <code style="color:var(--accent-light)">hmac</code> <span data-i18n="settingsPage.securityDependency.hmacSha256">HMAC-SHA256</span> &middot;
+                <code style="color:var(--accent-light)">subtle</code> <span data-i18n="settingsPage.securityDependency.constantTime">constant-time</span> &middot;
+                <code style="color:var(--accent-light)">ed25519-dalek</code> <span data-i18n="settingsPage.securityDependency.signing">signing</span> &middot;
+                <code style="color:var(--accent-light)">zeroize</code> <span data-i18n="settingsPage.securityDependency.secretWiping">secret wiping</span> &middot;
+                <code style="color:var(--accent-light)">rand</code> <span data-i18n="settingsPage.securityDependency.randomness">randomness</span> &middot;
+                <code style="color:var(--accent-light)">governor</code> <span data-i18n="settingsPage.securityDependency.rateLimiting">rate limiting</span>
               </div>
             </div>
             </div>
@@ -3401,35 +3401,35 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             <!-- OFP Status -->
             <div class="info-card" style="display:flex;justify-content:space-between;align-items:center">
               <div>
-                <h4>Peer Networking (OFP)</h4>
-                <p>Link multiple LibreFang instances into a mesh via the OFP wire protocol.</p>
+                <h4 data-i18n="settingsPage.peerNetworkingTitle">Peer Networking (OFP)</h4>
+                <p data-i18n="settingsPage.peerNetworkingDesc">Link multiple LibreFang instances into a mesh via the OFP wire protocol.</p>
               </div>
-              <span class="badge" :class="netStatus && netStatus.enabled ? 'badge-success' : 'badge-muted'" x-text="netStatus && netStatus.enabled ? 'Enabled' : 'Disabled'" style="font-size:12px;padding:4px 10px"></span>
+              <span class="badge" :class="netStatus && netStatus.enabled ? 'badge-success' : 'badge-muted'" x-text="netStatus && netStatus.enabled ? t('runtimePage.enabled', 'Enabled') : t('runtimePage.disabled', 'Disabled')" style="font-size:12px;padding:4px 10px"></span>
             </div>
             <div x-show="netStatus && netStatus.enabled" class="text-xs text-dim mb-2" style="margin-top:-8px">
-              Node: <span x-text="netStatus?.node_id?.substring(0,8) + '...'" class="font-bold"></span> &bull;
-              Listening on <span x-text="netStatus?.listen_address" class="font-bold"></span>
+              <span data-i18n="settingsPage.nodeLabel">Node:</span> <span x-text="netStatus?.node_id?.substring(0,8) + '...'" class="font-bold"></span> &bull;
+              <span data-i18n="settingsPage.listeningOn">Listening on</span> <span x-text="netStatus?.listen_address" class="font-bold"></span>
             </div>
-            <div x-show="peersLoading" class="loading-state"><div class="spinner"></div><span>Loading peers...</span></div>
+            <div x-show="peersLoading" class="loading-state"><div class="spinner"></div><span data-i18n="settingsPage.loadingPeers">Loading peers...</span></div>
             <div x-show="!peersLoading && peersLoadError" class="error-state">
               <span class="error-icon">!</span>
               <p x-text="peersLoadError"></p>
-              <button class="btn btn-ghost btn-sm" @click="loadPeers()">Retry</button>
+              <button class="btn btn-ghost btn-sm" @click="loadPeers()" data-i18n="btn.retry">Retry</button>
             </div>
             <div x-show="!peersLoading && !peersLoadError">
             <div class="stats-row">
-              <div class="stat-card"><div class="stat-value" x-text="peers.filter(function(p){return p.state === 'Connected'}).length"></div><div class="stat-label">Connected</div></div>
-              <div class="stat-card"><div class="stat-value" x-text="peers.length"></div><div class="stat-label">Total Peers</div></div>
+              <div class="stat-card"><div class="stat-value" x-text="peers.filter(function(p){return p.state === 'Connected'}).length"></div><div class="stat-label" data-i18n="settingsPage.connectedPeers">Connected</div></div>
+              <div class="stat-card"><div class="stat-value" x-text="peers.length"></div><div class="stat-label" data-i18n="settingsPage.totalPeers">Total Peers</div></div>
             </div>
             <div class="table-wrap" x-show="peers.length">
               <table>
-                <thead><tr><th>Node</th><th>Address</th><th>State</th><th>Agents</th><th>Protocol</th></tr></thead>
+                <thead><tr><th data-i18n="settingsPage.node">Node</th><th data-i18n="settingsPage.address">Address</th><th data-i18n="detail.state">State</th><th data-i18n="runtimePage.agents">Agents</th><th data-i18n="settingsPage.protocol">Protocol</th></tr></thead>
                 <tbody>
                   <template x-for="p in peers" :key="p.node_id">
                     <tr>
                       <td><span class="font-bold" x-text="p.node_name"></span><br><span class="text-xs text-dim" x-text="p.node_id"></span></td>
                       <td x-text="p.address"></td>
-                      <td><span class="badge" :class="p.state === 'Connected' ? 'badge-connected' : 'badge-disconnected'" x-text="p.state"></span></td>
+                      <td><span class="badge" :class="p.state === 'Connected' ? 'badge-connected' : 'badge-disconnected'" x-text="peerStateText(p.state)"></span></td>
                       <td x-text="(p.agents || []).length"></td>
                       <td x-text="'v' + p.protocol_version"></td>
                     </tr>
@@ -3438,25 +3438,25 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               </table>
             </div>
             <div class="empty-state" x-show="!peers.length">
-              <h4>No peers connected</h4>
-              <p class="hint">Add a <code style="color:var(--accent-light);background:var(--bg);padding:1px 4px;border-radius:2px">[network]</code> section to config.toml with <code style="color:var(--accent-light);background:var(--bg);padding:1px 4px;border-radius:2px">shared_secret</code> and peer addresses.</p>
+              <h4 data-i18n="settingsPage.noPeersConnected">No peers connected</h4>
+              <p class="hint"><span data-i18n="settingsPage.noPeersConnectedPrefix">Add a</span> <code style="color:var(--accent-light);background:var(--bg);padding:1px 4px;border-radius:2px">[network]</code> <span data-i18n="settingsPage.noPeersConnectedMiddle">section to config.toml with</span> <code style="color:var(--accent-light);background:var(--bg);padding:1px 4px;border-radius:2px">shared_secret</code> <span data-i18n="settingsPage.noPeersConnectedSuffix">and peer addresses.</span></p>
             </div>
             </div>
 
             <!-- A2A External Agents -->
             <div style="margin-top:24px;border-top:1px solid var(--border);padding-top:16px">
-              <h4 style="margin-bottom:8px">A2A External Agents</h4>
-              <p class="text-xs text-dim mb-2">Discovered agents on other LibreFang/A2A-compatible instances that this node can communicate with.</p>
+              <h4 style="margin-bottom:8px" data-i18n="settingsPage.a2aExternalAgents">A2A External Agents</h4>
+              <p class="text-xs text-dim mb-2" data-i18n="settingsPage.a2aExternalAgentsDesc">Discovered agents on other LibreFang/A2A-compatible instances that this node can communicate with.</p>
               <div class="flex gap-2 mb-3">
-                <input class="form-input" style="flex:1" placeholder="https://remote-agent.example.com" x-model="a2aDiscoverUrl">
+                <input class="form-input" style="flex:1" data-i18n-placeholder="settingsPage.remoteAgentPlaceholder" placeholder="https://remote-agent.example.com" x-model="a2aDiscoverUrl">
                 <button class="btn btn-primary btn-sm" @click="discoverA2a()" :disabled="a2aDiscovering">
-                  <span x-show="!a2aDiscovering">Discover</span>
+                  <span x-show="!a2aDiscovering" data-i18n="settingsPage.discover">Discover</span>
                   <span x-show="a2aDiscovering">...</span>
                 </button>
               </div>
               <div class="table-wrap" x-show="a2aAgents.length">
                 <table>
-                  <thead><tr><th>Name</th><th>URL</th><th>Description</th></tr></thead>
+                  <thead><tr><th data-i18n="label.name">Name</th><th data-i18n="settingsPage.url">URL</th><th data-i18n="settingsPage.description">Description</th></tr></thead>
                   <tbody>
                     <template x-for="a in a2aAgents" :key="a.url">
                       <tr>
@@ -3468,7 +3468,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   </tbody>
                 </table>
               </div>
-              <div class="text-xs text-dim" x-show="!a2aAgents.length">No external agents discovered yet. Enter a URL above to discover one.</div>
+              <div class="text-xs text-dim" x-show="!a2aAgents.length" data-i18n="settingsPage.noExternalAgents">No external agents discovered yet. Enter a URL above to discover one.</div>
             </div>
           </div>
 
@@ -4202,17 +4202,17 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
     <template x-if="page === 'comms'">
       <div x-data="commsPage" x-init="loadData()" @page-leave.window="stopSSE()">
         <div class="page-header">
-          <h2>Agent Comms</h2>
+          <h2 data-i18n="commsPage.title">Agent Comms</h2>
           <div class="flex items-center gap-2">
             <button class="btn btn-primary btn-sm" @click="openSendModal()">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2l-7 20-4-9-9-4z"/></svg>
-              Send Message
+              <span data-i18n="commsPage.sendMessage">Send Message</span>
             </button>
             <button class="btn btn-ghost btn-sm" @click="openTaskModal()">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
-              Post Task
+              <span data-i18n="commsPage.postTask">Post Task</span>
             </button>
-            <button class="btn btn-ghost btn-sm" @click="loadData()" title="Refresh">
+            <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n-title="btn.refresh" title="Refresh">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0115-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 01-15 6.7L3 16"/></svg>
             </button>
           </div>
@@ -4225,9 +4225,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           </div>
           <!-- Error -->
           <div x-show="!loading && loadError" class="error-state" style="animation:fadeIn 0.3s">
-            <h3 style="color:var(--error)">Connection Error</h3>
+            <h3 style="color:var(--error)" data-i18n="commsPage.connectionError">Connection Error</h3>
             <p class="text-xs text-dim" x-text="loadError"></p>
-            <button class="btn btn-primary btn-sm" @click="loadData()" style="margin-top:8px">Retry</button>
+            <button class="btn btn-primary btn-sm" @click="loadData()" style="margin-top:8px" data-i18n="btn.retry">Retry</button>
           </div>
           <!-- Content -->
           <div x-show="!loading && !loadError" style="animation:fadeIn 0.3s">
@@ -4235,17 +4235,17 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             <div class="card mb-4">
               <div class="card-header">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:4px;vertical-align:-2px"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="M8.59 13.51l6.83 3.98M15.41 6.51l-6.82 3.98"/></svg>
-                Agent Topology
-                <span class="badge badge-dim" style="margin-left:8px;font-weight:400" x-text="topology.nodes.length + ' agents'"></span>
+                <span data-i18n="commsPage.agentTopology">Agent Topology</span>
+                <span class="badge badge-dim" style="margin-left:8px;font-weight:400" x-text="topologyCountText()"></span>
               </div>
               <div style="padding:8px 0;font-family:var(--font-mono);font-size:12px;line-height:1.8">
                 <template x-if="topology.nodes.length === 0">
-                  <div class="text-dim" style="text-align:center;padding:24px">No agents running</div>
+                  <div class="text-dim" style="text-align:center;padding:24px" data-i18n="commsPage.noAgentsRunning">No agents running</div>
                 </template>
                 <template x-for="root in rootNodes()" :key="root.id">
                   <div class="comms-topo-tree">
                     <div class="comms-topo-node" :title="root.id">
-                      <span :class="stateBadgeClass(root.state)" style="font-size:10px;padding:1px 6px" x-text="root.state"></span>
+                      <span :class="stateBadgeClass(root.state)" style="font-size:10px;padding:1px 6px" x-text="stateLabel(root.state)"></span>
                       <strong x-text="root.name" style="margin:0 4px"></strong>
                       <span class="text-dim" x-text="root.model"></span>
                       <template x-for="peer in peersOf(root.id)" :key="peer.id">
@@ -4255,7 +4255,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     <template x-for="(child, ci) in childrenOf(root.id)" :key="child.id">
                       <div class="comms-topo-child">
                         <span class="comms-topo-branch" x-text="ci < childrenOf(root.id).length - 1 ? '\u251c\u2500\u2500 ' : '\u2514\u2500\u2500 '"></span>
-                        <span :class="stateBadgeClass(child.state)" style="font-size:10px;padding:1px 6px" x-text="child.state"></span>
+                        <span :class="stateBadgeClass(child.state)" style="font-size:10px;padding:1px 6px" x-text="stateLabel(child.state)"></span>
                         <strong x-text="child.name" style="margin:0 4px"></strong>
                         <span class="text-dim" x-text="child.model"></span>
                       </div>
@@ -4270,16 +4270,16 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               <div class="card-header flex justify-between items-center">
                 <div>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:inline;margin-right:4px;vertical-align:-2px"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
-                  Live Event Feed
+                  <span data-i18n="commsPage.liveEventFeed">Live Event Feed</span>
                 </div>
                 <div class="flex items-center gap-2">
-                  <span class="badge badge-success" style="font-size:9px;padding:2px 6px;animation:pulse-ring 2s infinite">LIVE</span>
-                  <span class="text-xs text-dim" x-text="events.length + ' events'"></span>
+                  <span class="badge badge-success" style="font-size:9px;padding:2px 6px;animation:pulse-ring 2s infinite" data-i18n="commsPage.liveBadge">LIVE</span>
+                  <span class="text-xs text-dim" x-text="eventsCountText()"></span>
                 </div>
               </div>
               <div style="max-height:400px;overflow-y:auto">
                 <template x-if="events.length === 0">
-                  <div class="text-dim" style="text-align:center;padding:24px">No inter-agent events yet</div>
+                  <div class="text-dim" style="text-align:center;padding:24px" data-i18n="commsPage.noEventsYet">No inter-agent events yet</div>
                 </template>
                 <template x-for="ev in events" :key="ev.id">
                   <div class="comms-event-row">
@@ -4297,35 +4297,35 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <!-- Send Message Modal -->
           <div x-show="showSendModal" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);backdrop-filter:blur(4px)" @click.self="showSendModal=false" x-transition>
             <div class="card" style="width:420px;max-width:90vw" @click.stop>
-              <div class="card-header">Send Agent Message</div>
+              <div class="card-header" data-i18n="commsPage.sendAgentMessage">Send Agent Message</div>
               <div style="display:flex;flex-direction:column;gap:12px;margin-top:12px">
                 <div>
-                  <label class="text-xs text-dim" style="display:block;margin-bottom:4px">From Agent</label>
+                  <label class="text-xs text-dim" style="display:block;margin-bottom:4px" data-i18n="commsPage.fromAgent">From Agent</label>
                   <select x-model="sendFrom" class="input" style="width:100%">
-                    <option value="">Select agent...</option>
+                    <option value="" x-text="selectAgentLabel()"></option>
                     <template x-for="n in topology.nodes" :key="n.id">
-                      <option :value="n.id" x-text="n.name + ' (' + n.state + ')'"></option>
+                      <option :value="n.id" x-text="n.name + ' (' + stateLabel(n.state) + ')'"></option>
                     </template>
                   </select>
                 </div>
                 <div>
-                  <label class="text-xs text-dim" style="display:block;margin-bottom:4px">To Agent</label>
+                  <label class="text-xs text-dim" style="display:block;margin-bottom:4px" data-i18n="commsPage.toAgent">To Agent</label>
                   <select x-model="sendTo" class="input" style="width:100%">
-                    <option value="">Select agent...</option>
+                    <option value="" x-text="selectAgentLabel()"></option>
                     <template x-for="n in topology.nodes" :key="n.id">
-                      <option :value="n.id" x-text="n.name + ' (' + n.state + ')'"></option>
+                      <option :value="n.id" x-text="n.name + ' (' + stateLabel(n.state) + ')'"></option>
                     </template>
                   </select>
                 </div>
                 <div>
-                  <label class="text-xs text-dim" style="display:block;margin-bottom:4px">Message</label>
-                  <textarea x-model="sendMsg" class="input" rows="3" placeholder="Type a message..." style="width:100%;resize:vertical"></textarea>
+                  <label class="text-xs text-dim" style="display:block;margin-bottom:4px" data-i18n="commsPage.messageLabel">Message</label>
+                  <textarea x-model="sendMsg" class="input" rows="3" placeholder="Type a message..." data-i18n-placeholder="commsPage.typeMessage" style="width:100%;resize:vertical"></textarea>
                 </div>
                 <div class="flex gap-2" style="justify-content:flex-end">
-                  <button class="btn btn-ghost btn-sm" @click="showSendModal=false">Cancel</button>
+                  <button class="btn btn-ghost btn-sm" @click="showSendModal=false" data-i18n="btn.cancel">Cancel</button>
                   <button class="btn btn-primary btn-sm" @click="submitSend()" :disabled="sendLoading || !sendFrom || !sendTo || !sendMsg.trim()">
-                    <span x-show="sendLoading">Sending...</span>
-                    <span x-show="!sendLoading">Send</span>
+                    <span x-show="sendLoading" data-i18n="commsPage.sending">Sending...</span>
+                    <span x-show="!sendLoading" data-i18n="btn.send">Send</span>
                   </button>
                 </div>
               </div>
@@ -4335,30 +4335,30 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <!-- Post Task Modal -->
           <div x-show="showTaskModal" style="position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.5);backdrop-filter:blur(4px)" @click.self="showTaskModal=false" x-transition>
             <div class="card" style="width:420px;max-width:90vw" @click.stop>
-              <div class="card-header">Post Task</div>
+              <div class="card-header" data-i18n="commsPage.postTask">Post Task</div>
               <div style="display:flex;flex-direction:column;gap:12px;margin-top:12px">
                 <div>
-                  <label class="text-xs text-dim" style="display:block;margin-bottom:4px">Title</label>
-                  <input type="text" x-model="taskTitle" class="input" placeholder="Task title..." style="width:100%">
+                  <label class="text-xs text-dim" style="display:block;margin-bottom:4px" data-i18n="commsPage.titleLabel">Title</label>
+                  <input type="text" x-model="taskTitle" class="input" placeholder="Task title..." data-i18n-placeholder="commsPage.taskTitlePlaceholder" style="width:100%">
                 </div>
                 <div>
-                  <label class="text-xs text-dim" style="display:block;margin-bottom:4px">Description</label>
-                  <textarea x-model="taskDesc" class="input" rows="3" placeholder="Task description..." style="width:100%;resize:vertical"></textarea>
+                  <label class="text-xs text-dim" style="display:block;margin-bottom:4px" data-i18n="settingsPage.description">Description</label>
+                  <textarea x-model="taskDesc" class="input" rows="3" placeholder="Task description..." data-i18n-placeholder="commsPage.taskDescriptionPlaceholder" style="width:100%;resize:vertical"></textarea>
                 </div>
                 <div>
-                  <label class="text-xs text-dim" style="display:block;margin-bottom:4px">Assign To (optional)</label>
+                  <label class="text-xs text-dim" style="display:block;margin-bottom:4px" data-i18n="commsPage.assignToOptional">Assign To (optional)</label>
                   <select x-model="taskAssign" class="input" style="width:100%">
-                    <option value="">Unassigned</option>
+                    <option value="" data-i18n="commsPage.unassigned">Unassigned</option>
                     <template x-for="n in topology.nodes" :key="n.id">
                       <option :value="n.id" x-text="n.name"></option>
                     </template>
                   </select>
                 </div>
                 <div class="flex gap-2" style="justify-content:flex-end">
-                  <button class="btn btn-ghost btn-sm" @click="showTaskModal=false">Cancel</button>
+                  <button class="btn btn-ghost btn-sm" @click="showTaskModal=false" data-i18n="btn.cancel">Cancel</button>
                   <button class="btn btn-primary btn-sm" @click="submitTask()" :disabled="taskLoading || !taskTitle.trim()">
-                    <span x-show="taskLoading">Posting...</span>
-                    <span x-show="!taskLoading">Post Task</span>
+                    <span x-show="taskLoading" data-i18n="commsPage.posting">Posting...</span>
+                    <span x-show="!taskLoading" data-i18n="commsPage.postTask">Post Task</span>
                   </button>
                 </div>
               </div>
