@@ -385,7 +385,8 @@ pub async fn run_agent_loop(
                         .messages
                         .push(Message::assistant("[no reply needed]".to_string()));
                     memory
-                        .save_session(session)
+                        .save_session_async(session)
+                        .await
                         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                     return Ok(AgentLoopResult {
                         response: String::new(),
@@ -453,7 +454,8 @@ pub async fn run_agent_loop(
 
                 // Save session
                 memory
-                    .save_session(session)
+                    .save_session_async(session)
+                    .await
                     .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
                 // Remember this interaction (with embedding if available)
@@ -567,7 +569,7 @@ pub async fn run_agent_loop(
                         LoopGuardVerdict::CircuitBreak(msg) => {
                             warn!(tool = %tool_call.name, "Circuit breaker triggered");
                             // Save session before bailing
-                            if let Err(e) = memory.save_session(session) {
+                            if let Err(e) = memory.save_session_async(session).await {
                                 warn!("Failed to save session on circuit break: {e}");
                             }
                             // Fire AgentLoopEnd hook on circuit break
@@ -765,7 +767,7 @@ pub async fn run_agent_loop(
                 messages.push(tool_results_msg);
 
                 // Interim save after tool execution to prevent data loss on crash
-                if let Err(e) = memory.save_session(session) {
+                if let Err(e) = memory.save_session_async(session).await {
                     warn!("Failed to interim-save session: {e}");
                 }
             }
@@ -780,7 +782,7 @@ pub async fn run_agent_loop(
                         text
                     };
                     session.messages.push(Message::assistant(&text));
-                    if let Err(e) = memory.save_session(session) {
+                    if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to save session on max continuations: {e}");
                     }
                     warn!(
@@ -822,7 +824,7 @@ pub async fn run_agent_loop(
     }
 
     // Save session before failing so conversation history is preserved
-    if let Err(e) = memory.save_session(session) {
+    if let Err(e) = memory.save_session_async(session).await {
         warn!("Failed to save session on max iterations: {e}");
     }
 
@@ -1365,7 +1367,8 @@ pub async fn run_agent_loop_streaming(
                         .messages
                         .push(Message::assistant("[no reply needed]".to_string()));
                     memory
-                        .save_session(session)
+                        .save_session_async(session)
+                        .await
                         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
                     return Ok(AgentLoopResult {
                         response: String::new(),
@@ -1432,7 +1435,8 @@ pub async fn run_agent_loop_streaming(
                 crate::session_repair::prune_heartbeat_turns(&mut session.messages, 10);
 
                 memory
-                    .save_session(session)
+                    .save_session_async(session)
+                    .await
                     .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
                 // Remember this interaction (with embedding if available)
@@ -1542,7 +1546,7 @@ pub async fn run_agent_loop_streaming(
                     match &verdict {
                         LoopGuardVerdict::CircuitBreak(msg) => {
                             warn!(tool = %tool_call.name, "Circuit breaker triggered (streaming)");
-                            if let Err(e) = memory.save_session(session) {
+                            if let Err(e) = memory.save_session_async(session).await {
                                 warn!("Failed to save session on circuit break: {e}");
                             }
                             // Fire AgentLoopEnd hook on circuit break
@@ -1752,7 +1756,7 @@ pub async fn run_agent_loop_streaming(
                 session.messages.push(tool_results_msg.clone());
                 messages.push(tool_results_msg);
 
-                if let Err(e) = memory.save_session(session) {
+                if let Err(e) = memory.save_session_async(session).await {
                     warn!("Failed to interim-save session: {e}");
                 }
             }
@@ -1766,7 +1770,7 @@ pub async fn run_agent_loop_streaming(
                         text
                     };
                     session.messages.push(Message::assistant(&text));
-                    if let Err(e) = memory.save_session(session) {
+                    if let Err(e) = memory.save_session_async(session).await {
                         warn!("Failed to save session on max continuations: {e}");
                     }
                     warn!(
@@ -1806,7 +1810,7 @@ pub async fn run_agent_loop_streaming(
         }
     }
 
-    if let Err(e) = memory.save_session(session) {
+    if let Err(e) = memory.save_session_async(session).await {
         warn!("Failed to save session on max iterations: {e}");
     }
 

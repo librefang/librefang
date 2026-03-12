@@ -149,6 +149,15 @@ impl MemorySubstrate {
         self.sessions.save_session(session)
     }
 
+    /// Save a session asynchronously on a blocking worker thread.
+    pub async fn save_session_async(&self, session: &Session) -> LibreFangResult<()> {
+        let sessions = self.sessions.clone();
+        let session = session.clone();
+        tokio::task::spawn_blocking(move || sessions.save_session(&session))
+            .await
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
     /// Create a new empty session for an agent.
     pub fn create_session(&self, agent_id: AgentId) -> LibreFangResult<Session> {
         self.sessions.create_session(agent_id)
