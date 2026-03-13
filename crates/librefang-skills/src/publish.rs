@@ -334,7 +334,7 @@ Write clearly.
         assert!(prepared
             .generated_files
             .iter()
-            .any(|file| file.relative_path == PathBuf::from("skill.toml")));
+            .any(|file| file.relative_path == Path::new("skill.toml")));
     }
 
     #[test]
@@ -357,7 +357,7 @@ Write clearly.
         assert!(prepared
             .generated_files
             .iter()
-            .any(|file| file.relative_path == PathBuf::from("skill.toml")));
+            .any(|file| file.relative_path == Path::new("skill.toml")));
     }
 
     #[test]
