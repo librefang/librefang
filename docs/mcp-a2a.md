@@ -68,13 +68,13 @@ Each entry maps to a `McpServerConfigEntry` struct:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | `String` | required | Display name, used in tool namespacing |
-| `transport` | `McpTransportEntry` | required | How to connect (stdio or SSE) |
+| `transport` | `McpTransportEntry` | required | How to connect (stdio, SSE, or built-in HTTP compatibility mode) |
 | `timeout_secs` | `u64` | `30` | JSON-RPC request timeout |
 | `env` | `Vec<String>` | `[]` | Env vars to pass through to the subprocess |
 
 #### Transport Types
 
-LibreFang supports two MCP transports, defined by `McpTransport`:
+LibreFang supports three transport modes, defined by `McpTransport`:
 
 **Stdio** -- Spawns a subprocess and communicates via stdin/stdout with newline-delimited JSON-RPC:
 
@@ -91,6 +91,21 @@ args = ["-y", "@modelcontextprotocol/server-github"]
 [mcp_servers.transport]
 type = "sse"
 url = "https://mcp.example.com/api"
+```
+
+**HTTP Compatibility** -- Declaratively exposes a plain HTTP/JSON backend as tool(s) without a separate bridge process:
+
+```toml
+[mcp_servers.transport]
+type = "http_compat"
+base_url = "http://127.0.0.1:11235"
+
+[[mcp_servers.transport.tools]]
+name = "crawl"
+path = "/crawl"
+method = "post"
+request_mode = "json_body"
+response_mode = "json"
 ```
 
 #### Tool Namespacing
@@ -113,10 +128,11 @@ When the kernel starts (`start_background_agents()`), it checks `config.mcp_serv
 1. Iterates each `McpServerConfigEntry` in the config
 2. Converts the config-level `McpTransportEntry` into a runtime `McpTransport`
 3. Calls `McpConnection::connect()` which:
-   - Spawns the subprocess (stdio) or creates an HTTP client (SSE)
-   - Sends the `initialize` handshake with client info
-   - Sends the `notifications/initialized` notification
-   - Calls `tools/list` to discover all available tools
+   - Spawns the subprocess (stdio), creates an HTTP client (SSE), or builds a declarative HTTP compatibility adapter
+   - For native MCP transports, sends the `initialize` handshake with client info
+   - For native MCP transports, sends the `notifications/initialized` notification
+   - For native MCP transports, calls `tools/list` to discover all available tools
+   - For `http_compat`, registers tool definitions directly from config
    - Namespaces each tool with `mcp_{server}_{tool}`
 4. Caches discovered `ToolDefinition` entries in `kernel.mcp_tools`
 5. Stores the live `McpConnection` in `kernel.mcp_connections`
@@ -386,6 +402,27 @@ type = "sse"
 url = "https://tools.example.com/mcp"
 ```
 
+```toml
+[[mcp_servers]]
+name = "internal-http"
+timeout_secs = 30
+
+[mcp_servers.transport]
+type = "http_compat"
+base_url = "http://127.0.0.1:11235"
+
+[[mcp_servers.transport.headers]]
+name = "Authorization"
+value_env = "INTERNAL_HTTP_TOKEN"
+
+[[mcp_servers.transport.tools]]
+name = "crawl"
+path = "/crawl"
+method = "post"
+request_mode = "json_body"
+response_mode = "json"
+```
+
 #### Multiple Servers
 
 ```toml
@@ -432,6 +469,20 @@ args = ["-y", "@modelcontextprotocol/server-postgres"]
       "transport": { "type": "stdio", "command": "npx", "args": [...] },
       "timeout_secs": 30,
       "env": ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+    },
+    {
+      "name": "internal-http",
+      "transport": {
+        "type": "http_compat",
+        "base_url": "http://127.0.0.1:11235",
+        "headers": [{ "name": "Authorization", "value_env": "INTERNAL_HTTP_TOKEN", "source": "env" }],
+        "tools_count": 1,
+        "tools": [
+          { "name": "crawl", "description": "", "path": "/crawl", "method": "post", "request_mode": "json_body", "response_mode": "json" }
+        ]
+      },
+      "timeout_secs": 30,
+      "env": []
     }
   ],
   "connected": [

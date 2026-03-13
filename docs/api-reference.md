@@ -1267,13 +1267,45 @@ List configured and connected MCP servers with their available tools.
 
 ```json
 {
-  "servers": [
+  "configured": [
     {
       "name": "filesystem",
-      "transport": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem"],
-      "connected": true,
+      "transport": {
+        "type": "stdio",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem"]
+      },
+      "timeout_secs": 30,
+      "env": []
+    },
+    {
+      "name": "internal-http",
+      "transport": {
+        "type": "http_compat",
+        "base_url": "http://127.0.0.1:11235",
+        "headers": [
+          { "name": "Authorization", "value_env": "INTERNAL_HTTP_TOKEN", "source": "env" }
+        ],
+        "tools_count": 1,
+        "tools": [
+          {
+            "name": "crawl",
+            "description": "Fetch content from a compatible HTTP backend",
+            "path": "/crawl",
+            "method": "post",
+            "request_mode": "json_body",
+            "response_mode": "json"
+          }
+        ]
+      },
+      "timeout_secs": 30,
+      "env": []
+    }
+  ],
+  "connected": [
+    {
+      "name": "filesystem",
+      "tools_count": 2,
       "tools": [
         {
           "name": "mcp_filesystem_read_file",
@@ -1283,10 +1315,12 @@ List configured and connected MCP servers with their available tools.
           "name": "mcp_filesystem_write_file",
           "description": "Write content to a file"
         }
-      ]
+      ],
+      "connected": true
     }
   ],
-  "total": 1
+  "total_configured": 2,
+  "total_connected": 1
 }
 ```
 

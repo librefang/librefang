@@ -2712,6 +2712,71 @@ decay_rate = 0.05
                                         checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
                                     }
                                 }
+                                librefang_types::config::McpTransportEntry::HttpCompat {
+                                    base_url,
+                                    headers,
+                                    tools,
+                                } => {
+                                    if base_url.is_empty() {
+                                        if !json {
+                                            ui::check_warn(&format!(
+                                                "MCP server '{}' has empty base_url",
+                                                server.name
+                                            ));
+                                        }
+                                        checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
+                                    }
+                                    if tools.is_empty() {
+                                        if !json {
+                                            ui::check_warn(&format!(
+                                                "MCP server '{}' has no http_compat tools configured",
+                                                server.name
+                                            ));
+                                        }
+                                        checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
+                                    }
+                                    if headers.iter().any(|h| h.name.trim().is_empty()) {
+                                        if !json {
+                                            ui::check_warn(&format!(
+                                                "MCP server '{}' has an http_compat header with empty name",
+                                                server.name
+                                            ));
+                                        }
+                                        checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
+                                    }
+                                    if headers.iter().any(|h| {
+                                        h.value.as_ref().is_none_or(|value| value.trim().is_empty())
+                                            && h.value_env
+                                                .as_ref()
+                                                .is_none_or(|value| value.trim().is_empty())
+                                    }) {
+                                        if !json {
+                                            ui::check_warn(&format!(
+                                                "MCP server '{}' has an http_compat header without value/value_env",
+                                                server.name
+                                            ));
+                                        }
+                                        checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
+                                    }
+                                    if tools.iter().any(|tool| tool.name.trim().is_empty()) {
+                                        if !json {
+                                            ui::check_warn(&format!(
+                                                "MCP server '{}' has an http_compat tool with empty name",
+                                                server.name
+                                            ));
+                                        }
+                                        checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
+                                    }
+                                    if tools.iter().any(|tool| tool.path.trim().is_empty()) {
+                                        if !json {
+                                            ui::check_warn(&format!(
+                                                "MCP server '{}' has an http_compat tool with empty path",
+                                                server.name
+                                            ));
+                                        }
+                                        checks.push(serde_json::json!({"check": "mcp_server_config", "status": "warn", "name": server.name}));
+                                    }
+                                }
                             }
                         }
                         checks.push(serde_json::json!({"check": "mcp_servers", "status": "ok", "count": mcp_count}));
@@ -6965,6 +7030,55 @@ args = ["-y", "@modelcontextprotocol/server-github"]
                 assert_eq!(args.len(), 2);
             }
             _ => panic!("Expected Stdio transport"),
+        }
+    }
+
+    #[test]
+    fn test_doctor_http_compat_transport_validation() {
+        let config_toml = r#"
+api_listen = "127.0.0.1:4545"
+
+[default_model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+
+[[mcp_servers]]
+name = "http-tools"
+timeout_secs = 30
+
+[mcp_servers.transport]
+type = "http_compat"
+base_url = "http://127.0.0.1:11235"
+
+[[mcp_servers.transport.headers]]
+name = "Authorization"
+value_env = "HTTP_TOOLS_TOKEN"
+
+[[mcp_servers.transport.tools]]
+name = "search"
+description = "Search HTTP backend"
+path = "/search"
+method = "get"
+request_mode = "query"
+response_mode = "json"
+input_schema = { type = "object" }
+"#;
+        let config: librefang_types::config::KernelConfig = toml::from_str(config_toml).unwrap();
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].name, "http-tools");
+        match &config.mcp_servers[0].transport {
+            librefang_types::config::McpTransportEntry::HttpCompat {
+                base_url,
+                headers,
+                tools,
+            } => {
+                assert_eq!(base_url, "http://127.0.0.1:11235");
+                assert_eq!(headers.len(), 1);
+                assert_eq!(tools.len(), 1);
+                assert_eq!(tools[0].name, "search");
+            }
+            _ => panic!("Expected HttpCompat transport"),
         }
     }
 

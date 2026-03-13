@@ -2315,6 +2315,19 @@
                       <div class="text-xs" x-show="srv.transport.type === 'sse'">
                         <code x-text="srv.transport.url" style="font-size:0.7rem"></code>
                       </div>
+                      <div class="text-xs" x-show="srv.transport.type === 'http_compat'">
+                        <code x-text="srv.transport.base_url" style="font-size:0.7rem"></code>
+                        <div class="text-dim mt-1" x-text="(srv.transport.tools_count || 0) + ' declared tool(s)'"></div>
+                        <div class="mt-1" x-show="srv.transport.tools && srv.transport.tools.length">
+                          <template x-for="tool in srv.transport.tools.slice(0, 5)" :key="tool.name">
+                            <div class="text-xs" style="padding:2px 0">
+                              <code x-text="tool.name" style="font-size:0.7rem"></code>
+                              <span class="text-dim" x-show="tool.method" x-text="' · ' + tool.method" style="font-size:0.65rem"></span>
+                            </div>
+                          </template>
+                          <div class="text-xs text-dim" x-show="srv.transport.tools.length > 5" x-text="'... and ' + (srv.transport.tools.length - 5) + ' more'"></div>
+                        </div>
+                      </div>
                       <div class="text-xs text-dim mt-1" x-show="srv.env && srv.env.length" x-text="'Env: ' + srv.env.join(', ')"></div>
                     </div>
                   </template>
@@ -2332,7 +2345,7 @@ timeout_secs = 30
 type = "stdio"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
-                <p class="hint mt-2" style="font-size:0.75rem">LibreFang supports all OpenClaw-compatible MCP servers.</p>
+                <p class="hint mt-2" style="font-size:0.75rem">LibreFang supports native MCP servers and declarative <code>http_compat</code> backends.</p>
               </div>
             </div>
           </div>
