@@ -38,8 +38,8 @@ pub struct ChatGptAuthResult {
 /// This approach doesn't require intercepting cookies or running a headless browser —
 /// users simply paste their bearer token from the ChatGPT session API endpoint.
 pub async fn start_browser_auth() -> Result<(String, u16), String> {
-    let listener =
-        TcpListener::bind(CALLBACK_BIND).map_err(|e| format!("Failed to bind local server: {e}"))?;
+    let listener = TcpListener::bind(CALLBACK_BIND)
+        .map_err(|e| format!("Failed to bind local server: {e}"))?;
     let port = listener
         .local_addr()
         .map_err(|e| format!("Failed to get local address: {e}"))?
@@ -108,13 +108,10 @@ pub async fn run_callback_server(port: u16) -> Result<ChatGptAuthResult, String>
     });
 
     // Wait for token with timeout
-    let token = tokio::time::timeout(
-        std::time::Duration::from_secs(AUTH_TIMEOUT_SECS),
-        rx,
-    )
-    .await
-    .map_err(|_| "Authentication timed out — no token received".to_string())?
-    .map_err(|_| "Auth channel closed unexpectedly".to_string())?;
+    let token = tokio::time::timeout(std::time::Duration::from_secs(AUTH_TIMEOUT_SECS), rx)
+        .await
+        .map_err(|_| "Authentication timed out — no token received".to_string())?
+        .map_err(|_| "Auth channel closed unexpectedly".to_string())?;
 
     server_handle.abort();
 

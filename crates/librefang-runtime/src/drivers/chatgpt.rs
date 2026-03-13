@@ -122,10 +122,7 @@ impl ChatGptDriver {
     }
 
     /// Create a fresh OpenAI driver with the current session token.
-    fn make_inner_driver(
-        &self,
-        token: &CachedSessionToken,
-    ) -> super::openai::OpenAIDriver {
+    fn make_inner_driver(&self, token: &CachedSessionToken) -> super::openai::OpenAIDriver {
         super::openai::OpenAIDriver::new(token.token.to_string(), self.base_url.clone())
     }
 }
@@ -200,8 +197,7 @@ mod tests {
 
     #[test]
     fn test_chatgpt_driver_new_custom_url() {
-        let driver =
-            ChatGptDriver::new("tok".to_string(), "https://custom.api.com/v1".to_string());
+        let driver = ChatGptDriver::new("tok".to_string(), "https://custom.api.com/v1".to_string());
         assert_eq!(driver.base_url, "https://custom.api.com/v1");
     }
 
