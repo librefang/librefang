@@ -102,7 +102,7 @@ LibreFang was forked from [RightNow-AI/openfang](https://github.com/RightNow-AI/
 
 | | OpenFang | LibreFang |
 |---|---------|-----------|
-| **License** | MIT | MIT |
+| **License** | MIT | MIT + Apache-2.0 |
 | **Governance** | Single-company controlled | Community-governed, transparent decision-making |
 | **PR Policy** | At maintainer's discretion | Positive contributions merged as-is; others get active review with improvement suggestions |
 | **Attribution** | Not guaranteed | Always preserved in commits and release notes |
@@ -116,6 +116,7 @@ LibreFang was forked from [RightNow-AI/openfang](https://github.com/RightNow-AI/
 - **Full attribution.** If a maintainer adapts your patch, your name stays in commit metadata (`Co-authored-by`) and release notes. Closing a PR and re-implementing privately is explicitly prohibited by our [governance](GOVERNANCE.md).
 - **Open governance.** Technical decisions happen in issues and PRs, not behind closed doors. See [`GOVERNANCE.md`](GOVERNANCE.md) and [`MAINTAINERS.md`](MAINTAINERS.md).
 - **Security first.** Vulnerability reports go through the private process in [`SECURITY.md`](SECURITY.md).
+- **Join us.** Active contributors are invited to join the LibreFang GitHub org. Core participants who consistently contribute get commit access and a voice in project direction.
 
 ---
 

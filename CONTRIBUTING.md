@@ -4,6 +4,8 @@ Thank you for your interest in contributing to LibreFang! "Libre" means freedom,
 
 **Our promise:** if your contribution positively helps the project, we merge it as-is. If it needs improvement, we provide active, constructive review to help you get it merged. Every contributor matters.
 
+Active contributors are invited to join the LibreFang GitHub org — core participants who consistently contribute get commit access and a voice in project direction.
+
 This guide covers everything you need to get started, from setting up your development environment to submitting pull requests.
 
 ## Table of Contents

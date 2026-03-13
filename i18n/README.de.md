@@ -57,7 +57,7 @@ LibreFang wurde von [RightNow-AI/openfang](https://github.com/RightNow-AI/openfa
 
 | | OpenFang | LibreFang |
 |---|---------|-----------|
-| **Lizenz** | MIT | MIT |
+| **Lizenz** | MIT | MIT + Apache-2.0 |
 | **Governance** | Von einem Unternehmen kontrolliert | Community-Governance, transparente Entscheidungsfindung |
 | **PR-Richtlinie** | Nach Ermessen des Maintainers | Positive Beiträge werden unverändert gemergt; andere erhalten aktives Review mit Verbesserungsvorschlägen |
 | **Zuschreibung** | Nicht garantiert | Immer in Commits und Release-Notes beibehalten |
@@ -70,6 +70,7 @@ LibreFang wurde von [RightNow-AI/openfang](https://github.com/RightNow-AI/openfa
 - **Aktives Code-Review.** PRs, die Änderungen brauchen, erhalten detailliertes, konstruktives Feedback — keine Stille. Wir helfen dir beim Ausliefern.
 - **Vollständige Zuschreibung.** Wenn ein Maintainer deinen Patch anpasst, bleibt dein Name in den Commit-Metadaten (`Co-authored-by`) und Release-Notes. Einen PR zu schließen und privat neu zu implementieren ist durch unsere [Governance](../GOVERNANCE.md) ausdrücklich verboten.
 - **Offene Governance.** Technische Entscheidungen finden in Issues und PRs statt, nicht hinter verschlossenen Türen. Siehe [`GOVERNANCE.md`](../GOVERNANCE.md) und [`MAINTAINERS.md`](../MAINTAINERS.md).
+- **Mach mit.** Aktive Mitwirkende werden eingeladen, der LibreFang GitHub-Organisation beizutreten. Kernbeteiligte, die kontinuierlich beitragen, erhalten Commit-Zugang und Mitspracherecht bei der Projektrichtung.
 
 ---
 

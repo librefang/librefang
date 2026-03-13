@@ -25,6 +25,7 @@ LibreFang — "libre" as in freedom — exists to maintain the codebase as a tru
 - **Closing a pull request and re-implementing it privately without attribution is explicitly prohibited.**
 - Large design changes should start as an issue so contributors can align before doing heavy implementation work.
 - All types of contributions are valued equally: code, documentation, tests, translations, packaging, issue triage, and community support.
+- Active contributors are invited to join the LibreFang GitHub organization. Core participants who demonstrate sustained, quality contributions are granted commit access and a voice in project governance.
 
 ## Review Expectations
 

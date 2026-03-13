@@ -57,7 +57,7 @@ LibreFang se bifurcó de [RightNow-AI/openfang](https://github.com/RightNow-AI/o
 
 | | OpenFang | LibreFang |
 |---|---------|-----------|
-| **Licencia** | MIT | MIT |
+| **Licencia** | MIT | MIT + Apache-2.0 |
 | **Gobernanza** | Controlada por una empresa | Gobernanza comunitaria, toma de decisiones transparente |
 | **Política de PRs** | A discreción del mantenedor | Contribuciones positivas fusionadas tal cual; las demás reciben revisión activa con sugerencias de mejora |
 | **Atribución** | Sin garantía | Siempre preservada en commits y notas de lanzamiento |
@@ -70,6 +70,7 @@ LibreFang se bifurcó de [RightNow-AI/openfang](https://github.com/RightNow-AI/o
 - **Revisión de código activa.** Los PRs que necesitan cambios reciben retroalimentación detallada y constructiva — no silencio. Te ayudamos a entregar.
 - **Atribución completa.** Si un mantenedor adapta tu parche, tu nombre permanece en los metadatos del commit (`Co-authored-by`) y en las notas de lanzamiento. Cerrar un PR y reimplementarlo en privado está explícitamente prohibido por nuestra [gobernanza](../GOVERNANCE.md).
 - **Gobernanza abierta.** Las decisiones técnicas ocurren en issues y PRs, no a puerta cerrada. Ver [`GOVERNANCE.md`](../GOVERNANCE.md) y [`MAINTAINERS.md`](../MAINTAINERS.md).
+- **Únete a nosotros.** Los contribuidores activos son invitados a unirse a la org de LibreFang en GitHub. Los participantes principales que contribuyen consistentemente obtienen acceso de commit y voz en la dirección del proyecto.
 
 ---
 
