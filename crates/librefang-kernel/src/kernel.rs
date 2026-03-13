@@ -1098,9 +1098,11 @@ impl LibreFangKernel {
 
                     // Apply default_model to restored agents.
                     //
-                    // Two cases:
+                    // Three cases:
                     // 1. Agent has empty/default provider → always apply default_model
-                    // 2. Agent named "assistant" (auto-spawned) → update to match
+                    // 2. Agent's source TOML defines provider="default" → the DB value
+                    //    is a stale resolved provider from a previous config; override it
+                    // 3. Agent named "assistant" (auto-spawned) → update to match
                     //    default_model so config.toml changes take effect on restart
                     {
                         let dm = &kernel.config.default_model;
@@ -1108,9 +1110,28 @@ impl LibreFangKernel {
                             || restored_entry.manifest.model.provider == "default";
                         let is_default_model = restored_entry.manifest.model.model.is_empty()
                             || restored_entry.manifest.model.model == "default";
+
+                        // Also check the source TOML: if the agent definition says
+                        // provider="default", the persisted value is stale and must
+                        // be overridden with the current default_model.
+                        let toml_says_default = toml_path.exists()
+                            && std::fs::read_to_string(&toml_path)
+                                .ok()
+                                .and_then(|s| {
+                                    toml::from_str::<librefang_types::agent::AgentManifest>(&s).ok()
+                                })
+                                .map(|m| {
+                                    (m.model.provider.is_empty() || m.model.provider == "default")
+                                        && (m.model.model.is_empty() || m.model.model == "default")
+                                })
+                                .unwrap_or(false);
+
                         let is_auto_spawned = restored_entry.name == "assistant"
                             && restored_entry.manifest.description == "General-purpose assistant";
-                        if is_default_provider && is_default_model || is_auto_spawned {
+                        if is_default_provider && is_default_model
+                            || toml_says_default
+                            || is_auto_spawned
+                        {
                             if !dm.provider.is_empty() {
                                 restored_entry.manifest.model.provider = dm.provider.clone();
                             }
