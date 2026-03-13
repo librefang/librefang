@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["coding", "implementation", "rust", "python"]
 
+[metadata.routing]
+aliases = ["write code", "implement feature", "fix bug", "coding task", "software engineer"]
+weak_aliases = ["refactor", "implementation", "patch", "code change"]
+
 [model]
 provider = "default"
 model = "default"

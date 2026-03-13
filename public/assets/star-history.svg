@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="320" viewBox="0 0 800 320" role="img" aria-labelledby="title desc">
+  <title id="title">Star History for librefang/librefang</title>
+  <desc id="desc">Cumulative GitHub stars over time for librefang/librefang</desc>
+  <style>
+    .bg { fill: #0f172a; }
+    .panel { fill: #111827; stroke: #334155; stroke-width: 1; }
+    .grid { stroke: #243244; stroke-width: 1; }
+    .axis { stroke: #475569; stroke-width: 1.25; }
+    .line { fill: none; stroke: #22c55e; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
+    .area { fill: url(#areaGradient); }
+    .title { font: 700 22px ui-sans-serif, system-ui, -apple-system, sans-serif; fill: #f8fafc; }
+    .subtitle { font: 400 12px ui-sans-serif, system-ui, -apple-system, sans-serif; fill: #94a3b8; }
+    .axis-label { font: 400 11px ui-sans-serif, system-ui, -apple-system, sans-serif; fill: #94a3b8; }
+    .value { font: 700 28px ui-sans-serif, system-ui, -apple-system, sans-serif; fill: #f8fafc; }
+  </style>
+  <defs>
+    <linearGradient id="areaGradient" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0%" stop-color="#22c55e" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#22c55e" stop-opacity="0.02" />
+    </linearGradient>
+  </defs>
+  <rect width="800" height="320" rx="18" class="bg" />
+  <rect x="12" y="12" width="776" height="296" rx="14" class="panel" />
+  <text x="30" y="52" class="title">Star History</text>
+  <text x="30" y="74" class="subtitle">librefang/librefang</text>
+  <text x="770" y="52" class="value" text-anchor="end">4</text>
+  <text x="770" y="74" class="subtitle" text-anchor="end">Updated 2026-03-12 23:53 UTC</text>
+  <line x1="68" y1="274.00" x2="772" y2="274.00" class="grid" />
+<line x1="68" y1="152.00" x2="772" y2="152.00" class="grid" />
+<line x1="68" y1="30.00" x2="772" y2="30.00" class="grid" />
+  <line x1="68" y1="274" x2="772" y2="274" class="axis" />
+  <line x1="68" y1="30" x2="68" y2="274" class="axis" />
+  <path d="M 68,274 L 68.00,274.00 L 420.00,30.00 L 772.00,30.00 L 772,274 Z" class="area" />
+  <polyline points="68.00,274.00 420.00,30.00 772.00,30.00" class="line" />
+  <text x="68.00" y="306" class="axis-label" text-anchor="middle">2026-03-11</text>
+<text x="420.00" y="306" class="axis-label" text-anchor="middle">2026-03-12</text>
+<text x="772.00" y="306" class="axis-label" text-anchor="middle">2026-03-13</text>
+  <text x="58" y="278.00" class="axis-label" text-anchor="end">0</text>
+<text x="58" y="156.00" class="axis-label" text-anchor="end">2</text>
+<text x="58" y="34.00" class="axis-label" text-anchor="end">4</text>
+</svg>

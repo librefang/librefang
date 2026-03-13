@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["travel", "planning", "itinerary", "booking", "logistics", "vacation"]
 
+[metadata.routing]
+aliases = ["trip itinerary", "travel plan", "vacation planning", "booking research", "travel logistics"]
+weak_aliases = ["itinerary", "travel", "vacation", "hotel", "flight"]
+
 [model]
 provider = "default"
 model = "default"

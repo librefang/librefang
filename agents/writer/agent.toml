@@ -4,6 +4,10 @@ description = "Content writer. Creates documentation, articles, and technical wr
 author = "librefang"
 module = "builtin:chat"
 
+[metadata.routing]
+aliases = ["write article", "draft content", "write blog post", "content writing", "marketing copy"]
+weak_aliases = ["writing", "article", "copywriting", "draft"]
+
 [model]
 provider = "default"
 model = "default"

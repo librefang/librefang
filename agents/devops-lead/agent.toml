@@ -4,6 +4,10 @@ description = "DevOps lead. Manages CI/CD, infrastructure, deployments, monitori
 author = "librefang"
 module = "builtin:chat"
 
+[metadata.routing]
+aliases = ["ci cd", "deployment pipeline", "infrastructure ops", "incident response", "production operations"]
+weak_aliases = ["devops", "deployment", "kubernetes", "terraform", "infra"]
+
 [model]
 provider = "default"
 model = "default"

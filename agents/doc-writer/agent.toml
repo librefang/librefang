@@ -4,6 +4,10 @@ description = "Technical writer. Creates documentation, README files, API docs, 
 author = "librefang"
 module = "builtin:chat"
 
+[metadata.routing]
+aliases = ["write documentation", "technical documentation", "api documentation", "architecture guide", "readme update"]
+weak_aliases = ["docs", "readme", "tutorial", "reference doc"]
+
 [model]
 provider = "default"
 model = "default"

@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["education", "teaching", "tutoring", "learning", "explanation", "knowledge"]
 
+[metadata.routing]
+aliases = ["teach me", "explain this concept", "tutoring session", "study plan", "learning support"]
+weak_aliases = ["tutoring", "teaching", "learn", "explanation"]
+
 [model]
 provider = "default"
 model = "default"

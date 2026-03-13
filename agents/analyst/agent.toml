@@ -4,6 +4,10 @@ description = "Data analyst. Processes data, generates insights, creates reports
 author = "librefang"
 module = "builtin:chat"
 
+[metadata.routing]
+aliases = ["data analysis", "analyze data", "analytics", "metrics analysis", "report analysis"]
+weak_aliases = ["dashboard", "kpi", "insights", "reporting"]
+
 [model]
 provider = "default"
 model = "default"

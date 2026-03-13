@@ -4,6 +4,10 @@ description = "Project planner. Creates project plans, breaks down epics, estima
 author = "librefang"
 module = "builtin:chat"
 
+[metadata.routing]
+aliases = ["project plan", "roadmap planning", "task breakdown", "delivery plan", "execution plan"]
+weak_aliases = ["timeline", "milestones", "dependencies", "plan"]
+
 [model]
 provider = "default"
 model = "default"

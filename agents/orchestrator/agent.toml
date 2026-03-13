@@ -4,6 +4,10 @@ description = "Meta-agent that decomposes complex tasks, delegates to specialist
 author = "librefang"
 module = "builtin:chat"
 
+[metadata.routing]
+aliases = ["multi agent", "coordinate specialists", "delegate tasks", "complex workflow", "break this into tasks"]
+weak_aliases = ["orchestrate", "delegate", "multi-step", "coordination"]
+
 [model]
 provider = "default"
 model = "default"

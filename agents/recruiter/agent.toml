@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["recruiting", "hiring", "resume", "outreach", "talent", "hr"]
 
+[metadata.routing]
+aliases = ["candidate screening", "recruiting outreach", "resume review", "hiring pipeline", "job description"]
+weak_aliases = ["recruiting", "hiring", "resume", "talent"]
+
 [model]
 provider = "default"
 model = "default"

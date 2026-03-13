@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["review", "code-quality", "best-practices"]
 
+[metadata.routing]
+aliases = ["code review", "review this pr", "review this patch", "review this diff", "pull request review"]
+weak_aliases = ["review", "pr review", "best practices"]
+
 [model]
 provider = "default"
 model = "default"

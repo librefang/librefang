@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["testing", "qa", "validation"]
 
+[metadata.routing]
+aliases = ["test plan", "write tests", "quality assurance", "test strategy", "validation plan"]
+weak_aliases = ["testing", "qa", "validation", "test coverage"]
+
 [model]
 provider = "default"
 model = "default"

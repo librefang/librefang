@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["translation", "languages", "localization", "multilingual", "communication", "i18n"]
 
+[metadata.routing]
+aliases = ["translate document", "translation task", "localize content", "language translation", "i18n review"]
+weak_aliases = ["translation", "localization", "multilingual", "translate"]
+
 [model]
 provider = "default"
 model = "default"

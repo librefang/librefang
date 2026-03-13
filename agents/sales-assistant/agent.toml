@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["sales", "crm", "outreach", "pipeline", "prospecting", "deals"]
 
+[metadata.routing]
+aliases = ["sales outreach", "crm update", "prospecting", "pipeline review", "deal tracking"]
+weak_aliases = ["sales", "crm", "pipeline", "leads"]
+
 [model]
 provider = "default"
 model = "default"

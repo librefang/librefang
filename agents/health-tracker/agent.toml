@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["health", "wellness", "fitness", "medication", "habits", "tracking"]
 
+[metadata.routing]
+aliases = ["health tracking", "fitness tracking", "medication reminder", "wellness log", "habit tracking"]
+weak_aliases = ["sleep log", "workout log", "wellness", "medication"]
+
 [model]
 provider = "default"
 model = "default"

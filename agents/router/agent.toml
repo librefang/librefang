@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:router"
 tags = ["router", "dispatcher", "system", "deterministic"]
 
+[metadata.routing]
+aliases = ["route this request", "dispatch to the right agent", "pick the best agent", "agent routing", "task router"]
+weak_aliases = ["router", "dispatcher", "routing", "triage"]
+
 [model]
 provider = "default"
 model = "default"

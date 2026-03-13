@@ -26,6 +26,7 @@
 use crate::host_functions;
 use crate::kernel_handle::KernelHandle;
 use librefang_types::capability::Capability;
+use serde_json::json;
 use std::sync::Arc;
 use tracing::debug;
 use wasmtime::*;
@@ -285,64 +286,18 @@ impl WasmSandbox {
                 "host_call",
                 |mut caller: Caller<'_, GuestState>,
                  request_ptr: i32,
-                 request_len: i32|
-                 -> Result<i64, anyhow::Error> {
-                    // Read request from guest memory
-                    let memory = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .ok_or_else(|| anyhow::anyhow!("no memory export"))?;
-
-                    let data = memory.data(&caller);
-                    let start = request_ptr as usize;
-                    let end = start + request_len as usize;
-                    if end > data.len() {
-                        anyhow::bail!("host_call: request out of bounds");
+                 request_len: i32| {
+                    match Self::host_call(&mut caller, request_ptr, request_len) {
+                        Ok(packed) => packed,
+                        Err(error) => {
+                            tracing::error!(agent = %caller.data().agent_id, error = %error, "host_call failed");
+                            Self::write_guest_json(
+                                &mut caller,
+                                &json!({ "error": format!("host_call failed: {error}") }),
+                            )
+                            .unwrap_or(0)
+                        }
                     }
-                    let request_bytes = data[start..end].to_vec();
-
-                    // Parse request
-                    let request: serde_json::Value = serde_json::from_slice(&request_bytes)?;
-                    let method = request
-                        .get("method")
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let params = request
-                        .get("params")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null);
-
-                    // Dispatch to capability-checked handler
-                    let response = host_functions::dispatch(caller.data(), &method, &params);
-
-                    // Serialize response JSON
-                    let response_bytes = serde_json::to_vec(&response)?;
-                    let len = response_bytes.len() as i32;
-
-                    // Allocate space in guest for response
-                    let alloc_fn = caller
-                        .get_export("alloc")
-                        .and_then(|e| e.into_func())
-                        .ok_or_else(|| anyhow::anyhow!("no alloc export"))?;
-                    let alloc_typed = alloc_fn.typed::<i32, i32>(&caller)?;
-                    let ptr = alloc_typed.call(&mut caller, len)?;
-
-                    // Write response into guest memory
-                    let memory = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .ok_or_else(|| anyhow::anyhow!("no memory export"))?;
-                    let mem_data = memory.data_mut(&mut caller);
-                    let dest_start = ptr as usize;
-                    let dest_end = dest_start + response_bytes.len();
-                    if dest_end > mem_data.len() {
-                        anyhow::bail!("host_call: response exceeds memory bounds");
-                    }
-                    mem_data[dest_start..dest_end].copy_from_slice(&response_bytes);
-
-                    // Pack (ptr, len) into i64
-                    Ok(((ptr as i64) << 32) | (len as i64))
                 },
             )
             .map_err(|e| SandboxError::Compilation(e.to_string()))?;
@@ -352,38 +307,108 @@ impl WasmSandbox {
             .func_wrap(
                 "librefang",
                 "host_log",
-                |mut caller: Caller<'_, GuestState>,
+                |caller: Caller<'_, GuestState>,
                  level: i32,
                  msg_ptr: i32,
-                 msg_len: i32|
-                 -> Result<(), anyhow::Error> {
-                    let memory = caller
-                        .get_export("memory")
-                        .and_then(|e| e.into_memory())
-                        .ok_or_else(|| anyhow::anyhow!("no memory export"))?;
+                 msg_len: i32| {
+                    let mut caller = caller;
+                    match Self::read_guest_bytes(&mut caller, msg_ptr, msg_len, "host_log") {
+                        Ok(bytes) => {
+                            let msg = std::str::from_utf8(&bytes).unwrap_or("<invalid utf8>");
+                            let agent_id = &caller.data().agent_id;
 
-                    let data = memory.data(&caller);
-                    let start = msg_ptr as usize;
-                    let end = start + msg_len as usize;
-                    if end > data.len() {
-                        anyhow::bail!("host_log: pointer out of bounds");
+                            match level {
+                                0 => tracing::trace!(agent = %agent_id, "[wasm] {msg}"),
+                                1 => tracing::debug!(agent = %agent_id, "[wasm] {msg}"),
+                                2 => tracing::info!(agent = %agent_id, "[wasm] {msg}"),
+                                3 => tracing::warn!(agent = %agent_id, "[wasm] {msg}"),
+                                _ => tracing::error!(agent = %agent_id, "[wasm] {msg}"),
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(agent = %caller.data().agent_id, error = %error, "host_log failed");
+                        }
                     }
-                    let msg = std::str::from_utf8(&data[start..end]).unwrap_or("<invalid utf8>");
-                    let agent_id = &caller.data().agent_id;
-
-                    match level {
-                        0 => tracing::trace!(agent = %agent_id, "[wasm] {msg}"),
-                        1 => tracing::debug!(agent = %agent_id, "[wasm] {msg}"),
-                        2 => tracing::info!(agent = %agent_id, "[wasm] {msg}"),
-                        3 => tracing::warn!(agent = %agent_id, "[wasm] {msg}"),
-                        _ => tracing::error!(agent = %agent_id, "[wasm] {msg}"),
-                    }
-                    Ok(())
                 },
             )
             .map_err(|e| SandboxError::Compilation(e.to_string()))?;
 
         Ok(())
+    }
+
+    fn host_call(
+        caller: &mut Caller<'_, GuestState>,
+        request_ptr: i32,
+        request_len: i32,
+    ) -> anyhow::Result<i64> {
+        let request_bytes = Self::read_guest_bytes(caller, request_ptr, request_len, "host_call")?;
+        let request: serde_json::Value = serde_json::from_slice(&request_bytes)?;
+        let method = request
+            .get("method")
+            .and_then(|m| m.as_str())
+            .unwrap_or("")
+            .to_string();
+        let params = request
+            .get("params")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let response = host_functions::dispatch(caller.data(), &method, &params);
+
+        Self::write_guest_json(caller, &response)
+    }
+
+    fn read_guest_bytes(
+        caller: &mut Caller<'_, GuestState>,
+        ptr: i32,
+        len: i32,
+        op: &str,
+    ) -> anyhow::Result<Vec<u8>> {
+        let memory = caller
+            .get_export("memory")
+            .and_then(|e| e.into_memory())
+            .ok_or_else(|| anyhow::anyhow!("{op}: no memory export"))?;
+
+        let start = ptr as usize;
+        let end = start
+            .checked_add(len as usize)
+            .ok_or_else(|| anyhow::anyhow!("{op}: pointer overflow"))?;
+        let data = memory.data(&mut *caller);
+        if end > data.len() {
+            anyhow::bail!("{op}: pointer out of bounds");
+        }
+
+        Ok(data[start..end].to_vec())
+    }
+
+    fn write_guest_json(
+        caller: &mut Caller<'_, GuestState>,
+        value: &serde_json::Value,
+    ) -> anyhow::Result<i64> {
+        let response_bytes = serde_json::to_vec(value)?;
+        let len = response_bytes.len() as i32;
+
+        let alloc_fn = caller
+            .get_export("alloc")
+            .and_then(|e| e.into_func())
+            .ok_or_else(|| anyhow::anyhow!("host_call: no alloc export"))?;
+        let alloc_typed = alloc_fn.typed::<i32, i32>(&mut *caller)?;
+        let ptr = alloc_typed.call(&mut *caller, len)?;
+
+        let memory = caller
+            .get_export("memory")
+            .and_then(|e| e.into_memory())
+            .ok_or_else(|| anyhow::anyhow!("host_call: no memory export"))?;
+        let dest_start = ptr as usize;
+        let dest_end = dest_start
+            .checked_add(response_bytes.len())
+            .ok_or_else(|| anyhow::anyhow!("host_call: response pointer overflow"))?;
+        let mem_data = memory.data_mut(caller);
+        if dest_end > mem_data.len() {
+            anyhow::bail!("host_call: response exceeds memory bounds");
+        }
+        mem_data[dest_start..dest_end].copy_from_slice(&response_bytes);
+
+        Ok(((ptr as i64) << 32) | (len as i64))
     }
 }
 

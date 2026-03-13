@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["meetings", "notes", "action-items", "agenda", "follow-up", "productivity"]
 
+[metadata.routing]
+aliases = ["meeting notes", "meeting summary", "action items", "prepare agenda", "meeting follow up"]
+weak_aliases = ["agenda", "notes", "meeting recap"]
+
 [model]
 provider = "default"
 model = "default"

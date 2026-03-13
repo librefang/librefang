@@ -1146,30 +1146,16 @@ impl LibreFangKernel {
             }
         }
 
-        // If no agents exist (fresh install), spawn a default assistant
+        // If no agents exist (fresh install), spawn a default router.
         if kernel.registry.list().is_empty() {
-            info!("No agents found — spawning default assistant");
-            let dm = &kernel.config.default_model;
-            let manifest = AgentManifest {
-                name: "assistant".to_string(),
-                description: "General-purpose assistant".to_string(),
-                model: librefang_types::agent::ModelConfig {
-                    provider: dm.provider.clone(),
-                    model: dm.model.clone(),
-                    system_prompt: "You are a helpful AI assistant.".to_string(),
-                    api_key_env: if dm.api_key_env.is_empty() {
-                        None
-                    } else {
-                        Some(dm.api_key_env.clone())
-                    },
-                    base_url: dm.base_url.clone(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            };
+            info!("No agents found — spawning default router");
+            let manifest = router::load_template_manifest(&kernel.config.home_dir, "router")
+                .map_err(|e| {
+                    KernelError::BootFailed(format!("failed to load router template: {e}"))
+                })?;
             match kernel.spawn_agent(manifest) {
-                Ok(id) => info!(id = %id, "Default assistant spawned"),
-                Err(e) => warn!("Failed to spawn default assistant: {e}"),
+                Ok(id) => info!(id = %id, "Default router spawned"),
+                Err(e) => warn!("Failed to spawn default router: {e}"),
             }
         }
 
@@ -6422,6 +6408,29 @@ mod tests {
         assert!(
             entry.manifest.tool_blocklist.is_empty(),
             "hand activation should not set a runtime blocklist by default"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn test_boot_spawns_router_as_default_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-default-router-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+        let agents = kernel.registry.list();
+
+        assert!(
+            agents.iter().any(|entry| entry.name == "router"),
+            "fresh kernel boot should auto-spawn a router agent"
         );
 
         kernel.shutdown();

@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["security", "audit", "vulnerability"]
 
+[metadata.routing]
+aliases = ["security audit", "vulnerability review", "threat model", "security review", "attack surface review"]
+weak_aliases = ["security", "vulnerability", "owasp", "audit"]
+
 [model]
 provider = "default"
 model = "default"

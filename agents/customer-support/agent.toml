@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["support", "customer-service", "tickets", "helpdesk", "communication", "resolution"]
 
+[metadata.routing]
+aliases = ["customer support", "support ticket", "help desk", "handle ticket", "reply to customer"]
+weak_aliases = ["ticket", "support", "customer issue"]
+
 [model]
 provider = "default"
 model = "default"

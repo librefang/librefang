@@ -34,8 +34,8 @@
 </p>
 
 <p align="center">
-  <a href="https://star-history.com/#librefang/librefang">
-    <img src="https://api.star-history.com/svg?repos=librefang/librefang&type=date" width="500" alt="Star History" />
+  <a href="https://github.com/librefang/librefang/stargazers">
+    <img src="./public/assets/star-history.svg" width="500" alt="Star History" />
   </a>
 </p>
 
