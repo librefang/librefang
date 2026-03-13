@@ -34,3 +34,5 @@ colored = { workspace = true }
 libc = "0.2"
 fluent = "0.16"
 unic-langid = "0.9"
+open = "5.3.3"
+toml_edit = "0.25.4"

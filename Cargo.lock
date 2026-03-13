@@ -3613,12 +3613,14 @@ dependencies = [
  "librefang-runtime",
  "librefang-skills",
  "librefang-types",
+ "open",
  "ratatui",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
+ "toml_edit 0.25.4+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "unic-langid",
@@ -7579,6 +7581,7 @@ dependencies = [
  "indexmap 2.13.0",
  "toml_datetime 1.0.0+spec-1.1.0",
  "toml_parser",
+ "toml_writer",
  "winnow 0.7.15",
 ]
 

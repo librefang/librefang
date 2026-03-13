@@ -5990,6 +5990,14 @@ fn cmd_auth_chatgpt() {
 
     let result: Result<(), String> = rt.block_on(async {
         let (_callback_url, port) = chatgpt_oauth::start_browser_auth().await?;
+
+        // Open the auth form in the default browser
+        let auth_url = format!("http://127.0.0.1:{port}/auth");
+        if let Err(e) = open::that(&auth_url) {
+            eprintln!("Could not open browser automatically: {e}");
+            eprintln!("Please open manually: {auth_url}");
+        }
+
         let auth_result = chatgpt_oauth::run_callback_server(port).await?;
 
         // Save the token to config
@@ -6031,7 +6039,29 @@ fn cmd_auth_chatgpt() {
             "\nChatGPT session token saved to {}",
             secrets_path.display()
         );
-        println!("You can now use provider = \"chatgpt\" in your config.toml.");
+
+        // Auto-update config.toml to use chatgpt provider
+        let config_path = home.join("config.toml");
+        let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let mut doc = config_str
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| format!("Failed to parse config.toml: {e}"))?;
+
+        let dm = doc
+            .entry("default_model")
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or("default_model is not a table")?;
+        dm.insert("provider", toml_edit::value("chatgpt"));
+        dm.insert("api_key_env", toml_edit::value("CHATGPT_SESSION_TOKEN"));
+        if !dm.contains_key("model") {
+            dm.insert("model", toml_edit::value("gpt-4o"));
+        }
+
+        std::fs::write(&config_path, doc.to_string())
+            .map_err(|e| format!("Failed to write config.toml: {e}"))?;
+
+        println!("config.toml updated: provider = \"chatgpt\"");
         Ok(())
     });
 
