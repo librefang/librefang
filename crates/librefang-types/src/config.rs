@@ -1157,49 +1157,34 @@ fn default_http_compat_input_schema() -> serde_json::Value {
 }
 
 /// HTTP request method for the built-in HTTP compatibility transport.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpCompatMethod {
     Get,
+    #[default]
     Post,
     Put,
     Patch,
     Delete,
 }
 
-impl Default for HttpCompatMethod {
-    fn default() -> Self {
-        Self::Post
-    }
-}
-
 /// How tool arguments are mapped onto an outbound HTTP request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpCompatRequestMode {
+    #[default]
     JsonBody,
     Query,
     None,
 }
 
-impl Default for HttpCompatRequestMode {
-    fn default() -> Self {
-        Self::JsonBody
-    }
-}
-
 /// How the built-in HTTP compatibility transport formats responses.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HttpCompatResponseMode {
+    #[default]
     Json,
     Text,
-}
-
-impl Default for HttpCompatResponseMode {
-    fn default() -> Self {
-        Self::Json
-    }
 }
 
 /// Header injection config for the built-in HTTP compatibility transport.

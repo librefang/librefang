@@ -5110,8 +5110,9 @@ impl LibreFangKernel {
                 {
                     continue;
                 }
-                if let Some(raw_tool_name) =
-                    tool.name.strip_prefix(&format!("mcp_{}_", normalized_server))
+                if let Some(raw_tool_name) = tool
+                    .name
+                    .strip_prefix(&format!("mcp_{}_", normalized_server))
                 {
                     servers
                         .entry(normalized_server)
