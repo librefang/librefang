@@ -864,9 +864,7 @@ fn description_phrases(description: &str) -> Vec<String> {
         text = tail.to_string();
     }
 
-    let normalized = text
-        .replace("以及", "、")
-        .replace(['并', '与'], "、");
+    let normalized = text.replace("以及", "、").replace(['并', '与'], "、");
     let mut phrases = Vec::new();
 
     for raw in normalized.split(|ch| "、，,。；;：:（）()/".contains(ch)) {
