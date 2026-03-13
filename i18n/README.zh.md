@@ -3,11 +3,11 @@
 </p>
 
 <h1 align="center">LibreFang</h1>
-<h3 align="center">社区维护的 Agent 操作系统</h3>
+<h3 align="center">自由的 Agent 操作系统 — Libre 意味着自由</h3>
 
 <p align="center">
   使用 Rust 编写的开源 Agent OS。137K 代码行。14 个 crate。1767+ 测试。零 clippy 警告。<br/>
-  <strong>派生自 `RightNow-AI/openfang`。透明治理。保留署名。与现有 `librefang` CLI 兼容。</strong>
+  <strong>派生自 <a href="https://github.com/RightNow-AI/openfang">RightNow-AI/openfang</a>。真正的开放治理。欢迎贡献者。有益的 PR 直接合并。</strong>
 </p>
 
 <p align="center">
@@ -38,11 +38,38 @@
 
 ---
 
-> **LibreFang 是 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) 的社区维护分支。**
+> **LibreFang 是 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) 的社区分支。**
 >
-> 代码库、二进制文件、crate 名称和配置路径已使用 `librefang`。LibreFang 采用不同的项目治理方式：我们积极接受社区贡献，在公开场合审查它们，通过正常的 GitHub 流程合并被接受的工作，并在改编代码时保留贡献者署名。
+> **"Libre"** 意味着自由。我们选择这个名字，因为我们相信开源项目应该是真正开放的——不仅仅是许可证开放，更是治理、贡献和协作的全方位开放。LibreFang 走的是一条与上游项目截然不同的路：我们欢迎每一位贡献者，公开审查每一个 PR，合并一切有益于项目的工作。
 
-> **社区状态：** 欢迎提交 issue、PR、reviewer 和维护者。
+> **我们对贡献者的承诺：**
+> - 如果你的 PR 对项目有积极帮助，**我们会原样合并**，保留完整署名。
+> - 如果你的 PR 需要改进，**我们会积极 review 并提出具体的改进意见**，帮助你把 PR 推到可合并状态——我们不会无声关闭 PR。
+> - 每一位贡献者都受到重视。Bug 修复、文档、测试、新功能、打包、翻译——所有贡献都很重要。
+
+---
+
+## 为什么选择 LibreFang？——与 OpenFang 的区别
+
+LibreFang 从 [RightNow-AI/openfang](https://github.com/RightNow-AI/openfang) 分支而来，因为我们相信一种不同的开源项目运作方式。
+
+### "Libre" 意味着什么
+
+| | OpenFang | LibreFang |
+|---|---------|-----------|
+| **许可证** | MIT | MIT |
+| **治理模式** | 单一公司控制 | 社区治理，决策透明 |
+| **PR 政策** | 取决于维护者意愿 | 有益贡献直接合并；需改进的 PR 会收到积极的 review 和改进建议 |
+| **署名** | 无保障 | 始终保留在 commit 和 release notes 中 |
+| **贡献者** | 参与度有限 | 积极欢迎——我们需要你 |
+| **Review 响应** | 无承诺 | 7 天内首次响应 |
+
+### 我们的承诺
+
+- **合并优先。** 如果你的 PR 对项目发展有帮助，我们合并它。不搞门禁，不"内部重写"。
+- **积极代码审查。** 需要修改的 PR 会收到详细、建设性的反馈——不是沉默。我们帮你把代码推上线。
+- **完整署名。** 维护者改编你的补丁时，你的名字会保留在 commit 元数据（`Co-authored-by`）和发布说明中。关闭 PR 后私自重新实现的行为在我们的[治理文档](../GOVERNANCE.md)中被明确禁止。
+- **开放治理。** 技术决策在 issue 和 PR 中公开进行，不在幕后。参见 [`GOVERNANCE.md`](../GOVERNANCE.md) 和 [`MAINTAINERS.md`](../MAINTAINERS.md)。
 
 ---
 

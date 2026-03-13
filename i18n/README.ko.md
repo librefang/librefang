@@ -3,11 +3,11 @@
 </p>
 
 <h1 align="center">LibreFang</h1>
-<h3 align="center">커뮤니티 관리형 Agent OS</h3>
+<h3 align="center">자유로운 Agent OS — Libre는 자유를 의미합니다</h3>
 
 <p align="center">
   Rust로 작성된 오픈소스 Agent OS. 137K 코드 라인. 14개 crate. 1767+ 테스트. 경고 없음.<br/>
-  <strong>`RightNow-AI/openfang`에서 포크. 투명한 거버넌스. 기여자 표시 유지. 기존 `librefang` CLI와 호환.</strong>
+  <strong><a href="https://github.com/RightNow-AI/openfang">RightNow-AI/openfang</a>에서 포크. 진정한 오픈 거버넌스. 기여자 환영. 프로젝트에 도움이 되는 PR은 병합됩니다.</strong>
 </p>
 
 <p align="center">
@@ -38,11 +38,38 @@
 
 ---
 
-> **LibreFang은 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang)의 커뮤니티 관리 포크입니다.**
+> **LibreFang은 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang)의 커뮤니티 포크입니다.**
 >
-> 코드베이스, 바이너리, crate 이름, 설정 경로는 `librefang`을 사용합니다. LibreFang은 다른 프로젝트 거버넌스를 채택합니다: 우리는 커뮤니티 기여를 적극적으로 수용하고, 공개적으로 검토하며, 일반적인 GitHub 플로우로 병합하고, 코드를改编할 때 기여자 표시를 유지합니다.
+> **"Libre"** 는 자유를 의미합니다. 오픈소스 프로젝트는 라이선스뿐만 아니라 거버넌스, 기여, 협업에서도 진정으로 개방적이어야 한다고 믿습니다. LibreFang은 업스트림 프로젝트와 근본적으로 다른 길을 걷고 있습니다: 모든 기여자를 환영하고, 모든 PR을 공개적으로 검토하며, 프로젝트에 도움이 되는 작업을 병합합니다.
 
-> **커뮤니티 상태:** 이슈, PR, 리뷰어, 메인테이너를 환영합니다.
+> **기여자에 대한 약속:**
+> - PR이 프로젝트에 긍정적인 도움이 되면, **전체 귀속을 유지하면서 그대로 병합**합니다.
+> - PR에 개선이 필요하면, **적극적으로 리뷰하고 구체적인 개선 제안을 제공**하여 병합을 돕습니다 — PR을 조용히 닫지 않습니다.
+> - 모든 기여자를 소중히 여깁니다. 버그 수정, 문서, 테스트, 기능, 패키징, 번역 — 모든 기여가 중요합니다.
+
+---
+
+## 왜 LibreFang인가? — OpenFang과의 차이
+
+LibreFang은 오픈소스 프로젝트를 운영하는 다른 방식을 믿기 때문에 [RightNow-AI/openfang](https://github.com/RightNow-AI/openfang)에서 포크했습니다.
+
+### "Libre"의 의미
+
+| | OpenFang | LibreFang |
+|---|---------|-----------|
+| **라이선스** | MIT | MIT |
+| **거버넌스** | 단일 회사 통제 | 커뮤니티 거버넌스, 투명한 의사결정 |
+| **PR 정책** | 메인테이너 재량 | 긍정적 기여는 그대로 병합; 나머지는 개선 제안과 함께 적극적 리뷰 |
+| **귀속** | 보장 없음 | 커밋과 릴리스 노트에 항상 유지 |
+| **기여자** | 제한적 참여 | 적극 환영 — 당신이 필요합니다 |
+| **리뷰 SLA** | 약속 없음 | 7일 이내 첫 응답 |
+
+### 우리의 약속
+
+- **병합 우선.** PR이 프로젝트 발전에 도움이 되면, 병합합니다. 게이트키핑 없음, "내부에서 다시 작성" 없음.
+- **적극적인 코드 리뷰.** 수정이 필요한 PR은 상세하고 건설적인 피드백을 받습니다 — 침묵이 아닌. 코드 출시를 돕습니다.
+- **완전한 귀속 유지.** 메인테이너가 패치를 수정할 때, 커밋 메타데이터(`Co-authored-by`)와 릴리스 노트에 이름이 유지됩니다. PR을 닫고 비공개로 재구현하는 것은 [거버넌스](../GOVERNANCE.md)에서 명시적으로 금지됩니다.
+- **오픈 거버넌스.** 기술적 결정은 이슈와 PR에서 공개적으로 이루어지며, 비공개가 아닙니다. [`GOVERNANCE.md`](../GOVERNANCE.md)와 [`MAINTAINERS.md`](../MAINTAINERS.md)를 참조하세요.
 
 ---
 

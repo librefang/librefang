@@ -1,8 +1,10 @@
 # Contributing to LibreFang
 
-Thank you for your interest in contributing to LibreFang. This guide covers everything you need to get started, from setting up your development environment to submitting pull requests.
+Thank you for your interest in contributing to LibreFang! "Libre" means freedom, and we mean it — this project is built by its community.
 
-LibreFang is a community-maintained fork. For compatibility, the binary name, crate names, and most internal identifiers still use `librefang`.
+**Our promise:** if your contribution positively helps the project, we merge it as-is. If it needs improvement, we provide active, constructive review to help you get it merged. Every contributor matters.
+
+This guide covers everything you need to get started, from setting up your development environment to submitting pull requests.
 
 ## Table of Contents
 
@@ -332,7 +334,7 @@ tools = ["my_tool"]
 
 5. **One concern per PR**: Keep PRs focused. A single PR should address one feature, one bug fix, or one refactor -- not all three.
 
-6. **Review process**: At least one maintainer must approve before merge. Maintainers aim to give an initial response within 7 days and preserve contributor attribution when adapting accepted work. See `GOVERNANCE.md` for project policy.
+6. **Review process**: At least one maintainer must approve before merge. Maintainers give an initial response within 7 days. If your PR needs changes, we provide specific, actionable suggestions — we don't leave you guessing. Contributor attribution is always preserved. See `GOVERNANCE.md` for full project policy.
 
 7. **CI must pass**: All automated checks must be green before merge.
 
