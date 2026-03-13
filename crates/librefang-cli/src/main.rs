@@ -2756,6 +2756,54 @@ decay_rate = 0.05
             all_ok = false;
         }
 
+        // --- Check: Version update ---
+        {
+            let current_version = env!("CARGO_PKG_VERSION");
+            if !json {
+                ui::check_ok(&format!("CLI version: {current_version}"));
+            }
+            checks.push(serde_json::json!({"check": "cli_version", "status": "ok", "version": current_version}));
+
+            // Try to fetch latest release from GitHub (best-effort, 3s timeout)
+            let version_client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(3))
+                .build();
+            if let Ok(client) = version_client {
+                match client
+                    .get("https://api.github.com/repos/librefang/librefang/releases/latest")
+                    .header("User-Agent", format!("librefang-cli/{current_version}"))
+                    .send()
+                {
+                    Ok(resp) if resp.status().is_success() => {
+                        if let Ok(body) = resp.json::<serde_json::Value>() {
+                            if let Some(tag) = body.get("tag_name").and_then(|v| v.as_str()) {
+                                let latest = tag.strip_prefix('v').unwrap_or(tag);
+                                if latest != current_version {
+                                    if !json {
+                                        ui::check_warn(&format!(
+                                            "Update available: {current_version} -> {latest} (see https://github.com/librefang/librefang/releases)"
+                                        ));
+                                    }
+                                    checks.push(serde_json::json!({"check": "version_update", "status": "warn", "current": current_version, "latest": latest}));
+                                } else {
+                                    if !json {
+                                        ui::check_ok("CLI is up to date");
+                                    }
+                                    checks.push(serde_json::json!({"check": "version_update", "status": "ok"}));
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        if !json {
+                            ui::check_warn("Could not check for updates (network unavailable)");
+                        }
+                        checks.push(serde_json::json!({"check": "version_update", "status": "warn", "reason": "network_error"}));
+                    }
+                }
+            }
+        }
+
         // --- Check 4: Port availability ---
         // Read api_listen from config (default: 127.0.0.1:4545)
         let api_listen = {
@@ -2983,6 +3031,56 @@ decay_rate = 0.05
             ui::hint(&i18n::t("hint-set-key"));
         }
         all_ok = false;
+    }
+
+    // --- Check: Network connectivity to configured LLM provider endpoints ---
+    {
+        let provider_endpoints: &[(&str, &str, &str)] = &[
+            ("OPENAI_API_KEY", "OpenAI", "api.openai.com:443"),
+            ("ANTHROPIC_API_KEY", "Anthropic", "api.anthropic.com:443"),
+            ("GROQ_API_KEY", "Groq", "api.groq.com:443"),
+            ("DEEPSEEK_API_KEY", "DeepSeek", "api.deepseek.com:443"),
+            ("GEMINI_API_KEY", "Gemini", "generativelanguage.googleapis.com:443"),
+            ("GOOGLE_API_KEY", "Google", "generativelanguage.googleapis.com:443"),
+            ("OPENROUTER_API_KEY", "OpenRouter", "openrouter.ai:443"),
+            ("TOGETHER_API_KEY", "Together", "api.together.xyz:443"),
+            ("MISTRAL_API_KEY", "Mistral", "api.mistral.ai:443"),
+            ("FIREWORKS_API_KEY", "Fireworks", "api.fireworks.ai:443"),
+        ];
+
+        let configured: Vec<_> = provider_endpoints
+            .iter()
+            .filter(|(env_var, _, _)| std::env::var(env_var).is_ok())
+            .collect();
+
+        if !configured.is_empty() {
+            if !json {
+                println!("\n  Network Connectivity:");
+            }
+            for (env_var, name, endpoint) in &configured {
+                use std::net::{TcpStream, ToSocketAddrs};
+                let reachable = endpoint
+                    .to_socket_addrs()
+                    .ok()
+                    .and_then(|mut addrs| addrs.next())
+                    .map(|addr| {
+                        TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)).is_ok()
+                    })
+                    .unwrap_or(false);
+
+                if reachable {
+                    if !json {
+                        ui::check_ok(&format!("{name} endpoint reachable ({endpoint})"));
+                    }
+                    checks.push(serde_json::json!({"check": "network_connectivity", "provider": name, "endpoint": endpoint, "env_var": env_var, "status": "ok"}));
+                } else {
+                    if !json {
+                        ui::check_warn(&format!("{name} endpoint unreachable ({endpoint})"));
+                    }
+                    checks.push(serde_json::json!({"check": "network_connectivity", "provider": name, "endpoint": endpoint, "env_var": env_var, "status": "warn"}));
+                }
+            }
+        }
     }
 
     // --- Check 10: Channel token format validation ---
