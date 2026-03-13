@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["email", "communication", "triage", "drafting", "scheduling", "productivity"]
 
+[metadata.routing]
+aliases = ["draft email", "email reply", "inbox triage", "email follow up", "compose email"]
+weak_aliases = ["email", "inbox", "follow-up"]
+
 [model]
 provider = "default"
 model = "default"

@@ -4,6 +4,10 @@ description = "Data scientist. Analyzes datasets, builds models, creates visuali
 author = "librefang"
 module = "builtin:chat"
 
+[metadata.routing]
+aliases = ["data science", "build model", "train model", "statistical analysis", "machine learning"]
+weak_aliases = ["modeling", "forecast", "prediction", "statistics"]
+
 [model]
 provider = "default"
 model = "default"

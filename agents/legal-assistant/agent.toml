@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["legal", "contracts", "compliance", "research", "review", "documents"]
 
+[metadata.routing]
+aliases = ["legal review", "contract review", "compliance check", "legal research", "draft legal document"]
+weak_aliases = ["legal", "contract", "compliance"]
+
 [model]
 provider = "default"
 model = "default"

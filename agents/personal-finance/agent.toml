@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["finance", "budget", "expenses", "savings", "planning", "money"]
 
+[metadata.routing]
+aliases = ["budget planning", "expense analysis", "savings plan", "personal finance", "debt payoff plan"]
+weak_aliases = ["budget", "expenses", "savings", "debt"]
+
 [model]
 provider = "default"
 model = "default"

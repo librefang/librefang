@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["smart-home", "iot", "automation", "devices", "monitoring", "home"]
 
+[metadata.routing]
+aliases = ["smart home", "home automation", "iot automation", "device automation", "automation rule"]
+weak_aliases = ["iot", "smart devices", "home assistant"]
+
 [model]
 provider = "default"
 model = "default"

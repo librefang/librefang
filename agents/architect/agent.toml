@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["architecture", "design", "planning"]
 
+[metadata.routing]
+aliases = ["system design", "software architecture", "architecture review", "technical design", "design a system"]
+weak_aliases = ["architecture", "design doc", "tech spec"]
+
 [model]
 provider = "default"
 model = "default"

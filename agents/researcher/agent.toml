@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["research", "analysis", "web"]
 
+[metadata.routing]
+aliases = ["deep research", "web research", "investigate topic", "gather sources", "fact finding"]
+weak_aliases = ["research", "sources", "literature review", "web search"]
+
 [model]
 provider = "default"
 model = "default"

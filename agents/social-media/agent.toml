@@ -5,6 +5,10 @@ author = "librefang"
 module = "builtin:chat"
 tags = ["social-media", "content", "marketing", "engagement", "scheduling", "analytics"]
 
+[metadata.routing]
+aliases = ["social media plan", "content calendar", "post scheduling", "engagement strategy", "social campaign"]
+weak_aliases = ["social media", "content calendar", "engagement", "campaign"]
+
 [model]
 provider = "default"
 model = "default"

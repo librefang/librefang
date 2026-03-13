@@ -946,7 +946,7 @@ fn is_phrase_separator(ch: char) -> bool {
     ch == '\n'
         || ch == '\r'
         || ch == '\t'
-        || ch.is_ascii_punctuation()
+        || (ch.is_ascii_punctuation() && !matches!(ch, '-' | '_'))
         || matches!(
             ch,
             '\u{3001}' // 、
@@ -1053,7 +1053,6 @@ fn dedupe(values: Vec<String>) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::LibreFangKernel;
-    use librefang_types::agent::AgentManifest;
     use librefang_types::config::KernelConfig;
     use std::process::Command;
     use tempfile::tempdir;
@@ -1134,6 +1133,46 @@ weak_aliases = ["changelog"]
         let phrases = tag_phrases(&["分析".to_string(), "release-notes".to_string()]);
         assert!(phrases.contains(&"分析".to_string()));
         assert!(phrases.contains(&"release notes".to_string()));
+    }
+
+    #[test]
+    fn test_bundled_template_metadata_routes_common_intents() {
+        let cases = [
+            (
+                "Perform a threat model and vulnerability review for this service",
+                "security-auditor",
+            ),
+            ("Draft a reply email to this customer", "email-assistant"),
+            (
+                "Create a travel itinerary for Kyoto this weekend",
+                "travel-planner",
+            ),
+            ("Translate this product page into Japanese", "translator"),
+            ("Write a test plan for this release", "test-engineer"),
+            (
+                "Prepare meeting notes and action items",
+                "meeting-assistant",
+            ),
+            (
+                "Help me design a system architecture for this service",
+                "architect",
+            ),
+            (
+                "Break this project into milestones and dependencies",
+                "planner",
+            ),
+            ("Investigate this bug and find the root cause", "debugger"),
+            (
+                "Do deep web research and gather sources on this topic",
+                "researcher",
+            ),
+        ];
+
+        for (message, expected) in cases {
+            let selection = auto_select_template(message, Path::new("/tmp/does-not-exist"));
+            assert_eq!(selection.template, expected, "message: {message}");
+            assert!(selection.score > 0, "message: {message}");
+        }
     }
 
     #[test]
@@ -1219,20 +1258,11 @@ weak_aliases = ["changelog"]
         };
         let kernel = LibreFangKernel::boot_with_config(config).unwrap();
 
-        let router_manifest: AgentManifest = toml::from_str(
-            r#"
-name = "router"
-description = "Native router"
-module = "builtin:router"
-
-[model]
-provider = "default"
-model = "default"
-system_prompt = "unused"
-"#,
-        )
-        .unwrap();
-        let router_id = kernel.spawn_agent(router_manifest).unwrap();
+        let router_id = kernel
+            .registry
+            .find_by_name("router")
+            .map(|entry| entry.id)
+            .expect("default router should exist");
 
         let result = kernel
             .send_message(router_id, "Please draft release notes for version 1.2.3")

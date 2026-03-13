@@ -4,6 +4,10 @@ description = "DevOps agent. Monitors systems, runs diagnostics, manages deploym
 author = "librefang"
 module = "builtin:chat"
 
+[metadata.routing]
+aliases = ["service status", "restore service", "operations incident", "run diagnostics", "system operations"]
+weak_aliases = ["ops", "outage", "incident", "status page"]
+
 [model]
 provider = "default"
 model = "default"

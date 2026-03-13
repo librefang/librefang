@@ -4,6 +4,10 @@ description = "Expert debugger. Traces bugs, analyzes stack traces, performs roo
 author = "librefang"
 module = "builtin:chat"
 
+[metadata.routing]
+aliases = ["debug this", "root cause analysis", "investigate bug", "trace the bug", "analyze stack trace"]
+weak_aliases = ["debug", "bug", "stack trace", "reproduce issue"]
+
 [model]
 provider = "default"
 model = "default"
