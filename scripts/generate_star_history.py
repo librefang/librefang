@@ -101,10 +101,11 @@ def render_svg(series: list[Point], repo: str) -> str:
     width = 800
     height = 320
     left = 68
+    plot_left = left + 16
     right = 28
-    top = 30
+    top = 104
     bottom = 46
-    chart_width = width - left - right
+    chart_width = width - plot_left - right
     chart_height = height - top - bottom
 
     max_stars = max(point.stars for point in series)
@@ -113,7 +114,7 @@ def render_svg(series: list[Point], repo: str) -> str:
     total_days = max((end_day - start_day).days, 1)
 
     def x_for(day: date) -> float:
-        return left + (((day - start_day).days / total_days) * chart_width)
+        return plot_left + (((day - start_day).days / total_days) * chart_width)
 
     def y_for(stars: int) -> float:
         if max_stars == 0:
@@ -130,8 +131,8 @@ def render_svg(series: list[Point], repo: str) -> str:
     updated_label = svg_escape(datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"))
 
     x_axis_labels = "\n".join(
-        f'<text x="{x_for(day):.2f}" y="{height - 14}" class="axis-label" text-anchor="middle">{day.isoformat()}</text>'
-        for day in label_days
+        f'<text x="{x_for(day):.2f}" y="{height - 14}" class="axis-label" text-anchor="{"start" if index == 0 else "end" if index == len(label_days) - 1 else "middle"}">{day.isoformat()}</text>'
+        for index, day in enumerate(label_days)
     )
     y_axis_labels = "\n".join(
         f'<text x="{left - 10}" y="{y_for(value) + 4:.2f}" class="axis-label" text-anchor="end">{value}</text>'
@@ -147,7 +148,7 @@ def render_svg(series: list[Point], repo: str) -> str:
   <desc id="desc">Cumulative GitHub stars over time for {repo_label}</desc>
   <style>
     .bg {{ fill: #0f172a; }}
-    .panel {{ fill: #111827; stroke: #334155; stroke-width: 1; }}
+    .panel {{ fill: #111827; }}
     .grid {{ stroke: #243244; stroke-width: 1; }}
     .axis {{ stroke: #475569; stroke-width: 1.25; }}
     .line {{ fill: none; stroke: #22c55e; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }}
@@ -172,7 +173,7 @@ def render_svg(series: list[Point], repo: str) -> str:
   {horizontal_guides}
   <line x1="{left}" y1="{top + chart_height}" x2="{width - right}" y2="{top + chart_height}" class="axis" />
   <line x1="{left}" y1="{top}" x2="{left}" y2="{top + chart_height}" class="axis" />
-  <path d="M {left},{top + chart_height} {' '.join(f'L {x_for(point.day):.2f},{y_for(point.stars):.2f}' for point in series)} L {width - right},{top + chart_height} Z" class="area" />
+  <path d="M {plot_left},{top + chart_height} {' '.join(f'L {x_for(point.day):.2f},{y_for(point.stars):.2f}' for point in series)} L {width - right},{top + chart_height} Z" class="area" />
   <polyline points="{points}" class="line" />
   {x_axis_labels}
   {y_axis_labels}
