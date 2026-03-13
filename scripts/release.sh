@@ -19,7 +19,10 @@ echo "Creating release: $TAG"
 # Update version in Cargo.toml
 sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
 rm -f Cargo.toml.bak
-git add Cargo.toml
+
+# Refresh lockfile so workspace package versions stay in sync with Cargo.toml.
+cargo update --workspace
+git add Cargo.toml Cargo.lock
 
 # Delete local and remote tag if exists
 git tag -d $TAG 2>/dev/null || true

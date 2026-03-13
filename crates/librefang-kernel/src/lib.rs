@@ -18,6 +18,7 @@ pub mod kernel;
 pub mod metering;
 pub mod pairing;
 pub mod registry;
+pub mod router;
 pub mod scheduler;
 pub mod supervisor;
 pub mod triggers;

@@ -119,7 +119,7 @@ All channel configurations live in `~/.librefang/config.toml` under the `[channe
 ```toml
 [channels.telegram]
 bot_token_env = "TELEGRAM_BOT_TOKEN"
-default_agent = "assistant"
+default_agent = "router"
 allowed_users = ["123456789"]
 
 [channels.discord]
@@ -261,7 +261,7 @@ export TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrsTUVwxyz
 ```toml
 [channels.telegram]
 bot_token_env = "TELEGRAM_BOT_TOKEN"
-default_agent = "assistant"
+default_agent = "router"
 # Optional: restrict to specific Telegram user IDs
 # allowed_users = ["123456789"]
 
@@ -417,7 +417,7 @@ phone_number_id_env = "WA_PHONE_ID"
 access_token_env = "WA_ACCESS_TOKEN"
 verify_token_env = "WA_VERIFY_TOKEN"
 webhook_port = 8443
-default_agent = "assistant"
+default_agent = "router"
 ```
 
 8. Set up a webhook in the Meta dashboard pointing to your server's public URL:
@@ -449,7 +449,7 @@ The WhatsApp adapter runs an HTTP server (on the configured `webhook_port`) that
 [channels.signal]
 signal_cli_path = "/usr/local/bin/signal-cli"
 phone_number = "+1234567890"
-default_agent = "assistant"
+default_agent = "router"
 ```
 
 4. Restart the daemon.
@@ -483,7 +483,7 @@ export MATRIX_TOKEN=syt_...
 homeserver_url = "https://matrix.org"
 access_token_env = "MATRIX_TOKEN"
 user_id = "@librefang-bot:matrix.org"
-default_agent = "assistant"
+default_agent = "router"
 ```
 
 5. Invite the bot to the rooms you want it to monitor.

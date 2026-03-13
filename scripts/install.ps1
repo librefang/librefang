@@ -166,8 +166,11 @@ function Install-LibreFang {
     if ($currentPath -notlike "*$InstallDir*") {
         [Environment]::SetEnvironmentVariable("Path", "$InstallDir;$currentPath", "User")
         Write-Host "  Added $InstallDir to user PATH." -ForegroundColor Green
-        Write-Host "  Restart your terminal for PATH changes to take effect." -ForegroundColor Yellow
     }
+
+    $sessionNeedsPathRefresh = -not (($env:Path -split ';') | Where-Object {
+        $_.TrimEnd('\') -ieq $InstallDir.TrimEnd('\')
+    })
 
     # Verify
     $installedExe = Join-Path $InstallDir "librefang.exe"
@@ -184,8 +187,22 @@ function Install-LibreFang {
     }
 
     Write-Host ""
-    Write-Host "  Get started:" -ForegroundColor Cyan
-    Write-Host "    librefang init"
+    Write-Host "  Get started now:" -ForegroundColor Cyan
+    Write-Host "    $installedExe init"
+    if ($sessionNeedsPathRefresh) {
+        Write-Host ""
+        Write-Host "  To use 'librefang' in this PowerShell session, run:" -ForegroundColor Yellow
+        Write-Host ('    $env:Path = "{0};$env:Path"' -f $InstallDir)
+        Write-Host "  New terminals will pick it up automatically." -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  After refreshing PATH, you can also run:" -ForegroundColor Cyan
+        Write-Host "    librefang init"
+    }
+    else {
+        Write-Host ""
+        Write-Host "  Or run:" -ForegroundColor Cyan
+        Write-Host "    librefang init"
+    }
     Write-Host ""
     Write-Host "  The setup wizard will guide you through provider selection"
     Write-Host "  and configuration."

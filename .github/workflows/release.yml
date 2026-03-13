@@ -49,7 +49,7 @@ jobs:
 
     runs-on: ${{ matrix.platform.os }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
@@ -208,7 +208,7 @@ jobs:
             archive: zip
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -258,7 +258,7 @@ jobs:
     name: Docker Image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
@@ -266,7 +266,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Set up QEMU (for arm64 emulation)
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
       - name: Extract version
@@ -287,43 +287,87 @@ jobs:
   sync_homebrew:
     name: Sync to Homebrew Tap
     runs-on: ubuntu-latest
-    needs: [desktop, cli, docker]
+    needs: [cli]
     steps:
       - name: Check out tap repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: librefang/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
 
-      - name: Download and calculate checksums
+      - name: Fetch release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
         run: |
-          TAG="${{ github.ref_name }}"
-          curl -fsSL "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" > releases.json
+          set -euo pipefail
 
-          rm -f tap/checksums.txt
+          curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+            > release.json
 
-          for url in $(jq -r '.assets[] | select(.name | endswith(".tar.gz") or endswith(".zip")) | .browser_download_url' releases.json); do
-            sha=$(curl -fsSL "$url" | sha256sum | cut -d' ' -f1)
-            echo "$url $sha" >> tap/checksums.txt
-          done
-
-          cat tap/checksums.txt
+          jq -e '.tag_name and (.assets | type == "array")' release.json >/dev/null
 
       - name: Generate formula
         run: |
+          set -euo pipefail
+
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
 
-          ARM64_DARWIN_SHA=$(grep "aarch64-apple-darwin" tap/checksums.txt | awk '{print $2}')
-          X86_DARWIN_SHA=$(grep "x86_64-apple-darwin" tap/checksums.txt | awk '{print $2}')
-          ARM64_LINUX_SHA=$(grep "aarch64-unknown-linux-gnu" tap/checksums.txt | awk '{print $2}')
-          X86_LINUX_SHA=$(grep "x86_64-unknown-linux-gnu" tap/checksums.txt | awk '{print $2}')
+          asset_url() {
+            jq -r --arg name "$1" '.assets[] | select(.name == $name) | .browser_download_url' release.json
+          }
 
-          ARM64_DARWIN_URL=$(grep "aarch64-apple-darwin" tap/checksums.txt | awk '{print $1}')
-          X86_DARWIN_URL=$(grep "x86_64-apple-darwin" tap/checksums.txt | awk '{print $1}')
-          ARM64_LINUX_URL=$(grep "aarch64-unknown-linux-gnu" tap/checksums.txt | awk '{print $1}')
-          X86_LINUX_URL=$(grep "x86_64-unknown-linux-gnu" tap/checksums.txt | awk '{print $1}')
+          asset_sha() {
+            jq -r --arg name "$1" '.assets[] | select(.name == $name) | (.digest // "" | sub("^sha256:"; ""))' release.json
+          }
+
+          asset_size() {
+            jq -r --arg name "$1" '.assets[] | select(.name == $name) | .size' release.json
+          }
+
+          ARM64_DARWIN_NAME="librefang-aarch64-apple-darwin.tar.gz"
+          X86_DARWIN_NAME="librefang-x86_64-apple-darwin.tar.gz"
+          ARM64_LINUX_NAME="librefang-aarch64-unknown-linux-gnu.tar.gz"
+          X86_LINUX_NAME="librefang-x86_64-unknown-linux-gnu.tar.gz"
+
+          ARM64_DARWIN_URL="$(asset_url "$ARM64_DARWIN_NAME")"
+          X86_DARWIN_URL="$(asset_url "$X86_DARWIN_NAME")"
+          ARM64_LINUX_URL="$(asset_url "$ARM64_LINUX_NAME")"
+          X86_LINUX_URL="$(asset_url "$X86_LINUX_NAME")"
+
+          ARM64_DARWIN_SHA="$(asset_sha "$ARM64_DARWIN_NAME")"
+          X86_DARWIN_SHA="$(asset_sha "$X86_DARWIN_NAME")"
+          ARM64_LINUX_SHA="$(asset_sha "$ARM64_LINUX_NAME")"
+          X86_LINUX_SHA="$(asset_sha "$X86_LINUX_NAME")"
+
+          ARM64_DARWIN_SIZE="$(asset_size "$ARM64_DARWIN_NAME")"
+          X86_DARWIN_SIZE="$(asset_size "$X86_DARWIN_NAME")"
+          ARM64_LINUX_SIZE="$(asset_size "$ARM64_LINUX_NAME")"
+          X86_LINUX_SIZE="$(asset_size "$X86_LINUX_NAME")"
+
+          for required in \
+            ARM64_DARWIN_URL X86_DARWIN_URL ARM64_LINUX_URL X86_LINUX_URL \
+            ARM64_DARWIN_SHA X86_DARWIN_SHA ARM64_LINUX_SHA X86_LINUX_SHA \
+            ARM64_DARWIN_SIZE X86_DARWIN_SIZE ARM64_LINUX_SIZE X86_LINUX_SIZE
+          do
+            if [ -z "${!required}" ] || [ "${!required}" = "null" ]; then
+              echo "Missing release metadata: $required" >&2
+              exit 1
+            fi
+          done
+
+          for size_var in ARM64_DARWIN_SIZE X86_DARWIN_SIZE ARM64_LINUX_SIZE X86_LINUX_SIZE
+          do
+            if [ "${!size_var}" -le 0 ]; then
+              echo "Release asset is empty: $size_var" >&2
+              exit 1
+            fi
+          done
 
           cat > tap/Formula/librefang.rb <<EOF
           class Librefang < Formula
@@ -376,16 +420,16 @@ jobs:
   sync_installers:
     name: Sync Installers to Website
     runs-on: ubuntu-latest
-    needs: [desktop, cli, docker]
+    needs: [cli]
     steps:
       - name: Check out source repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.ref_name }}
           path: source
 
       - name: Check out website repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: librefang/librefang-website
           token: ${{ secrets.WEBSITE_REPO_TOKEN }}
