@@ -21,12 +21,20 @@ let connStatus = 'disconnected'; // disconnected | qr_ready | connected
 let qrExpired = false;
 let statusMessage = 'Not started';
 let reconnectAttempts = 0;
+let isConnecting = false;
 const MAX_RECONNECT_DELAY = 60_000;
+const MAX_RECONNECT_ATTEMPTS = 10;
 
 // ---------------------------------------------------------------------------
 // Baileys connection
 // ---------------------------------------------------------------------------
 async function startConnection() {
+  if (isConnecting) {
+    console.log('[gateway] Connection already in progress, skipping.');
+    return;
+  }
+  isConnecting = true;
+
   // Dynamic imports — Baileys is ESM-only in v6+
   const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } =
     await import('@whiskeysockets/baileys');
@@ -94,18 +102,30 @@ async function startConnection() {
         if (fs.existsSync(authPath)) {
           fs.rmSync(authPath, { recursive: true, force: true });
         }
-      } else {
+      } else if (statusCode === DisconnectReason.restartRequired ||
+                 statusCode === DisconnectReason.timedOut) {
+        // Recoverable — reconnect with exponential backoff
         reconnectAttempts += 1;
-        const delay = Math.min(
-          2000 * Math.pow(1.5, reconnectAttempts - 1),
-          MAX_RECONNECT_DELAY,
-        );
-        console.log(
-          `[gateway] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts})...`,
-        );
+        if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+          console.error(`[gateway] Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`);
+          connStatus = 'disconnected';
+          statusMessage = `Reconnection failed after ${MAX_RECONNECT_ATTEMPTS} attempts. Restart manually.`;
+        } else {
+          const delay = Math.min(
+            2000 * Math.pow(1.5, reconnectAttempts - 1),
+            MAX_RECONNECT_DELAY,
+          );
+          console.log(`[gateway] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`);
+          connStatus = 'disconnected';
+          statusMessage = `Reconnecting (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
+          setTimeout(() => startConnection(), delay);
+        }
+      } else {
+        // Non-recoverable (e.g. QR expired, forbidden) — don't auto-reconnect
         connStatus = 'disconnected';
-        statusMessage = `Reconnecting (attempt ${reconnectAttempts})...`;
-        setTimeout(() => startConnection(), delay);
+        statusMessage = `Disconnected: ${reason}. Use POST /login/start to reconnect.`;
+        qrDataUrl = '';
+        sock = null;
       }
     }
 
@@ -118,6 +138,8 @@ async function startConnection() {
       console.log('[gateway] Connected to WhatsApp!');
     }
   });
+
+  isConnecting = false;
 
   // Incoming messages → forward to LibreFang
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
