@@ -28,8 +28,7 @@ const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 
 /// OAuth scopes.
-const SCOPE: &str =
-    "openid profile email offline_access model.request api.model.read api.responses.write";
+const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
 /// Local callback server bind address (port 1455 matches OpenAI's registered redirect_uri).
 const CALLBACK_BIND: &str = "127.0.0.1:1455";
@@ -59,7 +58,7 @@ pub struct PkceChallenge {
 pub fn generate_pkce() -> PkceChallenge {
     use rand::Rng;
     let mut rng = rand::thread_rng();
-    let mut bytes = [0u8; 32];
+    let mut bytes = [0u8; 64];
     rng.fill(&mut bytes);
 
     let verifier = URL_SAFE_NO_PAD.encode(bytes);
