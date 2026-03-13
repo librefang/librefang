@@ -752,16 +752,6 @@ fn builtin_providers() -> Vec<ProviderInfo> {
             auth_status: AuthStatus::Missing,
             model_count: 0,
         },
-        // ── OpenAI Codex ────────────────────────────────────────────
-        ProviderInfo {
-            id: "codex".into(),
-            display_name: "OpenAI Codex".into(),
-            api_key_env: "OPENAI_API_KEY".into(),
-            base_url: OPENAI_BASE_URL.into(),
-            key_required: true,
-            auth_status: AuthStatus::Missing,
-            model_count: 0,
-        },
         // ── Claude Code CLI ─────────────────────────────────────────
         ProviderInfo {
             id: "claude-code".into(),
@@ -3364,12 +3354,12 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             aliases: vec![],
         },
         // ══════════════════════════════════════════════════════════════
-        // OpenAI Codex (2) — reuses OpenAI driver
+        // OpenAI Codex (2) — same OpenAI driver & API key
         // ══════════════════════════════════════════════════════════════
         ModelCatalogEntry {
             id: "codex/gpt-4.1".into(),
             display_name: "GPT-4.1 (Codex)".into(),
-            provider: "codex".into(),
+            provider: "openai".into(),
             tier: ModelTier::Frontier,
             context_window: 1_047_576,
             max_output_tokens: 32_768,
@@ -3383,7 +3373,7 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
         ModelCatalogEntry {
             id: "codex/o4-mini".into(),
             display_name: "o4-mini (Codex)".into(),
-            provider: "codex".into(),
+            provider: "openai".into(),
             tier: ModelTier::Smart,
             context_window: 200_000,
             max_output_tokens: 100_000,
@@ -3646,7 +3636,7 @@ mod tests {
     #[test]
     fn test_catalog_has_providers() {
         let catalog = ModelCatalog::new();
-        assert_eq!(catalog.list_providers().len(), 40);
+        assert_eq!(catalog.list_providers().len(), 39);
     }
 
     #[test]
@@ -3963,19 +3953,10 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_provider() {
+    fn test_codex_models_under_openai() {
+        // Codex models are now merged under the "openai" provider
         let catalog = ModelCatalog::new();
-        let codex = catalog.get_provider("codex").unwrap();
-        assert_eq!(codex.display_name, "OpenAI Codex");
-        assert_eq!(codex.api_key_env, "OPENAI_API_KEY");
-        assert!(codex.key_required);
-    }
-
-    #[test]
-    fn test_codex_models() {
-        let catalog = ModelCatalog::new();
-        let models = catalog.models_by_provider("codex");
-        assert_eq!(models.len(), 2);
+        let models = catalog.models_by_provider("openai");
         assert!(models.iter().any(|m| m.id == "codex/gpt-4.1"));
         assert!(models.iter().any(|m| m.id == "codex/o4-mini"));
     }
