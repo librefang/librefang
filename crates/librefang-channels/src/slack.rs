@@ -3,6 +3,7 @@
 //! Uses Slack Socket Mode WebSocket (app token) for receiving events and the
 //! Web API (bot token) for sending responses. No external Slack crate.
 
+use crate::bridge::SENDER_USER_ID_KEY;
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
 };
@@ -417,7 +418,7 @@ async fn parse_slack_event(
     };
 
     let mut metadata = HashMap::new();
-    metadata.insert("sender_user_id".to_string(), serde_json::json!(user_id));
+    metadata.insert(SENDER_USER_ID_KEY.to_string(), serde_json::json!(user_id));
 
     // Slack channel prefixes: D = direct message, other channel types are group contexts.
     let is_group = !channel.starts_with('D');
@@ -426,6 +427,8 @@ async fn parse_slack_event(
         channel: ChannelType::Slack,
         platform_message_id: ts.to_string(),
         sender: ChannelUser {
+            // For DMs, platform_id is the DM channel ID (D*), not the user ID.
+            // The actual sender user ID is in metadata[SENDER_USER_ID_KEY].
             platform_id: channel.to_string(),
             display_name: user_id.to_string(), // Slack user IDs as display name
             librefang_user: None,
@@ -458,7 +461,7 @@ mod tests {
         assert_eq!(msg.channel, ChannelType::Slack);
         assert_eq!(msg.sender.platform_id, "C789");
         assert_eq!(
-            msg.metadata.get("sender_user_id").and_then(|v| v.as_str()),
+            msg.metadata.get(SENDER_USER_ID_KEY).and_then(|v| v.as_str()),
             Some("U456")
         );
         assert!(msg.is_group);
@@ -574,7 +577,7 @@ mod tests {
         assert_eq!(msg.channel, ChannelType::Slack);
         assert_eq!(msg.sender.platform_id, "C789");
         assert_eq!(
-            msg.metadata.get("sender_user_id").and_then(|v| v.as_str()),
+            msg.metadata.get(SENDER_USER_ID_KEY).and_then(|v| v.as_str()),
             Some("U456")
         );
         assert!(matches!(msg.content, ChannelContent::Text(ref t) if t == "Edited message text"));
@@ -595,7 +598,7 @@ mod tests {
         assert!(!msg.is_group);
         assert_eq!(msg.sender.platform_id, "D789");
         assert_eq!(
-            msg.metadata.get("sender_user_id").and_then(|v| v.as_str()),
+            msg.metadata.get(SENDER_USER_ID_KEY).and_then(|v| v.as_str()),
             Some("U456")
         );
     }

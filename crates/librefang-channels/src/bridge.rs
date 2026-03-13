@@ -393,11 +393,14 @@ fn channel_type_str(channel: &crate::types::ChannelType) -> &str {
     }
 }
 
+/// Metadata key for the actual sender user ID (distinct from platform_id in DMs).
+pub const SENDER_USER_ID_KEY: &str = "sender_user_id";
+
 /// Extract the sender identity used for RBAC and per-user rate limiting.
 fn sender_user_id(message: &ChannelMessage) -> &str {
     message
         .metadata
-        .get("sender_user_id")
+        .get(SENDER_USER_ID_KEY)
         .and_then(|v| v.as_str())
         .unwrap_or(&message.sender.platform_id)
 }
@@ -1529,7 +1532,7 @@ mod tests {
     fn test_sender_user_id_from_metadata() {
         let mut metadata = std::collections::HashMap::new();
         metadata.insert(
-            "sender_user_id".to_string(),
+            SENDER_USER_ID_KEY.to_string(),
             serde_json::Value::String("U456".to_string()),
         );
         let msg = ChannelMessage {
