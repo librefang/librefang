@@ -4,6 +4,10 @@ description = "A friendly greeting agent that can read files, search the web, an
 author = "librefang"
 module = "builtin:chat"
 
+[metadata.routing]
+aliases = ["hello world", "greeting", "say hello", "introduce yourself", "new user welcome"]
+weak_aliases = ["hello", "welcome", "intro", "getting started"]
+
 [model]
 provider = "default"
 model = "default"
