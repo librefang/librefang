@@ -6166,14 +6166,17 @@ fn cmd_auth_chatgpt() {
             .ok_or("default_model is not a table")?;
         dm.insert("provider", toml_edit::value("chatgpt"));
         dm.insert("api_key_env", toml_edit::value("CHATGPT_SESSION_TOKEN"));
-        if !dm.contains_key("model") {
-            dm.insert("model", toml_edit::value("gpt-4o"));
-        }
+        dm.insert("model", toml_edit::value("gpt-5.1-codex-mini"));
+        // ChatGPT OAuth tokens use the Responses API at the backend-api endpoint.
+        dm.insert(
+            "base_url",
+            toml_edit::value("https://chatgpt.com/backend-api"),
+        );
 
         std::fs::write(&config_path, doc.to_string())
             .map_err(|e| format!("Failed to write config.toml: {e}"))?;
 
-        println!("config.toml updated: provider = \"chatgpt\"");
+        println!("config.toml updated: provider = \"chatgpt\", base_url = \"https://chatgpt.com/backend-api\"");
         Ok(())
     });
 

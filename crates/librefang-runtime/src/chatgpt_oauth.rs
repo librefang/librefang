@@ -15,8 +15,10 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
-/// Default ChatGPT API base URL (same as OpenAI).
-pub const CHATGPT_BASE_URL: &str = "https://api.openai.com/v1";
+/// Default ChatGPT API base URL (ChatGPT backend, used with OAuth tokens).
+/// OAuth tokens with `api.connectors` scopes work with the Responses API
+/// at this endpoint, NOT the standard `/v1/chat/completions` endpoint.
+pub const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
 /// OAuth client ID (OpenAI Codex CLI).
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
