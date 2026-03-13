@@ -426,7 +426,6 @@ async fn parse_slack_event(
     // Slack channel prefixes: D = direct message, other channel types are group contexts.
     let is_group = !channel.starts_with('D');
 
-
     Some(ChannelMessage {
         channel: ChannelType::Slack,
         platform_message_id: ts.to_string(),
