@@ -233,6 +233,9 @@ enum Commands {
         /// Search query (optional — lists all if omitted).
         query: Option<String>,
     },
+    /// Authenticate with a provider (chatgpt) [*].
+    #[command(subcommand)]
+    Auth(AuthCommands),
     /// Manage the credential vault (init, set, list, remove) [*].
     #[command(subcommand)]
     Vault(VaultCommands),
@@ -353,6 +356,12 @@ enum VaultCommands {
         /// Credential key.
         key: String,
     },
+}
+
+#[derive(Subcommand)]
+enum AuthCommands {
+    /// Authenticate with ChatGPT (browser-based session token flow).
+    Chatgpt,
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -1128,6 +1137,9 @@ fn main() {
         Some(Commands::Add { name, key }) => cmd_integration_add(&name, key.as_deref()),
         Some(Commands::Remove { name }) => cmd_integration_remove(&name),
         Some(Commands::Integrations { query }) => cmd_integrations_list(query.as_deref()),
+        Some(Commands::Auth(sub)) => match sub {
+            AuthCommands::Chatgpt => cmd_auth_chatgpt(),
+        },
         Some(Commands::Vault(sub)) => match sub {
             VaultCommands::Init => cmd_vault_init(),
             VaultCommands::Set { key } => cmd_vault_set(&key),
@@ -5963,6 +5975,73 @@ fn cmd_integrations_list(query: Option<&str>) {
             .count()
     );
     println!("  Use `librefang add <name>` to install an integration.");
+}
+
+// ---------------------------------------------------------------------------
+// Auth commands (librefang auth chatgpt)
+// ---------------------------------------------------------------------------
+
+fn cmd_auth_chatgpt() {
+    use librefang_runtime::chatgpt_oauth;
+
+    println!("Starting ChatGPT browser authentication flow...\n");
+
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+
+    let result: Result<(), String> = rt.block_on(async {
+        let (_callback_url, port) = chatgpt_oauth::start_browser_auth().await?;
+        let auth_result = chatgpt_oauth::run_callback_server(port).await?;
+
+        // Save the token to config
+        let home = librefang_home();
+        let secrets_path = home.join("secrets.env");
+
+        // Append or update CHATGPT_SESSION_TOKEN in secrets.env
+        let token = auth_result.access_token;
+        let line = format!("CHATGPT_SESSION_TOKEN={}", &*token);
+
+        let existing = std::fs::read_to_string(&secrets_path).unwrap_or_default();
+        let updated = if existing.contains("CHATGPT_SESSION_TOKEN=") {
+            existing
+                .lines()
+                .map(|l| {
+                    if l.starts_with("CHATGPT_SESSION_TOKEN=") {
+                        line.as_str()
+                    } else {
+                        l
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n"
+        } else {
+            let mut s = existing;
+            if !s.ends_with('\n') && !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&line);
+            s.push('\n');
+            s
+        };
+
+        std::fs::write(&secrets_path, updated)
+            .map_err(|e| format!("Failed to write secrets.env: {e}"))?;
+
+        println!(
+            "\nChatGPT session token saved to {}",
+            secrets_path.display()
+        );
+        println!("You can now use provider = \"chatgpt\" in your config.toml.");
+        Ok(())
+    });
+
+    match result {
+        Ok(()) => ui::success("ChatGPT authentication complete."),
+        Err(e) => {
+            ui::error(&format!("ChatGPT authentication failed: {e}"));
+            std::process::exit(1);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
