@@ -15,11 +15,12 @@ use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};
 use librefang_types::model_catalog::{
     AI21_BASE_URL, ANTHROPIC_BASE_URL, CEREBRAS_BASE_URL, CHUTES_BASE_URL, COHERE_BASE_URL,
     DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL,
-    KIMI_CODING_BASE_URL, LEMONADE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_BASE_URL, MISTRAL_BASE_URL,
-    MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL,
-    QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL,
-    VENICE_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL, VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL,
-    ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
+    KIMI_CODING_BASE_URL, LEMONADE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_CN_BASE_URL,
+    MINIMAX_INTL_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL,
+    OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL,
+    SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VENICE_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
+    VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL,
+    ZHIPU_CODING_BASE_URL,
 };
 use std::sync::Arc;
 
@@ -165,7 +166,12 @@ fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
             key_required: true,
         }),
         "minimax" => Some(ProviderDefaults {
-            base_url: MINIMAX_BASE_URL,
+            base_url: MINIMAX_INTL_BASE_URL,
+            api_key_env: "MINIMAX_API_KEY",
+            key_required: true,
+        }),
+        "minimax-cn" => Some(ProviderDefaults {
+            base_url: MINIMAX_CN_BASE_URL,
             api_key_env: "MINIMAX_API_KEY",
             key_required: true,
         }),
@@ -497,6 +503,7 @@ pub fn known_providers() -> &'static [&'static str] {
         "moonshot",
         "qwen",
         "minimax",
+        "minimax-cn",
         "zhipu",
         "zhipu_coding",
         "zai",
@@ -599,6 +606,7 @@ mod tests {
         assert!(providers.contains(&"moonshot"));
         assert!(providers.contains(&"qwen"));
         assert!(providers.contains(&"minimax"));
+        assert!(providers.contains(&"minimax-cn"));
         assert!(providers.contains(&"zhipu"));
         assert!(providers.contains(&"zhipu_coding"));
         assert!(providers.contains(&"zai"));
@@ -608,7 +616,7 @@ mod tests {
         assert!(providers.contains(&"chutes"));
         assert!(providers.contains(&"codex"));
         assert!(providers.contains(&"claude-code"));
-        assert_eq!(providers.len(), 34);
+        assert_eq!(providers.len(), 35);
     }
 
     #[test]

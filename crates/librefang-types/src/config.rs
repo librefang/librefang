@@ -1647,6 +1647,8 @@ pub struct ChannelsConfig {
     pub mumble: Option<MumbleConfig>,
     /// DingTalk robot configuration (None = disabled).
     pub dingtalk: Option<DingTalkConfig>,
+    /// QQ Bot API v2 configuration (None = disabled).
+    pub qq: Option<QqConfig>,
     /// Discourse forum configuration (None = disabled).
     pub discourse: Option<DiscourseConfig>,
     /// Gitter streaming configuration (None = disabled).
@@ -2772,6 +2774,36 @@ impl Default for DingTalkConfig {
             access_token_env: "DINGTALK_ACCESS_TOKEN".to_string(),
             secret_env: "DINGTALK_SECRET".to_string(),
             webhook_port: 8457,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// QQ Bot API v2 channel adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QqConfig {
+    /// QQ Bot application ID.
+    pub app_id: String,
+    /// Env var name holding the app secret (NOT the secret itself).
+    pub app_secret_env: String,
+    /// QQ user IDs allowed to interact (empty = allow all).
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for QqConfig {
+    fn default() -> Self {
+        Self {
+            app_id: String::new(),
+            app_secret_env: "QQ_APP_SECRET".to_string(),
+            allowed_users: vec![],
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }

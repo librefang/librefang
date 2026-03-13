@@ -32,6 +32,9 @@ predictions_database.json
 prediction_report_*.md
 BUILD_LOG.md
 
+# Node.js (packages/)
+node_modules/
+
 # OS
 .DS_Store
 Thumbs.db

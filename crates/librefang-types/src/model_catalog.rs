@@ -36,7 +36,10 @@ pub const GITHUB_COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
 
 // ── Chinese providers ─────────────────────────────────────────────
 pub const QWEN_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
-pub const MINIMAX_BASE_URL: &str = "https://api.minimaxi.chat/v1";
+/// MiniMax China mainland (minimaxi.com)
+pub const MINIMAX_CN_BASE_URL: &str = "https://api.minimaxi.com/v1";
+/// MiniMax International (minimax.io)
+pub const MINIMAX_INTL_BASE_URL: &str = "https://api.minimax.io/v1";
 pub const ZHIPU_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
 pub const ZHIPU_CODING_BASE_URL: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
 /// Z.AI domain aliases (same API, different domain).
