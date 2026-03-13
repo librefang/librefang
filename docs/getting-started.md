@@ -268,9 +268,11 @@ librefang start
 Output:
 
 ```
-Starting LibreFang daemon...
-LibreFang daemon running on http://127.0.0.1:4545
-Press Ctrl+C to stop.
+[ok] Daemon started in background
+
+API:        http://127.0.0.1:4545
+Dashboard:  http://127.0.0.1:4545/
+hint: Use `librefang stop` to stop the daemon
 ```
 
 The daemon provides:

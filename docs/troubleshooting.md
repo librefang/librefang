@@ -51,9 +51,9 @@ curl http://127.0.0.1:4545/api/health/detail  # Requires auth
 LibreFang uses `tracing` for structured logging. Set the log level via environment:
 
 ```bash
-RUST_LOG=info librefang start          # Default
-RUST_LOG=debug librefang start         # Verbose
-RUST_LOG=librefang=debug librefang start  # Only LibreFang debug, deps at info
+RUST_LOG=info librefang start --foreground          # Default
+RUST_LOG=debug librefang start --foreground         # Verbose
+RUST_LOG=librefang=debug librefang start --foreground  # Only LibreFang debug, deps at info
 ```
 
 ---
@@ -272,7 +272,7 @@ python -m vllm.entrypoints.openai.api_server --model ...
 
 Check logs for the specific error:
 ```bash
-RUST_LOG=librefang_channels=debug librefang start
+RUST_LOG=librefang_channels=debug librefang start --foreground
 ```
 
 ---
@@ -542,7 +542,7 @@ LibreFang can import OpenClaw configs: `librefang migrate --from openclaw`
 ### How do I enable debug logging for a specific crate?
 
 ```bash
-RUST_LOG=librefang_runtime=debug,librefang_channels=info librefang start
+RUST_LOG=librefang_runtime=debug,librefang_channels=info librefang start --foreground
 ```
 
 ### Can I use LibreFang as a library?

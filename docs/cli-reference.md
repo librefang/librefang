@@ -112,7 +112,7 @@ librefang init --quick
 Start the LibreFang daemon (kernel + API server).
 
 ```
-librefang start [--config <PATH>]
+librefang start [--config <PATH>] [--tail | --foreground]
 ```
 
 **Behavior:**
@@ -120,27 +120,30 @@ librefang start [--config <PATH>]
 - Checks if a daemon is already running; exits with an error if so.
 - Boots the LibreFang kernel (loads config, initializes SQLite database, loads agents, connects MCP servers, starts background tasks).
 - Starts the HTTP API server on the address specified in `config.toml` (default: `127.0.0.1:4545`).
-- Writes `daemon.json` to `~/.librefang/` so other CLI commands can discover the running daemon.
-- Blocks until interrupted with `Ctrl+C`.
+- Writes `daemon.json` to the configured LibreFang home directory so other CLI commands can discover the running daemon.
+- Launches the daemon in the background by default and returns after the health endpoint responds.
+- Writes daemon startup output to `~/.librefang/logs/daemon.log`.
+- If `--tail` is passed, follows `~/.librefang/logs/daemon.log` after launch. `Ctrl+C` stops tailing only; the daemon keeps running.
+- If `--foreground` is passed, keeps the daemon attached to the current terminal and streams logs to stdout/stderr. Use this for Docker, systemd, or other process supervisors.
+
+**Options:**
+
+| Option | Description |
+|---|---|
+| `--tail` | Follow `~/.librefang/logs/daemon.log` after the daemon is launched. |
+| `--foreground` | Keep the daemon attached to the current terminal instead of detaching. |
 
 **Output:**
 
 ```
-  LibreFang Agent OS v0.1.0
+  [ok] Daemon started in background
 
-  Starting daemon...
-
-  [ok] Kernel booted (groq/llama-3.3-70b-versatile)
-  [ok] 50 models available
-  [ok] 3 agent(s) loaded
-
+  PID:        42431
   API:        http://127.0.0.1:4545
   Dashboard:  http://127.0.0.1:4545/
-  Provider:   groq
-  Model:      llama-3.3-70b-versatile
+  Log:        /Users/alice/.librefang/logs/daemon.log
 
-  hint: Open the dashboard in your browser, or run `librefang chat`
-  hint: Press Ctrl+C to stop the daemon
+  hint: Use `librefang stop` to stop the daemon
 ```
 
 **Example:**
@@ -151,6 +154,12 @@ librefang start
 
 # Start with custom config
 librefang start --config /path/to/config.toml
+
+# Start and follow daemon logs
+librefang start --tail
+
+# Start in the foreground for Docker/systemd
+librefang start --foreground
 ```
 
 ---
@@ -160,7 +169,7 @@ librefang start --config /path/to/config.toml
 Restart the LibreFang daemon.
 
 ```
-librefang restart [--config <PATH>]
+librefang restart [--config <PATH>] [--tail | --foreground]
 ```
 
 **Behavior:**
@@ -169,10 +178,21 @@ librefang restart [--config <PATH>]
 - Starts the daemon again using the same startup flow as `librefang start`.
 - If no daemon is running, behaves like `librefang start` and prints a hint.
 
+**Options:**
+
+| Option | Description |
+|---|---|
+| `--tail` | Follow `~/.librefang/logs/daemon.log` after the daemon is relaunched. |
+| `--foreground` | Keep the relaunched daemon attached to the current terminal instead of detaching. |
+
 **Example:**
 
 ```bash
 librefang restart
+
+librefang restart --tail
+
+librefang restart --foreground
 ```
 
 ---

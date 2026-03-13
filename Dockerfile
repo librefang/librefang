@@ -24,4 +24,4 @@ EXPOSE 4545
 VOLUME /data
 ENV LIBREFANG_HOME=/data
 ENTRYPOINT ["librefang"]
-CMD ["start"]
+CMD ["start", "--foreground"]

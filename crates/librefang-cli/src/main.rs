@@ -16,13 +16,16 @@ mod ui;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use librefang_api::server::read_daemon_info;
-use librefang_kernel::LibreFangKernel;
+use librefang_kernel::{config::load_config, LibreFangKernel};
 use librefang_types::agent::{AgentId, AgentManifest};
+use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::atomic::AtomicBool;
 #[cfg(windows)]
 use std::sync::atomic::Ordering;
+use std::time::{Duration, Instant};
 
 /// Global flag set by the Ctrl+C handler.
 static CTRLC_PRESSED: AtomicBool = AtomicBool::new(false);
@@ -113,9 +116,26 @@ enum Commands {
         quick: bool,
     },
     /// Start the LibreFang kernel daemon (API server + kernel).
-    Start,
+    Start {
+        /// Follow the daemon log after launching it in the background.
+        #[arg(long, conflicts_with_all = ["foreground", "spawned"])]
+        tail: bool,
+        /// Keep the daemon attached to the current terminal.
+        #[arg(long, conflicts_with = "spawned")]
+        foreground: bool,
+        /// Internal flag used by the detached daemon child process.
+        #[arg(long, hide = true)]
+        spawned: bool,
+    },
     /// Restart the running daemon (or start it if not running).
-    Restart,
+    Restart {
+        /// Follow the daemon log after launching it in the background.
+        #[arg(long, conflicts_with = "foreground")]
+        tail: bool,
+        /// Keep the relaunched daemon attached to the current terminal.
+        #[arg(long)]
+        foreground: bool,
+    },
     /// Stop the running daemon.
     Stop,
     /// Manage agents (new, list, chat, kill, spawn) [*].
@@ -592,9 +612,23 @@ enum ModelsCommands {
 #[derive(Subcommand)]
 enum GatewayCommands {
     /// Start the kernel daemon.
-    Start,
+    Start {
+        /// Follow the daemon log after launching it in the background.
+        #[arg(long, conflicts_with = "foreground")]
+        tail: bool,
+        /// Keep the daemon attached to the current terminal.
+        #[arg(long)]
+        foreground: bool,
+    },
     /// Restart the kernel daemon.
-    Restart,
+    Restart {
+        /// Follow the daemon log after launching it in the background.
+        #[arg(long, conflicts_with = "foreground")]
+        tail: bool,
+        /// Keep the relaunched daemon attached to the current terminal.
+        #[arg(long)]
+        foreground: bool,
+    },
     /// Stop the running daemon.
     Stop,
     /// Show daemon status.
@@ -800,6 +834,28 @@ fn cli_librefang_home() -> std::path::PathBuf {
         .join(".librefang")
 }
 
+#[derive(Debug, Clone)]
+struct DaemonConfigContext {
+    home_dir: PathBuf,
+    api_key: Option<String>,
+}
+
+fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContext {
+    let config = load_config(config);
+    let api_key = {
+        let trimmed = config.api_key.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
+    DaemonConfigContext {
+        home_dir: config.home_dir,
+        api_key,
+    }
+}
+
 /// Redirect tracing to a log file so it doesn't corrupt the ratatui TUI.
 fn init_tracing_file() {
     let log_dir = cli_librefang_home();
@@ -880,9 +936,13 @@ fn main() {
         }
         Some(Commands::Tui) => tui::run(cli.config),
         Some(Commands::Init { quick }) => cmd_init(quick),
-        Some(Commands::Start) => cmd_start(cli.config),
-        Some(Commands::Restart) => cmd_restart(cli.config),
-        Some(Commands::Stop) => cmd_stop(),
+        Some(Commands::Start {
+            tail,
+            foreground,
+            spawned,
+        }) => cmd_start(cli.config, tail, spawned, foreground),
+        Some(Commands::Restart { tail, foreground }) => cmd_restart(cli.config, tail, foreground),
+        Some(Commands::Stop) => cmd_stop(cli.config),
         Some(Commands::Agent(sub)) => match sub {
             AgentCommands::New { template } => cmd_agent_new(cli.config, template),
             AgentCommands::Spawn { manifest } => cmd_agent_spawn(cli.config, manifest),
@@ -971,9 +1031,13 @@ fn main() {
             ModelsCommands::Set { model } => cmd_models_set(model),
         },
         Some(Commands::Gateway(sub)) => match sub {
-            GatewayCommands::Start => cmd_start(cli.config),
-            GatewayCommands::Restart => cmd_restart(cli.config),
-            GatewayCommands::Stop => cmd_stop(),
+            GatewayCommands::Start { tail, foreground } => {
+                cmd_start(cli.config, tail, false, foreground)
+            }
+            GatewayCommands::Restart { tail, foreground } => {
+                cmd_restart(cli.config, tail, foreground)
+            }
+            GatewayCommands::Stop => cmd_stop(cli.config),
             GatewayCommands::Status { json } => cmd_status(cli.config, json),
         },
         Some(Commands::Approvals(sub)) => match sub {
@@ -994,7 +1058,7 @@ fn main() {
             CronCommands::Disable { id } => cmd_cron_toggle(&id, false),
         },
         Some(Commands::Sessions { agent, json }) => cmd_sessions(agent.as_deref(), json),
-        Some(Commands::Logs { lines, follow }) => cmd_logs(lines, follow),
+        Some(Commands::Logs { lines, follow }) => cmd_logs(cli.config, lines, follow),
         Some(Commands::Health { json }) => cmd_health(json),
         Some(Commands::Security(sub)) => match sub {
             SecurityCommands::Status { json } => cmd_security_status(json),
@@ -1059,9 +1123,8 @@ pub(crate) fn restrict_dir_permissions(path: &std::path::Path) {
 #[cfg(not(unix))]
 pub(crate) fn restrict_dir_permissions(_path: &std::path::Path) {}
 
-pub(crate) fn find_daemon() -> Option<String> {
-    let home_dir = cli_librefang_home();
-    let info = read_daemon_info(&home_dir)?;
+fn find_daemon_in_home(home_dir: &std::path::Path) -> Option<String> {
+    let info = read_daemon_info(home_dir)?;
 
     // Normalize listen address: replace 0.0.0.0 with 127.0.0.1 to avoid
     // DNS/connectivity issues on macOS where 0.0.0.0 can hang.
@@ -1081,16 +1144,24 @@ pub(crate) fn find_daemon() -> Option<String> {
     }
 }
 
+pub(crate) fn find_daemon() -> Option<String> {
+    find_daemon_in_home(&cli_librefang_home())
+}
+
 /// Build an HTTP client for daemon calls.
 ///
 /// When api_key is configured in config.toml, the client automatically
 /// includes a `Authorization: Bearer <key>` header on every request.
 /// When api_key is empty or missing, no auth header is sent.
 pub(crate) fn daemon_client() -> reqwest::blocking::Client {
+    daemon_client_with_api_key(read_api_key().as_deref())
+}
+
+fn daemon_client_with_api_key(api_key: Option<&str>) -> reqwest::blocking::Client {
     let mut builder =
         reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(120));
 
-    if let Some(key) = read_api_key() {
+    if let Some(key) = api_key {
         let mut headers = reqwest::header::HeaderMap::new();
         if let Ok(val) = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}")) {
             headers.insert(reqwest::header::AUTHORIZATION, val);
@@ -1113,7 +1184,7 @@ pub(crate) fn daemon_json(
             if status.is_server_error() {
                 ui::error_with_fix(
                     &format!("Daemon returned error ({})", status),
-                    "Check daemon logs: ~/.librefang/tui.log",
+                    "Check daemon logs with: librefang logs --follow",
                 );
             }
             body
@@ -1420,8 +1491,85 @@ decay_rate = 0.05
     }
 }
 
-fn cmd_start(config: Option<PathBuf>) {
-    if let Some(base) = find_daemon() {
+fn daemon_log_path_for_home(home_dir: &std::path::Path) -> PathBuf {
+    home_dir.join("logs").join("daemon.log")
+}
+
+fn daemon_log_path_for_config(config: Option<&std::path::Path>) -> PathBuf {
+    let daemon = daemon_config_context(config);
+    daemon_log_path_for_home(&daemon.home_dir)
+}
+
+fn detached_daemon_args(config: Option<&std::path::Path>) -> Vec<OsString> {
+    let mut args = Vec::new();
+    if let Some(path) = config {
+        args.push(OsString::from("--config"));
+        args.push(path.as_os_str().to_owned());
+    }
+    args.push(OsString::from("start"));
+    args.push(OsString::from("--spawned"));
+    args
+}
+
+fn spawn_detached_daemon(
+    config: Option<&std::path::Path>,
+    log_path: &std::path::Path,
+) -> Result<std::process::Child, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("resolve current executable: {e}"))?;
+    if let Some(log_dir) = log_path.parent() {
+        std::fs::create_dir_all(log_dir)
+            .map_err(|e| format!("create log directory {}: {e}", log_dir.display()))?;
+        restrict_dir_permissions(log_dir);
+    }
+
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .map_err(|e| format!("open daemon log {}: {e}", log_path.display()))?;
+    let stderr = stdout
+        .try_clone()
+        .map_err(|e| format!("clone daemon log handle {}: {e}", log_path.display()))?;
+
+    let mut command = std::process::Command::new(exe);
+    command
+        .args(detached_daemon_args(config))
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    }
+
+    command
+        .spawn()
+        .map_err(|e| format!("spawn detached daemon: {e}"))
+}
+
+fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: bool) {
+    let daemon = daemon_config_context(config.as_deref());
+    if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         ui::error_with_fix(
             &format!("Daemon already running at {base}"),
             "Use `librefang status` to check it, or stop it first",
@@ -1429,10 +1577,70 @@ fn cmd_start(config: Option<PathBuf>) {
         std::process::exit(1);
     }
 
-    ui::banner();
-    ui::blank();
-    println!("  Starting daemon...");
-    ui::blank();
+    if !spawned && !foreground {
+        let log_path = daemon_log_path_for_config(config.as_deref());
+        let mut child = spawn_detached_daemon(config.as_deref(), &log_path).unwrap_or_else(|e| {
+            ui::error_with_fix("Failed to launch background daemon", &e);
+            std::process::exit(1);
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
+                let pid = child.id();
+                std::mem::forget(child);
+                ui::success("Daemon started in background");
+                ui::kv("PID", &pid.to_string());
+                ui::kv("API", &base);
+                ui::kv("Dashboard", &format!("{base}/"));
+                ui::kv("Log", &log_path.display().to_string());
+                if tail {
+                    ui::hint("Ctrl+C stops log tailing; the daemon keeps running");
+                    ui::blank();
+                    show_log_file(&log_path, 50, true);
+                } else {
+                    ui::hint("Use `librefang stop` to stop the daemon");
+                }
+                return;
+            }
+
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    ui::error_with_fix(
+                        &format!("Background daemon exited before becoming healthy ({status})"),
+                        &format!("Check startup logs: {}", log_path.display()),
+                    );
+                    std::process::exit(1);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    ui::error_with_fix(
+                        "Failed while waiting for background daemon",
+                        &format!("{e}. Check startup logs: {}", log_path.display()),
+                    );
+                    std::process::exit(1);
+                }
+            }
+
+            if Instant::now() >= deadline {
+                let pid = child.id();
+                std::mem::forget(child);
+                ui::success("Daemon launched in background and is still starting");
+                ui::kv("PID", &pid.to_string());
+                ui::kv("Log", &log_path.display().to_string());
+                if tail {
+                    ui::hint("Ctrl+C stops log tailing; the daemon keeps running");
+                    ui::blank();
+                    show_log_file(&log_path, 50, true);
+                } else {
+                    ui::hint("Run `librefang status` to check readiness");
+                }
+                return;
+            }
+
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     rt.block_on(async {
@@ -1446,81 +1654,42 @@ fn cmd_start(config: Option<PathBuf>) {
 
         let listen_addr = kernel.config.api_listen.clone();
         let daemon_info_path = kernel.config.home_dir.join("daemon.json");
-        let provider = kernel.config.default_model.provider.clone();
-        let model = kernel.config.default_model.model.clone();
-        let agent_count = kernel.registry.count();
-        let model_count = kernel
-            .model_catalog
-            .read()
-            .map(|c| c.list_models().len())
-            .unwrap_or(0);
-
-        ui::success(&format!("Kernel booted ({provider}/{model})"));
-        if model_count > 0 {
-            ui::success(&format!("{model_count} models available"));
-        }
-        if agent_count > 0 {
-            ui::success(&format!("{agent_count} agent(s) loaded"));
-        }
-        ui::blank();
-        ui::kv("API", &format!("http://{listen_addr}"));
-        ui::kv("Dashboard", &format!("http://{listen_addr}/"));
-        ui::kv("Provider", &provider);
-        ui::kv("Model", &model);
-        ui::blank();
-        ui::hint("Open the dashboard in your browser, or run `librefang chat`");
-        ui::hint("Press Ctrl+C to stop the daemon");
-        ui::blank();
-
         if let Err(e) =
             librefang_api::server::run_daemon(kernel, &listen_addr, Some(&daemon_info_path)).await
         {
             ui::error(&format!("Daemon error: {e}"));
             std::process::exit(1);
         }
-
-        ui::blank();
-        println!("  LibreFang daemon stopped.");
     });
 }
 
-/// Read the api_key from ~/.librefang/config.toml (if any).
+/// Read the daemon api_key from the effective CLI config (if any).
 ///
 /// Returns `None` when the key is missing, empty, or whitespace-only —
 /// meaning the daemon is running in public (unauthenticated) mode.
 fn read_api_key() -> Option<String> {
-    let config_path = cli_librefang_home().join("config.toml");
-    let text = std::fs::read_to_string(config_path).ok()?;
-    let table: toml::Value = text.parse().ok()?;
-    let key = table.get("api_key")?.as_str()?.trim();
-    if key.is_empty() {
-        None
-    } else {
-        Some(key.to_string())
-    }
+    daemon_config_context(None).api_key
 }
 
-fn cmd_stop() {
-    match find_daemon() {
+fn cmd_stop(config: Option<PathBuf>) {
+    let daemon = daemon_config_context(config.as_deref());
+    match find_daemon_in_home(&daemon.home_dir) {
         Some(base) => {
-            let client = daemon_client();
+            let client = daemon_client_with_api_key(daemon.api_key.as_deref());
             match client.post(format!("{base}/api/shutdown")).send() {
                 Ok(r) if r.status().is_success() => {
                     // Wait for daemon to actually stop (up to 5 seconds)
                     for _ in 0..10 {
                         std::thread::sleep(std::time::Duration::from_millis(500));
-                        if find_daemon().is_none() {
+                        if find_daemon_in_home(&daemon.home_dir).is_none() {
                             ui::success("Daemon stopped");
                             return;
                         }
                     }
                     // Still alive — force kill via PID
-                    {
-                        let of_dir = cli_librefang_home();
-                        if let Some(info) = read_daemon_info(&of_dir) {
-                            force_kill_pid(info.pid);
-                            let _ = std::fs::remove_file(of_dir.join("daemon.json"));
-                        }
+                    if let Some(info) = read_daemon_info(&daemon.home_dir) {
+                        force_kill_pid(info.pid);
+                        let _ = std::fs::remove_file(daemon.home_dir.join("daemon.json"));
                     }
                     ui::success("Daemon stopped (forced)");
                 }
@@ -1541,15 +1710,16 @@ fn cmd_stop() {
     }
 }
 
-fn cmd_restart(config: Option<PathBuf>) {
-    if find_daemon().is_some() {
+fn cmd_restart(config: Option<PathBuf>, tail: bool, foreground: bool) {
+    let daemon = daemon_config_context(config.as_deref());
+    if find_daemon_in_home(&daemon.home_dir).is_some() {
         ui::hint("Restarting daemon...");
-        cmd_stop();
+        cmd_stop(config.clone());
     } else {
         ui::hint("No running daemon found; starting a new daemon");
     }
 
-    cmd_start(config);
+    cmd_start(config, tail, false, foreground);
 }
 
 fn force_kill_pid(pid: u32) {
@@ -1906,8 +2076,9 @@ fn spawn_template_agent(config: Option<PathBuf>, template: &templates::AgentTemp
 }
 
 fn cmd_status(config: Option<PathBuf>, json: bool) {
-    if let Some(base) = find_daemon() {
-        let client = daemon_client();
+    let daemon = daemon_config_context(config.as_deref());
+    if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
+        let client = daemon_client_with_api_key(daemon.api_key.as_deref());
         let body = daemon_json(client.get(format!("{base}/api/status")).send());
 
         if json {
@@ -5589,9 +5760,7 @@ fn cmd_sessions(agent: Option<&str>, json: bool) {
     }
 }
 
-fn cmd_logs(lines: usize, follow: bool) {
-    let log_path = cli_librefang_home().join("tui.log");
-
+fn show_log_file(log_path: &std::path::Path, lines: usize, follow: bool) {
     if !log_path.exists() {
         ui::error_with_fix(
             "Log file not found",
@@ -5606,13 +5775,13 @@ fn cmd_logs(lines: usize, follow: bool) {
         {
             let _ = std::process::Command::new("tail")
                 .args(["-f", "-n", &lines.to_string()])
-                .arg(&log_path)
+                .arg(log_path)
                 .status();
         }
         #[cfg(windows)]
         {
             // On Windows, read in a loop
-            let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+            let content = std::fs::read_to_string(log_path).unwrap_or_default();
             let all_lines: Vec<&str> = content.lines().collect();
             let start = all_lines.len().saturating_sub(lines);
             for line in &all_lines[start..] {
@@ -5622,7 +5791,7 @@ fn cmd_logs(lines: usize, follow: bool) {
             let mut last_len = content.len();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
-                if let Ok(new_content) = std::fs::read_to_string(&log_path) {
+                if let Ok(new_content) = std::fs::read_to_string(log_path) {
                     if new_content.len() > last_len {
                         print!("{}", &new_content[last_len..]);
                         last_len = new_content.len();
@@ -5631,13 +5800,34 @@ fn cmd_logs(lines: usize, follow: bool) {
             }
         }
     } else {
-        let content = std::fs::read_to_string(&log_path).unwrap_or_default();
+        let content = std::fs::read_to_string(log_path).unwrap_or_default();
         let all_lines: Vec<&str> = content.lines().collect();
         let start = all_lines.len().saturating_sub(lines);
         for line in &all_lines[start..] {
             println!("{line}");
         }
     }
+}
+
+fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
+    let daemon = daemon_config_context(config.as_deref());
+    let daemon_log = daemon_log_path_for_config(config.as_deref());
+    if daemon_log.exists() {
+        show_log_file(&daemon_log, lines, follow);
+        return;
+    }
+
+    let tui_log = daemon.home_dir.join("tui.log");
+    if tui_log.exists() {
+        ui::hint(&format!(
+            "Daemon log not found; showing TUI log at {}",
+            tui_log.display()
+        ));
+        show_log_file(&tui_log, lines, follow);
+        return;
+    }
+
+    show_log_file(&daemon_log, lines, follow);
 }
 
 fn cmd_health(json: bool) {
@@ -6213,7 +6403,7 @@ fn cmd_uninstall(confirm: bool, keep_config: bool) {
     // Step 3: Stop running daemon
     if find_daemon().is_some() {
         println!("  Stopping running daemon...");
-        cmd_stop();
+        cmd_stop(None);
         // Give it a moment
         std::thread::sleep(std::time::Duration::from_secs(1));
         // Force kill if still alive
@@ -6506,24 +6696,176 @@ fn remove_self_binary(exe_path: &std::path::Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, GatewayCommands};
+    use super::{
+        daemon_log_path_for_config, daemon_log_path_for_home, detached_daemon_args, Cli, Commands,
+        GatewayCommands,
+    };
     use clap::Parser;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::Path;
 
     // --- Doctor command unit tests ---
 
     #[test]
-    fn test_restart_command_parses() {
-        let cli = Cli::parse_from(["librefang", "restart"]);
-        assert!(matches!(cli.command, Some(Commands::Restart)));
+    fn test_start_accepts_tail_flag() {
+        let cli = Cli::parse_from(["librefang", "start", "--tail"]);
+        match cli.command {
+            Some(Commands::Start {
+                tail,
+                foreground,
+                spawned,
+            }) => {
+                assert!(tail);
+                assert!(!foreground);
+                assert!(!spawned);
+            }
+            _ => panic!("unexpected command"),
+        }
     }
 
     #[test]
-    fn test_gateway_restart_command_parses() {
-        let cli = Cli::parse_from(["librefang", "gateway", "restart"]);
-        assert!(matches!(
-            cli.command,
-            Some(Commands::Gateway(GatewayCommands::Restart))
+    fn test_restart_accepts_tail_flag() {
+        let cli = Cli::parse_from(["librefang", "restart", "--tail"]);
+        match cli.command {
+            Some(Commands::Restart { tail, foreground }) => {
+                assert!(tail);
+                assert!(!foreground);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_gateway_start_accepts_tail_flag() {
+        let cli = Cli::parse_from(["librefang", "gateway", "start", "--tail"]);
+        match cli.command {
+            Some(Commands::Gateway(GatewayCommands::Start { tail, foreground })) => {
+                assert!(tail);
+                assert!(!foreground);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_gateway_restart_accepts_tail_flag() {
+        let cli = Cli::parse_from(["librefang", "gateway", "restart", "--tail"]);
+        match cli.command {
+            Some(Commands::Gateway(GatewayCommands::Restart { tail, foreground })) => {
+                assert!(tail);
+                assert!(!foreground);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_start_accepts_foreground_flag() {
+        let cli = Cli::parse_from(["librefang", "start", "--foreground"]);
+        match cli.command {
+            Some(Commands::Start {
+                tail,
+                foreground,
+                spawned,
+            }) => {
+                assert!(!tail);
+                assert!(foreground);
+                assert!(!spawned);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_restart_accepts_foreground_flag() {
+        let cli = Cli::parse_from(["librefang", "restart", "--foreground"]);
+        match cli.command {
+            Some(Commands::Restart { tail, foreground }) => {
+                assert!(!tail);
+                assert!(foreground);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_gateway_start_accepts_foreground_flag() {
+        let cli = Cli::parse_from(["librefang", "gateway", "start", "--foreground"]);
+        match cli.command {
+            Some(Commands::Gateway(GatewayCommands::Start { tail, foreground })) => {
+                assert!(!tail);
+                assert!(foreground);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_gateway_restart_accepts_foreground_flag() {
+        let cli = Cli::parse_from(["librefang", "gateway", "restart", "--foreground"]);
+        match cli.command {
+            Some(Commands::Gateway(GatewayCommands::Restart { tail, foreground })) => {
+                assert!(!tail);
+                assert!(foreground);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_start_rejects_tail_with_foreground() {
+        let cli = Cli::try_parse_from(["librefang", "start", "--tail", "--foreground"]);
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn test_detached_daemon_args_include_config_and_spawned_flag() {
+        let args = detached_daemon_args(Some(Path::new("/tmp/librefang.toml")));
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("--config"),
+                OsString::from("/tmp/librefang.toml"),
+                OsString::from("start"),
+                OsString::from("--spawned"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_daemon_log_path_uses_logs_directory() {
+        let home = Path::new("/tmp/librefang-home");
+        assert_eq!(
+            daemon_log_path_for_home(home),
+            home.join("logs").join("daemon.log")
+        );
+    }
+
+    #[test]
+    fn test_daemon_log_path_respects_custom_config_home_dir() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "librefang-cli-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
+        fs::create_dir_all(&temp_root).unwrap();
+        let config_path = temp_root.join("config.toml");
+        let custom_home = temp_root.join("custom-home");
+        fs::write(
+            &config_path,
+            format!("home_dir = {:?}\n", custom_home.display().to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            daemon_log_path_for_config(Some(&config_path)),
+            custom_home.join("logs").join("daemon.log")
+        );
+
+        let _ = fs::remove_dir_all(&temp_root);
     }
 
     #[test]

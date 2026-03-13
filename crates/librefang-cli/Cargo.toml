@@ -31,3 +31,4 @@ librefang-runtime = { path = "../librefang-runtime" }
 uuid = { workspace = true }
 ratatui = { workspace = true }
 colored = { workspace = true }
+libc = "0.2"
