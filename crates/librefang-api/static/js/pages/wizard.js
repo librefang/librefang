@@ -551,7 +551,9 @@ function wizardPage() {
           }));
           await Alpine.store('app').refreshAgents();
         } else {
-          LibreFangToast.error('Failed: ' + (res.error || 'Unknown error'));
+          LibreFangToast.error(this.t('setupWizard.agentCreateFailed', 'Failed to create agent: {message}', {
+            message: res.error || this.t('status.unknown', 'Unknown error')
+          }));
         }
       } catch(e) {
         LibreFangToast.error(this.t('setupWizard.agentCreateFailed', 'Failed to create agent: {message}', {

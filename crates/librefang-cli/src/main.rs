@@ -1194,8 +1194,8 @@ pub(crate) fn daemon_json(
             let body = r.json::<serde_json::Value>().unwrap_or_default();
             if status.is_server_error() {
                 ui::error_with_fix(
-                    &format!("Daemon returned error ({})", status),
-                    "Check daemon logs with: librefang logs --follow",
+                    &i18n::t_args("error-daemon-returned", &[("status", &status.to_string())]),
+                    &i18n::t("error-daemon-returned-fix"),
                 );
             }
             body
@@ -1204,18 +1204,18 @@ pub(crate) fn daemon_json(
             let msg = e.to_string();
             if msg.contains("timed out") || msg.contains("Timeout") {
                 ui::error_with_fix(
-                    "Request timed out",
-                    "The agent may be processing a complex request. Try again, or check `librefang status`",
+                    &i18n::t("error-request-timeout"),
+                    &i18n::t("error-request-timeout-fix"),
                 );
             } else if msg.contains("Connection refused") || msg.contains("connect") {
                 ui::error_with_fix(
-                    "Cannot connect to daemon",
-                    "Is the daemon running? Start it with: librefang start",
+                    &i18n::t("error-connect-refused"),
+                    &i18n::t("error-connect-refused-fix"),
                 );
             } else {
                 ui::error_with_fix(
-                    &format!("Daemon communication error: {msg}"),
-                    "Check `librefang status` or restart: librefang start",
+                    &i18n::t_args("error-daemon-comm", &[("error", &msg)]),
+                    &i18n::t("error-daemon-comm-fix"),
                 );
             }
             std::process::exit(1);
@@ -1231,7 +1231,7 @@ fn cmd_init(quick: bool) {
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => {
-            ui::error("Could not determine home directory");
+            ui::error(&i18n::t("error-home-dir"));
             std::process::exit(1);
         }
     };
@@ -1242,8 +1242,14 @@ fn cmd_init(quick: bool) {
     if !librefang_dir.exists() {
         std::fs::create_dir_all(&librefang_dir).unwrap_or_else(|e| {
             ui::error_with_fix(
-                &format!("Failed to create {}", librefang_dir.display()),
-                &format!("Check permissions on {}", home.display()),
+                &i18n::t_args(
+                    "error-create-dir",
+                    &[("path", &librefang_dir.display().to_string())],
+                ),
+                &i18n::t_args(
+                    "error-create-dir-fix",
+                    &[("path", &home.display().to_string())],
+                ),
             );
             eprintln!("  {e}");
             std::process::exit(1);
@@ -1269,8 +1275,8 @@ fn cmd_init(quick: bool) {
     } else if !std::io::IsTerminal::is_terminal(&std::io::stdin())
         || !std::io::IsTerminal::is_terminal(&std::io::stdout())
     {
-        ui::hint("Non-interactive terminal detected — running in quick mode");
-        ui::hint("For the interactive wizard, run: librefang init (in a terminal)");
+        ui::hint(&i18n::t("hint-non-interactive"));
+        ui::hint(&i18n::t("hint-non-interactive-wizard"));
         cmd_init_quick(&librefang_dir);
     } else {
         cmd_init_interactive(&librefang_dir);
@@ -1287,14 +1293,11 @@ fn cmd_init_quick(librefang_dir: &std::path::Path) {
     write_config_if_missing(librefang_dir, provider, model, api_key_env);
 
     ui::blank();
-    ui::success("LibreFang initialized (quick mode)");
-    ui::kv("Provider", provider);
-    ui::kv("Model", model);
+    ui::success(&i18n::t("init-quick-success"));
+    ui::kv(&i18n::t("label-provider"), provider);
+    ui::kv(&i18n::t("label-model"), model);
     ui::blank();
-    ui::next_steps(&[
-        "Start the daemon:  librefang start",
-        "Chat:              librefang chat",
-    ]);
+    ui::next_steps(&[&i18n::t("init-next-start"), &i18n::t("init-next-chat")]);
 }
 
 /// Interactive 5-step onboarding wizard (ratatui TUI).
@@ -1310,12 +1313,12 @@ fn cmd_init_interactive(librefang_dir: &std::path::Path) {
         } => {
             // Print summary after TUI restores terminal
             ui::blank();
-            ui::success("LibreFang initialized!");
-            ui::kv("Provider", &provider);
-            ui::kv("Model", &model);
+            ui::success(&i18n::t("init-interactive-success"));
+            ui::kv(&i18n::t("label-provider"), &provider);
+            ui::kv(&i18n::t("label-model"), &model);
 
             if daemon_started {
-                ui::kv_ok("Daemon", "running");
+                ui::kv_ok(&i18n::t("label-daemon"), "running");
             }
             ui::blank();
 
@@ -1327,16 +1330,19 @@ fn cmd_init_interactive(librefang_dir: &std::path::Path) {
                 LaunchChoice::Dashboard => {
                     if let Some(base) = find_daemon() {
                         let url = format!("{base}/");
-                        ui::success(&format!("Opening dashboard at {url}"));
+                        ui::success(&i18n::t_args("dashboard-opening", &[("url", &url)]));
                         if !open_in_browser(&url) {
-                            ui::hint(&format!("Could not open browser. Visit: {url}"));
+                            ui::hint(&i18n::t_args(
+                                "hint-could-not-open-browser-visit",
+                                &[("url", &url)],
+                            ));
                         }
                     } else {
-                        ui::error("Daemon is not running. Start it with: librefang start");
+                        ui::error(&i18n::t("daemon-not-running-start"));
                     }
                 }
                 LaunchChoice::Chat => {
-                    ui::hint("Starting chat session...");
+                    ui::hint(&i18n::t("hint-starting-chat"));
                     ui::blank();
                     // Note: tracing was initialized for stderr (init is a CLI
                     // subcommand).  The chat TUI takes over the terminal with
@@ -1347,7 +1353,7 @@ fn cmd_init_interactive(librefang_dir: &std::path::Path) {
             }
         }
         InitResult::Cancelled => {
-            println!("  Setup cancelled.");
+            println!("  {}", i18n::t("init-cancelled"));
         }
     }
 }
@@ -1369,7 +1375,7 @@ fn launch_desktop_app(_librefang_dir: &std::path::Path) {
 
     match desktop_bin {
         Some(ref path) if path.exists() => {
-            ui::success("Launching LibreFang Desktop...");
+            ui::success(&i18n::t("desktop-launching"));
             match std::process::Command::new(path)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -1377,33 +1383,36 @@ fn launch_desktop_app(_librefang_dir: &std::path::Path) {
                 .spawn()
             {
                 Ok(_) => {
-                    ui::success("Desktop app started.");
+                    ui::success(&i18n::t("desktop-started"));
                 }
                 Err(e) => {
-                    ui::error(&format!("Failed to launch desktop app: {e}"));
-                    ui::hint("Try: librefang dashboard");
+                    ui::error(&i18n::t_args(
+                        "desktop-launch-fail",
+                        &[("error", &e.to_string())],
+                    ));
+                    ui::hint(&i18n::t("hint-try-dashboard"));
                 }
             }
         }
         _ => {
-            ui::error("Desktop app not found.");
-            ui::hint("Install it with: cargo install librefang-desktop");
-            ui::hint("Falling back to web dashboard...");
+            ui::error(&i18n::t("desktop-not-found"));
+            ui::hint(&i18n::t("hint-install-desktop"));
+            ui::hint(&i18n::t("hint-fallback-web-dashboard"));
             ui::blank();
             if let Some(base) = find_daemon() {
                 let url = format!("{base}/");
                 if !open_in_browser(&url) {
                     // Browser launch failed entirely (e.g., sandbox EPERM,
                     // no display server, container environment).
-                    ui::hint("Could not open a browser automatically.");
+                    ui::hint(&i18n::t("hint-could-not-open-browser"));
                 }
                 // Always print the URL so the user can open it manually,
                 // even when open_in_browser reported success — the spawned
                 // opener may still fail asynchronously.
-                ui::hint(&format!("Dashboard: {url}"));
+                ui::hint(&i18n::t_args("hint-dashboard-url", &[("url", &url)]));
             } else {
-                ui::hint("Daemon is not running. Start it with: librefang start");
-                ui::hint("Then open: http://127.0.0.1:4545");
+                ui::hint(&i18n::t("daemon-not-running-start"));
+                ui::hint(&i18n::t("hint-then-open-dashboard"));
             }
         }
     }
@@ -1415,23 +1424,26 @@ fn detect_best_provider() -> (&'static str, &'static str, &'static str) {
 
     for (p, env_var, m, display) in &providers {
         if std::env::var(env_var).is_ok() {
-            ui::success(&format!("Detected {display} ({env_var})"));
+            ui::success(&i18n::t_args(
+                "detected-provider",
+                &[("display", display), ("env_var", env_var)],
+            ));
             return (p, env_var, m);
         }
     }
     // Also check GOOGLE_API_KEY
     if std::env::var("GOOGLE_API_KEY").is_ok() {
-        ui::success("Detected Gemini (GOOGLE_API_KEY)");
+        ui::success(&i18n::t("detected-gemini"));
         return ("gemini", "GOOGLE_API_KEY", "gemini-2.5-flash");
     }
     // Check if Ollama is running locally (no API key needed)
     if check_ollama_available() {
-        ui::success("Detected Ollama running locally (no API key needed)");
+        ui::success(&i18n::t("detected-ollama"));
         return ("ollama", "OLLAMA_API_KEY", "llama3.2");
     }
-    ui::hint("No LLM provider API keys found");
-    ui::hint("Groq offers a free tier: https://console.groq.com");
-    ui::hint("Or install Ollama for local models: https://ollama.com");
+    ui::hint(&i18n::t("hint-no-api-keys"));
+    ui::hint(&i18n::t("hint-groq-free"));
+    ui::hint(&i18n::t("hint-ollama-local"));
     ("groq", "GROQ_API_KEY", "llama-3.3-70b-versatile")
 }
 
@@ -1475,7 +1487,10 @@ fn write_config_if_missing(
 ) {
     let config_path = librefang_dir.join("config.toml");
     if config_path.exists() {
-        ui::check_ok(&format!("Config already exists: {}", config_path.display()));
+        ui::check_ok(&i18n::t_args(
+            "error-config-exists",
+            &[("path", &config_path.display().to_string())],
+        ));
     } else {
         let default_config = format!(
             r#"# LibreFang Agent OS configuration
@@ -1494,11 +1509,14 @@ decay_rate = 0.05
 "#
         );
         std::fs::write(&config_path, &default_config).unwrap_or_else(|e| {
-            ui::error_with_fix("Failed to write config", &e.to_string());
+            ui::error_with_fix(&i18n::t("error-write-config"), &e.to_string());
             std::process::exit(1);
         });
         restrict_file_permissions(&config_path);
-        ui::success(&format!("Created: {}", config_path.display()));
+        ui::success(&i18n::t_args(
+            "error-config-created",
+            &[("path", &config_path.display().to_string())],
+        ));
     }
 }
 
@@ -1582,8 +1600,8 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
     let daemon = daemon_config_context(config.as_deref());
     if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
         ui::error_with_fix(
-            &format!("Daemon already running at {base}"),
-            "Use `librefang status` to check it, or stop it first",
+            &i18n::t_args("daemon-already-running", &[("url", &base)]),
+            &i18n::t("daemon-already-running-fix"),
         );
         std::process::exit(1);
     }
@@ -1591,7 +1609,7 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
     if !spawned && !foreground {
         let log_path = daemon_log_path_for_config(config.as_deref());
         let mut child = spawn_detached_daemon(config.as_deref(), &log_path).unwrap_or_else(|e| {
-            ui::error_with_fix("Failed to launch background daemon", &e);
+            ui::error_with_fix(&i18n::t("daemon-launch-fail"), &e);
             std::process::exit(1);
         });
 
@@ -1601,10 +1619,10 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
                 let pid = child.id();
                 std::mem::forget(child);
                 ui::success(&i18n::t("daemon-started-bg"));
-                ui::kv("PID", &pid.to_string());
+                ui::kv(&i18n::t("label-pid"), &pid.to_string());
                 ui::kv(&i18n::t("label-api"), &base);
                 ui::kv(&i18n::t("label-dashboard"), &format!("{base}/"));
-                ui::kv("Log", &log_path.display().to_string());
+                ui::kv(&i18n::t("label-log"), &log_path.display().to_string());
                 if tail {
                     ui::hint(&i18n::t("hint-tail-stop"));
                     ui::blank();
@@ -1618,16 +1636,25 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
             match child.try_wait() {
                 Ok(Some(status)) => {
                     ui::error_with_fix(
-                        &format!("Background daemon exited before becoming healthy ({status})"),
-                        &format!("Check startup logs: {}", log_path.display()),
+                        &i18n::t_args("daemon-bg-exited", &[("status", &status.to_string())]),
+                        &i18n::t_args(
+                            "daemon-bg-exited-fix",
+                            &[("path", &log_path.display().to_string())],
+                        ),
                     );
                     std::process::exit(1);
                 }
                 Ok(None) => {}
                 Err(e) => {
                     ui::error_with_fix(
-                        "Failed while waiting for background daemon",
-                        &format!("{e}. Check startup logs: {}", log_path.display()),
+                        &i18n::t("daemon-bg-wait-fail"),
+                        &i18n::t_args(
+                            "daemon-bg-wait-fail-fix",
+                            &[
+                                ("error", &e.to_string()),
+                                ("path", &log_path.display().to_string()),
+                            ],
+                        ),
                     );
                     std::process::exit(1);
                 }
@@ -1637,8 +1664,8 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
                 let pid = child.id();
                 std::mem::forget(child);
                 ui::success(&i18n::t("daemon-still-starting"));
-                ui::kv("PID", &pid.to_string());
-                ui::kv("Log", &log_path.display().to_string());
+                ui::kv(&i18n::t("label-pid"), &pid.to_string());
+                ui::kv(&i18n::t("label-log"), &log_path.display().to_string());
                 if tail {
                     ui::hint(&i18n::t("hint-tail-stop"));
                     ui::blank();
@@ -1711,7 +1738,7 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
         if let Err(e) =
             librefang_api::server::run_daemon(kernel, &listen_addr, Some(&daemon_info_path)).await
         {
-            ui::error(&format!("Daemon error: {e}"));
+            ui::error(&i18n::t_args("daemon-error", &[("error", &e.to_string())]));
             std::process::exit(1);
         }
 
@@ -1739,7 +1766,7 @@ fn cmd_stop(config: Option<PathBuf>) {
                     for _ in 0..10 {
                         std::thread::sleep(std::time::Duration::from_millis(500));
                         if find_daemon_in_home(&daemon.home_dir).is_none() {
-                            ui::success("Daemon stopped");
+                            ui::success(&i18n::t("daemon-stopped-ok"));
                             return;
                         }
                     }
@@ -1748,20 +1775,26 @@ fn cmd_stop(config: Option<PathBuf>) {
                         force_kill_pid(info.pid);
                         let _ = std::fs::remove_file(daemon.home_dir.join("daemon.json"));
                     }
-                    ui::success("Daemon stopped (forced)");
+                    ui::success(&i18n::t("daemon-stopped-forced"));
                 }
                 Ok(r) => {
-                    ui::error(&format!("Shutdown request failed ({})", r.status()));
+                    ui::error(&i18n::t_args(
+                        "shutdown-request-fail",
+                        &[("status", &r.status().to_string())],
+                    ));
                 }
                 Err(e) => {
-                    ui::error(&format!("Could not reach daemon: {e}"));
+                    ui::error(&i18n::t_args(
+                        "could-not-reach-daemon",
+                        &[("error", &e.to_string())],
+                    ));
                 }
             }
         }
         None => {
             ui::warn_with_fix(
-                "No running daemon found",
-                "Is it running? Check with: librefang status",
+                &i18n::t("daemon-no-running-found"),
+                &i18n::t("daemon-no-running-found-fix"),
             );
         }
     }
@@ -1770,10 +1803,10 @@ fn cmd_stop(config: Option<PathBuf>) {
 fn cmd_restart(config: Option<PathBuf>, tail: bool, foreground: bool) {
     let daemon = daemon_config_context(config.as_deref());
     if find_daemon_in_home(&daemon.home_dir).is_some() {
-        ui::hint("Restarting daemon...");
+        ui::hint(&i18n::t("daemon-restarting"));
         cmd_stop(config.clone());
     } else {
-        ui::hint("No running daemon found; starting a new daemon");
+        ui::hint(&i18n::t("daemon-no-running-starting"));
     }
 
     cmd_start(config, tail, false, foreground);
@@ -1799,23 +1832,17 @@ fn boot_kernel_error(e: &librefang_kernel::error::KernelError) {
     let msg = e.to_string();
     if msg.contains("parse") || msg.contains("toml") || msg.contains("config") {
         ui::error_with_fix(
-            "Failed to parse configuration",
-            "Check your config.toml syntax: librefang config show",
+            &i18n::t("error-boot-config"),
+            &i18n::t("error-boot-config-fix"),
         );
     } else if msg.contains("database") || msg.contains("locked") || msg.contains("sqlite") {
-        ui::error_with_fix(
-            "Database error (file may be locked)",
-            "Check if another LibreFang process is running: librefang status",
-        );
+        ui::error_with_fix(&i18n::t("error-boot-db"), &i18n::t("error-boot-db-fix"));
     } else if msg.contains("key") || msg.contains("API") || msg.contains("auth") {
-        ui::error_with_fix(
-            "LLM provider authentication failed",
-            "Run `librefang doctor` to check your API key configuration",
-        );
+        ui::error_with_fix(&i18n::t("error-boot-auth"), &i18n::t("error-boot-auth-fix"));
     } else {
         ui::error_with_fix(
-            &format!("Failed to boot kernel: {msg}"),
-            "Run `librefang doctor` to diagnose the issue",
+            &i18n::t_args("error-boot-generic", &[("error", &msg)]),
+            &i18n::t("error-boot-generic-fix"),
         );
     }
 }
@@ -1823,14 +1850,20 @@ fn boot_kernel_error(e: &librefang_kernel::error::KernelError) {
 fn cmd_agent_spawn(config: Option<PathBuf>, manifest_path: PathBuf) {
     if !manifest_path.exists() {
         ui::error_with_fix(
-            &format!("Manifest file not found: {}", manifest_path.display()),
-            "Use `librefang agent new` to spawn from a template instead",
+            &i18n::t_args(
+                "manifest-not-found",
+                &[("path", &manifest_path.display().to_string())],
+            ),
+            &i18n::t("manifest-not-found-fix"),
         );
         std::process::exit(1);
     }
 
     let contents = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        eprintln!("Error reading manifest: {e}");
+        eprintln!(
+            "{}",
+            i18n::t_args("error-reading-manifest", &[("error", &e.to_string())])
+        );
         std::process::exit(1);
     });
 
@@ -1843,31 +1876,40 @@ fn cmd_agent_spawn(config: Option<PathBuf>, manifest_path: PathBuf) {
                 .send(),
         );
         if body.get("agent_id").is_some() {
-            println!("Agent spawned successfully!");
+            println!("{}", i18n::t("agent-spawn-success"));
             println!("  ID:   {}", body["agent_id"].as_str().unwrap_or("?"));
             println!("  Name: {}", body["name"].as_str().unwrap_or("?"));
         } else {
             eprintln!(
-                "Failed to spawn agent: {}",
-                body["error"].as_str().unwrap_or("Unknown error")
+                "{}",
+                i18n::t_args(
+                    "agent-spawn-agent-failed",
+                    &[("error", body["error"].as_str().unwrap_or("Unknown error"))]
+                )
             );
             std::process::exit(1);
         }
     } else {
         let manifest: AgentManifest = toml::from_str(&contents).unwrap_or_else(|e| {
-            eprintln!("Error parsing manifest: {e}");
+            eprintln!(
+                "{}",
+                i18n::t_args("error-parsing-manifest", &[("error", &e.to_string())])
+            );
             std::process::exit(1);
         });
         let kernel = boot_kernel(config);
         match kernel.spawn_agent_with_source(manifest, Some(manifest_path.clone())) {
             Ok(id) => {
-                println!("Agent spawned (in-process mode).");
+                println!("{}", i18n::t("agent-spawn-inprocess-mode"));
                 println!("  ID: {id}");
-                println!("\n  Note: Agent will be lost when this process exits.");
-                println!("  For persistent agents, use `librefang start` first.");
+                println!("\n  {}", i18n::t("agent-note-lost"));
+                println!("  {}", i18n::t("agent-note-persistent"));
             }
             Err(e) => {
-                eprintln!("Failed to spawn agent: {e}");
+                eprintln!(
+                    "{}",
+                    i18n::t_args("agent-spawn-agent-failed", &[("error", &e.to_string())])
+                );
                 std::process::exit(1);
             }
         }
@@ -1890,7 +1932,7 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
         let agents = body.as_array();
 
         match agents {
-            Some(agents) if agents.is_empty() => println!("No agents running."),
+            Some(agents) if agents.is_empty() => println!("{}", i18n::t("agent-no-agents")),
             Some(agents) => {
                 println!(
                     "{:<38} {:<16} {:<10} {:<12} MODEL",
@@ -1908,7 +1950,7 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
                     );
                 }
             }
-            None => println!("No agents running."),
+            None => println!("{}", i18n::t("agent-no-agents")),
         }
     } else {
         let kernel = boot_kernel(config);
@@ -1934,7 +1976,7 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
         }
 
         if agents.is_empty() {
-            println!("No agents running.");
+            println!("{}", i18n::t("agent-no-agents"));
             return;
         }
 
@@ -1965,24 +2007,36 @@ fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
                 .send(),
         );
         if body.get("status").is_some() {
-            println!("Agent {agent_id_str} killed.");
+            println!("{}", i18n::t_args("agent-killed", &[("id", agent_id_str)]));
         } else {
             eprintln!(
-                "Failed to kill agent: {}",
-                body["error"].as_str().unwrap_or("Unknown error")
+                "{}",
+                i18n::t_args(
+                    "agent-kill-failed",
+                    &[("error", body["error"].as_str().unwrap_or("Unknown error"))]
+                )
             );
             std::process::exit(1);
         }
     } else {
         let agent_id: AgentId = agent_id_str.parse().unwrap_or_else(|_| {
-            eprintln!("Invalid agent ID: {agent_id_str}");
+            eprintln!(
+                "{}",
+                i18n::t_args("agent-invalid-id", &[("id", agent_id_str)])
+            );
             std::process::exit(1);
         });
         let kernel = boot_kernel(config);
         match kernel.kill_agent(agent_id) {
-            Ok(()) => println!("Agent {agent_id} killed."),
+            Ok(()) => println!(
+                "{}",
+                i18n::t_args("agent-killed", &[("id", &agent_id.to_string())])
+            ),
             Err(e) => {
-                eprintln!("Failed to kill agent: {e}");
+                eprintln!(
+                    "{}",
+                    i18n::t_args("agent-kill-failed", &[("error", &e.to_string())])
+                );
                 std::process::exit(1);
             }
         }
@@ -2044,7 +2098,7 @@ fn cmd_agent_new(config: Option<PathBuf>, template_name: Option<String>) {
             }
         },
         None => {
-            ui::section("Available Agent Templates");
+            ui::section(&i18n::t("section-agent-templates"));
             ui::blank();
             for (i, t) in all_templates.iter().enumerate() {
                 let desc = if t.description.is_empty() {
@@ -2090,26 +2144,32 @@ fn spawn_template_agent(config: Option<PathBuf>, template: &templates::AgentTemp
         );
         if let Some(id) = body["agent_id"].as_str() {
             ui::blank();
-            ui::success(&format!("Agent '{}' spawned", template.name));
-            ui::kv("ID", id);
+            ui::success(&i18n::t_args("agent-spawned", &[("name", &template.name)]));
+            ui::kv(&i18n::t("label-id"), id);
             if let Some(model) = body["model_name"].as_str() {
                 let provider = body["model_provider"].as_str().unwrap_or("?");
-                ui::kv("Model", &format!("{provider}/{model}"));
+                ui::kv(&i18n::t("label-model"), &format!("{provider}/{model}"));
             }
             ui::blank();
-            ui::hint(&format!("Chat: librefang chat {}", template.name));
+            ui::hint(&i18n::t_args(
+                "hint-chat-with-agent",
+                &[("name", &template.name)],
+            ));
         } else {
-            ui::error(&format!(
-                "Failed to spawn: {}",
-                body["error"].as_str().unwrap_or("Unknown error")
+            ui::error(&i18n::t_args(
+                "agent-spawn-failed",
+                &[("error", body["error"].as_str().unwrap_or("Unknown error"))],
             ));
             std::process::exit(1);
         }
     } else {
         let manifest: AgentManifest = toml::from_str(&template.content).unwrap_or_else(|e| {
             ui::error_with_fix(
-                &format!("Failed to parse template '{}': {e}", template.name),
-                "The template manifest may be corrupted",
+                &i18n::t_args(
+                    "agent-template-parse-fail",
+                    &[("name", &template.name), ("error", &e.to_string())],
+                ),
+                &i18n::t("agent-template-parse-fail-fix"),
             );
             std::process::exit(1);
         });
@@ -2117,15 +2177,24 @@ fn spawn_template_agent(config: Option<PathBuf>, template: &templates::AgentTemp
         match kernel.spawn_agent(manifest) {
             Ok(id) => {
                 ui::blank();
-                ui::success(&format!("Agent '{}' spawned (in-process)", template.name));
-                ui::kv("ID", &id.to_string());
+                ui::success(&i18n::t_args(
+                    "agent-spawned-inprocess",
+                    &[("name", &template.name)],
+                ));
+                ui::kv(&i18n::t("label-id"), &id.to_string());
                 ui::blank();
-                ui::hint(&format!("Chat: librefang chat {}", template.name));
-                ui::hint("Note: Agent will be lost when this process exits");
-                ui::hint("For persistent agents, use `librefang start` first");
+                ui::hint(&i18n::t_args(
+                    "hint-chat-with-agent",
+                    &[("name", &template.name)],
+                ));
+                ui::hint(&i18n::t("hint-agent-lost-on-exit"));
+                ui::hint(&i18n::t("hint-persistent-agents"));
             }
             Err(e) => {
-                ui::error(&format!("Failed to spawn agent: {e}"));
+                ui::error(&i18n::t_args(
+                    "agent-spawn-agent-failed",
+                    &[("error", &e.to_string())],
+                ));
                 std::process::exit(1);
             }
         }
@@ -2146,27 +2215,39 @@ fn cmd_status(config: Option<PathBuf>, json: bool) {
             return;
         }
 
-        ui::section("LibreFang Daemon Status");
+        ui::section(&i18n::t("section-daemon-status"));
         ui::blank();
-        ui::kv_ok("Status", body["status"].as_str().unwrap_or("?"));
+        ui::kv_ok(
+            &i18n::t("label-status"),
+            body["status"].as_str().unwrap_or("?"),
+        );
         ui::kv(
-            "Agents",
+            &i18n::t("label-agents"),
             &body["agent_count"].as_u64().unwrap_or(0).to_string(),
         );
-        ui::kv("Provider", body["default_provider"].as_str().unwrap_or("?"));
-        ui::kv("Model", body["default_model"].as_str().unwrap_or("?"));
+        ui::kv(
+            &i18n::t("label-provider"),
+            body["default_provider"].as_str().unwrap_or("?"),
+        );
+        ui::kv(
+            &i18n::t("label-model"),
+            body["default_model"].as_str().unwrap_or("?"),
+        );
         ui::kv(&i18n::t("label-api"), &base);
         ui::kv(&i18n::t("label-dashboard"), &format!("{base}/"));
-        ui::kv("Data dir", body["data_dir"].as_str().unwrap_or("?"));
         ui::kv(
-            "Uptime",
+            &i18n::t("label-data-dir"),
+            body["data_dir"].as_str().unwrap_or("?"),
+        );
+        ui::kv(
+            &i18n::t("label-uptime"),
             &format!("{}s", body["uptime_seconds"].as_u64().unwrap_or(0)),
         );
 
         if let Some(agents) = body["agents"].as_array() {
             if !agents.is_empty() {
                 ui::blank();
-                ui::section("Active Agents");
+                ui::section(&i18n::t("section-active-agents"));
                 for a in agents {
                     println!(
                         "    {} ({}) -- {} [{}:{}]",
@@ -2199,19 +2280,28 @@ fn cmd_status(config: Option<PathBuf>, json: bool) {
             return;
         }
 
-        ui::section("LibreFang Status (in-process)");
+        ui::section(&i18n::t("section-status-inprocess"));
         ui::blank();
-        ui::kv("Agents", &agent_count.to_string());
-        ui::kv("Provider", &kernel.config.default_model.provider);
-        ui::kv("Model", &kernel.config.default_model.model);
-        ui::kv("Data dir", &kernel.config.data_dir.display().to_string());
-        ui::kv_warn("Daemon", "NOT RUNNING");
+        ui::kv(&i18n::t("label-agents"), &agent_count.to_string());
+        ui::kv(
+            &i18n::t("label-provider"),
+            &kernel.config.default_model.provider,
+        );
+        ui::kv(&i18n::t("label-model"), &kernel.config.default_model.model);
+        ui::kv(
+            &i18n::t("label-data-dir"),
+            &kernel.config.data_dir.display().to_string(),
+        );
+        ui::kv_warn(
+            &i18n::t("label-daemon"),
+            &i18n::t("label-daemon-not-running"),
+        );
         ui::blank();
-        ui::hint("Run `librefang start` to launch the daemon");
+        ui::hint(&i18n::t("hint-run-start"));
 
         if agent_count > 0 {
             ui::blank();
-            ui::section("Persisted Agents");
+            ui::section(&i18n::t("section-persisted-agents"));
             for entry in kernel.registry.list() {
                 println!("    {} ({}) -- {:?}", entry.name, entry.id, entry.state);
             }
@@ -2225,7 +2315,7 @@ fn cmd_doctor(json: bool, repair: bool) {
     let mut repaired = false;
 
     if !json {
-        ui::step("LibreFang Doctor");
+        ui::step(&i18n::t("doctor-title"));
         println!();
     }
 
@@ -2337,7 +2427,7 @@ fn cmd_doctor(json: bool, repair: bool) {
                 Err(e) => {
                     if !json {
                         ui::check_fail(&format!("Config file has syntax errors: {e}"));
-                        ui::hint("Fix with: librefang config edit");
+                        ui::hint(&i18n::t("hint-config-edit"));
                     }
                     checks.push(serde_json::json!({"check": "config_syntax", "status": "fail", "error": e.to_string()}));
                     all_ok = false;
@@ -2608,14 +2698,14 @@ decay_rate = 0.05
     if !any_key_set {
         if !json {
             println!();
-            ui::check_fail("No LLM provider API keys found!");
+            ui::check_fail(&i18n::t("doctor-no-api-keys"));
             ui::blank();
-            ui::section("Getting an API key (free tiers)");
+            ui::section(&i18n::t("section-getting-api-key"));
             ui::suggest_cmd("Groq:", "https://console.groq.com       (free, fast)");
             ui::suggest_cmd("Gemini:", "https://aistudio.google.com    (free tier)");
             ui::suggest_cmd("DeepSeek:", "https://platform.deepseek.com  (low cost)");
             ui::blank();
-            ui::hint("Or run: librefang config set-key groq");
+            ui::hint(&i18n::t("hint-set-key"));
         }
         all_ok = false;
     }
@@ -3163,14 +3253,14 @@ decay_rate = 0.05
     } else {
         println!();
         if all_ok {
-            ui::success("All checks passed! LibreFang is ready.");
-            ui::hint("Start the daemon: librefang start");
+            ui::success(&i18n::t("doctor-all-passed"));
+            ui::hint(&i18n::t("hint-start-daemon-cmd"));
         } else if repaired {
-            ui::success("Repairs applied. Re-run `librefang doctor` to verify.");
+            ui::success(&i18n::t("doctor-repairs-applied"));
         } else {
-            ui::error("Some checks failed.");
+            ui::error(&i18n::t("doctor-some-failed"));
             if !repair {
-                ui::hint("Run `librefang doctor --repair` to attempt auto-fix");
+                ui::hint(&i18n::t("hint-doctor-repair"));
             }
         }
     }
@@ -3185,16 +3275,16 @@ fn cmd_dashboard() {
         url
     } else {
         // Auto-start the daemon
-        ui::hint("No daemon running — starting one now...");
+        ui::hint(&i18n::t("daemon-no-running-auto"));
         match start_daemon_background() {
             Ok(url) => {
-                ui::success("Daemon started");
+                ui::success(&i18n::t("daemon-started"));
                 url
             }
             Err(e) => {
                 ui::error_with_fix(
-                    &format!("Could not start daemon: {e}"),
-                    "Start it manually: librefang start",
+                    &i18n::t_args("daemon-start-fail", &[("error", &e.to_string())]),
+                    &i18n::t("daemon-start-fail-fix"),
                 );
                 std::process::exit(1);
             }
@@ -3202,12 +3292,15 @@ fn cmd_dashboard() {
     };
 
     let url = format!("{base}/");
-    ui::success(&format!("Opening dashboard at {url}"));
+    ui::success(&i18n::t_args("dashboard-opening", &[("url", &url)]));
     if copy_to_clipboard(&url) {
-        ui::hint("URL copied to clipboard");
+        ui::hint(&i18n::t("hint-url-copied"));
     }
     if !open_in_browser(&url) {
-        ui::hint(&format!("Could not open browser. Visit: {url}"));
+        ui::hint(&i18n::t_args(
+            "hint-could-not-open-browser-visit",
+            &[("url", &url)],
+        ));
     }
 }
 
@@ -3525,10 +3618,10 @@ fn cmd_trigger_delete(trigger_id: &str) {
 fn require_daemon(command: &str) -> String {
     find_daemon().unwrap_or_else(|| {
         ui::error_with_fix(
-            &format!("`librefang {command}` requires a running daemon"),
-            "Start the daemon: librefang start",
+            &i18n::t_args("error-require-daemon", &[("command", command)]),
+            &i18n::t("error-require-daemon-fix"),
         );
-        ui::hint("Or try `librefang chat` which works without a daemon");
+        ui::hint(&i18n::t("hint-or-chat"));
         std::process::exit(1);
     })
 }
@@ -3899,7 +3992,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
         Some(c) => c.to_string(),
         None => {
             // Interactive channel picker
-            ui::section("Channel Setup");
+            ui::section(&i18n::t("section-channel-setup"));
             ui::blank();
             let channel_list = [
                 ("telegram", "Telegram bot (BotFather)"),
@@ -3932,7 +4025,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
 
     match channel.as_str() {
         "telegram" => {
-            ui::section("Setting up Telegram");
+            ui::section(&i18n::t("section-setup-telegram"));
             ui::blank();
             println!("  1. Open Telegram and message @BotFather");
             println!("  2. Send /newbot and follow the prompts");
@@ -3941,7 +4034,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
 
             let token = prompt_input("  Paste your bot token: ");
             if token.is_empty() {
-                ui::error("No token provided. Setup cancelled.");
+                ui::error(&i18n::t("channel-no-token"));
                 return;
             }
 
@@ -3950,16 +4043,16 @@ fn cmd_channel_setup(channel: Option<&str>) {
 
             // Save token to .env
             match dotenv::save_env_key("TELEGRAM_BOT_TOKEN", &token) {
-                Ok(()) => ui::success("Token saved to ~/.librefang/.env"),
+                Ok(()) => ui::success(&i18n::t("channel-token-saved")),
                 Err(_) => println!("    export TELEGRAM_BOT_TOKEN={token}"),
             }
 
             ui::blank();
-            ui::success("Telegram configured");
+            ui::success(&i18n::t_args("channel-configured", &[("name", "Telegram")]));
             notify_daemon_restart();
         }
         "discord" => {
-            ui::section("Setting up Discord");
+            ui::section(&i18n::t("section-setup-discord"));
             ui::blank();
             println!("  1. Go to https://discord.com/developers/applications");
             println!("  2. Create a New Application");
@@ -3972,7 +4065,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
 
             let token = prompt_input("  Paste your bot token: ");
             if token.is_empty() {
-                ui::error("No token provided. Setup cancelled.");
+                ui::error(&i18n::t("channel-no-token"));
                 return;
             }
 
@@ -3980,16 +4073,16 @@ fn cmd_channel_setup(channel: Option<&str>) {
             maybe_write_channel_config("discord", config_block);
 
             match dotenv::save_env_key("DISCORD_BOT_TOKEN", &token) {
-                Ok(()) => ui::success("Token saved to ~/.librefang/.env"),
+                Ok(()) => ui::success(&i18n::t("channel-token-saved")),
                 Err(_) => println!("    export DISCORD_BOT_TOKEN={token}"),
             }
 
             ui::blank();
-            ui::success("Discord configured");
+            ui::success(&i18n::t_args("channel-configured", &[("name", "Discord")]));
             notify_daemon_restart();
         }
         "slack" => {
-            ui::section("Setting up Slack");
+            ui::section(&i18n::t("section-setup-slack"));
             ui::blank();
             println!("  1. Go to https://api.slack.com/apps");
             println!("  2. Create New App -> From Scratch");
@@ -4008,23 +4101,23 @@ fn cmd_channel_setup(channel: Option<&str>) {
 
             if !app_token.is_empty() {
                 match dotenv::save_env_key("SLACK_APP_TOKEN", &app_token) {
-                    Ok(()) => ui::success("App token saved to ~/.librefang/.env"),
+                    Ok(()) => ui::success(&i18n::t("channel-app-token-saved")),
                     Err(_) => println!("    export SLACK_APP_TOKEN={app_token}"),
                 }
             }
             if !bot_token.is_empty() {
                 match dotenv::save_env_key("SLACK_BOT_TOKEN", &bot_token) {
-                    Ok(()) => ui::success("Bot token saved to ~/.librefang/.env"),
+                    Ok(()) => ui::success(&i18n::t("channel-bot-token-saved")),
                     Err(_) => println!("    export SLACK_BOT_TOKEN={bot_token}"),
                 }
             }
 
             ui::blank();
-            ui::success("Slack configured");
+            ui::success(&i18n::t_args("channel-configured", &[("name", "Slack")]));
             notify_daemon_restart();
         }
         "whatsapp" => {
-            ui::section("Setting up WhatsApp");
+            ui::section(&i18n::t("section-setup-whatsapp"));
             ui::blank();
             println!("  WhatsApp Cloud API (recommended for production):");
             println!("  1. Go to https://developers.facebook.com");
@@ -4048,18 +4141,18 @@ fn cmd_channel_setup(channel: Option<&str>) {
             ] {
                 if !val.is_empty() {
                     match dotenv::save_env_key(key, val) {
-                        Ok(()) => ui::success(&format!("{key} saved to ~/.librefang/.env")),
+                        Ok(()) => ui::success(&i18n::t_args("channel-key-saved", &[("key", key)])),
                         Err(_) => println!("    export {key}={val}"),
                     }
                 }
             }
 
             ui::blank();
-            ui::success("WhatsApp configured");
+            ui::success(&i18n::t_args("channel-configured", &[("name", "WhatsApp")]));
             notify_daemon_restart();
         }
         "email" => {
-            ui::section("Setting up Email");
+            ui::section(&i18n::t("section-setup-email"));
             ui::blank();
             println!("  For Gmail, use an App Password:");
             println!("  https://myaccount.google.com/apppasswords");
@@ -4067,7 +4160,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
 
             let username = prompt_input("  Email address: ");
             if username.is_empty() {
-                ui::error("No email provided. Setup cancelled.");
+                ui::error(&i18n::t("channel-no-email"));
                 return;
             }
 
@@ -4080,21 +4173,19 @@ fn cmd_channel_setup(channel: Option<&str>) {
 
             if !password.is_empty() {
                 match dotenv::save_env_key("EMAIL_PASSWORD", &password) {
-                    Ok(()) => ui::success("Password saved to ~/.librefang/.env"),
+                    Ok(()) => ui::success(&i18n::t("channel-password-saved")),
                     Err(_) => println!("    export EMAIL_PASSWORD=your_app_password"),
                 }
             } else {
-                ui::hint(
-                    "Set later: librefang config set-key email (or export EMAIL_PASSWORD=...)",
-                );
+                ui::hint(&i18n::t("hint-set-key-provider"));
             }
 
             ui::blank();
-            ui::success("Email configured");
+            ui::success(&i18n::t_args("channel-configured", &[("name", "Email")]));
             notify_daemon_restart();
         }
         "signal" => {
-            ui::section("Setting up Signal");
+            ui::section(&i18n::t("section-setup-signal"));
             ui::blank();
             println!("  Signal requires signal-cli (https://github.com/AsamK/signal-cli).");
             ui::blank();
@@ -4116,17 +4207,17 @@ fn cmd_channel_setup(channel: Option<&str>) {
 
             if !phone.is_empty() {
                 match dotenv::save_env_key("SIGNAL_PHONE", &phone) {
-                    Ok(()) => ui::success("Phone saved to ~/.librefang/.env"),
+                    Ok(()) => ui::success(&i18n::t("channel-phone-saved")),
                     Err(_) => println!("    export SIGNAL_PHONE={phone}"),
                 }
             }
 
             ui::blank();
-            ui::success("Signal configured");
+            ui::success(&i18n::t_args("channel-configured", &[("name", "Signal")]));
             notify_daemon_restart();
         }
         "matrix" => {
-            ui::section("Setting up Matrix");
+            ui::section(&i18n::t("section-setup-matrix"));
             ui::blank();
             println!("  1. Create a bot account on your Matrix homeserver");
             println!("     (e.g., register @librefang-bot:matrix.org)");
@@ -4151,19 +4242,19 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let _ = dotenv::save_env_key("MATRIX_HOMESERVER", &homeserver);
             if !token.is_empty() {
                 match dotenv::save_env_key("MATRIX_ACCESS_TOKEN", &token) {
-                    Ok(()) => ui::success("Token saved to ~/.librefang/.env"),
+                    Ok(()) => ui::success(&i18n::t("channel-token-saved")),
                     Err(_) => println!("    export MATRIX_ACCESS_TOKEN={token}"),
                 }
             }
 
             ui::blank();
-            ui::success("Matrix configured");
+            ui::success(&i18n::t_args("channel-configured", &[("name", "Matrix")]));
             notify_daemon_restart();
         }
         other => {
             ui::error_with_fix(
-                &format!("Unknown channel: {other}"),
-                "Available: telegram, discord, slack, whatsapp, email, signal, matrix",
+                &i18n::t_args("channel-unknown", &[("name", other)]),
+                &i18n::t("channel-unknown-fix"),
             );
             std::process::exit(1);
         }
@@ -4176,7 +4267,7 @@ fn maybe_write_channel_config(channel: &str, config_block: &str) {
     let config_path = home.join("config.toml");
 
     if !config_path.exists() {
-        ui::hint("No config.toml found. Run `librefang init` first.");
+        ui::hint(&i18n::t("hint-run-init"));
         return;
     }
 
@@ -4205,7 +4296,7 @@ fn notify_daemon_restart() {
     if find_daemon().is_some() {
         ui::check_warn("Restart the daemon to activate this channel");
     } else {
-        ui::hint("Start the daemon: librefang start");
+        ui::hint(&i18n::t("hint-start-daemon-cmd"));
     }
 }
 
@@ -4497,7 +4588,7 @@ fn cmd_hand_install_deps(id: &str) {
             body["error"].as_str().unwrap_or("?")
         ));
     } else {
-        ui::success(&format!("Dependencies installed for hand '{id}'."));
+        ui::success(&i18n::t_args("hand-install-deps-success", &[("id", id)]));
         if let Some(results) = body.get("results") {
             println!(
                 "{}",
@@ -4521,7 +4612,7 @@ fn cmd_hand_pause(id: &str) {
             body["error"].as_str().unwrap_or("?")
         ));
     } else {
-        ui::success(&format!("Hand instance '{id}' paused."));
+        ui::success(&i18n::t_args("hand-paused", &[("id", id)]));
     }
 }
 
@@ -4539,7 +4630,7 @@ fn cmd_hand_resume(id: &str) {
             body["error"].as_str().unwrap_or("?")
         ));
     } else {
-        ui::success(&format!("Hand instance '{id}' resumed."));
+        ui::success(&i18n::t_args("hand-resumed", &[("id", id)]));
     }
 }
 
@@ -4731,19 +4822,22 @@ fn cmd_config_get(key: &str) {
     let config_path = home.join("config.toml");
 
     if !config_path.exists() {
-        ui::error_with_fix("No config file found", "Run `librefang init` first");
+        ui::error_with_fix(&i18n::t("config-no-file"), &i18n::t("config-no-file-fix"));
         std::process::exit(1);
     }
 
     let content = std::fs::read_to_string(&config_path).unwrap_or_else(|e| {
-        ui::error(&format!("Failed to read config: {e}"));
+        ui::error(&i18n::t_args(
+            "config-read-failed",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     });
 
     let table: toml::Value = toml::from_str(&content).unwrap_or_else(|e| {
         ui::error_with_fix(
-            &format!("Config parse error: {e}"),
-            "Fix your config.toml syntax, or run `librefang config edit`",
+            &i18n::t_args("config-parse-error", &[("error", &e.to_string())]),
+            &i18n::t("config-parse-fix"),
         );
         std::process::exit(1);
     });
@@ -4754,7 +4848,7 @@ fn cmd_config_get(key: &str) {
         match current.get(part) {
             Some(v) => current = v,
             None => {
-                ui::error(&format!("Key not found: {key}"));
+                ui::error(&i18n::t_args("config-key-not-found", &[("key", key)]));
                 std::process::exit(1);
             }
         }
@@ -4775,19 +4869,22 @@ fn cmd_config_set(key: &str, value: &str) {
     let config_path = home.join("config.toml");
 
     if !config_path.exists() {
-        ui::error_with_fix("No config file found", "Run `librefang init` first");
+        ui::error_with_fix(&i18n::t("config-no-file"), &i18n::t("config-no-file-fix"));
         std::process::exit(1);
     }
 
     let content = std::fs::read_to_string(&config_path).unwrap_or_else(|e| {
-        ui::error(&format!("Failed to read config: {e}"));
+        ui::error(&i18n::t_args(
+            "config-read-failed",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     });
 
     let mut table: toml::Value = toml::from_str(&content).unwrap_or_else(|e| {
         ui::error_with_fix(
-            &format!("Config parse error: {e}"),
-            "Fix your config.toml syntax first",
+            &i18n::t_args("config-parse-error", &[("error", &e.to_string())]),
+            &i18n::t("config-parse-fix-alt"),
         );
         std::process::exit(1);
     });
@@ -4795,7 +4892,7 @@ fn cmd_config_set(key: &str, value: &str) {
     // Navigate to parent and set key
     let parts: Vec<&str> = key.split('.').collect();
     if parts.is_empty() {
-        ui::error("Empty key");
+        ui::error(&i18n::t("config-empty-key"));
         std::process::exit(1);
     }
 
@@ -4805,7 +4902,7 @@ fn cmd_config_set(key: &str, value: &str) {
             .as_table_mut()
             .and_then(|t| t.get_mut(*part))
             .unwrap_or_else(|| {
-                ui::error(&format!("Key path not found: {key}"));
+                ui::error(&i18n::t_args("config-key-path-not-found", &[("key", key)]));
                 std::process::exit(1);
             });
     }
@@ -4829,15 +4926,15 @@ fn cmd_config_set(key: &str, value: &str) {
         ];
         if !known_scalars.contains(&last_key) {
             ui::error_with_fix(
-                &format!("'{last_key}' is a section, not a scalar"),
-                &format!("Use dotted notation: {last_key}.field_name"),
+                &i18n::t_args("config-section-not-scalar", &[("key", last_key)]),
+                &i18n::t_args("config-section-not-scalar-fix", &[("key", last_key)]),
             );
             std::process::exit(1);
         }
     }
 
     let tbl = current.as_table_mut().unwrap_or_else(|| {
-        ui::error(&format!("Parent of '{key}' is not a table"));
+        ui::error(&i18n::t_args("config-parent-not-table", &[("key", key)]));
         std::process::exit(1);
     });
 
@@ -4878,17 +4975,26 @@ fn cmd_config_set(key: &str, value: &str) {
 
     // Write back (note: this strips comments — warned in help text)
     let serialized = toml::to_string_pretty(&table).unwrap_or_else(|e| {
-        ui::error(&format!("Failed to serialize config: {e}"));
+        ui::error(&i18n::t_args(
+            "config-serialize-failed",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     });
 
     std::fs::write(&config_path, &serialized).unwrap_or_else(|e| {
-        ui::error(&format!("Failed to write config: {e}"));
+        ui::error(&i18n::t_args(
+            "config-write-failed",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     });
     restrict_file_permissions(&config_path);
 
-    ui::success(&format!("Set {key} = {value}"));
+    ui::success(&i18n::t_args(
+        "config-set-kv",
+        &[("key", key), ("value", value)],
+    ));
 }
 
 fn cmd_config_unset(key: &str) {
@@ -4896,19 +5002,22 @@ fn cmd_config_unset(key: &str) {
     let config_path = home.join("config.toml");
 
     if !config_path.exists() {
-        ui::error_with_fix("No config file found", "Run `librefang init` first");
+        ui::error_with_fix(&i18n::t("config-no-file"), &i18n::t("config-no-file-fix"));
         std::process::exit(1);
     }
 
     let content = std::fs::read_to_string(&config_path).unwrap_or_else(|e| {
-        ui::error(&format!("Failed to read config: {e}"));
+        ui::error(&i18n::t_args(
+            "config-read-failed",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     });
 
     let mut table: toml::Value = toml::from_str(&content).unwrap_or_else(|e| {
         ui::error_with_fix(
-            &format!("Config parse error: {e}"),
-            "Fix your config.toml syntax first",
+            &i18n::t_args("config-parse-error", &[("error", &e.to_string())]),
+            &i18n::t("config-parse-fix-alt"),
         );
         std::process::exit(1);
     });
@@ -4916,7 +5025,7 @@ fn cmd_config_unset(key: &str) {
     // Navigate to parent table and remove the final key
     let parts: Vec<&str> = key.split('.').collect();
     if parts.is_empty() {
-        ui::error("Empty key");
+        ui::error(&i18n::t("config-empty-key"));
         std::process::exit(1);
     }
 
@@ -4926,35 +5035,41 @@ fn cmd_config_unset(key: &str) {
             .as_table_mut()
             .and_then(|t| t.get_mut(*part))
             .unwrap_or_else(|| {
-                ui::error(&format!("Key path not found: {key}"));
+                ui::error(&i18n::t_args("config-key-path-not-found", &[("key", key)]));
                 std::process::exit(1);
             });
     }
 
     let last_key = parts[parts.len() - 1];
     let tbl = current.as_table_mut().unwrap_or_else(|| {
-        ui::error(&format!("Parent of '{key}' is not a table"));
+        ui::error(&i18n::t_args("config-parent-not-table", &[("key", key)]));
         std::process::exit(1);
     });
 
     if tbl.remove(last_key).is_none() {
-        ui::error(&format!("Key not found: {key}"));
+        ui::error(&i18n::t_args("config-key-not-found", &[("key", key)]));
         std::process::exit(1);
     }
 
     // Write back (note: this strips comments — warned in help text)
     let serialized = toml::to_string_pretty(&table).unwrap_or_else(|e| {
-        ui::error(&format!("Failed to serialize config: {e}"));
+        ui::error(&i18n::t_args(
+            "config-serialize-failed",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     });
 
     std::fs::write(&config_path, &serialized).unwrap_or_else(|e| {
-        ui::error(&format!("Failed to write config: {e}"));
+        ui::error(&i18n::t_args(
+            "config-write-failed",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     });
     restrict_file_permissions(&config_path);
 
-    ui::success(&format!("Removed key: {key}"));
+    ui::success(&i18n::t_args("config-removed-key", &[("key", key)]));
 }
 
 fn cmd_config_set_key(provider: &str) {
@@ -4962,13 +5077,13 @@ fn cmd_config_set_key(provider: &str) {
 
     let key = prompt_input(&format!("  Paste your {provider} API key: "));
     if key.is_empty() {
-        ui::error("No key provided. Cancelled.");
+        ui::error(&i18n::t("config-no-key"));
         return;
     }
 
     match dotenv::save_env_key(&env_var, &key) {
         Ok(()) => {
-            ui::success(&format!("Saved {env_var} to ~/.librefang/.env"));
+            ui::success(&i18n::t_args("config-saved-key", &[("env_var", &env_var)]));
             // Test the key
             print!("  Testing key... ");
             io::stdout().flush().unwrap();
@@ -4979,7 +5094,10 @@ fn cmd_config_set_key(provider: &str) {
             }
         }
         Err(e) => {
-            ui::error(&format!("Failed to save key: {e}"));
+            ui::error(&i18n::t_args(
+                "config-save-key-failed",
+                &[("error", &e.to_string())],
+            ));
             std::process::exit(1);
         }
     }
@@ -4989,9 +5107,15 @@ fn cmd_config_delete_key(provider: &str) {
     let env_var = provider_to_env_var(provider);
 
     match dotenv::remove_env_key(&env_var) {
-        Ok(()) => ui::success(&format!("Removed {env_var} from ~/.librefang/.env")),
+        Ok(()) => ui::success(&i18n::t_args(
+            "config-removed-env",
+            &[("env_var", &env_var)],
+        )),
         Err(e) => {
-            ui::error(&format!("Failed to remove key: {e}"));
+            ui::error(&i18n::t_args(
+                "config-remove-key-failed",
+                &[("error", &e.to_string())],
+            ));
             std::process::exit(1);
         }
     }
@@ -5001,8 +5125,14 @@ fn cmd_config_test_key(provider: &str) {
     let env_var = provider_to_env_var(provider);
 
     if std::env::var(&env_var).is_err() {
-        ui::error(&format!("{env_var} not set"));
-        ui::hint(&format!("Set it: librefang config set-key {provider}"));
+        ui::error(&i18n::t_args(
+            "config-env-not-set",
+            &[("env_var", &env_var)],
+        ));
+        ui::hint(&i18n::t_args(
+            "config-set-key-hint",
+            &[("provider", provider)],
+        ));
         std::process::exit(1);
     }
 
@@ -5012,7 +5142,10 @@ fn cmd_config_test_key(provider: &str) {
         println!("{}", "OK".bright_green());
     } else {
         println!("{}", "FAILED (401/403)".bright_red());
-        ui::hint(&format!("Update key: librefang config set-key {provider}"));
+        ui::hint(&i18n::t_args(
+            "config-update-key-hint",
+            &[("provider", provider)],
+        ));
         std::process::exit(1);
     }
 }
@@ -5263,7 +5396,7 @@ fn cmd_vault_init() {
     let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
 
     match vault.init() {
-        Ok(()) => ui::success("Credential vault initialized."),
+        Ok(()) => ui::success(&i18n::t("vault-initialized")),
         Err(e) => {
             ui::error(&e.to_string());
             std::process::exit(1);
@@ -5279,25 +5412,31 @@ fn cmd_vault_set(key: &str) {
     let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
 
     if !vault.exists() {
-        ui::error("Vault not initialized. Run: librefang vault init");
+        ui::error(&i18n::t("vault-not-init-run"));
         std::process::exit(1);
     }
 
     if let Err(e) = vault.unlock() {
-        ui::error(&format!("Could not unlock vault: {e}"));
+        ui::error(&i18n::t_args(
+            "vault-unlock-failed",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     }
 
     let value = prompt_input(&format!("Enter value for {key}: "));
     if value.is_empty() {
-        ui::error("Empty value — not stored.");
+        ui::error(&i18n::t("vault-empty-value"));
         std::process::exit(1);
     }
 
     match vault.set(key.to_string(), Zeroizing::new(value)) {
-        Ok(()) => ui::success(&format!("Stored '{key}' in vault.")),
+        Ok(()) => ui::success(&i18n::t_args("vault-stored", &[("key", key)])),
         Err(e) => {
-            ui::error(&format!("Failed to store: {e}"));
+            ui::error(&i18n::t_args(
+                "vault-store-failed",
+                &[("error", &e.to_string())],
+            ));
             std::process::exit(1);
         }
     }
@@ -5309,12 +5448,15 @@ fn cmd_vault_list() {
     let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
 
     if !vault.exists() {
-        println!("Vault not initialized. Run: librefang vault init");
+        println!("{}", i18n::t("vault-not-init-run"));
         return;
     }
 
     if let Err(e) = vault.unlock() {
-        ui::error(&format!("Could not unlock vault: {e}"));
+        ui::error(&i18n::t_args(
+            "vault-unlock-failed",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     }
 
@@ -5335,19 +5477,25 @@ fn cmd_vault_remove(key: &str) {
     let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
 
     if !vault.exists() {
-        ui::error("Vault not initialized.");
+        ui::error(&i18n::t("vault-not-initialized"));
         std::process::exit(1);
     }
     if let Err(e) = vault.unlock() {
-        ui::error(&format!("Could not unlock vault: {e}"));
+        ui::error(&i18n::t_args(
+            "vault-unlock-failed",
+            &[("error", &e.to_string())],
+        ));
         std::process::exit(1);
     }
 
     match vault.remove(key) {
-        Ok(true) => ui::success(&format!("Removed '{key}' from vault.")),
-        Ok(false) => println!("Key '{key}' not found in vault."),
+        Ok(true) => ui::success(&i18n::t_args("vault-removed", &[("key", key)])),
+        Ok(false) => println!("{}", i18n::t_args("vault-key-not-found", &[("key", key)])),
         Err(e) => {
-            ui::error(&format!("Failed to remove: {e}"));
+            ui::error(&i18n::t_args(
+                "vault-remove-failed",
+                &[("error", &e.to_string())],
+            ));
             std::process::exit(1);
         }
     }
@@ -5584,12 +5732,12 @@ fn cmd_models_set(model: Option<String>) {
             .send(),
     );
     if body.get("error").is_some() {
-        ui::error(&format!(
-            "Failed to set model: {}",
-            body["error"].as_str().unwrap_or("?")
+        ui::error(&i18n::t_args(
+            "model-set-failed",
+            &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
     } else {
-        ui::success(&format!("Default model set to: {model}"));
+        ui::success(&i18n::t_args("model-set-success", &[("model", &model)]));
     }
 }
 
@@ -5599,7 +5747,7 @@ fn pick_model() -> String {
     let models = catalog.list_models();
 
     if models.is_empty() {
-        ui::error("No models in catalog.");
+        ui::error(&i18n::t("model-no-catalog"));
         std::process::exit(1);
     }
 
@@ -5612,7 +5760,7 @@ fn pick_model() -> String {
         by_provider.entry(m.provider.clone()).or_default().push(m);
     }
 
-    ui::section("Select a model");
+    ui::section(&i18n::t("section-select-model"));
     ui::blank();
 
     let mut numbered: Vec<&str> = Vec::new();
@@ -5637,7 +5785,10 @@ fn pick_model() -> String {
             if n >= 1 && n <= numbered.len() {
                 return numbered[n - 1].to_string();
             }
-            ui::error(&format!("Number out of range (1-{})", numbered.len()));
+            ui::error(&i18n::t_args(
+                "model-out-of-range",
+                &[("max", &numbered.len().to_string())],
+            ));
             continue;
         }
         // Accept direct model ID if it exists in catalog
@@ -5698,12 +5849,18 @@ fn cmd_approvals_respond(id: &str, approve: bool) {
             .send(),
     );
     if body.get("error").is_some() {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
+        ui::error(&i18n::t_args(
+            "approval-failed",
+            &[
+                ("action", endpoint),
+                ("error", body["error"].as_str().unwrap_or("?")),
+            ],
         ));
     } else {
-        ui::success(&format!("Approval {id} {endpoint}d."));
+        ui::success(&i18n::t_args(
+            "approval-responded",
+            &[("id", id), ("action", endpoint)],
+        ));
     }
 }
 
@@ -5801,11 +5958,11 @@ fn cmd_cron_create(agent: &str, spec: &str, prompt: &str, explicit_name: Option<
             .send(),
     );
     if let Some(id) = body["id"].as_str() {
-        ui::success(&format!("Cron job created: {id}"));
+        ui::success(&i18n::t_args("cron-created", &[("id", id)]));
     } else {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
+        ui::error(&i18n::t_args(
+            "cron-create-failed",
+            &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
     }
 }
@@ -5815,12 +5972,12 @@ fn cmd_cron_delete(id: &str) {
     let client = daemon_client();
     let body = daemon_json(client.delete(format!("{base}/api/cron/jobs/{id}")).send());
     if body.get("error").is_some() {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
+        ui::error(&i18n::t_args(
+            "cron-delete-failed",
+            &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
     } else {
-        ui::success(&format!("Cron job {id} deleted."));
+        ui::success(&i18n::t_args("cron-deleted", &[("id", id)]));
     }
 }
 
@@ -5834,12 +5991,18 @@ fn cmd_cron_toggle(id: &str, enable: bool) {
             .send(),
     );
     if body.get("error").is_some() {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
+        ui::error(&i18n::t_args(
+            "cron-toggle-failed",
+            &[
+                ("action", endpoint),
+                ("error", body["error"].as_str().unwrap_or("?")),
+            ],
         ));
     } else {
-        ui::success(&format!("Cron job {id} {endpoint}d."));
+        ui::success(&i18n::t_args(
+            "cron-toggled",
+            &[("id", id), ("action", endpoint)],
+        ));
     }
 }
 
@@ -5964,14 +6127,14 @@ fn cmd_health(json: bool) {
                 );
                 return;
             }
-            ui::success("Daemon is healthy");
+            ui::success(&i18n::t("health-ok"));
             if let Some(status) = body["status"].as_str() {
-                ui::kv("Status", status);
+                ui::kv(&i18n::t("label-status"), status);
             }
             if let Some(uptime) = body.get("uptime_secs").and_then(|v| v.as_u64()) {
                 let hours = uptime / 3600;
                 let mins = (uptime % 3600) / 60;
-                ui::kv("Uptime", &format!("{hours}h {mins}m"));
+                ui::kv(&i18n::t("label-uptime"), &format!("{hours}h {mins}m"));
             }
         }
         None => {
@@ -5979,8 +6142,8 @@ fn cmd_health(json: bool) {
                 println!("{}", serde_json::json!({"error": "daemon not running"}));
                 std::process::exit(1);
             }
-            ui::error("Daemon is not running.");
-            ui::hint("Start it with: librefang start");
+            ui::error(&i18n::t("health-not-running"));
+            ui::hint(&i18n::t("hint-start-daemon"));
             std::process::exit(1);
         }
     }
@@ -6006,16 +6169,25 @@ fn cmd_security_status(json: bool) {
         );
         return;
     }
-    ui::section("Security Status");
+    ui::section(&i18n::t("section-security-status"));
     ui::blank();
-    ui::kv("Audit trail", "Merkle hash chain (SHA-256)");
-    ui::kv("Taint tracking", "Information flow labels");
-    ui::kv("WASM sandbox", "Dual metering (fuel + epoch)");
-    ui::kv("Wire protocol", "OFP HMAC-SHA256 mutual auth");
-    ui::kv("API keys", "Zeroizing<String> (auto-wipe on drop)");
-    ui::kv("Manifests", "Ed25519 signed");
+    ui::kv(&i18n::t("label-audit-trail"), &i18n::t("value-audit-trail"));
+    ui::kv(
+        &i18n::t("label-taint-tracking"),
+        &i18n::t("value-taint-tracking"),
+    );
+    ui::kv(
+        &i18n::t("label-wasm-sandbox"),
+        &i18n::t("value-wasm-sandbox"),
+    );
+    ui::kv(
+        &i18n::t("label-wire-protocol"),
+        &i18n::t("value-wire-protocol"),
+    );
+    ui::kv(&i18n::t("label-api-keys"), &i18n::t("value-api-keys"));
+    ui::kv(&i18n::t("label-manifests"), &i18n::t("value-manifests"));
     if let Some(agents) = body.get("agent_count").and_then(|v| v.as_u64()) {
-        ui::kv("Active agents", &agents.to_string());
+        ui::kv(&i18n::t("label-active-agents"), &agents.to_string());
     }
 }
 
@@ -6063,9 +6235,9 @@ fn cmd_security_verify() {
     let client = daemon_client();
     let body = daemon_json(client.get(format!("{base}/api/audit/verify")).send());
     if body["valid"].as_bool().unwrap_or(false) {
-        ui::success("Audit trail integrity verified (Merkle chain valid).");
+        ui::success(&i18n::t("audit-verified"));
     } else {
-        ui::error("Audit trail integrity check FAILED.");
+        ui::error(&i18n::t("audit-failed"));
         if let Some(msg) = body["error"].as_str() {
             ui::hint(msg);
         }
@@ -6150,12 +6322,15 @@ fn cmd_memory_set(agent: &str, key: &str, value: &str) {
             .send(),
     );
     if body.get("error").is_some() {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
+        ui::error(&i18n::t_args(
+            "memory-set-failed",
+            &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
     } else {
-        ui::success(&format!("Set {key} for agent '{agent}'."));
+        ui::success(&i18n::t_args(
+            "memory-set",
+            &[("key", key), ("agent", agent)],
+        ));
     }
 }
 
@@ -6168,12 +6343,15 @@ fn cmd_memory_delete(agent: &str, key: &str) {
             .send(),
     );
     if body.get("error").is_some() {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
+        ui::error(&i18n::t_args(
+            "memory-delete-failed",
+            &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
     } else {
-        ui::success(&format!("Deleted key '{key}' for agent '{agent}'."));
+        ui::success(&i18n::t_args(
+            "memory-deleted",
+            &[("key", key), ("agent", agent)],
+        ));
     }
 }
 
@@ -6216,18 +6394,18 @@ fn cmd_devices_pair() {
     let client = daemon_client();
     let body = daemon_json(client.post(format!("{base}/api/pairing/request")).send());
     if let Some(qr) = body["qr_data"].as_str() {
-        ui::section("Device Pairing");
+        ui::section(&i18n::t("section-device-pairing"));
         ui::blank();
         // Render a simple text-based QR representation
-        println!("  Scan this QR code with the LibreFang mobile app:");
+        println!("  {}", i18n::t("device-scan-qr"));
         ui::blank();
         println!("  {qr}");
         ui::blank();
         if let Some(code) = body["pairing_code"].as_str() {
-            ui::kv("Pairing code", code);
+            ui::kv(&i18n::t("label-pairing-code"), code);
         }
         if let Some(expires) = body["expires_at"].as_str() {
-            ui::kv("Expires", expires);
+            ui::kv(&i18n::t("label-expires"), expires);
         }
     } else {
         println!(
@@ -6246,12 +6424,12 @@ fn cmd_devices_remove(id: &str) {
             .send(),
     );
     if body.get("error").is_some() {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
+        ui::error(&i18n::t_args(
+            "device-remove-failed",
+            &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
     } else {
-        ui::success(&format!("Device {id} removed."));
+        ui::success(&i18n::t_args("device-removed", &[("id", id)]));
     }
 }
 
@@ -6303,11 +6481,11 @@ fn cmd_webhooks_create(agent: &str, url: &str) {
             .send(),
     );
     if let Some(id) = body["id"].as_str() {
-        ui::success(&format!("Webhook created: {id}"));
+        ui::success(&i18n::t_args("webhook-created", &[("id", id)]));
     } else {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
+        ui::error(&i18n::t_args(
+            "webhook-create-failed",
+            &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
     }
 }
@@ -6317,12 +6495,12 @@ fn cmd_webhooks_delete(id: &str) {
     let client = daemon_client();
     let body = daemon_json(client.delete(format!("{base}/api/triggers/{id}")).send());
     if body.get("error").is_some() {
-        ui::error(&format!(
-            "Failed: {}",
-            body["error"].as_str().unwrap_or("?")
+        ui::error(&i18n::t_args(
+            "webhook-delete-failed",
+            &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
     } else {
-        ui::success(&format!("Webhook {id} deleted."));
+        ui::success(&i18n::t_args("webhook-deleted", &[("id", id)]));
     }
 }
 
@@ -6331,11 +6509,11 @@ fn cmd_webhooks_test(id: &str) {
     let client = daemon_client();
     let body = daemon_json(client.post(format!("{base}/api/triggers/{id}/test")).send());
     if body["success"].as_bool().unwrap_or(false) {
-        ui::success(&format!("Webhook {id} test payload sent successfully."));
+        ui::success(&i18n::t_args("webhook-test-ok", &[("id", id)]));
     } else {
-        ui::error(&format!(
-            "Webhook test failed: {}",
-            body["error"].as_str().unwrap_or("?")
+        ui::error(&i18n::t_args(
+            "webhook-test-failed",
+            &[("error", body["error"].as_str().unwrap_or("?"))],
         ));
     }
 }
@@ -6385,20 +6563,32 @@ fn cmd_system_info(json: bool) {
             );
             return;
         }
-        ui::section("LibreFang System Info");
+        ui::section(&i18n::t("section-system-info"));
         ui::blank();
-        ui::kv("Version", env!("CARGO_PKG_VERSION"));
-        ui::kv("Status", body["status"].as_str().unwrap_or("?"));
+        ui::kv(&i18n::t("label-version"), env!("CARGO_PKG_VERSION"));
         ui::kv(
-            "Agents",
+            &i18n::t("label-status"),
+            body["status"].as_str().unwrap_or("?"),
+        );
+        ui::kv(
+            &i18n::t("label-agents"),
             &body["agent_count"].as_u64().unwrap_or(0).to_string(),
         );
-        ui::kv("Provider", body["default_provider"].as_str().unwrap_or("?"));
-        ui::kv("Model", body["default_model"].as_str().unwrap_or("?"));
-        ui::kv(&i18n::t("label-api"), &base);
-        ui::kv("Data dir", body["data_dir"].as_str().unwrap_or("?"));
         ui::kv(
-            "Uptime",
+            &i18n::t("label-provider"),
+            body["default_provider"].as_str().unwrap_or("?"),
+        );
+        ui::kv(
+            &i18n::t("label-model"),
+            body["default_model"].as_str().unwrap_or("?"),
+        );
+        ui::kv(&i18n::t("label-api"), &base);
+        ui::kv(
+            &i18n::t("label-data-dir"),
+            body["data_dir"].as_str().unwrap_or("?"),
+        );
+        ui::kv(
+            &i18n::t("label-uptime"),
             &format!("{}s", body["uptime_seconds"].as_u64().unwrap_or(0)),
         );
     } else {
@@ -6412,11 +6602,14 @@ fn cmd_system_info(json: bool) {
             );
             return;
         }
-        ui::section("LibreFang System Info");
+        ui::section(&i18n::t("section-system-info"));
         ui::blank();
-        ui::kv("Version", env!("CARGO_PKG_VERSION"));
-        ui::kv_warn("Daemon", "NOT RUNNING");
-        ui::hint("Start with: librefang start");
+        ui::kv(&i18n::t("label-version"), env!("CARGO_PKG_VERSION"));
+        ui::kv_warn(
+            &i18n::t("label-daemon"),
+            &i18n::t("label-daemon-not-running"),
+        );
+        ui::hint(&i18n::t("hint-start-daemon"));
     }
 }
 
@@ -6454,11 +6647,17 @@ fn cmd_reset(confirm: bool) {
     }
 
     match std::fs::remove_dir_all(&librefang_dir) {
-        Ok(()) => ui::success(&format!("Removed {}", librefang_dir.display())),
+        Ok(()) => ui::success(&i18n::t_args(
+            "reset-success",
+            &[("path", &librefang_dir.display().to_string())],
+        )),
         Err(e) => {
-            ui::error(&format!(
-                "Failed to remove {}: {e}",
-                librefang_dir.display()
+            ui::error(&i18n::t_args(
+                "reset-fail",
+                &[
+                    ("path", &librefang_dir.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
             ));
             std::process::exit(1);
         }
@@ -6524,7 +6723,7 @@ fn cmd_uninstall(confirm: bool, keep_config: bool) {
 
     // Step 3: Stop running daemon
     if find_daemon().is_some() {
-        println!("  Stopping running daemon...");
+        println!("  {}", i18n::t("uninstall-stopping-daemon"));
         cmd_stop(None);
         // Give it a moment
         std::thread::sleep(std::time::Duration::from_secs(1));
@@ -6552,13 +6751,19 @@ fn cmd_uninstall(confirm: bool, keep_config: bool) {
     if librefang_dir.exists() {
         if keep_config {
             remove_dir_except_config(&librefang_dir);
-            ui::success("Removed data (kept config files)");
+            ui::success(&i18n::t("uninstall-removed-data-kept"));
         } else {
             match std::fs::remove_dir_all(&librefang_dir) {
-                Ok(()) => ui::success(&format!("Removed {}", librefang_dir.display())),
-                Err(e) => ui::error(&format!(
-                    "Failed to remove {}: {e}",
-                    librefang_dir.display()
+                Ok(()) => ui::success(&i18n::t_args(
+                    "uninstall-removed",
+                    &[("path", &librefang_dir.display().to_string())],
+                )),
+                Err(e) => ui::error(&i18n::t_args(
+                    "uninstall-remove-failed",
+                    &[
+                        ("path", &librefang_dir.display().to_string()),
+                        ("error", &e.to_string()),
+                    ],
                 )),
             }
         }
@@ -6567,8 +6772,17 @@ fn cmd_uninstall(confirm: bool, keep_config: bool) {
     // Step 7: Remove cargo bin copy if it exists and is separate from current exe
     if cargo_bin.exists() && exe_path.as_ref().is_none_or(|e| *e != cargo_bin) {
         match std::fs::remove_file(&cargo_bin) {
-            Ok(()) => ui::success(&format!("Removed {}", cargo_bin.display())),
-            Err(e) => ui::error(&format!("Failed to remove {}: {e}", cargo_bin.display())),
+            Ok(()) => ui::success(&i18n::t_args(
+                "uninstall-removed",
+                &[("path", &cargo_bin.display().to_string())],
+            )),
+            Err(e) => ui::error(&i18n::t_args(
+                "uninstall-remove-failed",
+                &[
+                    ("path", &cargo_bin.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
+            )),
         }
     }
 
@@ -6578,7 +6792,7 @@ fn cmd_uninstall(confirm: bool, keep_config: bool) {
     }
 
     println!();
-    ui::success("LibreFang has been uninstalled. Goodbye!");
+    ui::success(&i18n::t("uninstall-goodbye"));
 }
 
 /// Remove auto-start / launch-agent / systemd entries.
@@ -6598,7 +6812,7 @@ fn remove_autostart_entries(home: &std::path::Path) {
             .output();
         match output {
             Ok(o) if o.status.success() => {
-                ui::success("Removed Windows auto-start registry entry");
+                ui::success(&i18n::t("uninstall-removed-autostart-win"));
             }
             _ => {} // Entry didn't exist — that's fine
         }
@@ -6613,8 +6827,11 @@ fn remove_autostart_entries(home: &std::path::Path) {
                 .args(["unload", &plist.to_string_lossy()])
                 .output();
             match std::fs::remove_file(&plist) {
-                Ok(()) => ui::success("Removed macOS launch agent"),
-                Err(e) => ui::error(&format!("Failed to remove launch agent: {e}")),
+                Ok(()) => ui::success(&i18n::t("uninstall-removed-launch-agent")),
+                Err(e) => ui::error(&i18n::t_args(
+                    "uninstall-remove-launch-fail",
+                    &[("error", &e.to_string())],
+                )),
             }
         }
     }
@@ -6624,8 +6841,11 @@ fn remove_autostart_entries(home: &std::path::Path) {
         let desktop_file = home.join(".config/autostart/LibreFang.desktop");
         if desktop_file.exists() {
             match std::fs::remove_file(&desktop_file) {
-                Ok(()) => ui::success("Removed Linux autostart entry"),
-                Err(e) => ui::error(&format!("Failed to remove autostart entry: {e}")),
+                Ok(()) => ui::success(&i18n::t("uninstall-removed-autostart-linux")),
+                Err(e) => ui::error(&i18n::t_args(
+                    "uninstall-remove-autostart-fail",
+                    &[("error", &e.to_string())],
+                )),
             }
         }
 
@@ -6640,9 +6860,12 @@ fn remove_autostart_entries(home: &std::path::Path) {
                     let _ = std::process::Command::new("systemctl")
                         .args(["--user", "daemon-reload"])
                         .output();
-                    ui::success("Removed systemd user service");
+                    ui::success(&i18n::t("uninstall-removed-systemd"));
                 }
-                Err(e) => ui::error(&format!("Failed to remove systemd service: {e}")),
+                Err(e) => ui::error(&i18n::t_args(
+                    "uninstall-remove-systemd-fail",
+                    &[("error", &e.to_string())],
+                )),
             }
         }
     }
@@ -6681,7 +6904,10 @@ fn clean_path_entries(home: &std::path::Path, librefang_dir: &str) {
                     new_content
                 };
                 if std::fs::write(path, &new_content).is_ok() {
-                    ui::success(&format!("Cleaned PATH from {}", path.display()));
+                    ui::success(&i18n::t_args(
+                        "uninstall-cleaned-path",
+                        &[("path", &path.display().to_string())],
+                    ));
                 }
             }
         }
@@ -6720,7 +6946,7 @@ fn clean_path_entries(home: &std::path::Path, librefang_dir: &str) {
                             .args(["-NoProfile", "-Command", &ps_cmd])
                             .output();
                         if result.is_ok_and(|o| o.status.success()) {
-                            ui::success("Cleaned PATH from Windows user environment");
+                            ui::success(&i18n::t("uninstall-cleaned-path-win"));
                         }
                     }
                 }
@@ -6775,10 +7001,16 @@ fn remove_self_binary(exe_path: &std::path::Path) {
         // On Unix, running binaries can be unlinked — the OS keeps the inode
         // alive until the process exits.
         match std::fs::remove_file(exe_path) {
-            Ok(()) => ui::success(&format!("Removed {}", exe_path.display())),
-            Err(e) => ui::error(&format!(
-                "Failed to remove binary {}: {e}",
-                exe_path.display()
+            Ok(()) => ui::success(&i18n::t_args(
+                "uninstall-removed",
+                &[("path", &exe_path.display().to_string())],
+            )),
+            Err(e) => ui::error(&i18n::t_args(
+                "uninstall-remove-failed",
+                &[
+                    ("path", &exe_path.display().to_string()),
+                    ("error", &e.to_string()),
+                ],
             )),
         }
     }
@@ -6809,9 +7041,9 @@ fn remove_self_binary(exe_path: &std::path::Path) {
             .creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS)
             .spawn();
 
-        ui::success(&format!(
-            "Removed {} (deferred cleanup)",
-            exe_path.display()
+        ui::success(&i18n::t_args(
+            "uninstall-removed",
+            &[("path", &exe_path.display().to_string())],
         ));
     }
 }

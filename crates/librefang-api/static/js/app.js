@@ -42,9 +42,9 @@ function copyCode(btn) {
   var code = btn.nextElementSibling;
   if (code) {
     navigator.clipboard.writeText(code.textContent).then(function() {
-      btn.textContent = 'Copied!';
+      btn.textContent = typeof i18n !== 'undefined' ? i18n.t('btn.copied') : 'Copied!';
       btn.classList.add('copied');
-      setTimeout(function() { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+      setTimeout(function() { btn.textContent = typeof i18n !== 'undefined' ? i18n.t('btn.copy') : 'Copy'; btn.classList.remove('copied'); }, 1500);
     });
   }
 }

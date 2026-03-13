@@ -43,24 +43,25 @@ function chatPage() {
     modelSwitching: false,
     _modelCache: null,
     _modelCacheTime: 0,
-    slashCommands: [
-      { cmd: '/help', desc: 'Show available commands' },
-      { cmd: '/agents', desc: 'Switch to Agents page' },
-      { cmd: '/new', desc: 'Reset session (clear history)' },
-      { cmd: '/compact', desc: 'Trigger LLM session compaction' },
-      { cmd: '/model', desc: 'Show or switch model (/model [name])' },
-      { cmd: '/stop', desc: 'Cancel current agent run' },
-      { cmd: '/usage', desc: 'Show session token usage & cost' },
-      { cmd: '/think', desc: 'Toggle extended thinking (/think [on|off|stream])' },
-      { cmd: '/context', desc: 'Show context window usage & pressure' },
-      { cmd: '/verbose', desc: 'Cycle tool detail level (/verbose [off|on|full])' },
-      { cmd: '/queue', desc: 'Check if agent is processing' },
-      { cmd: '/status', desc: 'Show system status' },
-      { cmd: '/clear', desc: 'Clear chat display' },
-      { cmd: '/exit', desc: 'Disconnect from agent' },
-      { cmd: '/budget', desc: 'Show spending limits and current costs' },
-      { cmd: '/peers', desc: 'Show OFP peer network status' },
-      { cmd: '/a2a', desc: 'List discovered external A2A agents' }
+    slashCommands: [],
+    _defaultSlashCommands: [
+      { cmd: '/help', descKey: 'agentChat.cmd.help', descFallback: 'Show available commands' },
+      { cmd: '/agents', descKey: 'agentChat.cmd.agents', descFallback: 'Switch to Agents page' },
+      { cmd: '/new', descKey: 'agentChat.cmd.new', descFallback: 'Reset session (clear history)' },
+      { cmd: '/compact', descKey: 'agentChat.cmd.compact', descFallback: 'Trigger LLM session compaction' },
+      { cmd: '/model', descKey: 'agentChat.cmd.model', descFallback: 'Show or switch model (/model [name])' },
+      { cmd: '/stop', descKey: 'agentChat.cmd.stop', descFallback: 'Cancel current agent run' },
+      { cmd: '/usage', descKey: 'agentChat.cmd.usage', descFallback: 'Show session token usage & cost' },
+      { cmd: '/think', descKey: 'agentChat.cmd.think', descFallback: 'Toggle extended thinking (/think [on|off|stream])' },
+      { cmd: '/context', descKey: 'agentChat.cmd.context', descFallback: 'Show context window usage & pressure' },
+      { cmd: '/verbose', descKey: 'agentChat.cmd.verbose', descFallback: 'Cycle tool detail level (/verbose [off|on|full])' },
+      { cmd: '/queue', descKey: 'agentChat.cmd.queue', descFallback: 'Check if agent is processing' },
+      { cmd: '/status', descKey: 'agentChat.cmd.status', descFallback: 'Show system status' },
+      { cmd: '/clear', descKey: 'agentChat.cmd.clear', descFallback: 'Clear chat display' },
+      { cmd: '/exit', descKey: 'agentChat.cmd.exit', descFallback: 'Disconnect from agent' },
+      { cmd: '/budget', descKey: 'agentChat.cmd.budget', descFallback: 'Show spending limits and current costs' },
+      { cmd: '/peers', descKey: 'agentChat.cmd.peers', descFallback: 'Show OFP peer network status' },
+      { cmd: '/a2a', descKey: 'agentChat.cmd.a2a', descFallback: 'List discovered external A2A agents' }
     ],
     tokenCount: 0,
 
@@ -242,7 +243,11 @@ function chatPage() {
 
       window.addEventListener('i18n-changed', function(event) {
         self._currentLang = event.detail.language;
+        self._buildSlashCommands();
       });
+
+      // Build localized slash commands from defaults
+      this._buildSlashCommands();
 
       // Start tip cycle
       this.startTipCycle();
@@ -375,12 +380,19 @@ function chatPage() {
         // Use server-resolved model/provider to stay in sync (fixes #387/#466)
         self.currentAgent.model_name = (resp && resp.model) || model.id;
         self.currentAgent.model_provider = (resp && resp.provider) || model.provider;
-        LibreFangToast.success('Switched to ' + (model.display_name || model.id));
+        LibreFangToast.success(self.t('agentChat.toast.modelSwitched', 'Switched to {model}', { model: model.display_name || model.id }));
         self.showModelSwitcher = false;
         self.modelSwitching = false;
       }).catch(function(e) {
-        LibreFangToast.error('Switch failed: ' + e.message);
+        LibreFangToast.error(self.t('agentChat.toast.switchFailed', 'Switch failed: {message}', { message: e.message }));
         self.modelSwitching = false;
+      });
+    },
+
+    _buildSlashCommands: function() {
+      var self = this;
+      this.slashCommands = this._defaultSlashCommands.map(function(c) {
+        return { cmd: c.cmd, desc: self.t(c.descKey, c.descFallback) };
       });
     },
 
@@ -445,32 +457,32 @@ function chatPage() {
           if (self.currentAgent) {
             LibreFangAPI.post('/api/agents/' + self.currentAgent.id + '/session/reset', {}).then(function() {
               self.messages = [];
-              LibreFangToast.success('Session reset');
-            }).catch(function(e) { LibreFangToast.error('Reset failed: ' + e.message); });
+              LibreFangToast.success(self.t('agentChat.toast.sessionReset', 'Session reset'));
+            }).catch(function(e) { LibreFangToast.error(self.t('agentChat.toast.resetFailed', 'Reset failed: {message}', { message: e.message })); });
           }
           break;
         case '/compact':
           if (self.currentAgent) {
-            self.messages.push({ id: ++msgId, role: 'system', text: 'Compacting session...', meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.compacting', 'Compacting session...'), meta: '', tools: [] });
             LibreFangAPI.post('/api/agents/' + self.currentAgent.id + '/session/compact', {}).then(function(res) {
-              self.messages.push({ id: ++msgId, role: 'system', text: res.message || 'Compaction complete', meta: '', tools: [] });
+              self.messages.push({ id: ++msgId, role: 'system', text: res.message || self.t('agentChat.sys.compactDone', 'Compaction complete'), meta: '', tools: [] });
               self.scrollToBottom();
-            }).catch(function(e) { LibreFangToast.error('Compaction failed: ' + e.message); });
+            }).catch(function(e) { LibreFangToast.error(self.t('agentChat.toast.compactFailed', 'Compaction failed: {message}', { message: e.message })); });
           }
           break;
         case '/stop':
           if (self.currentAgent) {
             LibreFangAPI.post('/api/agents/' + self.currentAgent.id + '/stop', {}).then(function(res) {
-              self.messages.push({ id: ++msgId, role: 'system', text: res.message || 'Run cancelled', meta: '', tools: [] });
+              self.messages.push({ id: ++msgId, role: 'system', text: res.message || self.t('agentChat.sys.runCancelled', 'Run cancelled'), meta: '', tools: [] });
               self.sending = false;
               self.scrollToBottom();
-            }).catch(function(e) { LibreFangToast.error('Stop failed: ' + e.message); });
+            }).catch(function(e) { LibreFangToast.error(self.t('agentChat.toast.stopFailed', 'Stop failed: {message}', { message: e.message })); });
           }
           break;
         case '/usage':
           if (self.currentAgent) {
             var approxTokens = self.messages.reduce(function(sum, m) { return sum + Math.round((m.text || '').length / 4); }, 0);
-            self.messages.push({ id: ++msgId, role: 'system', text: '**Session Usage**\n- Messages: ' + self.messages.length + '\n- Approx tokens: ~' + approxTokens, meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: '**' + self.t('agentChat.sys.sessionUsageTitle', 'Session Usage') + '**\n- ' + self.t('agentChat.sys.messages', 'Messages') + ': ' + self.messages.length + '\n- ' + self.t('agentChat.sys.approxTokens', 'Approx tokens') + ': ~' + approxTokens, meta: '', tools: [] });
             self.scrollToBottom();
           }
           break;
@@ -487,11 +499,11 @@ function chatPage() {
             else if (self.thinkingMode === 'on') self.thinkingMode = 'stream';
             else self.thinkingMode = 'off';
           }
-          var modeLabel = self.thinkingMode === 'stream' ? 'enabled (streaming reasoning)' : (self.thinkingMode === 'on' ? 'enabled' : 'disabled');
-          self.messages.push({ id: ++msgId, role: 'system', text: 'Extended thinking **' + modeLabel + '**. ' +
-            (self.thinkingMode === 'stream' ? 'Reasoning tokens will appear in a collapsible panel.' :
-             self.thinkingMode === 'on' ? 'The agent will show its reasoning when supported by the model.' :
-             'Normal response mode.'), meta: '', tools: [] });
+          var modeLabel = self.thinkingMode === 'stream' ? self.t('agentChat.sys.thinkStream', 'enabled (streaming reasoning)') : (self.thinkingMode === 'on' ? self.t('agentChat.sys.thinkOn', 'enabled') : self.t('agentChat.sys.thinkOff', 'disabled'));
+          self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.thinkStatus', 'Extended thinking') + ' **' + modeLabel + '**. ' +
+            (self.thinkingMode === 'stream' ? self.t('agentChat.sys.thinkStreamDesc', 'Reasoning tokens will appear in a collapsible panel.') :
+             self.thinkingMode === 'on' ? self.t('agentChat.sys.thinkOnDesc', 'The agent will show its reasoning when supported by the model.') :
+             self.t('agentChat.sys.thinkOffDesc', 'Normal response mode.')), meta: '', tools: [] });
           self.scrollToBottom();
           break;
         case '/context':
@@ -499,7 +511,7 @@ function chatPage() {
           if (self.currentAgent && LibreFangAPI.isWsConnected()) {
             LibreFangAPI.wsSend({ type: 'command', command: 'context', args: '' });
           } else {
-            self.messages.push({ id: ++msgId, role: 'system', text: 'Not connected. Connect to an agent first.', meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.notConnected', 'Not connected. Connect to an agent first.'), meta: '', tools: [] });
             self.scrollToBottom();
           }
           break;
@@ -507,7 +519,7 @@ function chatPage() {
           if (self.currentAgent && LibreFangAPI.isWsConnected()) {
             LibreFangAPI.wsSend({ type: 'command', command: 'verbose', args: cmdArgs });
           } else {
-            self.messages.push({ id: ++msgId, role: 'system', text: 'Not connected. Connect to an agent first.', meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.notConnected', 'Not connected. Connect to an agent first.'), meta: '', tools: [] });
             self.scrollToBottom();
           }
           break;
@@ -515,13 +527,13 @@ function chatPage() {
           if (self.currentAgent && LibreFangAPI.isWsConnected()) {
             LibreFangAPI.wsSend({ type: 'command', command: 'queue', args: '' });
           } else {
-            self.messages.push({ id: ++msgId, role: 'system', text: 'Not connected.', meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.notConnectedShort', 'Not connected.'), meta: '', tools: [] });
             self.scrollToBottom();
           }
           break;
         case '/status':
           LibreFangAPI.get('/api/status').then(function(s) {
-            self.messages.push({ id: ++msgId, role: 'system', text: '**System Status**\n- Agents: ' + (s.agent_count || 0) + '\n- Uptime: ' + (s.uptime_seconds || 0) + 's\n- Version: ' + (s.version || '?'), meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: '**' + self.t('agentChat.sys.systemStatus', 'System Status') + '**\n- ' + self.t('agentChat.sys.agents', 'Agents') + ': ' + (s.agent_count || 0) + '\n- ' + self.t('agentChat.sys.uptime', 'Uptime') + ': ' + (s.uptime_seconds || 0) + 's\n- ' + self.t('agentChat.sys.version', 'Version') + ': ' + (s.version || '?'), meta: '', tools: [] });
             self.scrollToBottom();
           }).catch(function() {});
           break;
@@ -534,15 +546,15 @@ function chatPage() {
                 var resolvedProvider = (resp && resp.provider) || '';
                 self.currentAgent.model_name = resolvedModel;
                 if (resolvedProvider) { self.currentAgent.model_provider = resolvedProvider; }
-                self.messages.push({ id: ++msgId, role: 'system', text: 'Model switched to: `' + resolvedModel + '`' + (resolvedProvider ? ' (provider: `' + resolvedProvider + '`)' : ''), meta: '', tools: [] });
+                self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.modelSwitchedTo', 'Model switched to: `{model}`', { model: resolvedModel }) + (resolvedProvider ? ' (' + self.t('agentChat.sys.provider', 'provider') + ': `' + resolvedProvider + '`)' : ''), meta: '', tools: [] });
                 self.scrollToBottom();
-              }).catch(function(e) { LibreFangToast.error('Model switch failed: ' + e.message); });
+              }).catch(function(e) { LibreFangToast.error(self.t('agentChat.toast.modelSwitchFailed', 'Model switch failed: {message}', { message: e.message })); });
             } else {
-              self.messages.push({ id: ++msgId, role: 'system', text: '**Current Model**\n- Provider: `' + (self.currentAgent.model_provider || '?') + '`\n- Model: `' + (self.currentAgent.model_name || '?') + '`', meta: '', tools: [] });
+              self.messages.push({ id: ++msgId, role: 'system', text: '**' + self.t('agentChat.sys.currentModel', 'Current Model') + '**\n- ' + self.t('agentChat.sys.providerLabel', 'Provider') + ': `' + (self.currentAgent.model_provider || '?') + '`\n- ' + self.t('agentChat.sys.modelLabel', 'Model') + ': `' + (self.currentAgent.model_name || '?') + '`', meta: '', tools: [] });
               self.scrollToBottom();
             }
           } else {
-            self.messages.push({ id: ++msgId, role: 'system', text: 'No agent selected.', meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.noAgent', 'No agent selected.'), meta: '', tools: [] });
             self.scrollToBottom();
           }
           break;
@@ -558,19 +570,20 @@ function chatPage() {
           break;
         case '/budget':
           LibreFangAPI.get('/api/budget').then(function(b) {
-            var fmt = function(v) { return v > 0 ? '$' + v.toFixed(2) : 'unlimited'; };
-            self.messages.push({ id: ++msgId, role: 'system', text: '**Budget Status**\n' +
-              '- Hourly: $' + (b.hourly_spend||0).toFixed(4) + ' / ' + fmt(b.hourly_limit) + '\n' +
-              '- Daily: $' + (b.daily_spend||0).toFixed(4) + ' / ' + fmt(b.daily_limit) + '\n' +
-              '- Monthly: $' + (b.monthly_spend||0).toFixed(4) + ' / ' + fmt(b.monthly_limit), meta: '', tools: [] });
+            var unlimitedLabel = self.t('agentChat.sys.unlimited', 'unlimited');
+            var fmt = function(v) { return v > 0 ? '$' + v.toFixed(2) : unlimitedLabel; };
+            self.messages.push({ id: ++msgId, role: 'system', text: '**' + self.t('agentChat.sys.budgetStatus', 'Budget Status') + '**\n' +
+              '- ' + self.t('agentChat.sys.hourly', 'Hourly') + ': $' + (b.hourly_spend||0).toFixed(4) + ' / ' + fmt(b.hourly_limit) + '\n' +
+              '- ' + self.t('agentChat.sys.daily', 'Daily') + ': $' + (b.daily_spend||0).toFixed(4) + ' / ' + fmt(b.daily_limit) + '\n' +
+              '- ' + self.t('agentChat.sys.monthly', 'Monthly') + ': $' + (b.monthly_spend||0).toFixed(4) + ' / ' + fmt(b.monthly_limit), meta: '', tools: [] });
             self.scrollToBottom();
           }).catch(function() {});
           break;
         case '/peers':
           LibreFangAPI.get('/api/network/status').then(function(ns) {
-            self.messages.push({ id: ++msgId, role: 'system', text: '**OFP Network**\n' +
-              '- Status: ' + (ns.enabled ? 'Enabled' : 'Disabled') + '\n' +
-              '- Connected peers: ' + (ns.connected_peers||0) + ' / ' + (ns.total_peers||0), meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: '**' + self.t('agentChat.sys.ofpNetwork', 'OFP Network') + '**\n' +
+              '- ' + self.t('agentChat.sys.status', 'Status') + ': ' + (ns.enabled ? self.t('agentChat.sys.enabled', 'Enabled') : self.t('agentChat.sys.disabled', 'Disabled')) + '\n' +
+              '- ' + self.t('agentChat.sys.connectedPeers', 'Connected peers') + ': ' + (ns.connected_peers||0) + ' / ' + (ns.total_peers||0), meta: '', tools: [] });
             self.scrollToBottom();
           }).catch(function() {});
           break;
@@ -578,10 +591,10 @@ function chatPage() {
           LibreFangAPI.get('/api/a2a/agents').then(function(res) {
             var agents = res.agents || [];
             if (!agents.length) {
-              self.messages.push({ id: ++msgId, role: 'system', text: 'No external A2A agents discovered.', meta: '', tools: [] });
+              self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.noA2aAgents', 'No external A2A agents discovered.'), meta: '', tools: [] });
             } else {
               var lines = agents.map(function(a) { return '- **' + a.name + '** — ' + a.url; });
-              self.messages.push({ id: ++msgId, role: 'system', text: '**A2A Agents (' + agents.length + ')**\n' + lines.join('\n'), meta: '', tools: [] });
+              self.messages.push({ id: ++msgId, role: 'system', text: '**' + self.t('agentChat.sys.a2aAgents', 'A2A Agents') + ' (' + agents.length + ')**\n' + lines.join('\n'), meta: '', tools: [] });
             }
             self.scrollToBottom();
           }).catch(function() {});
