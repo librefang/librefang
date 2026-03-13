@@ -24,17 +24,28 @@
 
 .sidebar.collapsed .sidebar-label,
 .sidebar.collapsed .sidebar-header-text,
+.sidebar.collapsed .sidebar-header-controls,
 .sidebar.collapsed .nav-label { display: none; }
 
 .sidebar.collapsed .nav-item { justify-content: center; padding: 12px 0; }
 
 .sidebar-header {
-  padding: 16px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--border);
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sidebar-header-row {
+  display: flex;
   align-items: center;
-  justify-content: space-between;
-  min-height: 60px;
+}
+
+.sidebar-header-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .sidebar-logo {

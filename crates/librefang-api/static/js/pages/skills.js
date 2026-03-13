@@ -57,11 +57,24 @@ function skillsPage() {
       { id: 'docs', name: 'PDF & Documents' },
     ],
 
+    _updateURL() {
+      var params = [];
+      if (this.tab && this.tab !== 'installed') params.push('tab=' + encodeURIComponent(this.tab));
+      var hash = 'skills' + (params.length ? '?' + params.join('&') : '');
+      if (window.location.hash !== '#' + hash) history.replaceState(null, '', '#' + hash);
+    },
+
     init() {
       var self = this;
       window.addEventListener('i18n-changed', function(event) {
         self._currentLang = event.detail.language;
       });
+      var hashParts = window.location.hash.split('?');
+      if (hashParts.length > 1) {
+        var params = new URLSearchParams(hashParts[1]);
+        if (params.get('tab')) self.tab = params.get('tab');
+      }
+      this.$watch('tab', function() { self._updateURL(); });
     },
 
     interpolate(text, params) {

@@ -1276,7 +1276,6 @@ mark.search-highlight {
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   overflow: hidden;
-  margin-left: 8px;
 }
 
 .lang-opt {
@@ -1293,6 +1292,10 @@ mark.search-highlight {
 
 .lang-opt:hover { color: var(--text-primary); background: var(--bg-hover); }
 .lang-opt.active { color: #fff; background: var(--accent); }
+
+/* Hand icons */
+.hand-icon { display: inline-flex; align-items: center; color: var(--accent); }
+.hand-icon svg { width: 20px; height: 20px; }
 
 /* Utility */
 .flex { display: flex; }
@@ -1980,11 +1983,14 @@ mark.search-highlight {
 
 /* ── Provider cards ── */
 .provider-card {
-  transition: border-color 0.2s, box-shadow 0.2s;
+  transition: border-color 0.2s, box-shadow 0.2s, opacity 0.2s;
 }
 .provider-card.configured { border-left: 3px solid var(--success); }
-.provider-card.not-configured { border-left: 3px solid var(--warning); }
-.provider-card.no-key { border-left: 3px solid var(--text-muted); }
+.provider-card.configured:hover { box-shadow: var(--shadow-sm); }
+.provider-card.not-configured { border-left: 3px solid var(--warning); opacity: 0.65; }
+.provider-card.not-configured:hover { opacity: 1; }
+.provider-card.no-key { border-left: 3px solid var(--text-muted); opacity: 0.5; }
+.provider-card.no-key:hover { opacity: 0.85; }
 
 /* ── Filter pills ── */
 .filter-pills {

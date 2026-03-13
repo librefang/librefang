@@ -15,23 +15,27 @@
   <!-- Sidebar -->
   <nav class="sidebar" :class="{ collapsed: sidebarCollapsed, 'mobile-open': mobileMenuOpen }">
     <div class="sidebar-header">
-      <div class="sidebar-header-text">
-        <div class="sidebar-logo">
-          <img src="/logo.png" alt="LibreFang" width="28" height="28">
-          <div>
-            <h1>LIBREFANG</h1>
-            <div class="version" x-text="'v' + version"></div>
+      <div class="sidebar-header-row">
+        <div class="sidebar-header-text">
+          <div class="sidebar-logo">
+            <img src="/logo.png" alt="LibreFang" width="28" height="28">
+            <div>
+              <h1>LIBREFANG</h1>
+              <div class="version" x-text="'v' + version"></div>
+            </div>
           </div>
         </div>
       </div>
-      <div class="theme-switcher">
-        <button class="theme-opt" :class="{ active: themeMode === 'light' }" @click="setTheme('light')" title="Light">&#9788;</button>
-        <button class="theme-opt" :class="{ active: themeMode === 'system' }" @click="setTheme('system')" title="System">&#9675;</button>
-        <button class="theme-opt" :class="{ active: themeMode === 'dark' }" @click="setTheme('dark')" title="Dark">&#9790;</button>
-      </div>
-      <div class="language-switcher" x-data="{ lang: (typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en') }">
-        <button class="lang-opt" :class="{ active: lang === 'en' }" @click="i18n.setLanguage('en').then(() => lang = 'en')" title="English">EN</button>
-        <button class="lang-opt" :class="{ active: lang === 'zh-CN' }" @click="i18n.setLanguage('zh-CN').then(() => lang = 'zh-CN')" title="中文">中</button>
+      <div class="sidebar-header-controls">
+        <div class="theme-switcher">
+          <button class="theme-opt" :class="{ active: themeMode === 'light' }" @click="setTheme('light')" title="Light">&#9788;</button>
+          <button class="theme-opt" :class="{ active: themeMode === 'system' }" @click="setTheme('system')" title="System">&#9675;</button>
+          <button class="theme-opt" :class="{ active: themeMode === 'dark' }" @click="setTheme('dark')" title="Dark">&#9790;</button>
+        </div>
+        <div class="language-switcher" x-data="{ lang: (typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en') }">
+          <button class="lang-opt" :class="{ active: lang === 'en' }" @click="i18n.setLanguage('en').then(() => lang = 'en')" title="English">EN</button>
+          <button class="lang-opt" :class="{ active: lang === 'zh-CN' }" @click="i18n.setLanguage('zh-CN').then(() => lang = 'zh-CN')" title="中文">中</button>
+        </div>
       </div>
     </div>
 
@@ -2186,9 +2190,9 @@
             <!-- Category quick-search chips (always visible when not searching) -->
             <div class="mb-4" x-show="!clawhubSearch">
               <div class="text-xs text-dim mb-2" style="letter-spacing:0.5px" data-i18n="skillsPage.categoriesTitle">CATEGORIES</div>
-              <div class="flex flex-wrap gap-1">
+              <div style="display:flex;flex-wrap:wrap;gap:6px">
                 <template x-for="cat in categories" :key="cat.id">
-                  <span class="filter-pill" style="font-size:0.7rem;padding:2px 8px" @click="searchCategory(cat)" x-text="categoryLabel(cat)"></span>
+                  <span class="filter-pill" style="font-size:0.75rem;padding:4px 10px" @click="searchCategory(cat)" x-text="categoryLabel(cat)"></span>
                 </template>
               </div>
             </div>
@@ -2258,7 +2262,7 @@
 
             <!-- Empty search results -->
             <div class="empty-state" x-show="clawhubSearch && !clawhubResults.length && !clawhubLoading && !clawhubError">
-              <p x-text="t('skillsPage.noResultsFor', 'No skills found for \"{query}\"', { query: clawhubSearch })"></p>
+              <p x-text="t('skillsPage.noResultsFor', 'No skills found for the query', { query: clawhubSearch })"></p>
               <p class="hint mt-1" data-i18n="skillsPage.noResultsHint">Try a different search term or browse by category.</p>
               <button class="btn btn-ghost btn-sm mt-2" @click="clearSearch()" data-i18n="skillsPage.backToBrowse">Back to browse</button>
             </div>
@@ -2473,7 +2477,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <div class="card" :class="{ 'card-glow': hand.requirements_met }">
                     <div class="flex justify-between items-center mb-2">
                       <div class="flex items-center gap-2">
-                        <span style="font-size:1.4rem" x-text="hand.icon"></span>
+                        <span class="hand-icon" x-html="handSvgIcon(hand.id)"></span>
                         <div class="card-header" style="margin:0" x-text="hand.name"></div>
                       </div>
                       <span class="badge" :class="hand.requirements_met ? 'badge-success' : 'badge-dim'" x-text="availabilityText(hand)"></span>
@@ -2523,7 +2527,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <div class="card">
                     <div class="flex justify-between items-center mb-2">
                       <div class="flex items-center gap-2">
-                        <span style="font-size:1.4rem" x-text="getHandIcon(inst.hand_id)"></span>
+                        <span class="hand-icon" x-html="handSvgIcon(inst.hand_id)"></span>
                         <div class="card-header" style="margin:0" x-text="inst.agent_name || inst.hand_id"></div>
                       </div>
                       <span class="badge" :class="{ 'badge-success': inst.status === 'Active', 'badge-dim': inst.status === 'Paused', 'badge-warn': inst.status && inst.status.startsWith('Error'), 'badge-info': inst.status === 'Inactive' }" x-text="instanceStatusText(inst)"></span>
@@ -3030,9 +3034,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <!-- Actions for configured providers -->
                   <template x-if="p.auth_status === 'configured'">
                     <div class="flex gap-2 mt-2">
-                      <button class="btn btn-ghost btn-sm" @click="testProvider(p)" :disabled="providerTesting[p.id]">
-                        <span x-show="!providerTesting[p.id]" data-i18n="btn.test">Test</span>
-                        <span x-show="providerTesting[p.id]" class="spinner" style="width:10px;height:10px;border-width:2px"></span>
+                      <button class="btn btn-ghost btn-sm" style="color:var(--accent-light);border-color:var(--accent)" @click="testProvider(p)" :disabled="providerTesting[p.id] === true">
+                        <span x-show="providerTesting[p.id] !== true" data-i18n="btn.test">Test</span>
+                        <span x-show="providerTesting[p.id] === true" class="spinner" style="width:10px;height:10px;border-width:2px"></span>
                       </button>
                       <button class="btn btn-ghost btn-sm" style="color:var(--error)" @click="removeProviderKey(p)" data-i18n="settingsPage.removeKey">Remove Key</button>
                     </div>
