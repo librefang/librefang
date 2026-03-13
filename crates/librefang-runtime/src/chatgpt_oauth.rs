@@ -522,8 +522,8 @@ mod tests {
     #[test]
     fn test_generate_pkce_verifier_length() {
         let pkce = generate_pkce();
-        // 32 random bytes base64url-encoded = 43 chars (no padding).
-        assert_eq!(pkce.verifier.len(), 43);
+        // 64 random bytes base64url-encoded = 86 chars (no padding).
+        assert_eq!(pkce.verifier.len(), 86);
         assert!(!pkce.challenge.is_empty());
         // Verifier and challenge must differ.
         assert_ne!(pkce.verifier, pkce.challenge);
