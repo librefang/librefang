@@ -2085,7 +2085,7 @@ fn spawn_prepared_agent(config: Option<PathBuf>, prepared: PreparedAgentManifest
     } else {
         let agent_name = prepared.manifest.name.clone();
         let kernel = boot_kernel(config);
-        match kernel.spawn_agent_with_source(prepared.manifest, Some(manifest_path.clone())) {
+        match kernel.spawn_agent_with_source(prepared.manifest, None) {
             Ok(id) => {
                 println!("Agent spawned (in-process mode).");
                 println!("  ID:   {id}");
