@@ -1911,6 +1911,21 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         setup_steps: &["Create a WeCom application at work.weixin.qq.com", "Get Corp ID, Agent ID, and Secret", "Configure callback URL to your webhook endpoint"],
         config_template: "[channels.wecom]\ncorp_id = \"\"\nagent_id = \"\"\nsecret_env = \"WECOM_SECRET\"",
     },
+    ChannelMeta {
+        name: "qq", display_name: "QQ Bot", icon: "QQ",
+        description: "QQ Bot API v2 — guild, group, and DM adapter",
+        category: "messaging", difficulty: "Medium", setup_time: "~5 min",
+        quick_setup: "Enter your App ID and set QQ_BOT_APP_SECRET env var",
+        setup_type: "form",
+        fields: &[
+            ChannelField { key: "app_id", label: "App ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "102xxxxx", advanced: false },
+            ChannelField { key: "app_secret_env", label: "App Secret", field_type: FieldType::Secret, env_var: Some("QQ_BOT_APP_SECRET"), required: true, placeholder: "secret", advanced: false },
+            ChannelField { key: "allowed_users", label: "Allowed User IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "12345, 67890", advanced: true },
+            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true },
+        ],
+        setup_steps: &["Register a QQ Bot at q.qq.com", "Get App ID and App Secret", "Set QQ_BOT_APP_SECRET environment variable"],
+        config_template: "[channels.qq]\napp_id = \"\"\napp_secret_env = \"QQ_BOT_APP_SECRET\"",
+    },
 ];
 
 /// Check if a channel is configured (has a `[channels.xxx]` section in config).
@@ -1957,6 +1972,7 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "webhook" => config.webhook.is_some(),
         "mumble" => config.mumble.is_some(),
         "wecom" => config.wecom.is_some(),
+        "qq" => config.qq.is_some(),
         _ => false,
     }
 }
@@ -2188,6 +2204,10 @@ fn channel_config_values(
             .and_then(|c| serde_json::to_value(c).ok()),
         "wecom" => config
             .wecom
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "qq" => config
+            .qq
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         _ => None,
@@ -7195,25 +7215,14 @@ pub async fn test_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
-    let (env_var, base_url, key_required, default_model) = {
+    let (env_var, base_url, key_required) = {
         let catalog = state
             .kernel
             .model_catalog
             .read()
             .unwrap_or_else(|e| e.into_inner());
         match catalog.get_provider(&name) {
-            Some(p) => {
-                // Find a default model for this provider to use in the test request
-                let model_id = catalog
-                    .default_model_for_provider(&name)
-                    .unwrap_or_default();
-                (
-                    p.api_key_env.clone(),
-                    p.base_url.clone(),
-                    p.key_required,
-                    model_id,
-                )
-            }
+            Some(p) => (p.api_key_env.clone(), p.base_url.clone(), p.key_required),
             None => {
                 return (
                     StatusCode::NOT_FOUND,
@@ -7232,61 +7241,156 @@ pub async fn test_provider(
         );
     }
 
-    // Attempt a lightweight connectivity test
-    let start = std::time::Instant::now();
-    let driver_config = librefang_runtime::llm_driver::DriverConfig {
-        provider: name.clone(),
-        api_key,
-        base_url: if base_url.is_empty() {
-            None
+    // ── CLI-based providers (no HTTP base URL) ──
+    if base_url.is_empty() {
+        let cli_ok = match name.as_str() {
+            "claude-code" => librefang_runtime::drivers::claude_code::claude_code_available(),
+            _ => false,
+        };
+        return if cli_ok {
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"status":"ok","provider":name,"latency_ms":0})),
+            )
         } else {
-            Some(base_url)
-        },
-        skip_permissions: true,
+            (
+                StatusCode::OK,
+                Json(
+                    serde_json::json!({"status":"error","provider":name,"error":"CLI not found in PATH"}),
+                ),
+            )
+        };
+    }
+
+    let start = std::time::Instant::now();
+    let api_key_val = api_key.unwrap_or_default();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    // ── Bedrock: AWS Signature auth — can't test with simple HTTP ──
+    if name == "bedrock" || name == "aws-bedrock" {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "provider": name,
+                "latency_ms": 0,
+                "note": "AWS Bedrock uses IAM auth; key presence verified"
+            })),
+        );
+    }
+
+    // ── Provider-specific test URL ──
+    let test_url_str = match name.as_str() {
+        "anthropic" => format!("{}/v1/models", base_url.trim_end_matches('/')),
+        "gemini" | "google" => format!(
+            "{}/v1beta/models?key={}",
+            base_url.trim_end_matches('/'),
+            api_key_val
+        ),
+        "chatgpt" => format!("{}/me", base_url.trim_end_matches('/')),
+        "github-copilot" => format!("{}/models", base_url.trim_end_matches('/')),
+        _ => format!("{}/models", base_url.trim_end_matches('/')),
     };
 
-    match librefang_runtime::drivers::create_driver(&driver_config) {
-        Ok(driver) => {
-            // Send a minimal completion request to test connectivity
-            let test_req = librefang_runtime::llm_driver::CompletionRequest {
-                model: default_model.clone(),
-                messages: vec![librefang_types::message::Message::user("Hi")],
-                tools: vec![],
-                max_tokens: 1,
-                temperature: 0.0,
-                system: None,
-                thinking: None,
-            };
-            match driver.complete(test_req).await {
-                Ok(_) => {
-                    let latency_ms = start.elapsed().as_millis();
-                    (
-                        StatusCode::OK,
-                        Json(serde_json::json!({
-                            "status": "ok",
-                            "provider": name,
-                            "latency_ms": latency_ms,
-                        })),
-                    )
-                }
-                Err(e) => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({
-                        "status": "error",
-                        "provider": name,
-                        "error": format!("{e}"),
-                    })),
-                ),
+    let mut req = client.get(&test_url_str);
+    match name.as_str() {
+        "anthropic" => {
+            req = req
+                .header("x-api-key", &api_key_val)
+                .header("anthropic-version", "2023-06-01");
+        }
+        "gemini" | "google" => {
+            // Key is in query param, no header needed
+        }
+        "github-copilot" => {
+            req = req.header("Authorization", format!("token {}", api_key_val));
+        }
+        _ => {
+            if !api_key_val.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", api_key_val));
             }
         }
-        Err(e) => (
+    }
+
+    let result = req.send().await;
+
+    let (first_status, _first_body) = match result {
+        Ok(resp) => {
+            let sc = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            (sc, body)
+        }
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "provider": name,
+                    "error": format!("Connection failed: {e}"),
+                })),
+            );
+        }
+    };
+
+    // If /models returned 404, fall back to base URL (some providers don't expose /models).
+    let status_code = if first_status == 404 {
+        let mut fallback = client.get(&base_url);
+        match name.as_str() {
+            "anthropic" => {
+                fallback = fallback
+                    .header("x-api-key", &api_key_val)
+                    .header("anthropic-version", "2023-06-01");
+            }
+            "gemini" | "google" => {}
+            "github-copilot" => {
+                fallback = fallback.header("Authorization", format!("token {}", api_key_val));
+            }
+            _ => {
+                if !api_key_val.is_empty() {
+                    fallback = fallback.header("Authorization", format!("Bearer {}", api_key_val));
+                }
+            }
+        }
+        match fallback.send().await {
+            Ok(resp) => resp.status().as_u16(),
+            Err(_) => first_status,
+        }
+    } else {
+        first_status
+    };
+
+    let latency_ms = start.elapsed().as_millis();
+
+    if status_code == 401 || status_code == 403 {
+        (
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "error",
                 "provider": name,
-                "error": format!("Failed to create driver: {e}"),
+                "error": format!("Authentication failed (HTTP {})", status_code),
             })),
-        ),
+        )
+    } else if status_code >= 500 {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "error",
+                "provider": name,
+                "error": format!("Server error (HTTP {})", status_code),
+            })),
+        )
+    } else {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "provider": name,
+                "latency_ms": latency_ms,
+            })),
+        )
     }
 }
 

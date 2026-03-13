@@ -35,11 +35,24 @@ function settingsPage() {
     loading: true,
     loadError: '',
 
+    _updateURL() {
+      var params = [];
+      if (this.tab && this.tab !== 'providers') params.push('tab=' + encodeURIComponent(this.tab));
+      var hash = 'settings' + (params.length ? '?' + params.join('&') : '');
+      if (window.location.hash !== '#' + hash) history.replaceState(null, '', '#' + hash);
+    },
+
     init() {
       var self = this;
       window.addEventListener('i18n-changed', function(event) {
         self._currentLang = event.detail.language;
       });
+      var hashParts = window.location.hash.split('?');
+      if (hashParts.length > 1) {
+        var params = new URLSearchParams(hashParts[1]);
+        if (params.get('tab')) self.tab = params.get('tab');
+      }
+      this.$watch('tab', function() { self._updateURL(); });
     },
 
     interpolate(text, params) {
@@ -405,7 +418,9 @@ function settingsPage() {
     async loadProviders() {
       try {
         var data = await LibreFangAPI.get('/api/providers');
-        this.providers = data.providers || [];
+        this.providers = (data.providers || []).sort(function(a, b) {
+          return (a.auth_status === 'configured' ? 0 : 1) - (b.auth_status === 'configured' ? 0 : 1);
+        });
         for (var i = 0; i < this.providers.length; i++) {
           var p = this.providers[i];
           if (p.is_local) {
@@ -599,15 +614,22 @@ function settingsPage() {
       }
     },
 
-    async removeProviderKey(provider) {
-      try {
-        await LibreFangAPI.del('/api/providers/' + encodeURIComponent(provider.id) + '/key');
-        LibreFangToast.success(this.t('settingsPage.apiKeyRemoved', 'API key removed for {provider}', { provider: provider.display_name }));
-        await this.loadProviders();
-        await this.loadModels();
-      } catch(e) {
-        LibreFangToast.error(this.t('settingsPage.removeKeyFailed', 'Failed to remove key: {message}', { message: e.message }));
-      }
+    removeProviderKey(provider) {
+      var self = this;
+      LibreFangToast.confirm(
+        this.t('settingsPage.removeKey', 'Remove Key'),
+        this.t('settingsPage.confirmRemoveKey', 'Are you sure you want to remove the API key for {provider}?', { provider: provider.display_name }),
+        async function() {
+          try {
+            await LibreFangAPI.del('/api/providers/' + encodeURIComponent(provider.id) + '/key');
+            LibreFangToast.success(self.t('settingsPage.apiKeyRemoved', 'API key removed for {provider}', { provider: provider.display_name }));
+            await self.loadProviders();
+            await self.loadModels();
+          } catch(e) {
+            LibreFangToast.error(self.t('settingsPage.removeKeyFailed', 'Failed to remove key: {message}', { message: e.message }));
+          }
+        }
+      );
     },
 
     async startCopilotOAuth() {

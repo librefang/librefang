@@ -109,6 +109,8 @@ document.addEventListener('alpine:init', function() {
 
           this.providers = (prov.providers || []).filter(function(p) {
             return p.auth_status === 'Configured' || p.auth_status === 'configured' || p.reachable || p.is_local;
+          }).sort(function(a, b) {
+            return (a.auth_status === 'configured' ? 0 : 1) - (b.auth_status === 'configured' ? 0 : 1);
           });
         } catch(e) {
           this.loadError = e.message || this.t('runtimePage.loadError', 'Could not load runtime data.');

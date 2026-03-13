@@ -49,6 +49,26 @@ function channelsPage() {
       window.addEventListener('i18n-changed', function(event) {
         self._currentLang = event.detail.language;
       });
+      // Read URL params: #channels?cat=messaging&q=search
+      var hashParts = window.location.hash.split('?');
+      if (hashParts.length > 1) {
+        var params = new URLSearchParams(hashParts[1]);
+        if (params.get('cat')) self.categoryFilter = params.get('cat');
+        if (params.get('q')) self.searchQuery = params.get('q');
+      }
+      // Watch category and search changes → update URL
+      this.$watch('categoryFilter', function(val) { self._updateURL(); });
+      this.$watch('searchQuery', function(val) { self._updateURL(); });
+    },
+
+    _updateURL() {
+      var params = [];
+      if (this.categoryFilter && this.categoryFilter !== 'all') params.push('cat=' + encodeURIComponent(this.categoryFilter));
+      if (this.searchQuery) params.push('q=' + encodeURIComponent(this.searchQuery));
+      var hash = 'channels' + (params.length ? '?' + params.join('&') : '');
+      if (window.location.hash !== '#' + hash) {
+        history.replaceState(null, '', '#' + hash);
+      }
     },
 
     interpolate(text, params) {
@@ -155,6 +175,8 @@ function channelsPage() {
         this.allChannels = (data.channels || []).map(function(ch) {
           ch.connected = ch.configured && ch.has_token;
           return ch;
+        }).sort(function(a, b) {
+          return (a.configured ? 0 : 1) - (b.configured ? 0 : 1);
         });
       } catch(e) {
         this.loadError = e.message || this.t('channelsPage.loadError', 'Could not load channels.');

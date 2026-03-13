@@ -240,7 +240,7 @@ function app() {
         'approval': 'approvals'
       };
       function handleHash() {
-        var hash = window.location.hash.replace('#', '') || 'agents';
+        var hash = window.location.hash.replace('#', '').split('?')[0] || 'agents';
         if (pageRedirects[hash]) {
           hash = pageRedirects[hash];
           window.location.hash = hash;

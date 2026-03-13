@@ -23,6 +23,23 @@ function analyticsPage() {
       '#6366F1', '#14B8A6', '#E11D48', '#A855F7', '#22D3EE'
     ],
 
+    _updateURL() {
+      var params = [];
+      if (this.tab && this.tab !== 'summary') params.push('tab=' + encodeURIComponent(this.tab));
+      var hash = 'analytics' + (params.length ? '?' + params.join('&') : '');
+      if (window.location.hash !== '#' + hash) history.replaceState(null, '', '#' + hash);
+    },
+
+    init() {
+      var self = this;
+      var hashParts = window.location.hash.split('?');
+      if (hashParts.length > 1) {
+        var params = new URLSearchParams(hashParts[1]);
+        if (params.get('tab')) self.tab = params.get('tab');
+      }
+      this.$watch('tab', function() { self._updateURL(); });
+    },
+
     async loadUsage() {
       this.loading = true;
       this.loadError = '';

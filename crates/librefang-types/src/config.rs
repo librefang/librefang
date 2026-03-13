@@ -2802,7 +2802,7 @@ impl Default for QqConfig {
     fn default() -> Self {
         Self {
             app_id: String::new(),
-            app_secret_env: "QQ_APP_SECRET".to_string(),
+            app_secret_env: "QQ_BOT_APP_SECRET".to_string(),
             allowed_users: vec![],
             default_agent: None,
             overrides: ChannelOverrides::default(),

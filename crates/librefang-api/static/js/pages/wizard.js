@@ -367,7 +367,9 @@ function wizardPage() {
     async loadProviders() {
       try {
         var data = await LibreFangAPI.get('/api/providers');
-        this.providers = data.providers || [];
+        this.providers = (data.providers || []).sort(function(a, b) {
+          return (a.auth_status === 'configured' ? 0 : 1) - (b.auth_status === 'configured' ? 0 : 1);
+        });
         // Pre-select first unconfigured provider, or first one
         var unconfigured = this.providers.filter(function(p) {
           return p.auth_status !== 'configured' && p.api_key_env;

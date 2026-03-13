@@ -145,7 +145,9 @@ function overviewPage() {
     async loadProviders() {
       try {
         var data = await LibreFangAPI.get('/api/providers');
-        this.providers = data.providers || [];
+        this.providers = (data.providers || []).sort(function(a, b) {
+          return (a.auth_status === 'configured' ? 0 : 1) - (b.auth_status === 'configured' ? 0 : 1);
+        });
       } catch(e) { this.providers = []; }
     },
 

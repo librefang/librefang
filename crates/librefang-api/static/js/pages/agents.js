@@ -336,11 +336,27 @@ function agentsPage() {
       return p ? p.auth_status === 'configured' : false;
     },
 
+    _updateURL() {
+      var params = [];
+      if (this.tab && this.tab !== 'agents') params.push('tab=' + encodeURIComponent(this.tab));
+      if (this.filterState && this.filterState !== 'all') params.push('filter=' + encodeURIComponent(this.filterState));
+      var hash = 'agents' + (params.length ? '?' + params.join('&') : '');
+      if (window.location.hash !== '#' + hash) history.replaceState(null, '', '#' + hash);
+    },
+
     async init() {
       var self = this;
       window.addEventListener('i18n-changed', function(event) {
         self._currentLang = event.detail.language;
       });
+      var hashParts = window.location.hash.split('?');
+      if (hashParts.length > 1) {
+        var params = new URLSearchParams(hashParts[1]);
+        if (params.get('tab')) self.tab = params.get('tab');
+        if (params.get('filter')) self.filterState = params.get('filter');
+      }
+      this.$watch('tab', function() { self._updateURL(); });
+      this.$watch('filterState', function() { self._updateURL(); });
       this.loading = true;
       this.loadError = '';
       try {

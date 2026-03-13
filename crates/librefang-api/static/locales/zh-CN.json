@@ -854,6 +854,7 @@
     "providerNamePlaceholder": "例如 my-local-llm",
     "providerUrlPlaceholder": "http://localhost:8080/v1",
     "rateLimiterValue": "算法：{algorithm} | 每 IP 每分钟 {count} token",
+    "confirmRemoveKey": "确定要移除 {provider} 的 API 密钥吗？",
     "removeKeyFailed": "移除密钥失败：{message}",
     "saveFailed": "保存失败：{message}",
     "saving": "正在保存...",

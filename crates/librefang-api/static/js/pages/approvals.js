@@ -9,11 +9,24 @@ function approvalsPage() {
     loading: true,
     loadError: '',
 
+    _updateURL() {
+      var params = [];
+      if (this.filterStatus && this.filterStatus !== 'all') params.push('filter=' + encodeURIComponent(this.filterStatus));
+      var hash = 'approvals' + (params.length ? '?' + params.join('&') : '');
+      if (window.location.hash !== '#' + hash) history.replaceState(null, '', '#' + hash);
+    },
+
     init() {
       var self = this;
       window.addEventListener('i18n-changed', function(event) {
         self._currentLang = event.detail.language;
       });
+      var hashParts = window.location.hash.split('?');
+      if (hashParts.length > 1) {
+        var params = new URLSearchParams(hashParts[1]);
+        if (params.get('filter')) self.filterStatus = params.get('filter');
+      }
+      this.$watch('filterStatus', function() { self._updateURL(); });
     },
 
     interpolate(text, params) {
