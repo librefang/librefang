@@ -1802,7 +1802,7 @@ fn cmd_agent_spawn(config: Option<PathBuf>, manifest_path: PathBuf) {
             std::process::exit(1);
         });
         let kernel = boot_kernel(config);
-        match kernel.spawn_agent(manifest) {
+        match kernel.spawn_agent_with_source(manifest, Some(manifest_path.clone())) {
             Ok(id) => {
                 println!("Agent spawned (in-process mode).");
                 println!("  ID: {id}");

@@ -35,6 +35,7 @@ async function startConnection() {
   }
   isConnecting = true;
   try {
+
   // Dynamic imports — Baileys is ESM-only in v6+
   const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } =
     await import('@whiskeysockets/baileys');
@@ -94,6 +95,7 @@ async function startConnection() {
         statusMessage = 'Logged out. Generate a new QR code to reconnect.';
         qrDataUrl = '';
         sock = null;
+        reconnectAttempts = 0;
         // Remove auth store so next connect gets a fresh QR
         const fs = require('node:fs');
         const path = require('node:path');
@@ -117,15 +119,16 @@ async function startConnection() {
           console.log(
             `[gateway] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`,
           );
+          connStatus = 'disconnected';
           statusMessage = `Reconnecting (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
           setTimeout(() => startConnection(), delay);
         }
       } else {
-        // QR expired or other non-recoverable close
-        qrExpired = true;
+        // Non-recoverable (e.g. QR expired, forbidden) — don't auto-reconnect
         connStatus = 'disconnected';
-        statusMessage = 'QR code expired. Click "Generate New QR" to retry.';
+        statusMessage = `Disconnected: ${reason}. Use POST /login/start to reconnect.`;
         qrDataUrl = '';
+        sock = null;
       }
     }
 
@@ -138,6 +141,8 @@ async function startConnection() {
       console.log('[gateway] Connected to WhatsApp!');
     }
   });
+
+  isConnecting = false;
 
   // Incoming messages → forward to LibreFang
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
@@ -359,11 +364,23 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
+server.listen(PORT, '127.0.0.1', async () => {
   console.log(`[gateway] WhatsApp Web gateway listening on http://127.0.0.1:${PORT}`);
   console.log(`[gateway] LibreFang URL: ${LIBREFANG_URL}`);
   console.log(`[gateway] Default agent: ${DEFAULT_AGENT}`);
-  console.log('[gateway] Waiting for POST /login/start to begin QR flow...');
+
+  const fs = require('node:fs');
+  const authPath = require('node:path').join(__dirname, 'auth_store', 'creds.json');
+  if (fs.existsSync(authPath)) {
+    console.log('[gateway] Found existing auth — auto-connecting...');
+    try {
+      await startConnection();
+    } catch (err) {
+      console.error('[gateway] Auto-connect failed:', err.message);
+    }
+  } else {
+    console.log('[gateway] No auth found — waiting for POST /login/start to begin QR flow...');
+  }
 });
 
 // Graceful shutdown

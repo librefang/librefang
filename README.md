@@ -3,11 +3,11 @@
 </p>
 
 <h1 align="center">LibreFang</h1>
-<h3 align="center">Community-Maintained Agent Operating System</h3>
+<h3 align="center">Libre Agent Operating System — Free as in Freedom</h3>
 
 <p align="center">
   Open-source Agent OS built in Rust. 137K LOC. 14 crates. 1,767+ tests. Zero clippy warnings.<br/>
-  <strong>Forked from `RightNow-AI/openfang`. Transparent governance. Preserved attribution. Compatible with the existing `librefang` CLI.</strong>
+  <strong>Forked from <a href="https://github.com/RightNow-AI/openfang">RightNow-AI/openfang</a>. Truly open governance. Contributors welcome. PRs that help the project get merged.</strong>
 </p>
 
 <p align="center">
@@ -41,11 +41,14 @@
 
 ---
 
-> **LibreFang is a community-maintained fork of [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang).**
+> **LibreFang is a community fork of [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang).**
 >
-> The codebase, binary, crate names, and config paths use `librefang`. LibreFang is taking a different path on project governance: we actively accept community contributions, review them in public, merge accepted work through normal GitHub flow, and preserve contributor credit when code is adapted.
+> **"Libre"** means freedom. We chose this name because we believe an open-source project should be truly open — not just in license, but in governance, contribution, and collaboration. LibreFang is taking a fundamentally different path from the upstream project: we welcome every contributor, review every PR in public, and merge work that benefits the project.
 
-> **Community status:** issues, pull requests, reviewers, and maintainers are actively welcome.
+> **Our promise to contributors:**
+> - If your PR positively helps the project, **we merge it as-is** with full attribution.
+> - If your PR needs improvement, **we actively review it and provide concrete suggestions** to help you get it merged — we don't close PRs silently.
+> - Every contributor is valued. Bug fixes, docs, tests, features, packaging, translations — all contributions matter.
 
 ---
 
@@ -91,14 +94,28 @@ curl -fsSL https://librefang.ai/install.sh | sh
 irm https://librefang.ai/install.ps1 | iex
 ```
 
-## Community Fork Commitments
+## Why LibreFang? — The Difference from OpenFang
 
-- LibreFang exists to continue the LibreFang codebase as an open community fork with normal GitHub collaboration.
-- Pull requests are reviewed in the open. If a change is accepted, it should land as a merge or squash merge whenever possible.
-- Community contributions are actively encouraged, including bug fixes, documentation, tests, packaging, release engineering, and maintainer help.
-- If a maintainer adapts or rewrites a contributor's patch, attribution is preserved in commit metadata and release notes.
-- Governance, maintainer responsibilities, and escalation paths are documented in [`GOVERNANCE.md`](GOVERNANCE.md) and [`MAINTAINERS.md`](MAINTAINERS.md).
-- Security reports go through the private process in [`SECURITY.md`](SECURITY.md), not public issues.
+LibreFang was forked from [RightNow-AI/openfang](https://github.com/RightNow-AI/openfang) because we believe in a different way of running an open-source project.
+
+### What "Libre" Means
+
+| | OpenFang | LibreFang |
+|---|---------|-----------|
+| **License** | MIT | MIT |
+| **Governance** | Single-company controlled | Community-governed, transparent decision-making |
+| **PR Policy** | At maintainer's discretion | Positive contributions merged as-is; others get active review with improvement suggestions |
+| **Attribution** | Not guaranteed | Always preserved in commits and release notes |
+| **Contributors** | Limited involvement | Actively welcomed — we need you |
+| **Review SLA** | No commitment | Initial response within 7 days |
+
+### Our Commitments
+
+- **Merge-first mindset.** If your PR helps the project move forward, we merge it. No gatekeeping, no "we'll rewrite it internally."
+- **Active code review.** PRs that need work get detailed, constructive feedback — not silence. We help you ship.
+- **Full attribution.** If a maintainer adapts your patch, your name stays in commit metadata (`Co-authored-by`) and release notes. Closing a PR and re-implementing privately is explicitly prohibited by our [governance](GOVERNANCE.md).
+- **Open governance.** Technical decisions happen in issues and PRs, not behind closed doors. See [`GOVERNANCE.md`](GOVERNANCE.md) and [`MAINTAINERS.md`](MAINTAINERS.md).
+- **Security first.** Vulnerability reports go through the private process in [`SECURITY.md`](SECURITY.md).
 
 ---
 

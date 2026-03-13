@@ -134,6 +134,21 @@ impl AgentRegistry {
         Ok(())
     }
 
+    /// Update an agent's source TOML path.
+    pub fn update_source_toml_path(
+        &self,
+        id: AgentId,
+        source_toml_path: Option<std::path::PathBuf>,
+    ) -> LibreFangResult<()> {
+        let mut entry = self
+            .agents
+            .get_mut(&id)
+            .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
+        entry.source_toml_path = source_toml_path;
+        entry.last_active = chrono::Utc::now();
+        Ok(())
+    }
+
     /// Update an agent's visual identity (emoji, avatar, color).
     pub fn update_identity(
         &self,
@@ -370,6 +385,7 @@ mod tests {
             parent: None,
             children: vec![],
             session_id: SessionId::new(),
+            source_toml_path: None,
             tags: vec![],
             identity: Default::default(),
             onboarding_completed: false,

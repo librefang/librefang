@@ -133,9 +133,12 @@ pub async fn execute_tool(
         }
     }
 
+    let skip_approval_for_full_exec = tool_name == "shell_exec"
+        && exec_policy.is_some_and(|p| p.mode == librefang_types::config::ExecSecurityMode::Full);
+
     // Approval gate: check if this tool requires human approval before execution
     if let Some(kh) = kernel {
-        if kh.requires_approval(tool_name) {
+        if !skip_approval_for_full_exec && kh.requires_approval(tool_name) {
             let agent_id_str = caller_agent_id.unwrap_or("unknown");
             let input_str = input.to_string();
             let summary = format!(
@@ -3250,6 +3253,114 @@ async fn tool_canvas_present(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel_handle::{AgentInfo, KernelHandle};
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct ApprovalKernel {
+        approval_requests: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl KernelHandle for ApprovalKernel {
+        async fn spawn_agent(
+            &self,
+            _manifest_toml: &str,
+            _parent_id: Option<&str>,
+        ) -> Result<(String, String), String> {
+            Err("not used".to_string())
+        }
+
+        async fn send_to_agent(&self, _agent_id: &str, _message: &str) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        fn list_agents(&self) -> Vec<AgentInfo> {
+            vec![]
+        }
+
+        fn kill_agent(&self, _agent_id: &str) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        fn memory_store(&self, _key: &str, _value: serde_json::Value) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        fn memory_recall(&self, _key: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        fn find_agents(&self, _query: &str) -> Vec<AgentInfo> {
+            vec![]
+        }
+
+        async fn task_post(
+            &self,
+            _title: &str,
+            _description: &str,
+            _assigned_to: Option<&str>,
+            _created_by: Option<&str>,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_claim(&self, _agent_id: &str) -> Result<Option<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_complete(&self, _task_id: &str, _result: &str) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_list(&self, _status: Option<&str>) -> Result<Vec<serde_json::Value>, String> {
+            Err("not used".to_string())
+        }
+
+        async fn publish_event(
+            &self,
+            _event_type: &str,
+            _payload: serde_json::Value,
+        ) -> Result<(), String> {
+            Err("not used".to_string())
+        }
+
+        async fn knowledge_add_entity(
+            &self,
+            _entity: librefang_types::memory::Entity,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        async fn knowledge_add_relation(
+            &self,
+            _relation: librefang_types::memory::Relation,
+        ) -> Result<String, String> {
+            Err("not used".to_string())
+        }
+
+        async fn knowledge_query(
+            &self,
+            _pattern: librefang_types::memory::GraphPattern,
+        ) -> Result<Vec<librefang_types::memory::GraphMatch>, String> {
+            Err("not used".to_string())
+        }
+
+        fn requires_approval(&self, tool_name: &str) -> bool {
+            tool_name == "shell_exec"
+        }
+
+        async fn request_approval(
+            &self,
+            _agent_id: &str,
+            _tool_name: &str,
+            _action_summary: &str,
+        ) -> Result<bool, String> {
+            self.approval_requests.fetch_add(1, Ordering::SeqCst);
+            Ok(false)
+        }
+    }
 
     #[test]
     fn test_builtin_tool_definitions() {
@@ -3673,6 +3784,84 @@ mod tests {
             result.content.contains("Permission denied"),
             "fs-write should normalize to file_write which is not in allowed list"
         );
+    }
+
+    #[tokio::test]
+    async fn test_shell_exec_full_policy_skips_approval_gate() {
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::clone(&approval_requests),
+        });
+        let policy = librefang_types::config::ExecPolicy {
+            mode: librefang_types::config::ExecSecurityMode::Full,
+            ..Default::default()
+        };
+        let workspace = tempfile::tempdir().expect("tempdir");
+
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            &serde_json::json!({"command": "echo ok"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(workspace.path()),
+            None,
+            Some(&policy),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(
+            !result.content.contains("requires human approval"),
+            "full exec policy should bypass approval gate, got: {}",
+            result.content
+        );
+        assert_eq!(approval_requests.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_shell_exec_non_full_policy_still_requires_approval() {
+        let approval_requests = Arc::new(AtomicUsize::new(0));
+        let kernel: Arc<dyn KernelHandle> = Arc::new(ApprovalKernel {
+            approval_requests: Arc::clone(&approval_requests),
+        });
+        let policy = librefang_types::config::ExecPolicy {
+            mode: librefang_types::config::ExecSecurityMode::Allowlist,
+            ..Default::default()
+        };
+
+        let result = execute_tool(
+            "test-id",
+            "shell_exec",
+            &serde_json::json!({"command": "echo ok"}),
+            Some(&kernel),
+            None,
+            Some("agent-1"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&policy),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_error);
+        assert!(result.content.contains("requires human approval"));
+        assert_eq!(approval_requests.load(Ordering::SeqCst), 1);
     }
 
     // --- Schedule parser tests ---

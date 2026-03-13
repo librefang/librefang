@@ -3,11 +3,11 @@
 </p>
 
 <h1 align="center">LibreFang</h1>
-<h3 align="center">Community-gepflegtes Agenten-Betriebssystem</h3>
+<h3 align="center">Freies Agenten-Betriebssystem — Libre bedeutet Freiheit</h3>
 
 <p align="center">
   Open-Source-Agent-OS in Rust geschrieben. 137K Codezeilen. 14 Crates. 1767+ Tests. Keine Clippy-Warnungen.<br/>
-  <strong>Geforkt von `RightNow-AI/openfang`. Transparente Governance. Attribuierung beibehalten. Kompatibel mit bestehender `librefang` CLI.</strong>
+  <strong>Geforkt von <a href="https://github.com/RightNow-AI/openfang">RightNow-AI/openfang</a>. Wirklich offene Governance. Mitwirkende willkommen. PRs, die dem Projekt helfen, werden gemergt.</strong>
 </p>
 
 <p align="center">
@@ -38,11 +38,38 @@
 
 ---
 
-> **LibreFang ist ein Community-gepflegter Fork von [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang).**
+> **LibreFang ist ein Community-Fork von [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang).**
 >
-> Codebase, Binaries, Crate-Namen und Konfigurationspfade verwenden `librefang`. LibreFang verfolgt eine andere Projekt-Governance: Wir nehmen Community-Beiträge aktiv an, überprüfen sie öffentlich, führen akzeptierte Arbeit über den normalen GitHub-Flow zusammen und behatten die Contribuutor-Attribuierung bei, wenn wir Code adaptieren.
+> **"Libre"** bedeutet Freiheit. Wir haben diesen Namen gewählt, weil wir glauben, dass ein Open-Source-Projekt wirklich offen sein sollte — nicht nur in der Lizenz, sondern auch in Governance, Beitrag und Zusammenarbeit. LibreFang geht einen grundlegend anderen Weg als das Upstream-Projekt: Wir heißen jeden Mitwirkenden willkommen, überprüfen jeden PR öffentlich und mergen Arbeit, die dem Projekt nützt.
 
-> **Community-Status:** Wir freuen uns über Issues, PRs, Reviewer und Maintainer.
+> **Unser Versprechen an Mitwirkende:**
+> - Wenn dein PR dem Projekt positiv hilft, **mergen wir ihn unverändert** mit vollständiger Zuschreibung.
+> - Wenn dein PR Verbesserungen braucht, **reviewen wir ihn aktiv und geben konkrete Verbesserungsvorschläge** um dir beim Mergen zu helfen — wir schließen PRs nicht stillschweigend.
+> - Jeder Mitwirkende wird geschätzt. Bugfixes, Dokumentation, Tests, Features, Paketierung, Übersetzungen — alle Beiträge zählen.
+
+---
+
+## Warum LibreFang? — Der Unterschied zu OpenFang
+
+LibreFang wurde von [RightNow-AI/openfang](https://github.com/RightNow-AI/openfang) geforkt, weil wir an eine andere Art glauben, ein Open-Source-Projekt zu führen.
+
+### Was "Libre" bedeutet
+
+| | OpenFang | LibreFang |
+|---|---------|-----------|
+| **Lizenz** | MIT | MIT |
+| **Governance** | Von einem Unternehmen kontrolliert | Community-Governance, transparente Entscheidungsfindung |
+| **PR-Richtlinie** | Nach Ermessen des Maintainers | Positive Beiträge werden unverändert gemergt; andere erhalten aktives Review mit Verbesserungsvorschlägen |
+| **Zuschreibung** | Nicht garantiert | Immer in Commits und Release-Notes beibehalten |
+| **Mitwirkende** | Begrenzte Beteiligung | Aktiv willkommen — wir brauchen dich |
+| **Review-SLA** | Keine Zusage | Erste Antwort innerhalb von 7 Tagen |
+
+### Unsere Verpflichtungen
+
+- **Merge-First-Mentalität.** Wenn dein PR dem Projekt hilft voranzukommen, mergen wir ihn. Kein Gatekeeping, kein "wir schreiben es intern um".
+- **Aktives Code-Review.** PRs, die Änderungen brauchen, erhalten detailliertes, konstruktives Feedback — keine Stille. Wir helfen dir beim Ausliefern.
+- **Vollständige Zuschreibung.** Wenn ein Maintainer deinen Patch anpasst, bleibt dein Name in den Commit-Metadaten (`Co-authored-by`) und Release-Notes. Einen PR zu schließen und privat neu zu implementieren ist durch unsere [Governance](../GOVERNANCE.md) ausdrücklich verboten.
+- **Offene Governance.** Technische Entscheidungen finden in Issues und PRs statt, nicht hinter verschlossenen Türen. Siehe [`GOVERNANCE.md`](../GOVERNANCE.md) und [`MAINTAINERS.md`](../MAINTAINERS.md).
 
 ---
 

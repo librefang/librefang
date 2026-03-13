@@ -338,7 +338,7 @@ async fn parse_slack_event(
     allowed_channels: &[String],
 ) -> Option<ChannelMessage> {
     let event_type = event["type"].as_str()?;
-    if event_type != "message" {
+    if event_type != "message" && event_type != "app_mention" {
         return None;
     }
 
@@ -419,6 +419,9 @@ async fn parse_slack_event(
 
     let mut metadata = HashMap::new();
     metadata.insert(SENDER_USER_ID_KEY.to_string(), serde_json::json!(user_id));
+    if event_type == "app_mention" {
+        metadata.insert("was_mentioned".to_string(), serde_json::json!(true));
+    }
 
     // Slack channel prefixes: D = direct message, other channel types are group contexts.
     let is_group = !channel.starts_with('D');
@@ -558,6 +561,62 @@ mod tests {
             }
             other => panic!("Expected Command, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_app_mention_sets_was_mentioned() {
+        let bot_id = Arc::new(RwLock::new(None));
+        let event = serde_json::json!({
+            "type": "app_mention",
+            "user": "U456",
+            "channel": "C789",
+            "text": "<@U123> hello there",
+            "ts": "1700000000.000100"
+        });
+
+        let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
+        assert_eq!(
+            msg.metadata.get("was_mentioned").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_app_mention_filters_bot_self() {
+        let bot_id = Arc::new(RwLock::new(Some("U456".to_string())));
+        let event = serde_json::json!({
+            "type": "app_mention",
+            "user": "U456",
+            "channel": "C789",
+            "text": "<@U456> hello",
+            "ts": "1700000000.000100"
+        });
+
+        let msg = parse_slack_event(&event, &bot_id, &[]).await;
+        assert!(
+            msg.is_none(),
+            "app_mention from the bot itself should be filtered out"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_app_mention_filters_disallowed_channel() {
+        let bot_id = Arc::new(RwLock::new(None));
+        let event = serde_json::json!({
+            "type": "app_mention",
+            "user": "U456",
+            "channel": "C789",
+            "text": "<@U123> hello",
+            "ts": "1700000000.000100"
+        });
+
+        // Channel C789 is not in the allowed list
+        let msg =
+            parse_slack_event(&event, &bot_id, &["C111".to_string(), "C222".to_string()]).await;
+        assert!(
+            msg.is_none(),
+            "app_mention in a channel not in allowed_channels should be filtered out"
+        );
     }
 
     #[tokio::test]
