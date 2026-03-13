@@ -594,12 +594,8 @@ mod tests {
         });
 
         // Channel C789 is not in the allowed list
-        let msg = parse_slack_event(
-            &event,
-            &bot_id,
-            &["C111".to_string(), "C222".to_string()],
-        )
-        .await;
+        let msg =
+            parse_slack_event(&event, &bot_id, &["C111".to_string(), "C222".to_string()]).await;
         assert!(
             msg.is_none(),
             "app_mention in a channel not in allowed_channels should be filtered out"
