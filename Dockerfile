@@ -14,6 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY xtask ./xtask
+COPY agents ./agents
+COPY packages ./packages
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
@@ -24,8 +26,8 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
-COPY agents /opt/librefang/agents
-COPY packages /opt/librefang/packages
+COPY --from=builder /build/agents /opt/librefang/agents
+COPY --from=builder /build/packages /opt/librefang/packages
 EXPOSE 4545
 VOLUME /data
 ENV LIBREFANG_HOME=/data
