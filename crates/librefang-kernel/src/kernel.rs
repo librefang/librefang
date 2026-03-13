@@ -6323,6 +6323,7 @@ mod tests {
             identity: Default::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            source_toml_path: None,
         };
         registry.register(entry).unwrap();
 
@@ -6360,6 +6361,7 @@ mod tests {
             identity: Default::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            source_toml_path: None,
         };
         registry.register(e1).unwrap();
 
@@ -6383,6 +6385,7 @@ mod tests {
             identity: Default::default(),
             onboarding_completed: false,
             onboarding_completed_at: None,
+            source_toml_path: None,
         };
         registry.register(e2).unwrap();
 
