@@ -7005,6 +7005,7 @@ const SHELL_INSTALLER_URL: &str = "https://librefang.ai/install.sh";
 const POWERSHELL_INSTALLER_URL: &str = "https://librefang.ai/install.ps1";
 
 enum UpdateLaunch {
+    #[cfg(not(windows))]
     Completed,
     #[cfg(windows)]
     Detached,
@@ -7138,6 +7139,7 @@ fn cmd_update(check: bool, version: Option<String>) {
 
     if same_path(&current_exe, &default_install) {
         match run_official_update(target_version) {
+            #[cfg(not(windows))]
             Ok(UpdateLaunch::Completed) => {
                 ui::success("LibreFang CLI updated.");
                 if let Some(installed) = installed_binary_version(&default_install) {
