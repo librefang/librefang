@@ -5,6 +5,7 @@
 //! Mistral, Fireworks, Ollama, vLLM, Chutes.ai, and any OpenAI-compatible endpoint.
 
 pub mod anthropic;
+pub mod chatgpt;
 pub mod claude_code;
 pub mod copilot;
 pub mod fallback;
@@ -132,6 +133,11 @@ fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
         "replicate" => Some(ProviderDefaults {
             base_url: REPLICATE_BASE_URL,
             api_key_env: "REPLICATE_API_TOKEN",
+            key_required: true,
+        }),
+        "chatgpt" => Some(ProviderDefaults {
+            base_url: crate::chatgpt_oauth::CHATGPT_BASE_URL,
+            api_key_env: "CHATGPT_SESSION_TOKEN",
             key_required: true,
         }),
         "github-copilot" | "copilot" => Some(ProviderDefaults {
@@ -306,6 +312,29 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
         )));
     }
 
+    // ChatGPT — wraps OpenAI-compatible driver with session token from browser auth.
+    // The ChatGptDriver caches the session token and delegates to an OpenAI-compatible driver.
+    if provider == "chatgpt" {
+        let session_token = config
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("CHATGPT_SESSION_TOKEN").ok())
+            .ok_or_else(|| {
+                LlmError::MissingApiKey(
+                    "Set CHATGPT_SESSION_TOKEN or run `librefang auth chatgpt` to authenticate"
+                        .to_string(),
+                )
+            })?;
+        let base_url = config
+            .base_url
+            .clone()
+            .unwrap_or_else(|| crate::chatgpt_oauth::CHATGPT_BASE_URL.to_string());
+        return Ok(Arc::new(chatgpt::ChatGptDriver::new(
+            session_token,
+            base_url,
+        )));
+    }
+
     // GitHub Copilot — wraps OpenAI-compatible driver with automatic token exchange.
     // The CopilotDriver exchanges the GitHub PAT for a Copilot API token on demand,
     // caches it, and refreshes when expired.
@@ -405,7 +434,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
     Err(LlmError::Api {
         status: 0,
         message: format!(
-            "Unknown provider '{}'. Supported: anthropic, gemini, openai, groq, openrouter, \
+            "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
              deepseek, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
              chutes, venice, codex, claude-code. Or set base_url for a custom OpenAI-compatible endpoint.",
@@ -474,6 +503,7 @@ pub fn detect_available_provider() -> Option<(&'static str, &'static str, &'stat
 pub fn known_providers() -> &'static [&'static str] {
     &[
         "anthropic",
+        "chatgpt",
         "gemini",
         "openai",
         "groq",
@@ -595,6 +625,7 @@ mod tests {
         assert!(providers.contains(&"huggingface"));
         assert!(providers.contains(&"xai"));
         assert!(providers.contains(&"replicate"));
+        assert!(providers.contains(&"chatgpt"));
         assert!(providers.contains(&"github-copilot"));
         assert!(providers.contains(&"moonshot"));
         assert!(providers.contains(&"qwen"));
@@ -608,7 +639,7 @@ mod tests {
         assert!(providers.contains(&"chutes"));
         assert!(providers.contains(&"codex"));
         assert!(providers.contains(&"claude-code"));
-        assert_eq!(providers.len(), 34);
+        assert_eq!(providers.len(), 35);
     }
 
     #[test]
