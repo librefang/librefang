@@ -8,7 +8,7 @@ use librefang_api::middleware;
 use librefang_api::routes::{self, AppState};
 use librefang_api::server::{read_daemon_info, DaemonInfo};
 use librefang_kernel::LibreFangKernel;
-use librefang_types::config::{DefaultModelConfig, KernelConfig};
+use librefang_types::config::{DefaultModelConfig, KernelConfig, DEFAULT_API_LISTEN};
 use std::sync::Arc;
 use std::time::Instant;
 use tower_http::cors::CorsLayer;
@@ -23,7 +23,7 @@ use tower_http::trace::TraceLayer;
 fn test_daemon_info_serde_roundtrip() {
     let info = DaemonInfo {
         pid: 12345,
-        listen_addr: "127.0.0.1:4545".to_string(),
+        listen_addr: DEFAULT_API_LISTEN.to_string(),
         started_at: "2024-01-01T00:00:00Z".to_string(),
         version: "0.1.0".to_string(),
         platform: "linux".to_string(),
@@ -33,7 +33,7 @@ fn test_daemon_info_serde_roundtrip() {
     let parsed: DaemonInfo = serde_json::from_str(&json).unwrap();
 
     assert_eq!(parsed.pid, 12345);
-    assert_eq!(parsed.listen_addr, "127.0.0.1:4545");
+    assert_eq!(parsed.listen_addr, DEFAULT_API_LISTEN);
     assert_eq!(parsed.version, "0.1.0");
     assert_eq!(parsed.platform, "linux");
 }

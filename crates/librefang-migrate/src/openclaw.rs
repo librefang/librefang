@@ -23,6 +23,7 @@
 
 use crate::report::{ItemKind, MigrateItem, MigrationReport, SkippedItem};
 use crate::{MigrateError, MigrateOptions};
+use librefang_types::config::DEFAULT_API_LISTEN;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};
@@ -1194,7 +1195,7 @@ fn migrate_config_from_json(
         },
         memory: LibreFangMemorySection { decay_rate: 0.05 },
         network: LibreFangNetworkSection {
-            listen_addr: "127.0.0.1:4545".to_string(),
+            listen_addr: DEFAULT_API_LISTEN.to_string(),
         },
         channels,
     };
@@ -2415,7 +2416,7 @@ fn migrate_legacy_config(
                 .unwrap_or(0.05),
         },
         network: LibreFangNetworkSection {
-            listen_addr: "127.0.0.1:4545".to_string(),
+            listen_addr: DEFAULT_API_LISTEN.to_string(),
         },
         channels,
     };

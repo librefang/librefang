@@ -83,7 +83,7 @@ api_key_env = ""
 home_dir = "~/.librefang"             # LibreFang home directory
 data_dir = "~/.librefang/data"        # SQLite databases and data files
 log_level = "info"                   # trace | debug | info | warn | error
-api_listen = "127.0.0.1:50051"      # HTTP/WS API bind address
+api_listen = "127.0.0.1:4545"       # HTTP/WS API bind address
 network_enabled = false              # Enable OFP peer-to-peer network
 api_key = ""                         # API Bearer token (empty = unauthenticated)
 mode = "default"                     # stable | default | dev
@@ -227,7 +227,7 @@ These fields sit at the root of `config.toml` (not inside any `[section]`).
 | `home_dir` | path | `~/.librefang` | LibreFang home directory. Stores config, agents, skills. |
 | `data_dir` | path | `~/.librefang/data` | Directory for SQLite databases and persistent data. |
 | `log_level` | string | `"info"` | Log verbosity. One of: `trace`, `debug`, `info`, `warn`, `error`. |
-| `api_listen` | string | `"127.0.0.1:50051"` | Bind address for the HTTP/WebSocket/SSE API server. |
+| `api_listen` | string | `"127.0.0.1:4545"` | Bind address for the HTTP/WebSocket/SSE API server. |
 | `network_enabled` | bool | `false` | Enable the OFP peer-to-peer network layer. |
 | `api_key` | string | `""` (empty) | API authentication key. When set, all endpoints except `/api/health` require `Authorization: Bearer <key>`. Empty means unauthenticated (local development only). |
 | `mode` | string | `"default"` | Kernel operating mode. See below. |

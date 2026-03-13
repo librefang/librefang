@@ -3,7 +3,7 @@
 
 # API server settings
 # api_key = ""                               # Set to enable Bearer auth (recommended)
-# api_listen = "127.0.0.1:50051"             # HTTP API bind address (use 0.0.0.0 for public)
+# api_listen = "127.0.0.1:4545"              # HTTP API bind address (use 0.0.0.0 for public)
 
 [default_model]
 provider = "anthropic"                    # "anthropic", "gemini", "openai", "groq", "ollama", etc.

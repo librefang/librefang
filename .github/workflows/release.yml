@@ -190,67 +190,112 @@ jobs:
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
 
-  # ── CLI Binary (5 platforms) ──────────────────────────────────────────────
-  cli:
+  # ── CLI Binary (macOS) ────────────────────────────────────────────────────
+  cli_mac:
     name: CLI / ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
-            archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04
-            archive: tar.gz
           - target: x86_64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
           - target: aarch64-apple-darwin
-            os: macos-latest
-            archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
-          - target: aarch64-pc-windows-msvc
-            os: windows-latest
-            archive: zip
 
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Install build deps (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
-      - name: Install cross (Linux aarch64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cargo install cross --locked
       - uses: Swatinem/rust-cache@v2
         with:
           key: cli-${{ matrix.target }}-${{ github.ref_name }}
-      - name: Build CLI (cross)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: cross build --release --target ${{ matrix.target }} --bin librefang
       - name: Build CLI
-        if: matrix.target != 'aarch64-unknown-linux-gnu'
         run: cargo build --release --target ${{ matrix.target }} --bin librefang
-      - name: Ad-hoc codesign CLI binary (macOS)
-        if: runner.os == 'macOS'
+      - name: Ad-hoc codesign
         run: |
           xattr -cr target/${{ matrix.target }}/release/librefang || true
           codesign --force --sign - target/${{ matrix.target }}/release/librefang
-      - name: Package (Unix)
-        if: matrix.archive == 'tar.gz'
+      - name: Package
         run: |
           cd target/${{ matrix.target }}/release
           tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
           cd ../../..
           sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
-      - name: Package (Windows)
-        if: matrix.archive == 'zip'
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: librefang-${{ matrix.target }}.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── CLI Binary (Linux) ──────────────────────────────────────────────────
+  cli_linux:
+    name: CLI / ${{ matrix.target }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            use_cross: false
+          - target: aarch64-unknown-linux-gnu
+            use_cross: true
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+      - name: Install cross
+        if: matrix.use_cross
+        run: cargo install cross --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build CLI
+        run: |
+          if [ "${{ matrix.use_cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} --bin librefang
+          else
+            cargo build --release --target ${{ matrix.target }} --bin librefang
+          fi
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          cd ../../..
+          sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: librefang-${{ matrix.target }}.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── CLI Binary (Windows) ────────────────────────────────────────────────
+  cli_windows:
+    name: CLI / ${{ matrix.target }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+          - target: aarch64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build CLI
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang
+      - name: Package
         shell: pwsh
         run: |
           Compress-Archive -Path "target/${{ matrix.target }}/release/librefang.exe" -DestinationPath "librefang-${{ matrix.target }}.zip"
@@ -351,7 +396,7 @@ jobs:
   sync_homebrew:
     name: Sync to Homebrew Tap
     runs-on: ubuntu-latest
-    needs: [cli]
+    needs: [cli_mac]
     steps:
       - name: Check out tap repo
         uses: actions/checkout@v6
@@ -401,28 +446,20 @@ jobs:
 
           ARM64_DARWIN_NAME="librefang-aarch64-apple-darwin.tar.gz"
           X86_DARWIN_NAME="librefang-x86_64-apple-darwin.tar.gz"
-          ARM64_LINUX_NAME="librefang-aarch64-unknown-linux-gnu.tar.gz"
-          X86_LINUX_NAME="librefang-x86_64-unknown-linux-gnu.tar.gz"
 
           ARM64_DARWIN_URL="$(asset_url "$ARM64_DARWIN_NAME")"
           X86_DARWIN_URL="$(asset_url "$X86_DARWIN_NAME")"
-          ARM64_LINUX_URL="$(asset_url "$ARM64_LINUX_NAME")"
-          X86_LINUX_URL="$(asset_url "$X86_LINUX_NAME")"
 
           ARM64_DARWIN_SHA="$(asset_sha "$ARM64_DARWIN_NAME")"
           X86_DARWIN_SHA="$(asset_sha "$X86_DARWIN_NAME")"
-          ARM64_LINUX_SHA="$(asset_sha "$ARM64_LINUX_NAME")"
-          X86_LINUX_SHA="$(asset_sha "$X86_LINUX_NAME")"
 
           ARM64_DARWIN_SIZE="$(asset_size "$ARM64_DARWIN_NAME")"
           X86_DARWIN_SIZE="$(asset_size "$X86_DARWIN_NAME")"
-          ARM64_LINUX_SIZE="$(asset_size "$ARM64_LINUX_NAME")"
-          X86_LINUX_SIZE="$(asset_size "$X86_LINUX_NAME")"
 
           for required in \
-            ARM64_DARWIN_URL X86_DARWIN_URL ARM64_LINUX_URL X86_LINUX_URL \
-            ARM64_DARWIN_SHA X86_DARWIN_SHA ARM64_LINUX_SHA X86_LINUX_SHA \
-            ARM64_DARWIN_SIZE X86_DARWIN_SIZE ARM64_LINUX_SIZE X86_LINUX_SIZE
+            ARM64_DARWIN_URL X86_DARWIN_URL \
+            ARM64_DARWIN_SHA X86_DARWIN_SHA \
+            ARM64_DARWIN_SIZE X86_DARWIN_SIZE
           do
             if [ -z "${!required}" ] || [ "${!required}" = "null" ]; then
               echo "Missing release metadata: $required" >&2
@@ -430,7 +467,7 @@ jobs:
             fi
           done
 
-          for size_var in ARM64_DARWIN_SIZE X86_DARWIN_SIZE ARM64_LINUX_SIZE X86_LINUX_SIZE
+          for size_var in ARM64_DARWIN_SIZE X86_DARWIN_SIZE
           do
             if [ "${!size_var}" -le 0 ]; then
               echo "Release asset is empty: $size_var" >&2
@@ -445,24 +482,14 @@ jobs:
             license "MIT"
             version "$VERSION"
 
-            on_macos do
-              if Hardware::CPU.arm?
-                url "$ARM64_DARWIN_URL"
-                sha256 "$ARM64_DARWIN_SHA"
-              else
-                url "$X86_DARWIN_URL"
-                sha256 "$X86_DARWIN_SHA"
-              end
-            end
+            depends_on :macos
 
-            on_linux do
-              if Hardware::CPU.arm?
-                url "$ARM64_LINUX_URL"
-                sha256 "$ARM64_LINUX_SHA"
-              else
-                url "$X86_LINUX_URL"
-                sha256 "$X86_LINUX_SHA"
-              end
+            if Hardware::CPU.arm?
+              url "$ARM64_DARWIN_URL"
+              sha256 "$ARM64_DARWIN_SHA"
+            else
+              url "$X86_DARWIN_URL"
+              sha256 "$X86_DARWIN_SHA"
             end
 
             def install
@@ -489,7 +516,7 @@ jobs:
   sync_installers:
     name: Sync Installers to Website
     runs-on: ubuntu-latest
-    needs: [cli]
+    needs: [cli_mac, cli_linux, cli_windows]
     steps:
       - name: Check out source repo
         uses: actions/checkout@v6

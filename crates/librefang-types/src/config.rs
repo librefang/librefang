@@ -4,6 +4,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Default API listen port. Every place that needs the default port
+/// should reference this constant so a rename is a single-line change.
+pub const DEFAULT_API_PORT: u16 = 4545;
+
+/// Default API listen address (loopback + default port).
+pub const DEFAULT_API_LISTEN: &str = "127.0.0.1:4545";
+
 /// Deserialize a `Vec<String>` that tolerates both string and integer elements.
 ///
 /// When channel configs are saved from the web dashboard, numeric IDs (e.g. Discord
@@ -1278,7 +1285,7 @@ impl Default for KernelConfig {
             data_dir: home_dir.join("data"),
             home_dir,
             log_level: "info".to_string(),
-            api_listen: "127.0.0.1:50051".to_string(),
+            api_listen: DEFAULT_API_LISTEN.to_string(),
             network_enabled: false,
             default_model: DefaultModelConfig::default(),
             memory: MemoryConfig::default(),
@@ -3427,7 +3434,7 @@ mod tests {
     fn test_default_config() {
         let config = KernelConfig::default();
         assert_eq!(config.log_level, "info");
-        assert_eq!(config.api_listen, "127.0.0.1:50051");
+        assert_eq!(config.api_listen, DEFAULT_API_LISTEN);
         assert!(!config.network_enabled);
     }
 
