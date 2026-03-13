@@ -173,7 +173,7 @@ fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
         }),
         "minimax-cn" => Some(ProviderDefaults {
             base_url: MINIMAX_CN_BASE_URL,
-            api_key_env: "MINIMAX_API_KEY",
+            api_key_env: "MINIMAX_CN_API_KEY",
             key_required: true,
         }),
         "zhipu" | "glm" => Some(ProviderDefaults {

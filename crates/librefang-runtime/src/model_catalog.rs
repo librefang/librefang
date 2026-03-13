@@ -644,7 +644,7 @@ fn builtin_providers() -> Vec<ProviderInfo> {
         ProviderInfo {
             id: "minimax-cn".into(),
             display_name: "MiniMax (China)".into(),
-            api_key_env: "MINIMAX_API_KEY".into(),
+            api_key_env: "MINIMAX_CN_API_KEY".into(),
             base_url: MINIMAX_CN_BASE_URL.into(),
             key_required: true,
             auth_status: AuthStatus::Missing,
