@@ -4442,6 +4442,37 @@ pub async fn hand_instance_browser(
 // MCP server endpoints
 // ---------------------------------------------------------------------------
 
+fn http_compat_header_summary(
+    header: &librefang_types::config::HttpCompatHeaderConfig,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": header.name,
+        "value_env": header.value_env,
+        "source": if header.value_env.is_some() {
+            "env"
+        } else if header.value.is_some() {
+            "static"
+        } else {
+            "unset"
+        },
+    })
+}
+
+fn http_compat_tool_summary(
+    tool: &librefang_types::config::HttpCompatToolConfig,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": tool.name,
+        "description": tool.description,
+        "path": tool.path,
+        "method": serde_json::to_value(&tool.method).unwrap_or(serde_json::json!("post")),
+        "request_mode": serde_json::to_value(&tool.request_mode)
+            .unwrap_or(serde_json::json!("json_body")),
+        "response_mode": serde_json::to_value(&tool.response_mode)
+            .unwrap_or(serde_json::json!("json")),
+    })
+}
+
 /// GET /api/mcp/servers — List configured MCP servers and their tools.
 pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Get configured servers from config
@@ -4463,6 +4494,23 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
                     serde_json::json!({
                         "type": "sse",
                         "url": url,
+                    })
+                }
+                librefang_types::config::McpTransportEntry::HttpCompat {
+                    base_url,
+                    headers,
+                    tools,
+                } => {
+                    let tool_summaries: Vec<serde_json::Value> =
+                        tools.iter().map(http_compat_tool_summary).collect();
+                    let header_summaries: Vec<serde_json::Value> =
+                        headers.iter().map(http_compat_header_summary).collect();
+                    serde_json::json!({
+                        "type": "http_compat",
+                        "base_url": base_url,
+                        "headers": header_summaries,
+                        "tools_count": tool_summaries.len(),
+                        "tools": tool_summaries,
                     })
                 }
             };
@@ -6838,9 +6886,18 @@ pub async fn get_agent_mcp_servers(
     // Collect known MCP server names from connected tools
     let mut available: Vec<String> = Vec::new();
     if let Ok(mcp_tools) = state.kernel.mcp_tools.lock() {
+        let configured_servers: Vec<String> = state
+            .kernel
+            .effective_mcp_servers
+            .read()
+            .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
         let mut seen = std::collections::HashSet::new();
         for tool in mcp_tools.iter() {
-            if let Some(server) = librefang_runtime::mcp::extract_mcp_server(&tool.name) {
+            if let Some(server) = librefang_runtime::mcp::resolve_mcp_server_from_known(
+                &tool.name,
+                configured_servers.iter().map(String::as_str),
+            ) {
                 if seen.insert(server.to_string()) {
                     available.push(server.to_string());
                 }

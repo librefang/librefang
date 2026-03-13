@@ -1152,6 +1152,83 @@ fn default_mcp_timeout() -> u64 {
     30
 }
 
+fn default_http_compat_input_schema() -> serde_json::Value {
+    serde_json::json!({"type": "object"})
+}
+
+/// HTTP request method for the built-in HTTP compatibility transport.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpCompatMethod {
+    Get,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl Default for HttpCompatMethod {
+    fn default() -> Self {
+        Self::Post
+    }
+}
+
+/// How tool arguments are mapped onto an outbound HTTP request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpCompatRequestMode {
+    JsonBody,
+    Query,
+    None,
+}
+
+impl Default for HttpCompatRequestMode {
+    fn default() -> Self {
+        Self::JsonBody
+    }
+}
+
+/// How the built-in HTTP compatibility transport formats responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HttpCompatResponseMode {
+    Json,
+    Text,
+}
+
+impl Default for HttpCompatResponseMode {
+    fn default() -> Self {
+        Self::Json
+    }
+}
+
+/// Header injection config for the built-in HTTP compatibility transport.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HttpCompatHeaderConfig {
+    pub name: String,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub value_env: Option<String>,
+}
+
+/// Declarative tool mapping for the built-in HTTP compatibility transport.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct HttpCompatToolConfig {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub path: String,
+    #[serde(default)]
+    pub method: HttpCompatMethod,
+    #[serde(default)]
+    pub request_mode: HttpCompatRequestMode,
+    #[serde(default)]
+    pub response_mode: HttpCompatResponseMode,
+    #[serde(default = "default_http_compat_input_schema")]
+    pub input_schema: serde_json::Value,
+}
+
 /// Transport configuration for an MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -1164,6 +1241,14 @@ pub enum McpTransportEntry {
     },
     /// HTTP Server-Sent Events.
     Sse { url: String },
+    /// Built-in compatibility adapter for plain HTTP/JSON tool backends.
+    HttpCompat {
+        base_url: String,
+        #[serde(default)]
+        headers: Vec<HttpCompatHeaderConfig>,
+        #[serde(default)]
+        tools: Vec<HttpCompatToolConfig>,
+    },
 }
 
 /// A2A (Agent-to-Agent) protocol configuration.

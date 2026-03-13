@@ -1114,11 +1114,34 @@ type = "sse"
 url = "https://mcp.example.com/sse"
 ```
 
+```toml
+[[mcp_servers]]
+name = "internal-http"
+timeout_secs = 30
+
+[mcp_servers.transport]
+type = "http_compat"
+base_url = "http://127.0.0.1:11235"
+
+[[mcp_servers.transport.headers]]
+name = "Authorization"
+value_env = "INTERNAL_HTTP_TOKEN"
+
+[[mcp_servers.transport.tools]]
+name = "crawl"
+description = "Fetch content from the backend"
+path = "/crawl"
+method = "post"
+request_mode = "json_body"
+response_mode = "json"
+input_schema = { type = "object", properties = { url = { type = "string" } }, required = ["url"] }
+```
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `name` | string | *required* | Display name for this MCP server. Tools are namespaced as `mcp_{name}_{tool}`. |
 | `timeout_secs` | u64 | `30` | Request timeout in seconds. |
-| `env` | list of strings | `[]` | Environment variable names to pass through to the subprocess (stdio transport only). |
+| `env` | list of strings | `[]` | Environment variable names to pass through to the subprocess (stdio transport only). For `http_compat`, put secrets in `headers[].value_env`. |
 
 **Transport variants** (tagged union on `type`):
 
@@ -1126,6 +1149,16 @@ url = "https://mcp.example.com/sse"
 |--------|--------|-------------|
 | `stdio` | `command` (string), `args` (list of strings, default `[]`) | Spawn a subprocess, communicate via JSON-RPC over stdin/stdout. |
 | `sse` | `url` (string) | Connect to an HTTP Server-Sent Events endpoint. |
+| `http_compat` | `base_url` (string), `headers` (list, default `[]`), `tools` (list, default `[]`) | Declaratively expose a plain HTTP/JSON backend as tool(s) without an external bridge process. |
+
+For `http_compat`:
+
+- `headers[].name` is required. Use either `headers[].value` or `headers[].value_env`.
+- `tools[].name` and `tools[].path` are required.
+- `tools[].method` supports `get`, `post`, `put`, `patch`, `delete` and defaults to `post`.
+- `tools[].request_mode` supports `json_body`, `query`, `none` and defaults to `json_body`.
+- `tools[].response_mode` supports `json` and `text` and defaults to `json`.
+- `tools[].input_schema` is the JSON schema exposed to the agent and defaults to `{ type = "object" }`.
 
 ---
 

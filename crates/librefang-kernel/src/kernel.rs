@@ -2953,9 +2953,17 @@ impl LibreFangKernel {
             if let Ok(mcp_tools) = self.mcp_tools.lock() {
                 let mut known_servers: std::collections::HashSet<String> =
                     std::collections::HashSet::new();
+                let configured_servers: Vec<String> = self
+                    .effective_mcp_servers
+                    .read()
+                    .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
+                    .unwrap_or_default();
                 for tool in mcp_tools.iter() {
-                    if let Some(s) = librefang_runtime::mcp::extract_mcp_server(&tool.name) {
-                        known_servers.insert(s.to_string());
+                    if let Some(s) = librefang_runtime::mcp::resolve_mcp_server_from_known(
+                        &tool.name,
+                        configured_servers.iter().map(String::as_str),
+                    ) {
+                        known_servers.insert(librefang_runtime::mcp::normalize_name(s));
                     }
                 }
                 for name in &servers {
@@ -4514,6 +4522,15 @@ impl LibreFangKernel {
                     args: args.clone(),
                 },
                 McpTransportEntry::Sse { url } => McpTransport::Sse { url: url.clone() },
+                McpTransportEntry::HttpCompat {
+                    base_url,
+                    headers,
+                    tools,
+                } => McpTransport::HttpCompat {
+                    base_url: base_url.clone(),
+                    headers: headers.clone(),
+                    tools: tools.clone(),
+                },
             };
 
             let mcp_config = McpServerConfig {
@@ -4622,6 +4639,15 @@ impl LibreFangKernel {
                     args: args.clone(),
                 },
                 McpTransportEntry::Sse { url } => McpTransport::Sse { url: url.clone() },
+                McpTransportEntry::HttpCompat {
+                    base_url,
+                    headers,
+                    tools,
+                } => McpTransport::HttpCompat {
+                    base_url: base_url.clone(),
+                    headers: headers.clone(),
+                    tools: tools.clone(),
+                },
             };
 
             let mcp_config = McpServerConfig {
@@ -4740,6 +4766,15 @@ impl LibreFangKernel {
                 args: args.clone(),
             },
             McpTransportEntry::Sse { url } => McpTransport::Sse { url: url.clone() },
+            McpTransportEntry::HttpCompat {
+                base_url,
+                headers,
+                tools,
+            } => McpTransport::HttpCompat {
+                base_url: base_url.clone(),
+                headers: headers.clone(),
+                tools: tools.clone(),
+            },
         };
 
         let mcp_config = McpServerConfig {
@@ -4903,6 +4938,11 @@ impl LibreFangKernel {
         // Step 3: Add MCP tools (filtered by agent's MCP server allowlist,
         // then by declared tools).
         if let Ok(mcp_tools) = self.mcp_tools.lock() {
+            let configured_servers: Vec<String> = self
+                .effective_mcp_servers
+                .read()
+                .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
+                .unwrap_or_default();
             let mcp_candidates: Vec<ToolDefinition> = if mcp_allowlist.is_empty() {
                 mcp_tools.iter().cloned().collect()
             } else {
@@ -4913,9 +4953,15 @@ impl LibreFangKernel {
                 mcp_tools
                     .iter()
                     .filter(|t| {
-                        librefang_runtime::mcp::extract_mcp_server(&t.name)
-                            .map(|s| normalized.iter().any(|n| n == s))
-                            .unwrap_or(false)
+                        librefang_runtime::mcp::resolve_mcp_server_from_known(
+                            &t.name,
+                            configured_servers.iter().map(String::as_str),
+                        )
+                        .map(|server| {
+                            let normalized_server = librefang_runtime::mcp::normalize_name(server);
+                            normalized.iter().any(|n| n == &normalized_server)
+                        })
+                        .unwrap_or(false)
                     })
                     .cloned()
                     .collect()
@@ -5044,30 +5090,46 @@ impl LibreFangKernel {
             .map(|s| librefang_runtime::mcp::normalize_name(s))
             .collect();
 
-        // Group tools by MCP server prefix (mcp_{server}_{tool})
+        let configured_servers: Vec<String> = self
+            .effective_mcp_servers
+            .read()
+            .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
+
+        // Group tools by configured MCP server prefix.
         let mut servers: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
         let mut tool_count = 0usize;
         for tool in &tools {
-            let parts: Vec<&str> = tool.name.splitn(3, '_').collect();
-            if parts.len() >= 3 && parts[0] == "mcp" {
-                let server = parts[1].to_string();
-                // Filter by MCP allowlist if set
-                if !mcp_allowlist.is_empty() && !normalized.iter().any(|n| n == &server) {
+            if let Some(server_name) = librefang_runtime::mcp::resolve_mcp_server_from_known(
+                &tool.name,
+                configured_servers.iter().map(String::as_str),
+            ) {
+                let normalized_server = librefang_runtime::mcp::normalize_name(server_name);
+                if !mcp_allowlist.is_empty() && !normalized.iter().any(|n| n == &normalized_server)
+                {
                     continue;
                 }
-                servers
-                    .entry(server)
-                    .or_default()
-                    .push(parts[2..].join("_"));
-                tool_count += 1;
+                if let Some(raw_tool_name) =
+                    tool.name.strip_prefix(&format!("mcp_{}_", normalized_server))
+                {
+                    servers
+                        .entry(normalized_server)
+                        .or_default()
+                        .push(raw_tool_name.to_string());
+                } else {
+                    servers
+                        .entry(normalized_server)
+                        .or_default()
+                        .push(tool.name.clone());
+                }
             } else {
                 servers
                     .entry("unknown".to_string())
                     .or_default()
                     .push(tool.name.clone());
-                tool_count += 1;
             }
+            tool_count += 1;
         }
         if tool_count == 0 {
             return String::new();

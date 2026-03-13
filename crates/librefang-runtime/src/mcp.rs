@@ -1,11 +1,16 @@
 //! MCP (Model Context Protocol) client — connect to external MCP servers.
 //!
-//! MCP uses JSON-RPC 2.0 over stdio or HTTP+SSE. This module lets LibreFang
-//! agents use tools from any MCP server (100+ available: GitHub, filesystem,
-//! databases, APIs, etc.).
+//! MCP uses JSON-RPC 2.0 over stdio or HTTP+SSE. This module also provides a
+//! built-in compatibility layer for plain HTTP/JSON backends, allowing
+//! LibreFang agents to use tools from native MCP servers or declarative
+//! HTTP-backed tool providers.
 //!
 //! All MCP tools are namespaced with `mcp_{server}_{tool}` to prevent collisions.
 
+use librefang_types::config::{
+    HttpCompatHeaderConfig, HttpCompatMethod, HttpCompatRequestMode, HttpCompatResponseMode,
+    HttpCompatToolConfig,
+};
 use librefang_types::tool::ToolDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -48,6 +53,14 @@ pub enum McpTransport {
     },
     /// HTTP Server-Sent Events.
     Sse { url: String },
+    /// Built-in compatibility adapter for plain HTTP/JSON backends.
+    HttpCompat {
+        base_url: String,
+        #[serde(default)]
+        headers: Vec<HttpCompatHeaderConfig>,
+        #[serde(default)]
+        tools: Vec<HttpCompatToolConfig>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -80,6 +93,9 @@ enum McpTransportHandle {
     Sse {
         client: reqwest::Client,
         url: String,
+    },
+    HttpCompat {
+        client: reqwest::Client,
     },
 }
 
@@ -134,6 +150,14 @@ impl McpConnection {
                 // SSRF check: reject private/localhost URLs unless explicitly configured
                 Self::connect_sse(url).await?
             }
+            McpTransport::HttpCompat {
+                base_url,
+                headers,
+                tools,
+            } => {
+                Self::validate_http_compat_config(base_url, headers, tools)?;
+                Self::connect_http_compat(base_url).await?
+            }
         };
 
         let mut conn = Self {
@@ -144,11 +168,16 @@ impl McpConnection {
             next_id: 1,
         };
 
-        // Initialize handshake
-        conn.initialize().await?;
+        if let McpTransport::HttpCompat { tools, .. } = &conn.config.transport {
+            let declared_tools = tools.clone();
+            conn.register_http_compat_tools(&declared_tools);
+        } else {
+            // Initialize handshake
+            conn.initialize().await?;
 
-        // Discover tools
-        conn.discover_tools().await?;
+            // Discover tools
+            conn.discover_tools().await?;
+        }
 
         info!(
             server = %conn.config.name,
@@ -193,7 +222,6 @@ impl McpConnection {
 
         if let Some(result) = response {
             if let Some(tools_array) = result.get("tools").and_then(|t| t.as_array()) {
-                let server_name = &self.config.name;
                 for tool in tools_array {
                     let raw_name = tool["name"].as_str().unwrap_or("unnamed");
                     let description = tool["description"].as_str().unwrap_or("");
@@ -215,23 +243,47 @@ impl McpConnection {
                         })
                         .unwrap_or(serde_json::json!({"type": "object"}));
 
-                    // Namespace: mcp_{server}_{tool}
-                    let namespaced = format_mcp_tool_name(server_name, raw_name);
-
-                    // Store original name so we can send it back to the server
-                    self.original_names
-                        .insert(namespaced.clone(), raw_name.to_string());
-
-                    self.tools.push(ToolDefinition {
-                        name: namespaced,
-                        description: format!("[MCP:{server_name}] {description}"),
-                        input_schema,
-                    });
+                    self.register_tool(raw_name, description, input_schema);
                 }
             }
         }
 
         Ok(())
+    }
+
+    fn register_http_compat_tools(&mut self, tools: &[HttpCompatToolConfig]) {
+        for tool in tools {
+            let description = if tool.description.trim().is_empty() {
+                format!("HTTP compatibility tool {}", tool.name)
+            } else {
+                tool.description.clone()
+            };
+
+            let input_schema = if tool.input_schema.is_object() {
+                tool.input_schema.clone()
+            } else {
+                serde_json::json!({"type": "object"})
+            };
+
+            self.register_tool(&tool.name, &description, input_schema);
+        }
+    }
+
+    fn register_tool(
+        &mut self,
+        raw_name: &str,
+        description: &str,
+        input_schema: serde_json::Value,
+    ) {
+        let server_name = &self.config.name;
+        let namespaced = format_mcp_tool_name(server_name, raw_name);
+        self.original_names
+            .insert(namespaced.clone(), raw_name.to_string());
+        self.tools.push(ToolDefinition {
+            name: namespaced,
+            description: format!("[MCP:{server_name}] {description}"),
+            input_schema,
+        });
     }
 
     /// Call a tool on the MCP server.
@@ -249,6 +301,27 @@ impl McpConnection {
             .map(|s| s.as_str())
             .or_else(|| strip_mcp_prefix(&self.config.name, name))
             .unwrap_or(name);
+
+        if let (
+            McpTransportHandle::HttpCompat { client },
+            McpTransport::HttpCompat {
+                base_url,
+                headers,
+                tools,
+            },
+        ) = (&self.transport, &self.config.transport)
+        {
+            return Self::call_http_compat_tool(
+                client,
+                base_url,
+                headers,
+                tools,
+                raw_name,
+                arguments,
+                self.config.timeout_secs,
+            )
+            .await;
+        }
 
         let params = serde_json::json!({
             "name": raw_name,
@@ -374,6 +447,9 @@ impl McpConnection {
 
                 Ok(rpc_response.result)
             }
+            McpTransportHandle::HttpCompat { .. } => {
+                Err("JSON-RPC requests are not supported for http_compat transport".to_string())
+            }
         }
     }
 
@@ -406,6 +482,7 @@ impl McpConnection {
             McpTransportHandle::Sse { client, url } => {
                 let _ = client.post(url.as_str()).json(&notification).send().await;
             }
+            McpTransportHandle::HttpCompat { .. } => {}
         }
 
         Ok(())
@@ -529,6 +606,287 @@ impl McpConnection {
             url: url.to_string(),
         })
     }
+
+    async fn connect_http_compat(base_url: &str) -> Result<McpTransportHandle, String> {
+        let lower = base_url.to_lowercase();
+        if lower.contains("169.254.169.254") || lower.contains("metadata.google") {
+            return Err("SSRF: HTTP compatibility backend targets metadata endpoint".to_string());
+        }
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
+
+        let probe = base_url.trim_end_matches('/').to_string();
+        let response = client
+            .get(probe.as_str())
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|e| format!("HTTP compatibility backend probe failed: {e}"))?;
+
+        debug!(
+            base_url = %probe,
+            status = %response.status(),
+            "HTTP compatibility backend reachable"
+        );
+
+        Ok(McpTransportHandle::HttpCompat { client })
+    }
+
+    fn validate_http_compat_config(
+        base_url: &str,
+        headers: &[HttpCompatHeaderConfig],
+        tools: &[HttpCompatToolConfig],
+    ) -> Result<(), String> {
+        if base_url.trim().is_empty() {
+            return Err("HTTP compatibility transport requires non-empty base_url".to_string());
+        }
+
+        if tools.is_empty() {
+            return Err("HTTP compatibility transport requires at least one tool".to_string());
+        }
+
+        for header in headers {
+            if header.name.trim().is_empty() {
+                return Err("HTTP compatibility headers must have non-empty names".to_string());
+            }
+
+            let has_static_value = header
+                .value
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty());
+            let has_env_value = header
+                .value_env
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty());
+            if !has_static_value && !has_env_value {
+                return Err(format!(
+                    "HTTP compatibility header '{}' must define either 'value' or 'value_env'",
+                    header.name
+                ));
+            }
+        }
+
+        for tool in tools {
+            if tool.name.trim().is_empty() {
+                return Err("HTTP compatibility tools must have non-empty names".to_string());
+            }
+            if tool.path.trim().is_empty() {
+                return Err(format!(
+                    "HTTP compatibility tool '{}' must have a non-empty path",
+                    tool.name
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn call_http_compat_tool(
+        client: &reqwest::Client,
+        base_url: &str,
+        headers: &[HttpCompatHeaderConfig],
+        tools: &[HttpCompatToolConfig],
+        raw_name: &str,
+        arguments: &serde_json::Value,
+        timeout_secs: u64,
+    ) -> Result<String, String> {
+        let tool = tools
+            .iter()
+            .find(|tool| tool.name == raw_name)
+            .ok_or_else(|| format!("HTTP compatibility tool not found: {raw_name}"))?;
+
+        let (path, remaining_args) = Self::render_http_compat_path(&tool.path, arguments);
+        let base = base_url.trim_end_matches('/');
+        let full_url = if path.starts_with("http://") || path.starts_with("https://") {
+            path
+        } else if path.starts_with('/') {
+            format!("{base}{path}")
+        } else {
+            format!("{base}/{path}")
+        };
+
+        let mut request = match tool.method {
+            HttpCompatMethod::Get => client.get(full_url.as_str()),
+            HttpCompatMethod::Post => client.post(full_url.as_str()),
+            HttpCompatMethod::Put => client.put(full_url.as_str()),
+            HttpCompatMethod::Patch => client.patch(full_url.as_str()),
+            HttpCompatMethod::Delete => client.delete(full_url.as_str()),
+        };
+
+        request = request.timeout(std::time::Duration::from_secs(timeout_secs));
+        request = Self::apply_http_compat_headers(request, headers)?;
+
+        match tool.request_mode {
+            HttpCompatRequestMode::JsonBody => {
+                if !Self::is_empty_json_object(&remaining_args) {
+                    request = request.json(&remaining_args);
+                }
+            }
+            HttpCompatRequestMode::Query => {
+                let pairs = Self::json_value_to_query_pairs(&remaining_args)?;
+                if !pairs.is_empty() {
+                    request = request.query(&pairs);
+                }
+            }
+            HttpCompatRequestMode::None => {}
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| format!("HTTP compatibility request failed: {e}"))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read HTTP compatibility response: {e}"))?;
+
+        if !status.is_success() {
+            return Err(format!(
+                "{} {} -> HTTP {}: {}",
+                Self::http_method_name(&tool.method),
+                full_url,
+                status.as_u16(),
+                body
+            ));
+        }
+
+        Ok(Self::format_http_compat_response(
+            &body,
+            &tool.response_mode,
+        ))
+    }
+
+    fn render_http_compat_path(
+        path_template: &str,
+        arguments: &serde_json::Value,
+    ) -> (String, serde_json::Value) {
+        let Some(args_obj) = arguments.as_object() else {
+            return (path_template.to_string(), arguments.clone());
+        };
+
+        let mut rendered = path_template.to_string();
+        let mut remaining = args_obj.clone();
+
+        for (key, value) in args_obj {
+            let placeholder = format!("{{{key}}}");
+            if rendered.contains(&placeholder) {
+                let replacement = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                let encoded = Self::encode_http_compat_path_value(&replacement);
+                rendered = rendered.replace(&placeholder, &encoded);
+                remaining.remove(key);
+            }
+        }
+
+        (rendered, serde_json::Value::Object(remaining))
+    }
+
+    fn encode_http_compat_path_value(value: &str) -> String {
+        let mut encoded = String::with_capacity(value.len());
+        for byte in value.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                    encoded.push(char::from(byte))
+                }
+                _ => {
+                    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+                    encoded.push('%');
+                    encoded.push(char::from(HEX[(byte >> 4) as usize]));
+                    encoded.push(char::from(HEX[(byte & 0x0F) as usize]));
+                }
+            }
+        }
+        encoded
+    }
+
+    fn apply_http_compat_headers(
+        mut request: reqwest::RequestBuilder,
+        headers: &[HttpCompatHeaderConfig],
+    ) -> Result<reqwest::RequestBuilder, String> {
+        for header in headers {
+            let value = if let Some(value) = &header.value {
+                value.clone()
+            } else if let Some(value_env) = &header.value_env {
+                std::env::var(value_env).map_err(|_| {
+                    format!(
+                        "Missing environment variable '{}' for HTTP compatibility header '{}'",
+                        value_env, header.name
+                    )
+                })?
+            } else {
+                return Err(format!(
+                    "HTTP compatibility header '{}' must define either 'value' or 'value_env'",
+                    header.name
+                ));
+            };
+
+            request = request.header(header.name.as_str(), value);
+        }
+
+        Ok(request)
+    }
+
+    fn json_value_to_query_pairs(
+        value: &serde_json::Value,
+    ) -> Result<Vec<(String, String)>, String> {
+        let Some(args_obj) = value.as_object() else {
+            if value.is_null() {
+                return Ok(Vec::new());
+            }
+            return Err("HTTP compatibility query mode requires object arguments".to_string());
+        };
+
+        let mut pairs = Vec::with_capacity(args_obj.len());
+        for (key, value) in args_obj {
+            if value.is_null() {
+                continue;
+            }
+            let rendered = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                other => serde_json::to_string(other)
+                    .map_err(|e| format!("Failed to serialize query value for '{key}': {e}"))?,
+            };
+            pairs.push((key.clone(), rendered));
+        }
+        Ok(pairs)
+    }
+
+    fn format_http_compat_response(body: &str, response_mode: &HttpCompatResponseMode) -> String {
+        if body.trim().is_empty() {
+            return "{}".to_string();
+        }
+
+        match response_mode {
+            HttpCompatResponseMode::Text => body.to_string(),
+            HttpCompatResponseMode::Json => serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|value| serde_json::to_string_pretty(&value).ok())
+                .unwrap_or_else(|| body.to_string()),
+        }
+    }
+
+    fn is_empty_json_object(value: &serde_json::Value) -> bool {
+        value.is_null() || value.as_object().is_some_and(|obj| obj.is_empty())
+    }
+
+    fn http_method_name(method: &HttpCompatMethod) -> &'static str {
+        match method {
+            HttpCompatMethod::Get => "GET",
+            HttpCompatMethod::Post => "POST",
+            HttpCompatMethod::Put => "PUT",
+            HttpCompatMethod::Patch => "PATCH",
+            HttpCompatMethod::Delete => "DELETE",
+        }
+    }
 }
 
 impl Drop for McpConnection {
@@ -569,6 +927,29 @@ fn strip_mcp_prefix<'a>(server: &str, tool_name: &'a str) -> Option<&'a str> {
     tool_name.strip_prefix(&prefix)
 }
 
+/// Resolve the original server name for a namespaced MCP tool using known servers.
+///
+/// This is the robust variant for runtime dispatch because server names are normalized
+/// into the tool namespace and may themselves contain underscores.
+pub fn resolve_mcp_server_from_known<'a>(
+    tool_name: &str,
+    server_names: impl IntoIterator<Item = &'a str>,
+) -> Option<&'a str> {
+    let mut best_match: Option<&'a str> = None;
+    let mut best_len = 0usize;
+
+    for server_name in server_names {
+        let normalized = normalize_name(server_name);
+        let prefix = format!("mcp_{}_", normalized);
+        if tool_name.starts_with(&prefix) && prefix.len() > best_len {
+            best_len = prefix.len();
+            best_match = Some(server_name);
+        }
+    }
+
+    best_match
+}
+
 /// Normalize a name for use in tool namespacing (lowercase, replace hyphens).
 pub fn normalize_name(name: &str) -> String {
     name.to_lowercase().replace('-', "_")
@@ -577,6 +958,8 @@ pub fn normalize_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn test_mcp_tool_namespacing() {
@@ -623,6 +1006,15 @@ mod tests {
             Some("github")
         );
         assert_eq!(extract_mcp_server("file_read"), None);
+    }
+
+    #[test]
+    fn test_resolve_mcp_server_from_known_prefers_longest_prefix() {
+        let server = resolve_mcp_server_from_known(
+            "mcp_http_tools_fetch_item",
+            ["http", "http-tools", "http-tools-extra"],
+        );
+        assert_eq!(server, Some("http-tools"));
     }
 
     #[test]
@@ -723,5 +1115,240 @@ mod tests {
             McpTransport::Sse { url } => assert_eq!(url, "https://example.com/mcp"),
             _ => panic!("Expected SSE transport"),
         }
+
+        // HTTP compatibility variant
+        let http_compat_config = McpServerConfig {
+            name: "http-tools".to_string(),
+            transport: McpTransport::HttpCompat {
+                base_url: "http://127.0.0.1:11235".to_string(),
+                headers: vec![HttpCompatHeaderConfig {
+                    name: "Authorization".to_string(),
+                    value: None,
+                    value_env: Some("HTTP_TOOLS_TOKEN".to_string()),
+                }],
+                tools: vec![HttpCompatToolConfig {
+                    name: "search".to_string(),
+                    description: "Search over an HTTP backend".to_string(),
+                    path: "/search".to_string(),
+                    method: HttpCompatMethod::Get,
+                    request_mode: HttpCompatRequestMode::Query,
+                    response_mode: HttpCompatResponseMode::Json,
+                    input_schema: serde_json::json!({"type": "object"}),
+                }],
+            },
+            timeout_secs: 45,
+            env: vec![],
+        };
+        let json = serde_json::to_string(&http_compat_config).unwrap();
+        let back: McpServerConfig = serde_json::from_str(&json).unwrap();
+        match back.transport {
+            McpTransport::HttpCompat {
+                base_url,
+                headers,
+                tools,
+            } => {
+                assert_eq!(base_url, "http://127.0.0.1:11235");
+                assert_eq!(headers.len(), 1);
+                assert_eq!(tools.len(), 1);
+                assert_eq!(tools[0].name, "search");
+            }
+            _ => panic!("Expected HttpCompat transport"),
+        }
+    }
+
+    #[test]
+    fn test_http_compat_tool_registration() {
+        let mut conn = McpConnection {
+            config: McpServerConfig {
+                name: "http-tools".to_string(),
+                transport: McpTransport::HttpCompat {
+                    base_url: "http://127.0.0.1:8080".to_string(),
+                    headers: vec![],
+                    tools: vec![],
+                },
+                timeout_secs: 30,
+                env: vec![],
+            },
+            tools: Vec::new(),
+            original_names: HashMap::new(),
+            transport: McpTransportHandle::HttpCompat {
+                client: reqwest::Client::new(),
+            },
+            next_id: 1,
+        };
+
+        conn.register_http_compat_tools(&[
+            HttpCompatToolConfig {
+                name: "search".to_string(),
+                description: "Search backend".to_string(),
+                path: "/search".to_string(),
+                method: HttpCompatMethod::Get,
+                request_mode: HttpCompatRequestMode::Query,
+                response_mode: HttpCompatResponseMode::Json,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+            HttpCompatToolConfig {
+                name: "create_item".to_string(),
+                description: String::new(),
+                path: "/items".to_string(),
+                method: HttpCompatMethod::Post,
+                request_mode: HttpCompatRequestMode::JsonBody,
+                response_mode: HttpCompatResponseMode::Json,
+                input_schema: serde_json::json!({"type": "object"}),
+            },
+        ]);
+
+        let tool_names: Vec<&str> = conn.tools.iter().map(|tool| tool.name.as_str()).collect();
+        assert!(tool_names.contains(&"mcp_http_tools_search"));
+        assert!(tool_names.contains(&"mcp_http_tools_create_item"));
+        assert_eq!(
+            conn.original_names
+                .get("mcp_http_tools_create_item")
+                .map(String::as_str),
+            Some("create_item")
+        );
+    }
+
+    #[test]
+    fn test_http_compat_path_rendering() {
+        let arguments = serde_json::json!({
+            "team_id": "core platform",
+            "doc_id": "folder/42",
+            "include_meta": true,
+        });
+
+        let (path, remaining) =
+            McpConnection::render_http_compat_path("/teams/{team_id}/docs/{doc_id}", &arguments);
+
+        assert_eq!(path, "/teams/core%20platform/docs/folder%2F42");
+        assert_eq!(remaining, serde_json::json!({ "include_meta": true }));
+    }
+
+    #[test]
+    fn test_http_compat_query_pairs() {
+        let pairs = McpConnection::json_value_to_query_pairs(&serde_json::json!({
+            "q": "hello",
+            "limit": 10,
+            "exact": false,
+        }))
+        .unwrap();
+
+        assert!(pairs.contains(&(String::from("q"), String::from("hello"))));
+        assert!(pairs.contains(&(String::from("limit"), String::from("10"))));
+        assert!(pairs.contains(&(String::from("exact"), String::from("false"))));
+    }
+
+    #[test]
+    fn test_http_compat_invalid_config_rejected() {
+        let err = McpConnection::validate_http_compat_config(
+            "http://127.0.0.1:8080",
+            &[HttpCompatHeaderConfig {
+                name: "Authorization".to_string(),
+                value: None,
+                value_env: None,
+            }],
+            &[HttpCompatToolConfig {
+                name: "search".to_string(),
+                description: String::new(),
+                path: "/search".to_string(),
+                method: HttpCompatMethod::Get,
+                request_mode: HttpCompatRequestMode::Query,
+                response_mode: HttpCompatResponseMode::Json,
+                input_schema: serde_json::json!({"type": "object"}),
+            }],
+        )
+        .unwrap_err();
+
+        assert!(err.contains("value") || err.contains("value_env"));
+    }
+
+    #[tokio::test]
+    async fn test_http_compat_end_to_end() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            for request_index in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut buffer = vec![0_u8; 4096];
+                let bytes = stream.read(&mut buffer).await.unwrap();
+                let request = String::from_utf8_lossy(&buffer[..bytes]).to_string();
+                let request_line = request.lines().next().unwrap_or_default().to_string();
+
+                if request_index == 0 {
+                    assert_eq!(request_line, "GET / HTTP/1.1");
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+
+                assert!(request_line.starts_with("GET /items/folder%2F42?"));
+                assert!(request_line.contains("q=hello+world"));
+                assert!(request_line.contains("limit=2"));
+                assert!(request.to_ascii_lowercase().contains("x-test: yes\r\n"));
+
+                let body = r#"{"ok":true,"source":"http_compat"}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+
+        let mut conn = McpConnection::connect(McpServerConfig {
+            name: "http-tools".to_string(),
+            transport: McpTransport::HttpCompat {
+                base_url: format!("http://{}", addr),
+                headers: vec![HttpCompatHeaderConfig {
+                    name: "X-Test".to_string(),
+                    value: Some("yes".to_string()),
+                    value_env: None,
+                }],
+                tools: vec![HttpCompatToolConfig {
+                    name: "fetch_item".to_string(),
+                    description: "Fetch item over HTTP".to_string(),
+                    path: "/items/{id}".to_string(),
+                    method: HttpCompatMethod::Get,
+                    request_mode: HttpCompatRequestMode::Query,
+                    response_mode: HttpCompatResponseMode::Json,
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string" },
+                            "q": { "type": "string" },
+                            "limit": { "type": "integer" }
+                        },
+                        "required": ["id"]
+                    }),
+                }],
+            },
+            timeout_secs: 5,
+            env: vec![],
+        })
+        .await
+        .unwrap();
+
+        let result = conn
+            .call_tool(
+                "mcp_http_tools_fetch_item",
+                &serde_json::json!({
+                    "id": "folder/42",
+                    "q": "hello world",
+                    "limit": 2
+                }),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.contains("\"ok\": true"));
+        assert!(result.contains("\"source\": \"http_compat\""));
+
+        server.await.unwrap();
     }
 }

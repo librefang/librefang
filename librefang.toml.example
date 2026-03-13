@@ -44,5 +44,31 @@ listen_addr = "127.0.0.1:4545"           # OFP listen address
 # MCP server connections
 # [[mcp_servers]]
 # name = "filesystem"
+# timeout_secs = 30
+# [mcp_servers.transport]
+# type = "stdio"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+#
+# [[mcp_servers]]
+# name = "remote-tools"
+# timeout_secs = 60
+# [mcp_servers.transport]
+# type = "sse"
+# url = "https://mcp.example.com/events"
+#
+# [[mcp_servers]]
+# name = "internal-http"
+# timeout_secs = 30
+# [mcp_servers.transport]
+# type = "http_compat"
+# base_url = "http://127.0.0.1:8080"
+# [[mcp_servers.transport.headers]]
+# name = "Authorization"
+# value_env = "INTERNAL_HTTP_TOKEN"
+# [[mcp_servers.transport.tools]]
+# name = "search"
+# path = "/search"
+# method = "get"
+# request_mode = "query"
+# response_mode = "json"
