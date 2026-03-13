@@ -6152,6 +6152,11 @@ fn cmd_auth_chatgpt() {
 
         println!("\nChatGPT tokens saved to {}", secrets_path.display());
 
+        // Auto-detect best available Codex model using the fresh access token.
+        println!("Detecting best available model...");
+        let best_model = chatgpt_oauth::fetch_best_codex_model(&access_token).await;
+        println!("Selected model: {best_model}");
+
         // Auto-update config.toml to use chatgpt provider
         let config_path = home.join("config.toml");
         let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
@@ -6166,7 +6171,7 @@ fn cmd_auth_chatgpt() {
             .ok_or("default_model is not a table")?;
         dm.insert("provider", toml_edit::value("chatgpt"));
         dm.insert("api_key_env", toml_edit::value("CHATGPT_SESSION_TOKEN"));
-        dm.insert("model", toml_edit::value("gpt-5.1-codex-mini"));
+        dm.insert("model", toml_edit::value(&best_model));
         // ChatGPT OAuth tokens use the Responses API at the backend-api endpoint.
         dm.insert(
             "base_url",
@@ -6176,7 +6181,7 @@ fn cmd_auth_chatgpt() {
         std::fs::write(&config_path, doc.to_string())
             .map_err(|e| format!("Failed to write config.toml: {e}"))?;
 
-        println!("config.toml updated: provider = \"chatgpt\", base_url = \"https://chatgpt.com/backend-api\"");
+        println!("config.toml updated: provider = \"chatgpt\", model = \"{best_model}\"");
         Ok(())
     });
 

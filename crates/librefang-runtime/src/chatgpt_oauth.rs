@@ -303,6 +303,75 @@ pub async fn refresh_access_token(refresh_token: &str) -> Result<ChatGptAuthResu
     })
 }
 
+/// Fetch the best available Codex model from the ChatGPT backend API.
+///
+/// Calls `GET {base_url}/codex/models?client_version=0.1.0` with the given
+/// access token, sorts by priority (highest first), and returns the model slug.
+/// Falls back to `gpt-5.1-codex-mini` if the API call fails.
+pub async fn fetch_best_codex_model(access_token: &str) -> String {
+    const FALLBACK_MODEL: &str = "gpt-5.1-codex-mini";
+
+    let url = format!("{CHATGPT_BASE_URL}/codex/models?client_version=0.1.0");
+    let client = reqwest::Client::new();
+    let resp = match client.get(&url).bearer_auth(access_token).send().await {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("Failed to fetch Codex models: {e}");
+            return FALLBACK_MODEL.to_string();
+        }
+    };
+
+    if !resp.status().is_success() {
+        warn!("Codex models API returned HTTP {}", resp.status());
+        return FALLBACK_MODEL.to_string();
+    }
+
+    let body = match resp.text().await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!("Failed to read Codex models response: {e}");
+            return FALLBACK_MODEL.to_string();
+        }
+    };
+
+    let json: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("Failed to parse Codex models JSON: {e}");
+            return FALLBACK_MODEL.to_string();
+        }
+    };
+
+    // Response format: { "models": [ { "slug": "gpt-5.2-codex", "priority": 100 }, ... ] }
+    let models = match json.get("models").and_then(|v| v.as_array()) {
+        Some(arr) => arr,
+        None => {
+            warn!("Codex models response missing 'models' array");
+            return FALLBACK_MODEL.to_string();
+        }
+    };
+
+    // Sort by priority descending; pick the first (highest priority).
+    let mut sorted: Vec<(&str, i64)> = models
+        .iter()
+        .filter_map(|m| {
+            let slug = m.get("slug")?.as_str()?;
+            let priority = m.get("priority").and_then(|p| p.as_i64()).unwrap_or(0);
+            Some((slug, priority))
+        })
+        .collect();
+
+    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+
+    if let Some((best_slug, priority)) = sorted.first() {
+        info!("Best Codex model: {best_slug} (priority {priority})");
+        best_slug.to_string()
+    } else {
+        warn!("No models found in Codex API response");
+        FALLBACK_MODEL.to_string()
+    }
+}
+
 /// Check if ChatGPT session auth is available (CHATGPT_SESSION_TOKEN env var is set).
 pub fn chatgpt_session_available() -> bool {
     std::env::var("CHATGPT_SESSION_TOKEN").is_ok()
@@ -613,7 +682,7 @@ mod tests {
 
     #[test]
     fn test_chatgpt_base_url() {
-        assert_eq!(CHATGPT_BASE_URL, "https://api.openai.com/v1");
+        assert_eq!(CHATGPT_BASE_URL, "https://chatgpt.com/backend-api");
     }
 
     #[test]
