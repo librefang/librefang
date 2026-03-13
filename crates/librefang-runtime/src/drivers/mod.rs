@@ -647,7 +647,7 @@ mod tests {
         assert!(providers.contains(&"chutes"));
         assert!(providers.contains(&"codex"));
         assert!(providers.contains(&"claude-code"));
-        assert_eq!(providers.len(), 35);
+        assert_eq!(providers.len(), 36);
     }
 
     #[test]

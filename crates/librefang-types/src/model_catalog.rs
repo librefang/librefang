@@ -54,6 +54,9 @@ pub const VOLCENGINE_CODING_BASE_URL: &str = "https://ark.cn-beijing.volces.com/
 // ── Chutes.ai ────────────────────────────────────────────────────
 pub const CHUTES_BASE_URL: &str = "https://llm.chutes.ai/v1";
 
+// ── ChatGPT (Session Auth / Codex Responses API) ─────────────────
+pub const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
+
 // ── AWS Bedrock ───────────────────────────────────────────────────
 pub const BEDROCK_BASE_URL: &str = "https://bedrock-runtime.us-east-1.amazonaws.com";
 

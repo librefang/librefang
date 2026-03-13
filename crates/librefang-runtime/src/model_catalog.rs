@@ -5,8 +5,8 @@
 
 use librefang_types::model_catalog::{
     AuthStatus, ModelCatalogEntry, ModelTier, ProviderInfo, AI21_BASE_URL, ANTHROPIC_BASE_URL,
-    BEDROCK_BASE_URL, CEREBRAS_BASE_URL, CHUTES_BASE_URL, COHERE_BASE_URL, DEEPSEEK_BASE_URL,
-    FIREWORKS_BASE_URL, GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL,
+    BEDROCK_BASE_URL, CEREBRAS_BASE_URL, CHATGPT_BASE_URL, CHUTES_BASE_URL, COHERE_BASE_URL,
+    DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL,
     HUGGINGFACE_BASE_URL, KIMI_CODING_BASE_URL, LEMONADE_BASE_URL, LMSTUDIO_BASE_URL,
     MINIMAX_CN_BASE_URL, MINIMAX_INTL_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL,
     OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL,
@@ -742,6 +742,16 @@ fn builtin_providers() -> Vec<ProviderInfo> {
             auth_status: AuthStatus::Missing,
             model_count: 0,
         },
+        // ── ChatGPT (Session Auth / Codex Responses API) ────────────
+        ProviderInfo {
+            id: "chatgpt".into(),
+            display_name: "ChatGPT (Session Auth)".into(),
+            api_key_env: "CHATGPT_SESSION_TOKEN".into(),
+            base_url: CHATGPT_BASE_URL.into(),
+            key_required: true,
+            auth_status: AuthStatus::Missing,
+            model_count: 0,
+        },
         // ── OpenAI Codex ────────────────────────────────────────────
         ProviderInfo {
             id: "codex".into(),
@@ -824,6 +834,13 @@ fn builtin_aliases() -> HashMap<String, String> {
         ("minimax-highspeed", "MiniMax-M2.5-highspeed"),
         ("minimax-m2.1", "MiniMax-M2.1"),
         ("codegeex", "codegeex-4"),
+        // ChatGPT Session Auth aliases
+        ("chatgpt", "gpt-5.1-codex-mini"),
+        ("chatgpt-mini", "gpt-5.1-codex-mini"),
+        ("chatgpt-5.1", "gpt-5.1-codex"),
+        ("chatgpt-5.2", "gpt-5.2-codex"),
+        ("chatgpt-5.3", "gpt-5.3-codex"),
+        ("chatgpt-5.4", "gpt-5.4-codex"),
         // Codex aliases
         ("codex", "codex/gpt-4.1"),
         ("codex-4.1", "codex/gpt-4.1"),
@@ -3378,6 +3395,79 @@ fn builtin_models() -> Vec<ModelCatalogEntry> {
             aliases: vec!["codex-o4".into()],
         },
         // ══════════════════════════════════════════════════════════════
+        // ChatGPT Session Auth (3) — Codex Responses API via OAuth
+        // ══════════════════════════════════════════════════════════════
+        ModelCatalogEntry {
+            id: "gpt-5.4-codex".into(),
+            display_name: "GPT-5.4 Codex".into(),
+            provider: "chatgpt".into(),
+            tier: ModelTier::Frontier,
+            context_window: 200_000,
+            max_output_tokens: 65_536,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["chatgpt-5.4".into()],
+        },
+        ModelCatalogEntry {
+            id: "gpt-5.3-codex".into(),
+            display_name: "GPT-5.3 Codex".into(),
+            provider: "chatgpt".into(),
+            tier: ModelTier::Frontier,
+            context_window: 200_000,
+            max_output_tokens: 65_536,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["chatgpt-5.3".into()],
+        },
+        ModelCatalogEntry {
+            id: "gpt-5.2-codex".into(),
+            display_name: "GPT-5.2 Codex".into(),
+            provider: "chatgpt".into(),
+            tier: ModelTier::Smart,
+            context_window: 200_000,
+            max_output_tokens: 65_536,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["chatgpt-5.2".into()],
+        },
+        ModelCatalogEntry {
+            id: "gpt-5.1-codex".into(),
+            display_name: "GPT-5.1 Codex".into(),
+            provider: "chatgpt".into(),
+            tier: ModelTier::Smart,
+            context_window: 200_000,
+            max_output_tokens: 65_536,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["chatgpt-5.1".into()],
+        },
+        ModelCatalogEntry {
+            id: "gpt-5.1-codex-mini".into(),
+            display_name: "GPT-5.1 Codex Mini".into(),
+            provider: "chatgpt".into(),
+            tier: ModelTier::Balanced,
+            context_window: 200_000,
+            max_output_tokens: 65_536,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["chatgpt-mini".into(), "chatgpt".into()],
+        },
+        // ══════════════════════════════════════════════════════════════
         // Claude Code CLI (3) — subprocess-based
         // ══════════════════════════════════════════════════════════════
         ModelCatalogEntry {
@@ -3556,7 +3646,7 @@ mod tests {
     #[test]
     fn test_catalog_has_providers() {
         let catalog = ModelCatalog::new();
-        assert_eq!(catalog.list_providers().len(), 39);
+        assert_eq!(catalog.list_providers().len(), 40);
     }
 
     #[test]
