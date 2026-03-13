@@ -3790,6 +3790,7 @@ dependencies = [
  "librefang-memory",
  "librefang-skills",
  "librefang-types",
+ "rand 0.8.5",
  "regex-lite",
  "reqwest",
  "rusqlite",

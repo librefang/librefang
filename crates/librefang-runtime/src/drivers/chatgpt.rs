@@ -97,16 +97,64 @@ impl ChatGptDriver {
     }
 
     /// Get a valid session token, caching it with an estimated TTL.
+    ///
+    /// If the cached token is expired and a `CHATGPT_REFRESH_TOKEN` environment
+    /// variable is set, attempts to refresh the access token automatically via
+    /// the OAuth refresh endpoint before falling back to an error.
     fn ensure_token(&self) -> Result<CachedSessionToken, crate::llm_driver::LlmError> {
         // Check cache first
         if let Some(cached) = self.token_cache.get() {
             return Ok(cached);
         }
 
+        // Try refreshing via OAuth if a refresh token is available.
+        if let Ok(refresh_tok) = std::env::var("CHATGPT_REFRESH_TOKEN") {
+            if !refresh_tok.is_empty() {
+                debug!("Access token expired; attempting OAuth refresh");
+                // We need a tokio runtime to call the async refresh function.
+                // If we are already inside a runtime, use Handle::current().
+                let refresh_result = match tokio::runtime::Handle::try_current() {
+                    Ok(handle) => std::thread::scope(|s| {
+                        s.spawn(|| {
+                            handle
+                                .block_on(crate::chatgpt_oauth::refresh_access_token(&refresh_tok))
+                        })
+                        .join()
+                        .unwrap_or_else(|_| Err("Refresh thread panicked".to_string()))
+                    }),
+                    Err(_) => {
+                        // No runtime available; create a temporary one.
+                        let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                            crate::llm_driver::LlmError::Http(format!(
+                                "Failed to create runtime for token refresh: {e}"
+                            ))
+                        })?;
+                        rt.block_on(crate::chatgpt_oauth::refresh_access_token(&refresh_tok))
+                    }
+                };
+
+                match refresh_result {
+                    Ok(auth) => {
+                        let ttl = auth.expires_in.unwrap_or(SESSION_TOKEN_TTL_SECS);
+                        let token = CachedSessionToken {
+                            token: auth.access_token,
+                            expires_at: Instant::now() + Duration::from_secs(ttl),
+                        };
+                        self.token_cache.set(token.clone());
+                        return Ok(token);
+                    }
+                    Err(e) => {
+                        debug!("OAuth refresh failed: {e}");
+                        // Fall through to use the session token directly, or error.
+                    }
+                }
+            }
+        }
+
         // Use the session token directly (it's a bearer token)
         if self.session_token.is_empty() {
             return Err(crate::llm_driver::LlmError::MissingApiKey(
-                "ChatGPT session token not set. Run browser auth flow or set CHATGPT_SESSION_TOKEN"
+                "ChatGPT session token not set or expired. Run `librefang auth chatgpt` to re-authenticate"
                     .to_string(),
             ));
         }
