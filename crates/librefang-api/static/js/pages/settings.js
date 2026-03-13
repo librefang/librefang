@@ -3,6 +3,7 @@
 
 function settingsPage() {
   return {
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     tab: 'providers',
     sysInfo: {},
     usageData: [],
@@ -33,6 +34,189 @@ function settingsPage() {
     addingCustomProvider: false,
     loading: true,
     loadError: '',
+
+    init() {
+      var self = this;
+      window.addEventListener('i18n-changed', function(event) {
+        self._currentLang = event.detail.language;
+      });
+    },
+
+    interpolate(text, params) {
+      if (!params || typeof text !== 'string') return text;
+      return text.replace(/\{(\w+)\}/g, function(match, key) {
+        return params[key] !== undefined ? params[key] : match;
+      });
+    },
+
+    t(key, fallback, params) {
+      if (typeof i18n === 'undefined') return this.interpolate(fallback || key, params);
+      var translated = i18n.t(key, params);
+      if (!translated || translated.charAt(0) === '[') {
+        return this.interpolate(fallback || key, params);
+      }
+      return translated;
+    },
+
+    providerModelsText(provider) {
+      return this.t('settingsPage.providerModels', '{count} model(s) available', {
+        count: provider.model_count || 0
+      });
+    },
+
+    envText(env) {
+      return this.t('settingsPage.envLabel', 'Env: {env}', { env: env });
+    },
+
+    providerKeyPlaceholder(env) {
+      return this.t('settingsPage.enterEnv', 'Enter {env}', { env: env });
+    },
+
+    envRestartText(env) {
+      return this.t('settingsPage.envRestart', 'Or set {env} in your environment and restart', {
+        env: env
+      });
+    },
+
+    copilotVisitText() {
+      return this.t('settingsPage.visitAndEnter', 'Visit {url} and enter:', {
+        url: this.copilotOAuth.verificationUri || ''
+      });
+    },
+
+    customModelToggleText() {
+      return this.showCustomModelForm
+        ? this.t('btn.cancel', 'Cancel')
+        : this.t('settingsPage.customModelButton', '+ Custom Model');
+    },
+
+    modelsSummaryText() {
+      return this.t('settingsPage.modelsSummary', '{filtered} of {total} models', {
+        filtered: this.filteredModels.length,
+        total: this.models.length
+      });
+    },
+
+    modelEmptyTitle() {
+      if (this.models.length) return this.t('settingsPage.noModelsMatch', 'No models match your search');
+      return this.t('settingsPage.noModelsAvailable', 'No models available');
+    },
+
+    modelEmptyDesc() {
+      if (this.models.length) return this.t('settingsPage.noModelsMatchDesc', 'Try a different search term or clear filters.');
+      return this.t('settingsPage.noModelsAvailableDesc', 'Configure an LLM provider to see available models.');
+    },
+
+    modelStatusText(model) {
+      return model.available
+        ? this.t('settingsPage.available', 'Available')
+        : this.t('settingsPage.needsKey', 'Needs Key');
+    },
+
+    toolsSummaryText() {
+      return this.t('settingsPage.toolsSummary', '{filtered} of {total} tools', {
+        filtered: this.filteredTools.length,
+        total: this.tools.length
+      });
+    },
+
+    toolsEmptyTitle() {
+      if (this.tools.length) return this.t('settingsPage.noToolsMatch', 'No tools match your search');
+      return this.t('settingsPage.noToolsAvailable', 'No tools available');
+    },
+
+    toolsEmptyDesc() {
+      if (this.tools.length) return this.t('settingsPage.noToolsMatchDesc', 'Try a different search term.');
+      return this.t('settingsPage.noToolsAvailableDesc', 'Tools will appear once agents are configured.');
+    },
+
+    providerNamePlaceholder() {
+      return this.t('settingsPage.providerNamePlaceholder', 'e.g. my-local-llm');
+    },
+
+    providerUrlPlaceholder() {
+      return this.t('settingsPage.providerUrlPlaceholder', 'http://localhost:8080/v1');
+    },
+
+    providerKeyOptionalPlaceholder() {
+      return this.t('settingsPage.providerKeyOptionalPlaceholder', 'sk-... (leave blank if not needed)');
+    },
+
+    customModelIdPlaceholder() {
+      return this.t('settingsPage.customModelIdPlaceholder', 'e.g. my-org/my-model');
+    },
+
+    customModelProviderPlaceholder() {
+      return this.t('settingsPage.customModelProviderPlaceholder', 'openrouter');
+    },
+
+    chainResultText() {
+      if (!this.chainResult) return '';
+      if (this.chainResult.valid) {
+        return this.t('settingsPage.chainValid', 'CHAIN VALID - {count} entries verified', {
+          count: this.chainResult.entries || 0
+        });
+      }
+      return this.t('settingsPage.chainBroken', 'CHAIN BROKEN - {message}', {
+        message: this.chainResult.error || ''
+      });
+    },
+
+    securityStateText(enabled) {
+      return enabled
+        ? this.t('settingsPage.active', 'Active')
+        : this.t('settingsPage.disabled', 'Disabled');
+    },
+
+    monitoringAvailableText(available) {
+      return available
+        ? this.t('settingsPage.available', 'Available')
+        : this.t('settingsPage.notAvailable', 'Not available');
+    },
+
+    featureText(group, feature, field, fallback) {
+      return this.t('settingsPage.' + group + '.' + feature.key + '.' + field, fallback);
+    },
+
+    coreFeatureName(feature) {
+      return this.featureText('coreFeatures', feature, 'name', feature.name);
+    },
+
+    coreFeatureDescription(feature) {
+      return this.featureText('coreFeatures', feature, 'description', feature.description);
+    },
+
+    coreFeatureThreat(feature) {
+      return this.featureText('coreFeatures', feature, 'threat', feature.threat);
+    },
+
+    configurableFeatureName(feature) {
+      return this.featureText('configurableFeatures', feature, 'name', feature.name);
+    },
+
+    configurableFeatureDescription(feature) {
+      return this.featureText('configurableFeatures', feature, 'description', feature.description);
+    },
+
+    configurableFeatureHint(feature) {
+      return this.featureText('configurableFeatures', feature, 'hint', feature.configHint);
+    },
+
+    monitoringFeatureName(feature) {
+      return this.featureText('monitoringFeatures', feature, 'name', feature.name);
+    },
+
+    monitoringFeatureDescription(feature) {
+      return this.featureText('monitoringFeatures', feature, 'description', feature.description);
+    },
+
+    monitoringFeatureHint(feature) {
+      return this.featureText('monitoringFeatures', feature, 'hint', feature.configHint);
+    },
+
+    peerStateText(state) {
+      return this.t('settingsPage.peerState.' + String(state || '').toLowerCase(), state);
+    },
 
     // -- Dynamic config state --
     configSchema: null,
@@ -175,7 +359,7 @@ function settingsPage() {
           this.loadModels()
         ]);
       } catch(e) {
-        this.loadError = e.message || 'Could not load settings.';
+        this.loadError = e.message || this.t('settingsPage.loadError', 'Could not load settings.');
       }
       this.loading = false;
     },
@@ -246,7 +430,7 @@ function settingsPage() {
     async addCustomModel() {
       var id = this.customModelId.trim();
       if (!id) return;
-      this.customModelStatus = 'Adding...';
+      this.customModelStatus = this.t('settingsPage.adding', 'Adding...');
       try {
         await LibreFangAPI.post('/api/models/custom', {
           id: id,
@@ -254,23 +438,27 @@ function settingsPage() {
           context_window: this.customModelContext || 128000,
           max_output_tokens: this.customModelMaxOutput || 8192,
         });
-        this.customModelStatus = 'Added!';
+        this.customModelStatus = this.t('settingsPage.added', 'Added!');
         this.customModelId = '';
         this.showCustomModelForm = false;
         await this.loadModels();
       } catch(e) {
-        this.customModelStatus = 'Error: ' + (e.message || 'Failed');
+        this.customModelStatus = this.t('settingsPage.errorMessage', 'Error: {message}', {
+          message: e.message || this.t('settingsPage.failed', 'Failed')
+        });
       }
     },
 
     async deleteCustomModel(modelId) {
-      if (!confirm('Delete custom model "' + modelId + '"?')) return;
+      if (!confirm(this.t('settingsPage.deleteCustomModelConfirm', 'Delete custom model "{model}"?', { model: modelId }))) return;
       try {
         await LibreFangAPI.del('/api/models/custom/' + encodeURIComponent(modelId));
-        LibreFangToast.success('Model deleted');
+        LibreFangToast.success(this.t('settingsPage.modelDeleted', 'Model deleted'));
         await this.loadModels();
       } catch(e) {
-        LibreFangToast.error('Failed to delete: ' + (e.message || 'Unknown error'));
+        LibreFangToast.error(this.t('settingsPage.deleteFailed', 'Failed to delete: {message}', {
+          message: e.message || this.t('settingsPage.unknownError', 'Unknown error')
+        }));
       }
     },
 
@@ -302,9 +490,9 @@ function settingsPage() {
       try {
         await LibreFangAPI.post('/api/config/set', { path: path, value: value });
         this.configDirty[key] = false;
-        LibreFangToast.success('Saved ' + field);
+        LibreFangToast.success(this.t('settingsPage.fieldSaved', 'Saved {field}', { field: field }));
       } catch(e) {
-        LibreFangToast.error('Failed to save: ' + e.message);
+        LibreFangToast.error(this.t('settingsPage.saveFailed', 'Failed to save: {message}', { message: e.message }));
       }
       this.configSaving[key] = false;
     },
@@ -351,12 +539,12 @@ function settingsPage() {
     },
 
     providerAuthText(p) {
-      if (p.auth_status === 'configured') return 'Configured';
+      if (p.auth_status === 'configured') return this.t('settingsPage.configured', 'Configured');
       if (p.auth_status === 'not_set' || p.auth_status === 'missing') {
-        if (p.id === 'claude-code') return 'Not Installed';
-        return 'Not Set';
+        if (p.id === 'claude-code') return this.t('settingsPage.notInstalled', 'Not Installed');
+        return this.t('settingsPage.notSet', 'Not Set');
       }
-      return 'No Key Needed';
+      return this.t('settingsPage.noKeyNeeded', 'No Key Needed');
     },
 
     providerCardClass(p) {
@@ -392,33 +580,33 @@ function settingsPage() {
       var h = Math.floor(secs / 3600);
       var m = Math.floor((secs % 3600) / 60);
       var s = secs % 60;
-      if (h > 0) return h + 'h ' + m + 'm';
-      if (m > 0) return m + 'm ' + s + 's';
-      return s + 's';
+      if (h > 0) return this.t('runtimePage.hoursMinutesShort', '{hours}h {minutes}m', { hours: h, minutes: m });
+      if (m > 0) return this.t('runtimePage.minutesSecondsShort', '{minutes}m {seconds}s', { minutes: m, seconds: s });
+      return this.t('runtimePage.secondsShort', '{count}s', { count: s });
     },
 
     async saveProviderKey(provider) {
       var key = this.providerKeyInputs[provider.id];
-      if (!key || !key.trim()) { LibreFangToast.error('Please enter an API key'); return; }
+      if (!key || !key.trim()) { LibreFangToast.error(this.t('settingsPage.enterApiKey', 'Please enter an API key')); return; }
       try {
         await LibreFangAPI.post('/api/providers/' + encodeURIComponent(provider.id) + '/key', { key: key.trim() });
-        LibreFangToast.success('API key saved for ' + provider.display_name);
+        LibreFangToast.success(this.t('settingsPage.apiKeySaved', 'API key saved for {provider}', { provider: provider.display_name }));
         this.providerKeyInputs[provider.id] = '';
         await this.loadProviders();
         await this.loadModels();
       } catch(e) {
-        LibreFangToast.error('Failed to save key: ' + e.message);
+        LibreFangToast.error(this.t('settingsPage.saveKeyFailed', 'Failed to save key: {message}', { message: e.message }));
       }
     },
 
     async removeProviderKey(provider) {
       try {
         await LibreFangAPI.del('/api/providers/' + encodeURIComponent(provider.id) + '/key');
-        LibreFangToast.success('API key removed for ' + provider.display_name);
+        LibreFangToast.success(this.t('settingsPage.apiKeyRemoved', 'API key removed for {provider}', { provider: provider.display_name }));
         await this.loadProviders();
         await this.loadModels();
       } catch(e) {
-        LibreFangToast.error('Failed to remove key: ' + e.message);
+        LibreFangToast.error(this.t('settingsPage.removeKeyFailed', 'Failed to remove key: {message}', { message: e.message }));
       }
     },
 
@@ -434,7 +622,7 @@ function settingsPage() {
         window.open(resp.verification_uri, '_blank');
         this.pollCopilotOAuth();
       } catch(e) {
-        LibreFangToast.error('Failed to start Copilot login: ' + e.message);
+        LibreFangToast.error(this.t('settingsPage.startCopilotFailed', 'Failed to start Copilot login: {message}', { message: e.message }));
         this.copilotOAuth.polling = false;
       }
     },
@@ -446,7 +634,7 @@ function settingsPage() {
         try {
           var resp = await LibreFangAPI.get('/api/providers/github-copilot/oauth/poll/' + self.copilotOAuth.pollId);
           if (resp.status === 'complete') {
-            LibreFangToast.success('GitHub Copilot authenticated successfully!');
+            LibreFangToast.success(self.t('settingsPage.copilotAuthenticated', 'GitHub Copilot authenticated successfully!'));
             self.copilotOAuth = { polling: false, userCode: '', verificationUri: '', pollId: '', interval: 5 };
             await self.loadProviders();
             await self.loadModels();
@@ -454,17 +642,17 @@ function settingsPage() {
             if (resp.interval) self.copilotOAuth.interval = resp.interval;
             self.pollCopilotOAuth();
           } else if (resp.status === 'expired') {
-            LibreFangToast.error('Device code expired. Please try again.');
+            LibreFangToast.error(self.t('settingsPage.deviceCodeExpired', 'Device code expired. Please try again.'));
             self.copilotOAuth = { polling: false, userCode: '', verificationUri: '', pollId: '', interval: 5 };
           } else if (resp.status === 'denied') {
-            LibreFangToast.error('Access denied by user.');
+            LibreFangToast.error(self.t('settingsPage.accessDenied', 'Access denied by user.'));
             self.copilotOAuth = { polling: false, userCode: '', verificationUri: '', pollId: '', interval: 5 };
           } else {
-            LibreFangToast.error('OAuth error: ' + (resp.error || resp.status));
+            LibreFangToast.error(self.t('settingsPage.oauthError', 'OAuth error: {message}', { message: resp.error || resp.status }));
             self.copilotOAuth = { polling: false, userCode: '', verificationUri: '', pollId: '', interval: 5 };
           }
         } catch(e) {
-          LibreFangToast.error('Poll error: ' + e.message);
+          LibreFangToast.error(self.t('settingsPage.pollError', 'Poll error: {message}', { message: e.message }));
           self.copilotOAuth = { polling: false, userCode: '', verificationUri: '', pollId: '', interval: 5 };
         }
       }, self.copilotOAuth.interval * 1000);
@@ -477,46 +665,57 @@ function settingsPage() {
         var result = await LibreFangAPI.post('/api/providers/' + encodeURIComponent(provider.id) + '/test', {});
         this.providerTestResults[provider.id] = result;
         if (result.status === 'ok') {
-          LibreFangToast.success(provider.display_name + ' connected (' + (result.latency_ms || '?') + 'ms)');
+          LibreFangToast.success(this.t('settingsPage.providerConnected', '{provider} connected ({latency}ms)', {
+            provider: provider.display_name,
+            latency: result.latency_ms || '?'
+          }));
         } else {
-          LibreFangToast.error(provider.display_name + ': ' + (result.error || 'Connection failed'));
+          LibreFangToast.error(this.t('settingsPage.providerConnectionFailed', '{provider}: {message}', {
+            provider: provider.display_name,
+            message: result.error || this.t('settingsPage.connectionFailed', 'Connection failed')
+          }));
         }
       } catch(e) {
         this.providerTestResults[provider.id] = { status: 'error', error: e.message };
-        LibreFangToast.error('Test failed: ' + e.message);
+        LibreFangToast.error(this.t('settingsPage.testFailed', 'Test failed: {message}', { message: e.message }));
       }
       this.providerTesting[provider.id] = false;
     },
 
     async saveProviderUrl(provider) {
       var url = this.providerUrlInputs[provider.id];
-      if (!url || !url.trim()) { LibreFangToast.error('Please enter a base URL'); return; }
+      if (!url || !url.trim()) { LibreFangToast.error(this.t('settingsPage.enterBaseUrl', 'Please enter a base URL')); return; }
       url = url.trim();
       if (url.indexOf('http://') !== 0 && url.indexOf('https://') !== 0) {
-        LibreFangToast.error('URL must start with http:// or https://'); return;
+        LibreFangToast.error(this.t('settingsPage.urlMustStart', 'URL must start with http:// or https://')); return;
       }
       this.providerUrlSaving[provider.id] = true;
       try {
         var result = await LibreFangAPI.put('/api/providers/' + encodeURIComponent(provider.id) + '/url', { base_url: url });
         if (result.reachable) {
-          LibreFangToast.success(provider.display_name + ' URL saved &mdash; reachable (' + (result.latency_ms || '?') + 'ms)');
+          LibreFangToast.success(this.t('settingsPage.urlSavedReachable', '{provider} URL saved - reachable ({latency}ms)', {
+            provider: provider.display_name,
+            latency: result.latency_ms || '?'
+          }));
         } else {
-          LibreFangToast.warning(provider.display_name + ' URL saved but not reachable');
+          LibreFangToast.warning(this.t('settingsPage.urlSavedNotReachable', '{provider} URL saved but not reachable', {
+            provider: provider.display_name
+          }));
         }
         await this.loadProviders();
       } catch(e) {
-        LibreFangToast.error('Failed to save URL: ' + e.message);
+        LibreFangToast.error(this.t('settingsPage.saveUrlFailed', 'Failed to save URL: {message}', { message: e.message }));
       }
       this.providerUrlSaving[provider.id] = false;
     },
 
     async addCustomProvider() {
       var name = this.customProviderName.trim().toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
-      if (!name) { LibreFangToast.error('Please enter a provider name'); return; }
+      if (!name) { LibreFangToast.error(this.t('settingsPage.enterProviderName', 'Please enter a provider name')); return; }
       var url = this.customProviderUrl.trim();
-      if (!url) { LibreFangToast.error('Please enter a base URL'); return; }
+      if (!url) { LibreFangToast.error(this.t('settingsPage.enterBaseUrl', 'Please enter a base URL')); return; }
       if (url.indexOf('http://') !== 0 && url.indexOf('https://') !== 0) {
-        LibreFangToast.error('URL must start with http:// or https://'); return;
+        LibreFangToast.error(this.t('settingsPage.urlMustStart', 'URL must start with http:// or https://')); return;
       }
       this.addingCustomProvider = true;
       this.customProviderStatus = '';
@@ -529,11 +728,17 @@ function settingsPage() {
         this.customProviderUrl = '';
         this.customProviderKey = '';
         this.customProviderStatus = '';
-        LibreFangToast.success('Provider "' + name + '" added' + (result.reachable ? ' (reachable)' : ' (not reachable yet)'));
+        LibreFangToast.success(this.t(
+          result.reachable ? 'settingsPage.providerAddedReachable' : 'settingsPage.providerAddedNotReachable',
+          result.reachable ? 'Provider "{name}" added (reachable)' : 'Provider "{name}" added (not reachable yet)',
+          { name: name }
+        ));
         await this.loadProviders();
       } catch(e) {
-        this.customProviderStatus = 'Error: ' + (e.message || 'Failed');
-        LibreFangToast.error('Failed to add provider: ' + e.message);
+        this.customProviderStatus = this.t('settingsPage.errorMessage', 'Error: {message}', {
+          message: e.message || this.t('settingsPage.failed', 'Failed')
+        });
+        LibreFangToast.error(this.t('settingsPage.addProviderFailed', 'Failed to add provider: {message}', { message: e.message }));
       }
       this.addingCustomProvider = false;
     },
@@ -570,34 +775,60 @@ function settingsPage() {
 
     formatConfigValue(feature) {
       var val = this.getConfigValue(feature.valueKey);
-      if (!val) return feature.configHint;
+      if (!val) return this.configurableFeatureHint(feature);
       switch (feature.valueKey) {
         case 'rate_limiter':
-          return 'Algorithm: ' + (val.algorithm || 'GCRA') + ' | ' + (val.tokens_per_minute || 500) + ' tokens/min per IP';
+          return this.t('settingsPage.rateLimiterValue', 'Algorithm: {algorithm} | {count} tokens/min per IP', {
+            algorithm: val.algorithm || 'GCRA',
+            count: val.tokens_per_minute || 500
+          });
         case 'websocket_limits':
-          return 'Max ' + (val.max_per_ip || 5) + ' conn/IP | ' + Math.round((val.idle_timeout_secs || 1800) / 60) + 'min idle timeout | ' + Math.round((val.max_message_size || 65536) / 1024) + 'KB max msg';
+          return this.t('settingsPage.websocketLimitsValue', 'Max {max} conn/IP | {idle}min idle timeout | {size}KB max msg', {
+            max: val.max_per_ip || 5,
+            idle: Math.round((val.idle_timeout_secs || 1800) / 60),
+            size: Math.round((val.max_message_size || 65536) / 1024)
+          });
         case 'wasm_sandbox':
-          return 'Fuel: ' + (val.fuel_metering ? 'ON' : 'OFF') + ' | Epoch: ' + (val.epoch_interruption ? 'ON' : 'OFF') + ' | Timeout: ' + (val.default_timeout_secs || 30) + 's';
+          return this.t('settingsPage.wasmSandboxValue', 'Fuel: {fuel} | Epoch: {epoch} | Timeout: {timeout}s', {
+            fuel: val.fuel_metering ? this.t('settingsPage.on', 'ON') : this.t('settingsPage.off', 'OFF'),
+            epoch: val.epoch_interruption ? this.t('settingsPage.on', 'ON') : this.t('settingsPage.off', 'OFF'),
+            timeout: val.default_timeout_secs || 30
+          });
         case 'auth':
-          return 'Mode: ' + (val.mode || 'unknown') + (val.api_key_set ? ' (key configured)' : ' (no key set)');
+          return this.t('settingsPage.authValue', 'Mode: {mode}{suffix}', {
+            mode: val.mode || this.t('status.unknown', 'unknown'),
+            suffix: val.api_key_set
+              ? this.t('settingsPage.keyConfiguredSuffix', ' (key configured)')
+              : this.t('settingsPage.noKeySetSuffix', ' (no key set)')
+          });
         default:
-          return feature.configHint;
+          return this.configurableFeatureHint(feature);
       }
     },
 
     formatMonitoringValue(feature) {
       var val = this.getMonitoringValue(feature.valueKey);
-      if (!val) return feature.configHint;
+      if (!val) return this.monitoringFeatureHint(feature);
       switch (feature.valueKey) {
         case 'audit_trail':
-          return (val.enabled ? 'Active' : 'Disabled') + ' | ' + (val.algorithm || 'SHA-256') + ' | ' + (val.entry_count || 0) + ' entries logged';
+          return this.t('settingsPage.auditTrailValue', '{state} | {algorithm} | {count} entries logged', {
+            state: this.securityStateText(val.enabled),
+            algorithm: val.algorithm || 'SHA-256',
+            count: val.entry_count || 0
+          });
         case 'taint_tracking':
           var labels = val.tracked_labels || [];
-          return (val.enabled ? 'Active' : 'Disabled') + ' | Tracking: ' + labels.join(', ');
+          return this.t('settingsPage.taintTrackingValue', '{state} | Tracking: {labels}', {
+            state: this.securityStateText(val.enabled),
+            labels: labels.join(', ')
+          });
         case 'manifest_signing':
-          return 'Algorithm: ' + (val.algorithm || 'Ed25519') + ' | ' + (val.available ? 'Available' : 'Not available');
+          return this.t('settingsPage.manifestSigningValue', 'Algorithm: {algorithm} | {availability}', {
+            algorithm: val.algorithm || 'Ed25519',
+            availability: this.monitoringAvailableText(val.available)
+          });
         default:
-          return feature.configHint;
+          return this.monitoringFeatureHint(feature);
       }
     },
 
@@ -631,7 +862,7 @@ function settingsPage() {
         });
       } catch(e) {
         this.peers = [];
-        this.peersLoadError = e.message || 'Could not load peers.';
+        this.peersLoadError = e.message || this.t('settingsPage.loadPeersFailed', 'Could not load peers.');
       }
       this.peersLoading = false;
     },
@@ -685,14 +916,14 @@ function settingsPage() {
       try {
         var data = await LibreFangAPI.post('/api/migrate/scan', { path: this.sourcePath });
         if (data.error) {
-          LibreFangToast.error('Scan error: ' + data.error);
+          LibreFangToast.error(this.t('settingsPage.scanError', 'Scan error: {message}', { message: data.error }));
           this.scanning = false;
           return;
         }
         this.scanResult = data;
         this.migStep = 'preview';
       } catch(e) {
-        LibreFangToast.error('Scan failed: ' + e.message);
+        LibreFangToast.error(this.t('settingsPage.scanFailed', 'Scan failed: {message}', { message: e.message }));
       }
       this.scanning = false;
     },

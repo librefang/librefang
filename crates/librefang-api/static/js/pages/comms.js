@@ -3,6 +3,7 @@
 
 function commsPage() {
   return {
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     topology: { nodes: [], edges: [] },
     events: [],
     loading: true,
@@ -19,6 +20,49 @@ function commsPage() {
     taskAssign: '',
     taskLoading: false,
 
+    init() {
+      var self = this;
+      window.addEventListener('i18n-changed', function(event) {
+        self._currentLang = event.detail.language;
+      });
+    },
+
+    interpolate(text, params) {
+      if (!params || typeof text !== 'string') return text;
+      return text.replace(/\{(\w+)\}/g, function(match, key) {
+        return params[key] !== undefined ? params[key] : match;
+      });
+    },
+
+    t(key, fallback, params) {
+      if (typeof i18n === 'undefined') return this.interpolate(fallback || key, params);
+      var translated = i18n.t(key, params);
+      if (!translated || translated.charAt(0) === '[') {
+        return this.interpolate(fallback || key, params);
+      }
+      return translated;
+    },
+
+    topologyCountText() {
+      return this.t('commsPage.agentsCount', '{count} agents', {
+        count: this.topology.nodes.length
+      });
+    },
+
+    eventsCountText() {
+      return this.t('commsPage.eventsCount', '{count} events', {
+        count: this.events.length
+      });
+    },
+
+    selectAgentLabel() {
+      return this.t('commsPage.selectAgent', 'Select agent...');
+    },
+
+    stateLabel(state) {
+      return this.t('commsPage.state.' + String(state || '').toLowerCase(), state);
+    },
+
     async loadData() {
       this.loading = true;
       this.loadError = '';
@@ -31,7 +75,7 @@ function commsPage() {
         this.events = results[1] || [];
         this.startSSE();
       } catch(e) {
-        this.loadError = e.message || 'Could not load comms data.';
+        this.loadError = e.message || this.t('commsPage.loadError', 'Could not load comms data.');
       }
       this.loading = false;
     },
@@ -132,12 +176,12 @@ function commsPage() {
 
     eventLabel(kind) {
       switch(kind) {
-        case 'agent_message': return 'Message';
-        case 'agent_spawned': return 'Spawned';
-        case 'agent_terminated': return 'Terminated';
-        case 'task_posted': return 'Task Posted';
-        case 'task_claimed': return 'Task Claimed';
-        case 'task_completed': return 'Task Done';
+        case 'agent_message': return this.t('commsPage.event.message', 'Message');
+        case 'agent_spawned': return this.t('commsPage.event.spawned', 'Spawned');
+        case 'agent_terminated': return this.t('commsPage.event.terminated', 'Terminated');
+        case 'task_posted': return this.t('commsPage.event.taskPosted', 'Task Posted');
+        case 'task_claimed': return this.t('commsPage.event.taskClaimed', 'Task Claimed');
+        case 'task_completed': return this.t('commsPage.event.taskDone', 'Task Done');
         default: return kind;
       }
     },
@@ -146,10 +190,11 @@ function commsPage() {
       if (!dateStr) return '';
       var d = new Date(dateStr);
       var secs = Math.floor((Date.now() - d.getTime()) / 1000);
-      if (secs < 60) return secs + 's ago';
-      if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
-      if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
-      return Math.floor(secs / 86400) + 'd ago';
+      if (secs < 5) return this.t('time.now', 'just now');
+      if (secs < 60) return this.t('time.secondsAgo', '{count}s ago', { count: secs });
+      if (secs < 3600) return this.t('time.minutesAgo', '{count}m ago', { count: Math.floor(secs / 60) });
+      if (secs < 86400) return this.t('time.hoursAgo', '{count}h ago', { count: Math.floor(secs / 3600) });
+      return this.t('time.daysAgo', '{count}d ago', { count: Math.floor(secs / 86400) });
     },
 
     openSendModal() {
@@ -168,10 +213,10 @@ function commsPage() {
           to_agent_id: this.sendTo,
           message: this.sendMsg
         });
-        LibreFangToast.success('Message sent');
+        LibreFangToast.success(this.t('commsPage.messageSent', 'Message sent'));
         this.showSendModal = false;
       } catch(e) {
-        LibreFangToast.error(e.message || 'Send failed');
+        LibreFangToast.error(e.message || this.t('commsPage.sendFailed', 'Send failed'));
       }
       this.sendLoading = false;
     },
@@ -190,10 +235,10 @@ function commsPage() {
         var body = { title: this.taskTitle, description: this.taskDesc };
         if (this.taskAssign) body.assigned_to = this.taskAssign;
         await LibreFangAPI.post('/api/comms/task', body);
-        LibreFangToast.success('Task posted');
+        LibreFangToast.success(this.t('commsPage.taskPosted', 'Task posted'));
         this.showTaskModal = false;
       } catch(e) {
-        LibreFangToast.error(e.message || 'Task failed');
+        LibreFangToast.error(e.message || this.t('commsPage.taskFailed', 'Task failed'));
       }
       this.taskLoading = false;
     }

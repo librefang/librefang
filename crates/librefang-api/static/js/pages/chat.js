@@ -4,6 +4,7 @@
 function chatPage() {
   var msgId = 0;
   return {
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     currentAgent: null,
     messages: [],
     inputText: '',
@@ -42,30 +43,60 @@ function chatPage() {
     modelSwitching: false,
     _modelCache: null,
     _modelCacheTime: 0,
-    slashCommands: [
-      { cmd: '/help', desc: 'Show available commands' },
-      { cmd: '/agents', desc: 'Switch to Agents page' },
-      { cmd: '/new', desc: 'Reset session (clear history)' },
-      { cmd: '/compact', desc: 'Trigger LLM session compaction' },
-      { cmd: '/model', desc: 'Show or switch model (/model [name])' },
-      { cmd: '/stop', desc: 'Cancel current agent run' },
-      { cmd: '/usage', desc: 'Show session token usage & cost' },
-      { cmd: '/think', desc: 'Toggle extended thinking (/think [on|off|stream])' },
-      { cmd: '/context', desc: 'Show context window usage & pressure' },
-      { cmd: '/verbose', desc: 'Cycle tool detail level (/verbose [off|on|full])' },
-      { cmd: '/queue', desc: 'Check if agent is processing' },
-      { cmd: '/status', desc: 'Show system status' },
-      { cmd: '/clear', desc: 'Clear chat display' },
-      { cmd: '/exit', desc: 'Disconnect from agent' },
-      { cmd: '/budget', desc: 'Show spending limits and current costs' },
-      { cmd: '/peers', desc: 'Show OFP peer network status' },
-      { cmd: '/a2a', desc: 'List discovered external A2A agents' }
+    slashCommands: [],
+    _defaultSlashCommands: [
+      { cmd: '/help', descKey: 'agentChat.cmd.help', descFallback: 'Show available commands' },
+      { cmd: '/agents', descKey: 'agentChat.cmd.agents', descFallback: 'Switch to Agents page' },
+      { cmd: '/new', descKey: 'agentChat.cmd.new', descFallback: 'Reset session (clear history)' },
+      { cmd: '/compact', descKey: 'agentChat.cmd.compact', descFallback: 'Trigger LLM session compaction' },
+      { cmd: '/model', descKey: 'agentChat.cmd.model', descFallback: 'Show or switch model (/model [name])' },
+      { cmd: '/stop', descKey: 'agentChat.cmd.stop', descFallback: 'Cancel current agent run' },
+      { cmd: '/usage', descKey: 'agentChat.cmd.usage', descFallback: 'Show session token usage & cost' },
+      { cmd: '/think', descKey: 'agentChat.cmd.think', descFallback: 'Toggle extended thinking (/think [on|off|stream])' },
+      { cmd: '/context', descKey: 'agentChat.cmd.context', descFallback: 'Show context window usage & pressure' },
+      { cmd: '/verbose', descKey: 'agentChat.cmd.verbose', descFallback: 'Cycle tool detail level (/verbose [off|on|full])' },
+      { cmd: '/queue', descKey: 'agentChat.cmd.queue', descFallback: 'Check if agent is processing' },
+      { cmd: '/status', descKey: 'agentChat.cmd.status', descFallback: 'Show system status' },
+      { cmd: '/clear', descKey: 'agentChat.cmd.clear', descFallback: 'Clear chat display' },
+      { cmd: '/exit', descKey: 'agentChat.cmd.exit', descFallback: 'Disconnect from agent' },
+      { cmd: '/budget', descKey: 'agentChat.cmd.budget', descFallback: 'Show spending limits and current costs' },
+      { cmd: '/peers', descKey: 'agentChat.cmd.peers', descFallback: 'Show OFP peer network status' },
+      { cmd: '/a2a', descKey: 'agentChat.cmd.a2a', descFallback: 'List discovered external A2A agents' }
     ],
     tokenCount: 0,
 
     // ── Tip Bar ──
     tipIndex: 0,
-    tips: ['Type / for commands', '/think on for reasoning', 'Ctrl+Shift+F for focus mode', 'Drag files to attach', '/model to switch models', '/context to check usage', '/verbose off to hide tool details'],
+    tipKeys: [
+      ['agentChat.tipCommands', 'Type / for commands'],
+      ['agentChat.tipThinking', '/think on for reasoning'],
+      ['agentChat.tipFocus', 'Ctrl+Shift+F for focus mode'],
+      ['agentChat.tipAttach', 'Drag files to attach'],
+      ['agentChat.tipModel', '/model to switch models'],
+      ['agentChat.tipContext', '/context to check usage'],
+      ['agentChat.tipVerbose', '/verbose off to hide tool details']
+    ],
+    interpolate(text, params) {
+      if (!params || typeof text !== 'string') return text;
+      return text.replace(/\{(\w+)\}/g, function(match, key) {
+        return params[key] !== undefined ? params[key] : match;
+      });
+    },
+    t(key, fallback, params) {
+      var lang = this._currentLang;
+      if (typeof i18n === 'undefined') return this.interpolate(fallback || key, params);
+      var translated = i18n.t(key, params);
+      if (!translated || translated.charAt(0) === '[') {
+        return this.interpolate(fallback || key, params);
+      }
+      return translated;
+    },
+    get tips() {
+      var self = this;
+      return this.tipKeys.map(function(pair) {
+        return self.t(pair[0], pair[1]);
+      });
+    },
     tipTimer: null,
     get currentTip() {
       if (localStorage.getItem('of-tips-off') === 'true') return '';
@@ -134,8 +165,89 @@ function chatPage() {
       });
     },
 
+    queueText(count, withPlus) {
+      return this.t(
+        withPlus ? 'agentChat.queueCount' : 'agentChat.queueCountCompact',
+        withPlus ? '+{count} queued' : '{count} queued',
+        { count: count }
+      );
+    },
+
+    sessionLabel(session) {
+      if (session.label) return session.label;
+      return this.t('agentChat.sessionDefault', 'Session {id}', {
+        id: session.session_id.substring(0, 8)
+      });
+    },
+
+    messageCountText(count) {
+      return this.t('agentChat.messagesCount', '{count} messages', { count: count });
+    },
+
+    searchResultsText() {
+      return this.t('agentChat.searchResults', '{filtered} of {total}', {
+        filtered: this.filteredMessages.length,
+        total: this.messages.length
+      });
+    },
+
+    copyMessageTitle(msg) {
+      return msg._copied
+        ? this.t('agentChat.copied', 'Copied!')
+        : this.t('agentChat.copyMessage', 'Copy message');
+    },
+
+    composerPlaceholder() {
+      return this.recording
+        ? this.t('agentChat.recordingRelease', 'Recording... release to send')
+        : this.t('agentChat.messageLibreFang', 'Message LibreFang... (/ for commands)');
+    },
+
+    toolStatusText(tool) {
+      if (tool.running) return this.t('agentChat.running', 'running...');
+      if (tool.is_error) return this.t('status.error', 'error');
+      if (tool.result && tool.result.length > 500) return Math.round(tool.result.length / 1024) + 'KB';
+      return this.t('agentChat.done', 'done');
+    },
+
+    toolCharsText(result) {
+      return this.t('agentChat.chars', '({count} chars)', { count: result.length });
+    },
+
+    audioLabel(tool) {
+      return this.t('agentChat.audio', 'Audio: {name}', {
+        name: tool._audioFile.split('/').pop()
+      });
+    },
+
+    audioDurationText(ms) {
+      return '~' + this.t('agentChat.secondsShort', '{count}s', {
+        count: Math.round((ms || 0) / 1000)
+      });
+    },
+
+    footerStatusText() {
+      if (this.tokenCount > 0) {
+        return '~' + this.tokenCount + ' ' + this.t('agentChat.tokens', 'tokens');
+      }
+      if (this.attachments.length) {
+        return this.t('agentChat.filesCount', '{count} file(s)', {
+          count: this.attachments.length
+        });
+      }
+      return '';
+    },
+
     init() {
       var self = this;
+
+      window.addEventListener('i18n-changed', function(event) {
+        self._currentLang = event.detail.language;
+        self._buildSlashCommands();
+      });
+
+      // Build localized slash commands from defaults
+      this._buildSlashCommands();
 
       // Start tip cycle
       this.startTipCycle();
@@ -255,7 +367,7 @@ function chatPage() {
           if (el) el.focus();
         });
       }).catch(function(e) {
-        LibreFangToast.error('Failed to load models: ' + e.message);
+        LibreFangToast.error(self.t('agentChat.loadModelsFailed', 'Failed to load models: {message}', { message: e.message }));
       });
     },
 
@@ -268,12 +380,19 @@ function chatPage() {
         // Use server-resolved model/provider to stay in sync (fixes #387/#466)
         self.currentAgent.model_name = (resp && resp.model) || model.id;
         self.currentAgent.model_provider = (resp && resp.provider) || model.provider;
-        LibreFangToast.success('Switched to ' + (model.display_name || model.id));
+        LibreFangToast.success(self.t('agentChat.toast.modelSwitched', 'Switched to {model}', { model: model.display_name || model.id }));
         self.showModelSwitcher = false;
         self.modelSwitching = false;
       }).catch(function(e) {
-        LibreFangToast.error('Switch failed: ' + e.message);
+        LibreFangToast.error(self.t('agentChat.toast.switchFailed', 'Switch failed: {message}', { message: e.message }));
         self.modelSwitching = false;
+      });
+    },
+
+    _buildSlashCommands: function() {
+      var self = this;
+      this.slashCommands = this._defaultSlashCommands.map(function(c) {
+        return { cmd: c.cmd, desc: self.t(c.descKey, c.descFallback) };
       });
     },
 
@@ -338,32 +457,32 @@ function chatPage() {
           if (self.currentAgent) {
             LibreFangAPI.post('/api/agents/' + self.currentAgent.id + '/session/reset', {}).then(function() {
               self.messages = [];
-              LibreFangToast.success('Session reset');
-            }).catch(function(e) { LibreFangToast.error('Reset failed: ' + e.message); });
+              LibreFangToast.success(self.t('agentChat.toast.sessionReset', 'Session reset'));
+            }).catch(function(e) { LibreFangToast.error(self.t('agentChat.toast.resetFailed', 'Reset failed: {message}', { message: e.message })); });
           }
           break;
         case '/compact':
           if (self.currentAgent) {
-            self.messages.push({ id: ++msgId, role: 'system', text: 'Compacting session...', meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.compacting', 'Compacting session...'), meta: '', tools: [] });
             LibreFangAPI.post('/api/agents/' + self.currentAgent.id + '/session/compact', {}).then(function(res) {
-              self.messages.push({ id: ++msgId, role: 'system', text: res.message || 'Compaction complete', meta: '', tools: [] });
+              self.messages.push({ id: ++msgId, role: 'system', text: res.message || self.t('agentChat.sys.compactDone', 'Compaction complete'), meta: '', tools: [] });
               self.scrollToBottom();
-            }).catch(function(e) { LibreFangToast.error('Compaction failed: ' + e.message); });
+            }).catch(function(e) { LibreFangToast.error(self.t('agentChat.toast.compactFailed', 'Compaction failed: {message}', { message: e.message })); });
           }
           break;
         case '/stop':
           if (self.currentAgent) {
             LibreFangAPI.post('/api/agents/' + self.currentAgent.id + '/stop', {}).then(function(res) {
-              self.messages.push({ id: ++msgId, role: 'system', text: res.message || 'Run cancelled', meta: '', tools: [] });
+              self.messages.push({ id: ++msgId, role: 'system', text: res.message || self.t('agentChat.sys.runCancelled', 'Run cancelled'), meta: '', tools: [] });
               self.sending = false;
               self.scrollToBottom();
-            }).catch(function(e) { LibreFangToast.error('Stop failed: ' + e.message); });
+            }).catch(function(e) { LibreFangToast.error(self.t('agentChat.toast.stopFailed', 'Stop failed: {message}', { message: e.message })); });
           }
           break;
         case '/usage':
           if (self.currentAgent) {
             var approxTokens = self.messages.reduce(function(sum, m) { return sum + Math.round((m.text || '').length / 4); }, 0);
-            self.messages.push({ id: ++msgId, role: 'system', text: '**Session Usage**\n- Messages: ' + self.messages.length + '\n- Approx tokens: ~' + approxTokens, meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: '**' + self.t('agentChat.sys.sessionUsageTitle', 'Session Usage') + '**\n- ' + self.t('agentChat.sys.messages', 'Messages') + ': ' + self.messages.length + '\n- ' + self.t('agentChat.sys.approxTokens', 'Approx tokens') + ': ~' + approxTokens, meta: '', tools: [] });
             self.scrollToBottom();
           }
           break;
@@ -380,11 +499,11 @@ function chatPage() {
             else if (self.thinkingMode === 'on') self.thinkingMode = 'stream';
             else self.thinkingMode = 'off';
           }
-          var modeLabel = self.thinkingMode === 'stream' ? 'enabled (streaming reasoning)' : (self.thinkingMode === 'on' ? 'enabled' : 'disabled');
-          self.messages.push({ id: ++msgId, role: 'system', text: 'Extended thinking **' + modeLabel + '**. ' +
-            (self.thinkingMode === 'stream' ? 'Reasoning tokens will appear in a collapsible panel.' :
-             self.thinkingMode === 'on' ? 'The agent will show its reasoning when supported by the model.' :
-             'Normal response mode.'), meta: '', tools: [] });
+          var modeLabel = self.thinkingMode === 'stream' ? self.t('agentChat.sys.thinkStream', 'enabled (streaming reasoning)') : (self.thinkingMode === 'on' ? self.t('agentChat.sys.thinkOn', 'enabled') : self.t('agentChat.sys.thinkOff', 'disabled'));
+          self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.thinkStatus', 'Extended thinking') + ' **' + modeLabel + '**. ' +
+            (self.thinkingMode === 'stream' ? self.t('agentChat.sys.thinkStreamDesc', 'Reasoning tokens will appear in a collapsible panel.') :
+             self.thinkingMode === 'on' ? self.t('agentChat.sys.thinkOnDesc', 'The agent will show its reasoning when supported by the model.') :
+             self.t('agentChat.sys.thinkOffDesc', 'Normal response mode.')), meta: '', tools: [] });
           self.scrollToBottom();
           break;
         case '/context':
@@ -392,7 +511,7 @@ function chatPage() {
           if (self.currentAgent && LibreFangAPI.isWsConnected()) {
             LibreFangAPI.wsSend({ type: 'command', command: 'context', args: '' });
           } else {
-            self.messages.push({ id: ++msgId, role: 'system', text: 'Not connected. Connect to an agent first.', meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.notConnected', 'Not connected. Connect to an agent first.'), meta: '', tools: [] });
             self.scrollToBottom();
           }
           break;
@@ -400,7 +519,7 @@ function chatPage() {
           if (self.currentAgent && LibreFangAPI.isWsConnected()) {
             LibreFangAPI.wsSend({ type: 'command', command: 'verbose', args: cmdArgs });
           } else {
-            self.messages.push({ id: ++msgId, role: 'system', text: 'Not connected. Connect to an agent first.', meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.notConnected', 'Not connected. Connect to an agent first.'), meta: '', tools: [] });
             self.scrollToBottom();
           }
           break;
@@ -408,13 +527,13 @@ function chatPage() {
           if (self.currentAgent && LibreFangAPI.isWsConnected()) {
             LibreFangAPI.wsSend({ type: 'command', command: 'queue', args: '' });
           } else {
-            self.messages.push({ id: ++msgId, role: 'system', text: 'Not connected.', meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.notConnectedShort', 'Not connected.'), meta: '', tools: [] });
             self.scrollToBottom();
           }
           break;
         case '/status':
           LibreFangAPI.get('/api/status').then(function(s) {
-            self.messages.push({ id: ++msgId, role: 'system', text: '**System Status**\n- Agents: ' + (s.agent_count || 0) + '\n- Uptime: ' + (s.uptime_seconds || 0) + 's\n- Version: ' + (s.version || '?'), meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: '**' + self.t('agentChat.sys.systemStatus', 'System Status') + '**\n- ' + self.t('agentChat.sys.agents', 'Agents') + ': ' + (s.agent_count || 0) + '\n- ' + self.t('agentChat.sys.uptime', 'Uptime') + ': ' + (s.uptime_seconds || 0) + 's\n- ' + self.t('agentChat.sys.version', 'Version') + ': ' + (s.version || '?'), meta: '', tools: [] });
             self.scrollToBottom();
           }).catch(function() {});
           break;
@@ -427,15 +546,15 @@ function chatPage() {
                 var resolvedProvider = (resp && resp.provider) || '';
                 self.currentAgent.model_name = resolvedModel;
                 if (resolvedProvider) { self.currentAgent.model_provider = resolvedProvider; }
-                self.messages.push({ id: ++msgId, role: 'system', text: 'Model switched to: `' + resolvedModel + '`' + (resolvedProvider ? ' (provider: `' + resolvedProvider + '`)' : ''), meta: '', tools: [] });
+                self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.modelSwitchedTo', 'Model switched to: `{model}`', { model: resolvedModel }) + (resolvedProvider ? ' (' + self.t('agentChat.sys.provider', 'provider') + ': `' + resolvedProvider + '`)' : ''), meta: '', tools: [] });
                 self.scrollToBottom();
-              }).catch(function(e) { LibreFangToast.error('Model switch failed: ' + e.message); });
+              }).catch(function(e) { LibreFangToast.error(self.t('agentChat.toast.modelSwitchFailed', 'Model switch failed: {message}', { message: e.message })); });
             } else {
-              self.messages.push({ id: ++msgId, role: 'system', text: '**Current Model**\n- Provider: `' + (self.currentAgent.model_provider || '?') + '`\n- Model: `' + (self.currentAgent.model_name || '?') + '`', meta: '', tools: [] });
+              self.messages.push({ id: ++msgId, role: 'system', text: '**' + self.t('agentChat.sys.currentModel', 'Current Model') + '**\n- ' + self.t('agentChat.sys.providerLabel', 'Provider') + ': `' + (self.currentAgent.model_provider || '?') + '`\n- ' + self.t('agentChat.sys.modelLabel', 'Model') + ': `' + (self.currentAgent.model_name || '?') + '`', meta: '', tools: [] });
               self.scrollToBottom();
             }
           } else {
-            self.messages.push({ id: ++msgId, role: 'system', text: 'No agent selected.', meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.noAgent', 'No agent selected.'), meta: '', tools: [] });
             self.scrollToBottom();
           }
           break;
@@ -451,19 +570,20 @@ function chatPage() {
           break;
         case '/budget':
           LibreFangAPI.get('/api/budget').then(function(b) {
-            var fmt = function(v) { return v > 0 ? '$' + v.toFixed(2) : 'unlimited'; };
-            self.messages.push({ id: ++msgId, role: 'system', text: '**Budget Status**\n' +
-              '- Hourly: $' + (b.hourly_spend||0).toFixed(4) + ' / ' + fmt(b.hourly_limit) + '\n' +
-              '- Daily: $' + (b.daily_spend||0).toFixed(4) + ' / ' + fmt(b.daily_limit) + '\n' +
-              '- Monthly: $' + (b.monthly_spend||0).toFixed(4) + ' / ' + fmt(b.monthly_limit), meta: '', tools: [] });
+            var unlimitedLabel = self.t('agentChat.sys.unlimited', 'unlimited');
+            var fmt = function(v) { return v > 0 ? '$' + v.toFixed(2) : unlimitedLabel; };
+            self.messages.push({ id: ++msgId, role: 'system', text: '**' + self.t('agentChat.sys.budgetStatus', 'Budget Status') + '**\n' +
+              '- ' + self.t('agentChat.sys.hourly', 'Hourly') + ': $' + (b.hourly_spend||0).toFixed(4) + ' / ' + fmt(b.hourly_limit) + '\n' +
+              '- ' + self.t('agentChat.sys.daily', 'Daily') + ': $' + (b.daily_spend||0).toFixed(4) + ' / ' + fmt(b.daily_limit) + '\n' +
+              '- ' + self.t('agentChat.sys.monthly', 'Monthly') + ': $' + (b.monthly_spend||0).toFixed(4) + ' / ' + fmt(b.monthly_limit), meta: '', tools: [] });
             self.scrollToBottom();
           }).catch(function() {});
           break;
         case '/peers':
           LibreFangAPI.get('/api/network/status').then(function(ns) {
-            self.messages.push({ id: ++msgId, role: 'system', text: '**OFP Network**\n' +
-              '- Status: ' + (ns.enabled ? 'Enabled' : 'Disabled') + '\n' +
-              '- Connected peers: ' + (ns.connected_peers||0) + ' / ' + (ns.total_peers||0), meta: '', tools: [] });
+            self.messages.push({ id: ++msgId, role: 'system', text: '**' + self.t('agentChat.sys.ofpNetwork', 'OFP Network') + '**\n' +
+              '- ' + self.t('agentChat.sys.status', 'Status') + ': ' + (ns.enabled ? self.t('agentChat.sys.enabled', 'Enabled') : self.t('agentChat.sys.disabled', 'Disabled')) + '\n' +
+              '- ' + self.t('agentChat.sys.connectedPeers', 'Connected peers') + ': ' + (ns.connected_peers||0) + ' / ' + (ns.total_peers||0), meta: '', tools: [] });
             self.scrollToBottom();
           }).catch(function() {});
           break;
@@ -471,10 +591,10 @@ function chatPage() {
           LibreFangAPI.get('/api/a2a/agents').then(function(res) {
             var agents = res.agents || [];
             if (!agents.length) {
-              self.messages.push({ id: ++msgId, role: 'system', text: 'No external A2A agents discovered.', meta: '', tools: [] });
+              self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.noA2aAgents', 'No external A2A agents discovered.'), meta: '', tools: [] });
             } else {
               var lines = agents.map(function(a) { return '- **' + a.name + '** — ' + a.url; });
-              self.messages.push({ id: ++msgId, role: 'system', text: '**A2A Agents (' + agents.length + ')**\n' + lines.join('\n'), meta: '', tools: [] });
+              self.messages.push({ id: ++msgId, role: 'system', text: '**' + self.t('agentChat.sys.a2aAgents', 'A2A Agents') + ' (' + agents.length + ')**\n' + lines.join('\n'), meta: '', tools: [] });
             }
             self.scrollToBottom();
           }).catch(function() {});
@@ -492,15 +612,7 @@ function chatPage() {
         this.messages.push({
           id: ++localMsgId,
           role: 'system',
-          text: '**Welcome to LibreFang Chat!**\n\n' +
-            '- Type `/` to see available commands\n' +
-            '- `/help` shows all commands\n' +
-            '- `/think on` enables extended reasoning\n' +
-            '- `/context` shows context window usage\n' +
-            '- `/verbose off` hides tool details\n' +
-            '- `Ctrl+Shift+F` toggles focus mode\n' +
-            '- Drag & drop files to attach them\n' +
-            '- `Ctrl+/` opens the command palette',
+          text: this.t('agentChat.welcomeTips', '**Welcome to LibreFang Chat!**'),
           meta: '',
           tools: []
         });
@@ -557,7 +669,7 @@ function chatPage() {
     // Multi-session: create a new session
     async createSession() {
       if (!this.currentAgent) return;
-      var label = prompt('Session name (optional):');
+      var label = prompt(this.t('agentChat.newSessionPrompt', 'Session name (optional):'));
       if (label === null) return; // cancelled
       try {
         await LibreFangAPI.post('/api/agents/' + this.currentAgent.id + '/sessions', {
@@ -567,9 +679,9 @@ function chatPage() {
         await this.loadSession(this.currentAgent.id);
         this.messages = [];
         this.scrollToBottom();
-        if (typeof LibreFangToast !== 'undefined') LibreFangToast.success('New session created');
+        if (typeof LibreFangToast !== 'undefined') LibreFangToast.success(this.t('agentChat.newSessionCreated', 'New session created'));
       } catch(e) {
-        if (typeof LibreFangToast !== 'undefined') LibreFangToast.error('Failed to create session');
+        if (typeof LibreFangToast !== 'undefined') LibreFangToast.error(this.t('agentChat.newSessionFailed', 'Failed to create session'));
       }
     },
 
@@ -585,7 +697,7 @@ function chatPage() {
         this._wsAgent = null;
         this.connectWs(this.currentAgent.id);
       } catch(e) {
-        if (typeof LibreFangToast !== 'undefined') LibreFangToast.error('Failed to switch session');
+        if (typeof LibreFangToast !== 'undefined') LibreFangToast.error(this.t('agentChat.switchSessionFailed', 'Failed to switch session'));
       }
     },
 
@@ -617,13 +729,17 @@ function chatPage() {
         // Legacy thinking event (backward compat)
         case 'thinking':
           if (!this.messages.length || !this.messages[this.messages.length - 1].thinking) {
-            var thinkLabel = data.level ? 'Thinking (' + data.level + ')...' : 'Processing...';
+            var thinkLabel = data.level
+              ? this.t('agentChat.thinkingWithLevel', 'Thinking ({level})...', { level: data.level })
+              : this.t('agentChat.processing', 'Processing...');
             this.messages.push({ id: ++msgId, role: 'agent', text: thinkLabel, meta: '', thinking: true, streaming: true, tools: [] });
             this.scrollToBottom();
             this._resetTypingTimeout();
           } else if (data.level) {
             var lastThink = this.messages[this.messages.length - 1];
-            if (lastThink && lastThink.thinking) lastThink.text = 'Thinking (' + data.level + ')...';
+            if (lastThink && lastThink.thinking) {
+              lastThink.text = this.t('agentChat.thinkingWithLevel', 'Thinking ({level})...', { level: data.level });
+            }
           }
           break;
 
@@ -631,14 +747,16 @@ function chatPage() {
         case 'typing':
           if (data.state === 'start') {
             if (!this.messages.length || !this.messages[this.messages.length - 1].thinking) {
-              this.messages.push({ id: ++msgId, role: 'agent', text: 'Processing...', meta: '', thinking: true, streaming: true, tools: [] });
+              this.messages.push({ id: ++msgId, role: 'agent', text: this.t('agentChat.processing', 'Processing...'), meta: '', thinking: true, streaming: true, tools: [] });
               this.scrollToBottom();
             }
             this._resetTypingTimeout();
           } else if (data.state === 'tool') {
             var typingMsg = this.messages.length ? this.messages[this.messages.length - 1] : null;
             if (typingMsg && (typingMsg.thinking || typingMsg.streaming)) {
-              typingMsg.text = 'Using ' + (data.tool || 'tool') + '...';
+              typingMsg.text = this.t('agentChat.usingTool', 'Using {tool}...', {
+                tool: data.tool || 'tool'
+              });
             }
             this._resetTypingTimeout();
           } else if (data.state === 'stop') {
@@ -669,11 +787,13 @@ function chatPage() {
               // receiving streamed content) to avoid overwriting accumulated text.
               var phaseDetail;
               if (data.phase === 'tool_use') {
-                phaseDetail = 'Using ' + (data.detail || 'tool') + '...';
+                phaseDetail = this.t('agentChat.usingTool', 'Using {tool}...', {
+                  tool: data.detail || 'tool'
+                });
               } else if (data.phase === 'thinking') {
-                phaseDetail = 'Thinking...';
+                phaseDetail = this.t('agentChat.thinking', 'Thinking...');
               } else {
-                phaseDetail = data.detail || 'Working...';
+                phaseDetail = data.detail || this.t('agentChat.working', 'Working...');
               }
               phaseMsg.text = phaseDetail;
             }
@@ -835,7 +955,14 @@ function chatPage() {
         case 'error':
           this._clearTypingTimeout();
           this.messages = this.messages.filter(function(m) { return !m.thinking && !m.streaming; });
-          this.messages.push({ id: ++msgId, role: 'system', text: 'Error: ' + data.content, meta: '', tools: [], ts: Date.now() });
+          this.messages.push({
+            id: ++msgId,
+            role: 'system',
+            text: this.t('agentChat.errorPrefix', 'Error: {message}', { message: data.content }),
+            meta: '',
+            tools: [],
+            ts: Date.now()
+          });
           this.sending = false;
           this.tokenCount = 0;
           this.scrollToBottom();
@@ -938,7 +1065,9 @@ function chatPage() {
             fileRefs.push('[File: ' + att.file.name + ']');
             uploadedFiles.push({ file_id: uploadRes.file_id, filename: uploadRes.filename, content_type: uploadRes.content_type });
           } catch(e) {
-            LibreFangToast.error('Failed to upload ' + att.file.name);
+            LibreFangToast.error(this.t('agentChat.failedUploadFile', 'Failed to upload {name}', {
+              name: att.file.name
+            }));
             fileRefs.push('[File: ' + att.file.name + ' (upload failed)]');
           }
           att.uploading = false;
@@ -987,7 +1116,7 @@ function chatPage() {
 
       // HTTP fallback
       if (!LibreFangAPI.isWsConnected()) {
-        LibreFangToast.info('Using HTTP mode (no streaming)');
+        LibreFangToast.info(this.t('agentChat.usingHttpMode', 'Using HTTP mode (no streaming)'));
       }
       this.messages.push({ id: ++msgId, role: 'agent', text: '', meta: '', thinking: true, tools: [], ts: Date.now() });
       this.scrollToBottom();
@@ -1003,7 +1132,14 @@ function chatPage() {
         this.messages.push({ id: ++msgId, role: 'agent', text: res.response, meta: httpMeta, tools: [], ts: Date.now() });
       } catch(e) {
         this.messages = this.messages.filter(function(m) { return !m.thinking; });
-        this.messages.push({ id: ++msgId, role: 'system', text: 'Error: ' + e.message, meta: '', tools: [], ts: Date.now() });
+        this.messages.push({
+          id: ++msgId,
+          role: 'system',
+          text: this.t('agentChat.errorPrefix', 'Error: {message}', { message: e.message }),
+          meta: '',
+          tools: [],
+          ts: Date.now()
+        });
       }
       this.sending = false;
       this.scrollToBottom();
@@ -1020,28 +1156,44 @@ function chatPage() {
       if (!this.currentAgent) return;
       var self = this;
       LibreFangAPI.post('/api/agents/' + this.currentAgent.id + '/stop', {}).then(function(res) {
-        self.messages.push({ id: ++msgId, role: 'system', text: res.message || 'Run cancelled', meta: '', tools: [], ts: Date.now() });
+        self.messages.push({
+          id: ++msgId,
+          role: 'system',
+          text: res.message || self.t('agentChat.runCancelled', 'Run cancelled'),
+          meta: '',
+          tools: [],
+          ts: Date.now()
+        });
         self.sending = false;
         self.scrollToBottom();
         self.$nextTick(function() { self._processQueue(); });
-      }).catch(function(e) { LibreFangToast.error('Stop failed: ' + e.message); });
+      }).catch(function(e) {
+        LibreFangToast.error(self.t('agentChat.stopFailed', 'Stop failed: {message}', {
+          message: e.message
+        }));
+      });
     },
 
     killAgent() {
       if (!this.currentAgent) return;
       var self = this;
       var name = this.currentAgent.name;
-      LibreFangToast.confirm('Stop Agent', 'Stop agent "' + name + '"? The agent will be shut down.', async function() {
+      LibreFangToast.confirm(
+        this.t('agentChat.stopAgentTitle', 'Stop Agent'),
+        this.t('agentChat.stopAgentConfirm', 'Stop agent "{name}"? The agent will be shut down.', { name: name }),
+        async function() {
         try {
           await LibreFangAPI.del('/api/agents/' + self.currentAgent.id);
           LibreFangAPI.wsDisconnect();
           self._wsAgent = null;
           self.currentAgent = null;
           self.messages = [];
-          LibreFangToast.success('Agent "' + name + '" stopped');
+          LibreFangToast.success(self.t('agentChat.agentStopped', 'Agent "{name}" stopped', { name: name }));
           Alpine.store('app').refreshAgents();
         } catch(e) {
-          LibreFangToast.error('Failed to stop agent: ' + e.message);
+          LibreFangToast.error(self.t('agentChat.stopFailed', 'Stop failed: {message}', {
+            message: e.message
+          }));
         }
       });
     },
@@ -1060,7 +1212,9 @@ function chatPage() {
       for (var i = 0; i < files.length; i++) {
         var file = files[i];
         if (file.size > 10 * 1024 * 1024) {
-          LibreFangToast.warn('File "' + file.name + '" exceeds 10MB limit');
+          LibreFangToast.warn(this.t('agentChat.fileTooLarge', 'File "{name}" exceeds 10MB limit', {
+            name: file.name
+          }));
           continue;
         }
         var typeOk = allowed.indexOf(file.type) !== -1;
@@ -1069,7 +1223,9 @@ function chatPage() {
           typeOk = allowedExts.indexOf(ext) !== -1 || file.type.startsWith('image/');
         }
         if (!typeOk) {
-          LibreFangToast.warn('File type not supported: ' + file.name);
+          LibreFangToast.warn(this.t('agentChat.fileTypeNotSupported', 'File type not supported: {name}', {
+            name: file.name
+          }));
           continue;
         }
         var preview = null;
@@ -1145,7 +1301,9 @@ function chatPage() {
         this.recordingTime = 0;
         this._recordingTimer = setInterval(function() { self.recordingTime++; }, 1000);
       } catch(e) {
-        if (typeof LibreFangToast !== 'undefined') LibreFangToast.error('Microphone access denied');
+        if (typeof LibreFangToast !== 'undefined') {
+          LibreFangToast.error(this.t('agentChat.microphoneDenied', 'Microphone access denied'));
+        }
       }
     },
 
@@ -1165,7 +1323,14 @@ function chatPage() {
       if (blob.size < 100) return; // too small
 
       // Show a temporary "Transcribing..." message
-      this.messages.push({ id: ++msgId, role: 'system', text: 'Transcribing audio...', thinking: true, ts: Date.now(), tools: [] });
+      this.messages.push({
+        id: ++msgId,
+        role: 'system',
+        text: this.t('agentChat.transcribingAudio', 'Transcribing audio...'),
+        thinking: true,
+        ts: Date.now(),
+        tools: []
+      });
       this.scrollToBottom();
 
       try {
@@ -1184,7 +1349,11 @@ function chatPage() {
         this._sendPayload(text, [upload], []);
       } catch(e) {
         this.messages = this.messages.filter(function(m) { return !m.thinking || m.role !== 'system'; });
-        if (typeof LibreFangToast !== 'undefined') LibreFangToast.error('Failed to upload audio: ' + (e.message || 'unknown error'));
+        if (typeof LibreFangToast !== 'undefined') {
+          LibreFangToast.error(this.t('agentChat.failedUploadAudio', 'Failed to upload audio: {message}', {
+            message: e.message || 'unknown error'
+          }));
+        }
       }
     },
 

@@ -23,6 +23,8 @@ const LOGO_PNG: &[u8] = include_bytes!("../static/logo.png");
 
 /// Embedded favicon ICO for browser tabs.
 const FAVICON_ICO: &[u8] = include_bytes!("../static/favicon.ico");
+const LOCALE_EN: &str = include_str!("../static/locales/en.json");
+const LOCALE_ZH_CN: &str = include_str!("../static/locales/zh-CN.json");
 
 /// GET /logo.png — Serve the LibreFang logo.
 pub async fn logo_png() -> impl IntoResponse {
@@ -43,6 +45,26 @@ pub async fn favicon_ico() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=86400, immutable"),
         ],
         FAVICON_ICO,
+    )
+}
+
+pub async fn locale_en() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        LOCALE_EN,
+    )
+}
+
+pub async fn locale_zh_cn() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        LOCALE_ZH_CN,
     )
 }
 
@@ -87,6 +109,9 @@ const WEBCHAT_HTML: &str = concat!(
     "\n</script>\n",
     "<script>\n",
     include_str!("../static/vendor/highlight.min.js"),
+    "\n</script>\n",
+    "<script>\n",
+    include_str!("../static/js/i18n.js"),
     "\n</script>\n",
     // App code
     "<script>\n",

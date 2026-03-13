@@ -3,6 +3,7 @@
 
 function overviewPage() {
   return {
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     health: {},
     status: {},
     usageSummary: {},
@@ -15,6 +16,30 @@ function overviewPage() {
     loadError: '',
     refreshTimer: null,
     lastRefresh: null,
+
+    init() {
+      var self = this;
+      window.addEventListener('i18n-changed', function(event) {
+        self._currentLang = event.detail.language;
+      });
+    },
+
+    interpolate(text, params) {
+      if (!params || typeof text !== 'string') return text;
+      return text.replace(/\{(\w+)\}/g, function(match, key) {
+        return params[key] !== undefined ? params[key] : match;
+      });
+    },
+
+    t(key, fallback, params) {
+      var lang = this._currentLang;
+      if (typeof i18n === 'undefined') return this.interpolate(fallback || key, params);
+      var translated = i18n.t(key, params);
+      if (!translated || translated.charAt(0) === '[') {
+        return this.interpolate(fallback || key, params);
+      }
+      return translated;
+    },
 
     async loadOverview() {
       this.loading = true;
@@ -32,7 +57,7 @@ function overviewPage() {
         ]);
         this.lastRefresh = Date.now();
       } catch(e) {
-        this.loadError = e.message || 'Could not load overview data.';
+        this.loadError = e.message || this.t('overview.loadError', 'Could not load overview data.');
       }
       this.loading = false;
     },
@@ -162,10 +187,10 @@ function overviewPage() {
 
     // Provider health tooltip
     providerTooltip(p) {
-      if (p.health === 'cooldown') return p.display_name + ' \u2014 cooling down (rate limited)';
-      if (p.health === 'open') return p.display_name + ' \u2014 circuit breaker open';
-      if (p.auth_status === 'configured') return p.display_name + ' \u2014 ready';
-      return p.display_name + ' \u2014 not configured';
+      if (p.health === 'cooldown') return this.t('overview.providerCoolingDown', '{provider} - cooling down (rate limited)', { provider: p.display_name });
+      if (p.health === 'open') return this.t('overview.providerCircuitOpen', '{provider} - circuit breaker open', { provider: p.display_name });
+      if (p.auth_status === 'configured') return this.t('overview.providerReady', '{provider} - ready', { provider: p.display_name });
+      return this.t('overview.providerNotConfigured', '{provider} - not configured', { provider: p.display_name });
     },
 
     // Audit action badge color
@@ -182,11 +207,11 @@ function overviewPage() {
 
     get setupChecklist() {
       return [
-        { key: 'provider', label: 'Configure an LLM provider', done: this.configuredProviders.length > 0, action: '#settings' },
-        { key: 'agent', label: 'Create your first agent', done: (Alpine.store('app').agents || []).length > 0, action: '#agents' },
-        { key: 'chat', label: 'Send your first message', done: localStorage.getItem('of-first-msg') === 'true', action: '#chat' },
-        { key: 'channel', label: 'Connect a messaging channel', done: this.channels.length > 0, action: '#channels' },
-        { key: 'skill', label: 'Browse or install a skill', done: localStorage.getItem('of-skill-browsed') === 'true', action: '#skills' }
+        { key: 'provider', label: this.t('overview.setupProvider', 'Configure an LLM provider'), done: this.configuredProviders.length > 0, action: '#settings' },
+        { key: 'agent', label: this.t('overview.setupAgent', 'Create your first agent'), done: (Alpine.store('app').agents || []).length > 0, action: '#agents' },
+        { key: 'chat', label: this.t('overview.setupChat', 'Send your first message'), done: localStorage.getItem('of-first-msg') === 'true', action: '#chat' },
+        { key: 'channel', label: this.t('overview.setupChannel', 'Connect a messaging channel'), done: this.channels.length > 0, action: '#channels' },
+        { key: 'skill', label: this.t('overview.setupSkill', 'Browse or install a skill'), done: localStorage.getItem('of-skill-browsed') === 'true', action: '#skills' }
       ];
     },
 
@@ -202,6 +227,37 @@ function overviewPage() {
     dismissChecklist() {
       this.checklistDismissed = true;
       localStorage.setItem('of-checklist-dismissed', 'true');
+    },
+
+    setupProgressText() {
+      return this.t('overview.stepsCompleted', '{count} of 5 steps completed', {
+        count: this.setupDoneCount
+      });
+    },
+
+    providerSummaryText() {
+      return this.t('overview.providersConfigured', '{configured}/{total} configured', {
+        configured: this.configuredProviders.length,
+        total: this.providers.length
+      });
+    },
+
+    defenseSystemsText(count) {
+      return this.t('overview.defenseActive', '{count} defense-in-depth systems active', {
+        count: count
+      });
+    },
+
+    channelsConnectedText() {
+      return this.t('overview.channelsConnected', '{count} channel(s) connected', {
+        count: this.channels.length
+      });
+    },
+
+    mcpToolsText(count) {
+      return this.t('overview.toolsCount', '({count} tools)', {
+        count: count
+      });
     },
 
     formatUptime(secs) {
@@ -233,38 +289,38 @@ function overviewPage() {
       var now = Date.now();
       var ts = new Date(timestamp).getTime();
       var diff = Math.floor((now - ts) / 1000);
-      if (diff < 10) return 'just now';
-      if (diff < 60) return diff + 's ago';
-      if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
-      if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
-      return Math.floor(diff / 86400) + 'd ago';
+      if (diff < 10) return this.t('time.now', 'just now');
+      if (diff < 60) return this.t('time.secondsAgo', '{count}s ago', { count: diff });
+      if (diff < 3600) return this.t('time.minutesAgo', '{count}m ago', { count: Math.floor(diff / 60) });
+      if (diff < 86400) return this.t('time.hoursAgo', '{count}h ago', { count: Math.floor(diff / 3600) });
+      return this.t('time.daysAgo', '{count}d ago', { count: Math.floor(diff / 86400) });
     },
 
     // Map raw audit action names to user-friendly labels
     friendlyAction(action) {
-      if (!action) return 'Unknown';
+      if (!action) return this.t('overview.actionUnknown', 'Unknown');
       var map = {
-        'AgentSpawn': 'Agent Created',
-        'AgentKill': 'Agent Stopped',
-        'AgentTerminated': 'Agent Stopped',
-        'ToolInvoke': 'Tool Used',
-        'ToolResult': 'Tool Completed',
-        'MessageReceived': 'Message In',
-        'MessageSent': 'Response Sent',
-        'SessionReset': 'Session Reset',
-        'SessionCompact': 'Compacted',
-        'ModelSwitch': 'Model Changed',
-        'AuthAttempt': 'Login Attempt',
-        'AuthSuccess': 'Login OK',
-        'AuthFailure': 'Login Failed',
-        'CapabilityDenied': 'Denied',
-        'RateLimited': 'Rate Limited',
-        'WorkflowRun': 'Workflow Run',
-        'TriggerFired': 'Trigger Fired',
-        'SkillInstalled': 'Skill Installed',
-        'McpConnected': 'MCP Connected'
+        'AgentSpawn': 'overview.actionAgentCreated',
+        'AgentKill': 'overview.actionAgentStopped',
+        'AgentTerminated': 'overview.actionAgentStopped',
+        'ToolInvoke': 'overview.actionToolUsed',
+        'ToolResult': 'overview.actionToolCompleted',
+        'MessageReceived': 'overview.actionMessageIn',
+        'MessageSent': 'overview.actionResponseSent',
+        'SessionReset': 'overview.actionSessionReset',
+        'SessionCompact': 'overview.actionCompacted',
+        'ModelSwitch': 'overview.actionModelChanged',
+        'AuthAttempt': 'overview.actionLoginAttempt',
+        'AuthSuccess': 'overview.actionLoginOk',
+        'AuthFailure': 'overview.actionLoginFailed',
+        'CapabilityDenied': 'overview.actionDenied',
+        'RateLimited': 'overview.actionRateLimited',
+        'WorkflowRun': 'overview.actionWorkflowRun',
+        'TriggerFired': 'overview.actionTriggerFired',
+        'SkillInstalled': 'overview.actionSkillInstalled',
+        'McpConnected': 'overview.actionMcpConnected'
       };
-      return map[action] || action.replace(/([A-Z])/g, ' $1').trim();
+      return map[action] ? this.t(map[action], action.replace(/([A-Z])/g, ' $1').trim()) : action.replace(/([A-Z])/g, ' $1').trim();
     },
 
     // Audit action icon (small inline SVG)

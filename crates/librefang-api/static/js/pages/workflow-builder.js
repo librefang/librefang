@@ -3,6 +3,7 @@
 
 function workflowBuilder() {
   return {
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     // -- Canvas state --
     nodes: [],
     connections: [],
@@ -44,8 +45,66 @@ function workflowBuilder() {
     _didConnect: false,
     _didPan: false,
 
+    interpolate(text, params) {
+      if (!params || typeof text !== 'string') return text;
+      return text.replace(/\{(\w+)\}/g, function(match, key) {
+        return params[key] !== undefined ? params[key] : match;
+      });
+    },
+
+    t(key, fallback, params) {
+      if (typeof i18n === 'undefined') return this.interpolate(fallback || key, params);
+      var translated = i18n.t(key, params);
+      if (!translated || translated.charAt(0) === '[') {
+        return this.interpolate(fallback || key, params);
+      }
+      return translated;
+    },
+
+    localizeNodeTypes() {
+      var keyMap = {
+        agent: 'agentStep',
+        parallel: 'parallelFanOut',
+        condition: 'condition',
+        loop: 'loop',
+        collect: 'collect',
+        start: 'start',
+        end: 'end'
+      };
+      for (var i = 0; i < this.nodeTypes.length; i++) {
+        var type = this.nodeTypes[i];
+        var key = keyMap[type.type];
+        if (key) {
+          type.label = this.t('workflowBuilder.nodeType.' + key, type.label);
+        }
+      }
+    },
+
+    nodeSubLabel(node) {
+      if (node.type === 'agent') return node.config.agent_name || this.t('workflowBuilder.noAgent', 'No agent');
+      if (node.type === 'condition') return node.config.expression || this.t('workflowBuilder.noCondition', 'No condition');
+      if (node.type === 'loop') {
+        return this.t('workflowBuilder.maxIterationsShort', 'max {count} iters', {
+          count: node.config.max_iterations || 5
+        });
+      }
+      if (node.type === 'parallel') {
+        return this.t('workflowBuilder.branchesShort', '{count} branches', {
+          count: node.config.fan_count || 3
+        });
+      }
+      if (node.type === 'collect') return this.t('workflowBuilder.strategy.' + (node.config.strategy || 'all'), node.config.strategy || 'all');
+      return '';
+    },
+
     async init() {
       var self = this;
+      window.addEventListener('i18n-changed', function(event) {
+        self._currentLang = event.detail.language;
+        self.localizeNodeTypes();
+        self.scheduleRender();
+      });
+      self.localizeNodeTypes();
       // Load agents for the agent step dropdown
       try {
         var list = await LibreFangAPI.get('/api/agents');
@@ -169,11 +228,7 @@ function workflowBuilder() {
         subLabel.setAttribute('x', '50'); subLabel.setAttribute('y', node.height / 2 + 12);
         subLabel.setAttribute('fill', 'var(--text-dim)');
         subLabel.setAttribute('style', 'font-size:10px;pointer-events:none');
-        if (node.type === 'agent') subLabel.textContent = node.config.agent_name || 'No agent';
-        else if (node.type === 'condition') subLabel.textContent = node.config.expression || 'No condition';
-        else if (node.type === 'loop') subLabel.textContent = 'max ' + (node.config.max_iterations || 5) + ' iters';
-        else if (node.type === 'parallel') subLabel.textContent = (node.config.fan_count || 3) + ' branches';
-        else if (node.type === 'collect') subLabel.textContent = node.config.strategy || 'all';
+        subLabel.textContent = self.nodeSubLabel(node);
         g.appendChild(subLabel);
 
         // Input ports
@@ -232,7 +287,11 @@ function workflowBuilder() {
       if (type === 'agent') {
         node.config = { agent_name: '', prompt: '{{input}}', model: '' };
       } else if (type === 'condition') {
-        node.config = { expression: '', true_label: 'Yes', false_label: 'No' };
+        node.config = {
+          expression: '',
+          true_label: this.t('workflowBuilder.branch.true', 'Yes'),
+          false_label: this.t('workflowBuilder.branch.false', 'No')
+        };
       } else if (type === 'loop') {
         node.config = { max_iterations: 5, until: '' };
       } else if (type === 'parallel') {
@@ -261,7 +320,7 @@ function workflowBuilder() {
       var newNode = this.addNode(node.type, node.x + 30, node.y + 30);
       if (newNode) {
         newNode.config = JSON.parse(JSON.stringify(node.config));
-        newNode.label = node.label + ' copy';
+        newNode.label = this.t('workflowBuilder.copySuffix', '{label} copy', { label: node.label });
       }
     },
 
@@ -473,7 +532,7 @@ function workflowBuilder() {
       var self = this;
       var lines = [];
       lines.push('[workflow]');
-      lines.push('name = "' + (this.workflowName || 'untitled') + '"');
+      lines.push('name = "' + (this.workflowName || this.t('workflowBuilder.untitled', 'untitled')) + '"');
       lines.push('description = "' + (this.workflowDescription || '') + '"');
       lines.push('');
 
@@ -559,14 +618,25 @@ function workflowBuilder() {
       }
       try {
         await LibreFangAPI.post('/api/workflows', {
-          name: this.workflowName || 'untitled',
+          name: this.workflowName || this.t('workflowBuilder.untitled', 'untitled'),
           description: this.workflowDescription || '',
           steps: steps
         });
-        LibreFangToast.success('Workflow saved!');
+        LibreFangToast.success(this.t('workflowBuilder.saved', 'Workflow saved!'));
         this.showSaveModal = false;
       } catch(e) {
-        LibreFangToast.error('Failed to save: ' + e.message);
+        LibreFangToast.error(this.t('workflowBuilder.saveFailed', 'Failed to save: {message}', {
+          message: e.message || this.t('status.unknown', 'unknown')
+        }));
+      }
+    },
+
+    async copyToml() {
+      try {
+        await navigator.clipboard.writeText(this.tomlOutput);
+        LibreFangToast.success(this.t('workflowBuilder.copied', 'Copied!'));
+      } catch(e) {
+        LibreFangToast.error(this.t('workflowBuilder.copyFailed', 'Copy failed'));
       }
     },
 

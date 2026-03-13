@@ -1,6 +1,12 @@
 // LibreFang App — Alpine.js init, hash router, global store
 'use strict';
 
+if (typeof i18n !== 'undefined') {
+  i18n.init().then(function(lang) {
+    console.log('LibreFang i18n initialized:', lang);
+  });
+}
+
 // Marked.js configuration
 if (typeof marked !== 'undefined') {
   marked.setOptions({
@@ -36,9 +42,9 @@ function copyCode(btn) {
   var code = btn.nextElementSibling;
   if (code) {
     navigator.clipboard.writeText(code.textContent).then(function() {
-      btn.textContent = 'Copied!';
+      btn.textContent = typeof i18n !== 'undefined' ? i18n.t('btn.copied') : 'Copied!';
       btn.classList.add('copied');
-      setTimeout(function() { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+      setTimeout(function() { btn.textContent = typeof i18n !== 'undefined' ? i18n.t('btn.copy') : 'Copy'; btn.classList.remove('copied'); }, 1500);
     });
   }
 }
@@ -240,6 +246,11 @@ function app() {
           window.location.hash = hash;
         }
         if (validPages.indexOf(hash) >= 0) self.page = hash;
+        if (typeof i18n !== 'undefined') {
+          self.$nextTick(function() {
+            i18n.updateDOM();
+          });
+        }
       }
       window.addEventListener('hashchange', handleHash);
       handleHash();

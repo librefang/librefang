@@ -3,6 +3,7 @@
 
 function skillsPage() {
   return {
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     tab: 'installed',
     skills: [],
     loading: true,
@@ -56,22 +57,51 @@ function skillsPage() {
       { id: 'docs', name: 'PDF & Documents' },
     ],
 
+    init() {
+      var self = this;
+      window.addEventListener('i18n-changed', function(event) {
+        self._currentLang = event.detail.language;
+      });
+    },
+
+    interpolate(text, params) {
+      if (!params || typeof text !== 'string') return text;
+      return text.replace(/\{(\w+)\}/g, function(match, key) {
+        return params[key] !== undefined ? params[key] : match;
+      });
+    },
+
+    t(key, fallback, params) {
+      if (typeof i18n === 'undefined') return this.interpolate(fallback || key, params);
+      var translated = i18n.t(key, params);
+      if (!translated || translated.charAt(0) === '[') {
+        return this.interpolate(fallback || key, params);
+      }
+      return translated;
+    },
+
+    categoryLabel(cat) {
+      return this.t('skillsPage.category.' + cat.id, cat.name);
+    },
+
     runtimeBadge: function(rt) {
       var r = (rt || '').toLowerCase();
       if (r === 'python' || r === 'py') return { text: 'PY', cls: 'runtime-badge-py' };
       if (r === 'node' || r === 'nodejs' || r === 'js' || r === 'javascript') return { text: 'JS', cls: 'runtime-badge-js' };
       if (r === 'wasm' || r === 'webassembly') return { text: 'WASM', cls: 'runtime-badge-wasm' };
-      if (r === 'prompt_only' || r === 'prompt' || r === 'promptonly') return { text: 'PROMPT', cls: 'runtime-badge-prompt' };
+      if (r === 'prompt_only' || r === 'prompt' || r === 'promptonly') {
+        return { text: this.t('skillsPage.runtime.prompt', 'PROMPT'), cls: 'runtime-badge-prompt' };
+      }
       return { text: r.toUpperCase().substring(0, 4), cls: 'runtime-badge-prompt' };
     },
 
     sourceBadge: function(source) {
-      if (!source) return { text: 'Local', cls: 'badge-dim' };
+      if (!source) return { text: this.t('skillsPage.source.local', 'Local'), cls: 'badge-dim' };
       switch (source.type) {
-        case 'clawhub': return { text: 'ClawHub', cls: 'badge-info' };
-        case 'openclaw': return { text: 'OpenClaw', cls: 'badge-info' };
-        case 'bundled': return { text: 'Built-in', cls: 'badge-success' };
-        default: return { text: 'Local', cls: 'badge-dim' };
+        case 'clawhub': return { text: this.t('skillsPage.source.clawhub', 'ClawHub'), cls: 'badge-info' };
+        case 'openclaw': return { text: this.t('skillsPage.source.openclaw', 'OpenClaw'), cls: 'badge-info' };
+        case 'bundled': return { text: this.t('skillsPage.source.bundled', 'Built-in'), cls: 'badge-success' };
+        default: return { text: this.t('skillsPage.source.local', 'Local'), cls: 'badge-dim' };
       }
     },
 
@@ -80,6 +110,59 @@ function skillsPage() {
       if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
       if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
       return n.toString();
+    },
+
+    toolCountText(n) {
+      return this.t('skillsPage.toolCount', '{count} tool(s)', { count: n || 0 });
+    },
+
+    promptContextText() {
+      return this.t('skillsPage.promptContext', '(prompt context)');
+    },
+
+    searchLoadingText() {
+      return this.clawhubSearch
+        ? this.t('skillsPage.searching', 'Searching ClawHub...')
+        : this.t('skillsPage.loading', 'Loading skills...');
+    },
+
+    resultsText() {
+      return this.t('skillsPage.resultsFor', '{count} result(s) for "{query}"', {
+        count: this.clawhubResults.length,
+        query: this.clawhubSearch
+      });
+    },
+
+    downloadsText(n) {
+      return this.t('skillsPage.downloads', '{count} downloads', {
+        count: this.formatDownloads(n)
+      });
+    },
+
+    starsText(n) {
+      return this.t('skillsPage.stars', '{count} stars', { count: n || 0 });
+    },
+
+    toolsAvailableText(n) {
+      return this.t('skillsPage.toolsAvailable', '{count} tool(s) available', { count: n || 0 });
+    },
+
+    andMoreText(n) {
+      return this.t('skillsPage.andMore', '... and {count} more', { count: n || 0 });
+    },
+
+    envText(values) {
+      return this.t('skillsPage.envPrefix', 'Env: {value}', {
+        value: Array.isArray(values) ? values.join(', ') : values
+      });
+    },
+
+    quickStartName(qs) {
+      return this.t('skillsPage.quickStartSkill.' + qs.name + '.name', qs.name);
+    },
+
+    quickStartDescription(qs) {
+      return this.t('skillsPage.quickStartSkill.' + qs.name + '.description', qs.description);
     },
 
     async loadSkills() {
@@ -103,7 +186,7 @@ function skillsPage() {
         });
       } catch(e) {
         this.skills = [];
-        this.loadError = e.message || 'Could not load skills.';
+        this.loadError = e.message || this.t('skillsPage.loadError', 'Could not load skills.');
       }
       this.loading = false;
     },
@@ -139,7 +222,7 @@ function skillsPage() {
         if (data.error) this.clawhubError = data.error;
       } catch(e) {
         this.clawhubResults = [];
-        this.clawhubError = e.message || 'Search failed';
+        this.clawhubError = e.message || this.t('skillsPage.searchFailed', 'Search failed');
       }
       this.clawhubLoading = false;
     },
@@ -173,7 +256,7 @@ function skillsPage() {
         this._browseCache[ckey] = { ts: Date.now(), data: data };
       } catch(e) {
         this.clawhubBrowseResults = [];
-        this.clawhubError = e.message || 'Browse failed';
+        this.clawhubError = e.message || this.t('skillsPage.browseFailed', 'Browse failed');
       }
       this.clawhubLoading = false;
     },
@@ -201,7 +284,7 @@ function skillsPage() {
         var data = await LibreFangAPI.get('/api/clawhub/skill/' + encodeURIComponent(slug));
         this.skillDetail = data;
       } catch(e) {
-        LibreFangToast.error('Failed to load skill details');
+        LibreFangToast.error(this.t('skillsPage.detailFailed', 'Failed to load skill details'));
       }
       this.detailLoading = false;
     },
@@ -226,7 +309,7 @@ function skillsPage() {
         this.skillCodeFilename = data.filename || 'source';
         this.showSkillCode = true;
       } catch(e) {
-        LibreFangToast.error('Could not load skill source code');
+        LibreFangToast.error(this.t('skillsPage.codeFailed', 'Could not load skill source code'));
       }
       this.skillCodeLoading = false;
     },
@@ -239,9 +322,14 @@ function skillsPage() {
         var data = await LibreFangAPI.post('/api/clawhub/install', { slug: slug });
         this.installResult = data;
         if (data.warnings && data.warnings.length > 0) {
-          LibreFangToast.success('Skill "' + data.name + '" installed with ' + data.warnings.length + ' warning(s)');
+          LibreFangToast.success(this.t('skillsPage.installedWithWarnings', 'Skill "{name}" installed with {count} warning(s)', {
+            name: data.name,
+            count: data.warnings.length
+          }));
         } else {
-          LibreFangToast.success('Skill "' + data.name + '" installed successfully');
+          LibreFangToast.success(this.t('skillsPage.installedSuccess', 'Skill "{name}" installed successfully', {
+            name: data.name
+          }));
         }
         // Update installed state in detail modal if open
         if (this.skillDetail && this.skillDetail.slug === slug) {
@@ -249,13 +337,15 @@ function skillsPage() {
         }
         await this.loadSkills();
       } catch(e) {
-        var msg = e.message || 'Install failed';
+        var msg = e.message || this.t('skillsPage.installFailedShort', 'Install failed');
         if (msg.includes('already_installed')) {
-          LibreFangToast.error('Skill is already installed');
+          LibreFangToast.error(this.t('skillsPage.alreadyInstalledToast', 'Skill is already installed'));
         } else if (msg.includes('SecurityBlocked')) {
-          LibreFangToast.error('Skill blocked by security scan');
+          LibreFangToast.error(this.t('skillsPage.securityBlocked', 'Skill blocked by security scan'));
         } else {
-          LibreFangToast.error('Install failed: ' + msg);
+          LibreFangToast.error(this.t('skillsPage.installFailed', 'Install failed: {message}', {
+            message: msg
+          }));
         }
       }
       this.installingSlug = null;
@@ -264,13 +354,20 @@ function skillsPage() {
     // Uninstall
     uninstallSkill: function(name) {
       var self = this;
-      LibreFangToast.confirm('Uninstall Skill', 'Uninstall skill "' + name + '"? This cannot be undone.', async function() {
+      LibreFangToast.confirm(
+        this.t('skillsPage.uninstallTitle', 'Uninstall Skill'),
+        this.t('skillsPage.uninstallConfirm', 'Uninstall skill "{name}"? This cannot be undone.', {
+          name: name
+        }),
+        async function() {
         try {
           await LibreFangAPI.post('/api/skills/uninstall', { name: name });
-          LibreFangToast.success('Skill "' + name + '" uninstalled');
+          LibreFangToast.success(self.t('skillsPage.uninstalled', 'Skill "{name}" uninstalled', { name: name }));
           await self.loadSkills();
         } catch(e) {
-          LibreFangToast.error('Failed to uninstall skill: ' + e.message);
+          LibreFangToast.error(self.t('skillsPage.uninstallFailed', 'Failed to uninstall skill: {message}', {
+            message: e.message || e
+          }));
         }
       });
     },
@@ -284,11 +381,13 @@ function skillsPage() {
           runtime: 'prompt_only',
           prompt_context: skill.prompt_context || skill.description
         });
-        LibreFangToast.success('Skill "' + skill.name + '" created');
+        LibreFangToast.success(this.t('skillsPage.created', 'Skill "{name}" created', { name: skill.name }));
         this.tab = 'installed';
         await this.loadSkills();
       } catch(e) {
-        LibreFangToast.error('Failed to create skill: ' + e.message);
+        LibreFangToast.error(this.t('skillsPage.createFailed', 'Failed to create skill: {message}', {
+          message: e.message || e
+        }));
       }
     },
 

@@ -13,6 +13,7 @@ function wizardTomlBasicEscape(s) {
 
 function wizardPage() {
   return {
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     step: 1,
     totalSteps: 6,
     loading: false,
@@ -157,6 +158,18 @@ function wizardPage() {
       if (cat === 'All') return this.templates;
       return this.templates.filter(function(t) { return t.category === cat; });
     },
+    categoryLabel(category) {
+      var key = category === 'All' ? 'all' : category.toLowerCase();
+      return this.t('category.' + key, category);
+    },
+    templateName(tpl) {
+      var key = tpl.name.replace(/\s+/g, '');
+      return this.t('template.' + key + '.name', tpl.name);
+    },
+    templateDescription(tpl) {
+      var key = tpl.name.replace(/\s+/g, '');
+      return this.t('template.' + key + '.desc', tpl.description);
+    },
 
     // Step 3: Profile/tool descriptions
     profileDescriptions: {
@@ -168,7 +181,13 @@ function wizardPage() {
       creative: { label: 'Creative', desc: 'Full tools with creative emphasis' },
       full: { label: 'Full', desc: 'All 35+ tools' }
     },
-    profileInfo: function(name) { return this.profileDescriptions[name] || { label: name, desc: '' }; },
+    profileInfo: function(name) {
+      var fallback = this.profileDescriptions[name] || { label: name, desc: '' };
+      return {
+        label: this.t('profile.' + name + '.label', fallback.label),
+        desc: this.t('profile.' + name + '.desc', fallback.desc)
+      };
+    },
 
     // Step 4: Try It chat
     tryItMessages: [],
@@ -197,7 +216,12 @@ function wizardPage() {
         this.tryItMessages.push({ role: 'agent', text: res.response || '(no response)' });
         localStorage.setItem('of-first-msg', 'true');
       } catch(e) {
-        this.tryItMessages.push({ role: 'agent', text: 'Error: ' + (e.message || 'Could not reach agent') });
+        this.tryItMessages.push({
+          role: 'agent',
+          text: this.t('agentChat.errorPrefix', 'Error: {message}', {
+            message: e.message || 'Could not reach agent'
+          })
+        });
       }
       this.tryItSending = false;
     },
@@ -247,6 +271,30 @@ function wizardPage() {
       channel: ''
     },
 
+    init() {
+      var self = this;
+      window.addEventListener('i18n-changed', function(event) {
+        self._currentLang = event.detail.language;
+      });
+    },
+
+    interpolate(text, params) {
+      if (!params || typeof text !== 'string') return text;
+      return text.replace(/\{(\w+)\}/g, function(match, key) {
+        return params[key] !== undefined ? params[key] : match;
+      });
+    },
+
+    t(key, fallback, params) {
+      var lang = this._currentLang;
+      if (typeof i18n === 'undefined') return this.interpolate(fallback || key, params);
+      var translated = i18n.t(key, params);
+      if (!translated || translated.charAt(0) === '[') {
+        return this.interpolate(fallback || key, params);
+      }
+      return translated;
+    },
+
     // ── Lifecycle ──
 
     async loadData() {
@@ -255,7 +303,7 @@ function wizardPage() {
       try {
         await this.loadProviders();
       } catch(e) {
-        this.error = e.message || 'Could not load setup data.';
+        this.error = e.message || this.t('setupWizard.loading', 'Loading...');
       }
       this.loading = false;
     },
@@ -288,7 +336,14 @@ function wizardPage() {
     },
 
     stepLabel(n) {
-      var labels = ['Welcome', 'Provider', 'Agent', 'Try It', 'Channel', 'Done'];
+      var labels = [
+        this.t('setupWizard.welcomeStep', 'Welcome'),
+        this.t('setupWizard.providerStep', 'Provider'),
+        this.t('setupWizard.agentStep', 'Agent'),
+        this.t('setupWizard.tryItStep', 'Try It'),
+        this.t('setupWizard.channelStep', 'Channel'),
+        this.t('setupWizard.doneStep', 'Done')
+      ];
       return labels[n - 1] || '';
     },
 
@@ -382,7 +437,7 @@ function wizardPage() {
       if (!provider) return;
       var key = this.apiKeyInput.trim();
       if (!key) {
-        LibreFangToast.error('Please enter an API key');
+        LibreFangToast.error(this.t('setupWizard.pleaseEnterApiKey', 'Please enter an API key'));
         return;
       }
       this.savingKey = true;
@@ -391,12 +446,16 @@ function wizardPage() {
         this.apiKeyInput = '';
         this.keySaved = true;
         this.setupSummary.provider = provider.display_name;
-        LibreFangToast.success('API key saved for ' + provider.display_name);
+        LibreFangToast.success(this.t('setupWizard.apiKeySavedFor', 'API key saved for {provider}', {
+          provider: provider.display_name
+        }));
         await this.loadProviders();
         // Auto-test after saving
         await this.testKey();
       } catch(e) {
-        LibreFangToast.error('Failed to save key: ' + e.message);
+        LibreFangToast.error(this.t('setupWizard.saveKeyFailed', 'Failed to save key: {message}', {
+          message: e.message
+        }));
       }
       this.savingKey = false;
     },
@@ -410,13 +469,15 @@ function wizardPage() {
         var result = await LibreFangAPI.post('/api/providers/' + encodeURIComponent(provider.id) + '/test', {});
         this.testResult = result;
         if (result.status === 'ok') {
-          LibreFangToast.success(provider.display_name + ' connected (' + (result.latency_ms || '?') + 'ms)');
+          LibreFangToast.success(provider.display_name + ' - ' + this.t('setupWizard.connectedSuccessfully', 'Connected successfully') + ' (' + (result.latency_ms || '?') + 'ms)');
         } else {
-          LibreFangToast.error(provider.display_name + ': ' + (result.error || 'Connection failed'));
+          LibreFangToast.error(provider.display_name + ': ' + (result.error || this.t('setupWizard.connectionFailed', 'Connection failed')));
         }
       } catch(e) {
         this.testResult = { status: 'error', error: e.message };
-        LibreFangToast.error('Test failed: ' + e.message);
+        LibreFangToast.error(this.t('setupWizard.testFailed', 'Test failed: {message}', {
+          message: e.message
+        }));
       }
       this.testingProvider = false;
     },
@@ -431,14 +492,14 @@ function wizardPage() {
           this.claudeCodeDetected = true;
           this.keySaved = true;
           this.setupSummary.provider = 'Claude Code';
-          LibreFangToast.success('Claude Code detected (' + (result.latency_ms || '?') + 'ms)');
+          LibreFangToast.success(this.t('setupWizard.claudeCodeDetected', 'Claude Code detected') + ' (' + (result.latency_ms || '?') + 'ms)');
         } else {
-          this.testResult = { status: 'error', error: 'Claude Code CLI not detected' };
-          LibreFangToast.error('Claude Code CLI not detected. Make sure you\'ve run: npm install -g @anthropic-ai/claude-code && claude auth');
+          this.testResult = { status: 'error', error: this.t('setupWizard.claudeCodeNotDetected', 'Claude Code CLI not detected. Make sure you\'ve run: npm install -g @anthropic-ai/claude-code && claude auth') };
+          LibreFangToast.error(this.t('setupWizard.claudeCodeNotDetected', 'Claude Code CLI not detected. Make sure you\'ve run: npm install -g @anthropic-ai/claude-code && claude auth'));
         }
       } catch(e) {
         this.testResult = { status: 'error', error: e.message };
-        LibreFangToast.error('Claude Code CLI not detected. Make sure you\'ve run: npm install -g @anthropic-ai/claude-code && claude auth');
+        LibreFangToast.error(this.t('setupWizard.claudeCodeNotDetected', 'Claude Code CLI not detected. Make sure you\'ve run: npm install -g @anthropic-ai/claude-code && claude auth'));
       }
       this.testingProvider = false;
     },
@@ -458,7 +519,7 @@ function wizardPage() {
       if (!tpl) return;
       var name = this.agentName.trim();
       if (!name) {
-        LibreFangToast.error('Please enter a name for your agent');
+        LibreFangToast.error(this.t('setupWizard.pleaseEnterAgentName', 'Please enter a name for your agent'));
         return;
       }
 
@@ -485,13 +546,19 @@ function wizardPage() {
         if (res.agent_id) {
           this.createdAgent = { id: res.agent_id, name: res.name || name };
           this.setupSummary.agent = res.name || name;
-          LibreFangToast.success('Agent "' + (res.name || name) + '" created');
+          LibreFangToast.success(this.t('setupWizard.agentCreatedToast', 'Agent "{name}" created', {
+            name: res.name || name
+          }));
           await Alpine.store('app').refreshAgents();
         } else {
-          LibreFangToast.error('Failed: ' + (res.error || 'Unknown error'));
+          LibreFangToast.error(this.t('setupWizard.agentCreateFailed', 'Failed to create agent: {message}', {
+            message: res.error || this.t('status.unknown', 'Unknown error')
+          }));
         }
       } catch(e) {
-        LibreFangToast.error('Failed to create agent: ' + e.message);
+        LibreFangToast.error(this.t('setupWizard.agentCreateFailed', 'Failed to create agent: {message}', {
+          message: e.message
+        }));
       }
       this.creatingAgent = false;
     },
@@ -538,7 +605,9 @@ function wizardPage() {
       if (!ch) return;
       var token = this.channelToken.trim();
       if (!token) {
-        LibreFangToast.error('Please enter the ' + ch.token_label);
+        LibreFangToast.error(this.t('setupWizard.pleaseEnterToken', 'Please enter the {label}', {
+          label: ch.token_label
+        }));
         return;
       }
       this.configuringChannel = true;
@@ -549,9 +618,13 @@ function wizardPage() {
         await LibreFangAPI.post('/api/channels/' + ch.name + '/configure', { fields: fields });
         this.channelConfigured = true;
         this.setupSummary.channel = ch.display_name;
-        LibreFangToast.success(ch.display_name + ' configured and activated.');
+        LibreFangToast.success(this.t('setupWizard.configuredAndActivated', '{channel} configured and activated.', {
+          channel: ch.display_name
+        }));
       } catch(e) {
-        LibreFangToast.error('Failed: ' + (e.message || 'Unknown error'));
+        LibreFangToast.error(this.t('setupWizard.channelConfigFailed', 'Failed: {message}', {
+          message: e.message || 'Unknown error'
+        }));
       }
       this.configuringChannel = false;
     },

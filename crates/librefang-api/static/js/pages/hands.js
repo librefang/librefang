@@ -3,6 +3,7 @@
 
 function handsPage() {
   return {
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     tab: 'available',
     hands: [],
     instances: [],
@@ -28,6 +29,29 @@ function handsPage() {
     detectedPlatform: 'linux',
     installPlatforms: {},
 
+    init() {
+      var self = this;
+      window.addEventListener('i18n-changed', function(event) {
+        self._currentLang = event.detail.language;
+      });
+    },
+
+    interpolate(text, params) {
+      if (!params || typeof text !== 'string') return text;
+      return text.replace(/\{(\w+)\}/g, function(match, key) {
+        return params[key] !== undefined ? params[key] : match;
+      });
+    },
+
+    t(key, fallback, params) {
+      if (typeof i18n === 'undefined') return this.interpolate(fallback || key, params);
+      var translated = i18n.t(key, params);
+      if (!translated || translated.charAt(0) === '[') {
+        return this.interpolate(fallback || key, params);
+      }
+      return translated;
+    },
+
     async loadData() {
       this.loading = true;
       this.loadError = '';
@@ -36,7 +60,7 @@ function handsPage() {
         this.hands = data.hands || [];
       } catch(e) {
         this.hands = [];
-        this.loadError = e.message || 'Could not load hands.';
+        this.loadError = e.message || this.t('handsPage.loadError', 'Could not load hands.');
       }
       this.loading = false;
     },
@@ -113,7 +137,9 @@ function handsPage() {
         var hasReqs = data.requirements && data.requirements.length > 0;
         this.setupStep = hasReqs ? 1 : 2;
       } catch(e) {
-        this.showToast('Could not load hand details: ' + (e.message || 'unknown error'));
+        this.showToast(this.t('handsPage.detailLoadFailed', 'Could not load hand details: {message}', {
+          message: e.message || this.t('handsPage.unknownError', 'unknown error')
+        }));
       }
       this.setupLoading = false;
     },
@@ -137,7 +163,7 @@ function handsPage() {
       var handId = this.setupWizard.id;
       var missing = (this.setupWizard.requirements || []).filter(function(r) { return !r.satisfied; });
       if (missing.length === 0) {
-        this.showToast('All dependencies already installed!');
+        this.showToast(this.t('handsPage.allDepsInstalled', 'All dependencies already installed!'));
         return;
       }
 
@@ -175,7 +201,7 @@ function handsPage() {
         var failed = results.filter(function(r) { return r.status === 'error' || r.status === 'timeout'; }).length;
 
         if (data.requirements_met) {
-          this.showToast('All dependencies installed successfully!');
+          this.showToast(this.t('handsPage.installDepsSuccess', 'All dependencies installed successfully!'));
           // Auto-advance to step 2 after a short delay
           var self = this;
           setTimeout(function() {
@@ -183,7 +209,11 @@ function handsPage() {
             self.setupNextStep();
           }, 1500);
         } else if (failed > 0) {
-          this.installProgress.error = failed + ' dependency(ies) failed to install. Check the details below.';
+          this.installProgress.error = this.t(
+            'handsPage.installDepsFailedCount',
+            '{count} dependency(ies) failed to install. Check the details below.',
+            { count: failed }
+          );
         }
       } catch(e) {
         this.installProgress = {
@@ -192,7 +222,7 @@ function handsPage() {
           total: missing.length,
           currentLabel: '',
           results: [],
-          error: e.message || 'Installation request failed'
+          error: e.message || this.t('handsPage.installRequestFailed', 'Installation request failed')
         };
       }
     },
@@ -227,10 +257,12 @@ function handsPage() {
           this.setupWizard.requirements_met = data.requirements_met;
         }
         if (data.requirements_met) {
-          this.showToast('All dependencies satisfied!');
+          this.showToast(this.t('handsPage.allDepsSatisfied', 'All dependencies satisfied!'));
         }
       } catch(e) {
-        this.showToast('Check failed: ' + (e.message || 'unknown'));
+        this.showToast(this.t('handsPage.checkFailed', 'Check failed: {message}', {
+          message: e.message || this.t('handsPage.unknownError', 'unknown')
+        }));
       }
       this.setupChecking = false;
     },
@@ -270,6 +302,12 @@ function handsPage() {
       });
     },
 
+    copyButtonText(text) {
+      return this.clipboardMsg === text
+        ? this.t('handsPage.copied', 'Copied!')
+        : this.t('handsPage.copy', 'Copy');
+    },
+
     get setupReqsMet() {
       if (!this.setupWizard || !this.setupWizard.requirements) return 0;
       var count = 0;
@@ -294,6 +332,80 @@ function handsPage() {
 
     get setupHasSettings() {
       return this.setupWizard && this.setupWizard.settings && this.setupWizard.settings.length > 0;
+    },
+
+    availabilityText(hand) {
+      return hand.requirements_met
+        ? this.t('handsPage.ready', 'Ready')
+        : this.t('handsPage.setupNeeded', 'Setup needed');
+    },
+
+    toolsCountText(hand) {
+      return this.t('handsPage.toolsCount', '{count} tool(s)', {
+        count: hand && hand.tools ? hand.tools.length : 0
+      });
+    },
+
+    metricsCountText(hand) {
+      return this.t('handsPage.metricsCount', '{count} metric(s)', {
+        count: hand ? hand.dashboard_metrics || 0 : 0
+      });
+    },
+
+    instanceStatusText(inst) {
+      var status = inst && inst.status ? inst.status : '';
+      if (status === 'Active') return this.t('handsPage.status.active', 'Active');
+      if (status === 'Paused') return this.t('handsPage.status.paused', 'Paused');
+      if (status === 'Inactive') return this.t('handsPage.status.inactive', 'Inactive');
+      if (status.indexOf('Error') === 0) return this.t('handsPage.status.error', 'Error');
+      return status || this.t('status.unknown', 'unknown');
+    },
+
+    activatedAtText(inst) {
+      return this.t('handsPage.activatedAt', 'Activated: {time}', {
+        time: new Date(inst.activated_at).toLocaleString()
+      });
+    },
+
+    agentIdText(inst) {
+      return this.t('handsPage.agentLabel', 'Agent: {id}', {
+        id: inst.agent_id || ''
+      });
+    },
+
+    statsErrorText(message) {
+      return this.t('handsPage.statsError', 'Could not load stats: {message}', {
+        message: message || this.t('handsPage.unknownError', 'unknown error')
+      });
+    },
+
+    progressReadyText() {
+      return this.t('handsPage.progressReady', '{ready} of {total} ready', {
+        ready: this.setupReqsMet,
+        total: this.setupReqsTotal
+      });
+    },
+
+    progressHintText() {
+      return this.setupAllReqsMet
+        ? this.t('handsPage.progressAllSet', 'All set!')
+        : this.t('handsPage.progressInstallMissing', 'Install missing dependencies above');
+    },
+
+    settingAvailabilityText(opt) {
+      return opt.available
+        ? this.t('handsPage.optionReady', 'Ready')
+        : this.t('handsPage.optionMissing', 'Missing');
+    },
+
+    toggleSettingText(settingKey) {
+      return this.settingsValues[settingKey] === 'true'
+        ? this.t('handsPage.enabled', 'Enabled')
+        : this.t('handsPage.disabled', 'Disabled');
+    },
+
+    browserUrlText() {
+      return this.browserViewer ? (this.browserViewer.url || 'about:blank') : 'about:blank';
     },
 
     setupNextStep() {
@@ -335,12 +447,17 @@ function handsPage() {
       this.activatingId = handId;
       try {
         var data = await LibreFangAPI.post('/api/hands/' + handId + '/activate', { config: config });
-        this.showToast('Hand "' + handId + '" activated as ' + (data.agent_name || data.instance_id));
+        this.showToast(this.t('handsPage.activated', 'Hand "{hand}" activated as {name}', {
+          hand: handId,
+          name: data.agent_name || data.instance_id
+        }));
         this.closeSetupWizard();
         await this.loadActive();
         this.tab = 'active';
       } catch(e) {
-        this.showToast('Activation failed: ' + (e.message || 'unknown error'));
+        this.showToast(this.t('handsPage.activationFailed', 'Activation failed: {message}', {
+          message: e.message || this.t('handsPage.unknownError', 'unknown error')
+        }));
       }
       this.activatingId = null;
     },
@@ -352,7 +469,9 @@ function handsPage() {
     getSettingDisplayValue(setting) {
       var val = this.settingsValues[setting.key] || setting.default || '';
       if (setting.setting_type === 'toggle') {
-        return val === 'true' ? 'Enabled' : 'Disabled';
+        return val === 'true'
+          ? this.t('handsPage.enabled', 'Enabled')
+          : this.t('handsPage.disabled', 'Disabled');
       }
       if (setting.setting_type === 'select' && setting.options) {
         for (var i = 0; i < setting.options.length; i++) {
@@ -369,7 +488,9 @@ function handsPage() {
         await LibreFangAPI.post('/api/hands/instances/' + inst.instance_id + '/pause', {});
         inst.status = 'Paused';
       } catch(e) {
-        this.showToast('Pause failed: ' + (e.message || 'unknown error'));
+        this.showToast(this.t('handsPage.pauseFailed', 'Pause failed: {message}', {
+          message: e.message || this.t('handsPage.unknownError', 'unknown error')
+        }));
       }
     },
 
@@ -378,20 +499,29 @@ function handsPage() {
         await LibreFangAPI.post('/api/hands/instances/' + inst.instance_id + '/resume', {});
         inst.status = 'Active';
       } catch(e) {
-        this.showToast('Resume failed: ' + (e.message || 'unknown error'));
+        this.showToast(this.t('handsPage.resumeFailed', 'Resume failed: {message}', {
+          message: e.message || this.t('handsPage.unknownError', 'unknown error')
+        }));
       }
     },
 
     async deactivate(inst) {
       var self = this;
       var handName = inst.agent_name || inst.hand_id;
-      LibreFangToast.confirm('Deactivate Hand', 'Deactivate hand "' + handName + '"? This will kill its agent.', async function() {
+      LibreFangToast.confirm(
+        this.t('handsPage.deactivateTitle', 'Deactivate Hand'),
+        this.t('handsPage.deactivateConfirm', 'Deactivate hand "{name}"? This will kill its agent.', {
+          name: handName
+        }),
+        async function() {
         try {
           await LibreFangAPI.delete('/api/hands/instances/' + inst.instance_id);
           self.instances = self.instances.filter(function(i) { return i.instance_id !== inst.instance_id; });
-          LibreFangToast.success('Hand deactivated.');
+          LibreFangToast.success(self.t('handsPage.deactivated', 'Hand deactivated.'));
         } catch(e) {
-          LibreFangToast.error('Deactivation failed: ' + (e.message || 'unknown error'));
+          LibreFangToast.error(self.t('handsPage.deactivationFailed', 'Deactivation failed: {message}', {
+            message: e.message || self.t('handsPage.unknownError', 'unknown error')
+          }));
         }
       });
     },
@@ -401,7 +531,11 @@ function handsPage() {
         var data = await LibreFangAPI.get('/api/hands/instances/' + inst.instance_id + '/stats');
         inst._stats = data.metrics || {};
       } catch(e) {
-        inst._stats = { 'Error': { value: e.message || 'Could not load stats', format: 'text' } };
+        inst._stats = {};
+        inst._stats[this.t('handsPage.errorLabel', 'Error')] = {
+          value: this.statsErrorText(e.message),
+          format: 'text'
+        };
       }
     },
 
@@ -467,11 +601,11 @@ function handsPage() {
           this.browserViewer.content = data.content || '';
           this.browserViewer.error = '';
         } else {
-          this.browserViewer.error = 'No active browser session';
+          this.browserViewer.error = this.t('handsPage.noBrowserSession', 'No active browser session');
           this.browserViewer.screenshot = '';
         }
       } catch(e) {
-        this.browserViewer.error = e.message || 'Could not load browser state';
+        this.browserViewer.error = e.message || this.t('handsPage.browserLoadFailed', 'Could not load browser state');
       }
       this.browserViewer.loading = false;
     },
