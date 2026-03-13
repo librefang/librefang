@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/assets/logo.png" width="160" alt="LibreFang Logo" />
+  <img src="../public/assets/logo.png" width="160" alt="LibreFang Logo" />
 </p>
 
 <h1 align="center">LibreFang</h1>
@@ -11,15 +11,15 @@
 </p>
 
 <p align="center">
-  <strong>Sprachversionen:</strong> <a href="README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
+  <strong>Sprachversionen:</strong> <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
 </p>
 
 <p align="center">
   <a href="https://librefang.ai/">Website</a> &bull;
   <a href="https://github.com/librefang/librefang">GitHub</a> &bull;
-  <a href="GOVERNANCE.md">Governance</a> &bull;
-  <a href="CONTRIBUTING.md">Beiträge</a> &bull;
-  <a href="SECURITY.md">Sicherheit</a>
+  <a href="../GOVERNANCE.md">Governance</a> &bull;
+  <a href="../CONTRIBUTING.md">Beiträge</a> &bull;
+  <a href="../SECURITY.md">Sicherheit</a>
 </p>
 
 <p align="center">
@@ -28,6 +28,12 @@
   <img src="https://img.shields.io/badge/community-maintained-brightgreen?style=flat-square" alt="Community-gepflegt" />
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
   <img src="https://img.shields.io/github/forks/librefang/librefang?style=flat-square" alt="Forks" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/librefang/librefang/stargazers">
+    <img src="../public/assets/star-history.svg" alt="Star History" />
+  </a>
 </p>
 
 ---
@@ -201,7 +207,7 @@ Wir veröffentlichen schnell, wir beheben schnell. Ziel: Mitte 2026 ein stabiles
 
 ## Sicherheit
 
-Um Sicherheitslücken zu melden, folge dem privaten Berichtsprozess in [SECURITY.md](SECURITY.md).
+Um Sicherheitslücken zu melden, folge dem privaten Berichtsprozess in [SECURITY.md](../SECURITY.md).
 
 ---
 
@@ -216,10 +222,10 @@ MIT-Lizenz. Siehe LICENSE-Datei.
 - [GitHub](https://github.com/librefang/librefang)
 - [Website](https://librefang.ai/)
 - [Dokumentation](https://docs.librefang.ai)
-- [Beitragsleitfaden](CONTRIBUTING.md)
-- [Governance](GOVERNANCE.md)
-- [Maintainer](MAINTAINERS.md)
-- [Sicherheitsrichtlinie](SECURITY.md)
+- [Beitragsleitfaden](../CONTRIBUTING.md)
+- [Governance](../GOVERNANCE.md)
+- [Maintainer](../MAINTAINERS.md)
+- [Sicherheitsrichtlinie](../SECURITY.md)
 
 ---
 

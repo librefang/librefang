@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/assets/logo.png" width="160" alt="LibreFang Logo" />
+  <img src="../public/assets/logo.png" width="160" alt="LibreFang Logo" />
 </p>
 
 <h1 align="center">LibreFang</h1>
@@ -11,15 +11,15 @@
 </p>
 
 <p align="center">
-  <strong>Versiones en otros idiomas:</strong> <a href="README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
+  <strong>Versiones en otros idiomas:</strong> <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
 </p>
 
 <p align="center">
   <a href="https://librefang.ai/">Sitio web</a> &bull;
   <a href="https://github.com/librefang/librefang">GitHub</a> &bull;
-  <a href="GOVERNANCE.md">Gobernanza</a> &bull;
-  <a href="CONTRIBUTING.md">Contribuciones</a> &bull;
-  <a href="SECURITY.md">Seguridad</a>
+  <a href="../GOVERNANCE.md">Gobernanza</a> &bull;
+  <a href="../CONTRIBUTING.md">Contribuciones</a> &bull;
+  <a href="../SECURITY.md">Seguridad</a>
 </p>
 
 <p align="center">
@@ -28,6 +28,12 @@
   <img src="https://img.shields.io/badge/community-maintained-brightgreen?style=flat-square" alt="Mantenido por la comunidad" />
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
   <img src="https://img.shields.io/github/forks/librefang/librefang?style=flat-square" alt="Forks" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/librefang/librefang/stargazers">
+    <img src="../public/assets/star-history.svg" alt="Star History" />
+  </a>
 </p>
 
 ---
@@ -201,7 +207,7 @@ Publicamos rápido, corregimos rápido. Objetivo: lanzar un v1.0 sólido a media
 
 ## Seguridad
 
-Para reportar vulnerabilidades de seguridad, sigue el proceso de reporte privado en [SECURITY.md](SECURITY.md).
+Para reportar vulnerabilidades de seguridad, sigue el proceso de reporte privado en [SECURITY.md](../SECURITY.md).
 
 ---
 
@@ -216,10 +222,10 @@ Licencia MIT. Ver archivo LICENSE.
 - [GitHub](https://github.com/librefang/librefang)
 - [Sitio web](https://librefang.ai/)
 - [Documentación](https://docs.librefang.ai)
-- [Guía de contribuciones](CONTRIBUTING.md)
-- [Gobernanza](GOVERNANCE.md)
-- [Mantenedores](MAINTAINERS.md)
-- [Política de seguridad](SECURITY.md)
+- [Guía de contribuciones](../CONTRIBUTING.md)
+- [Gobernanza](../GOVERNANCE.md)
+- [Mantenedores](../MAINTAINERS.md)
+- [Política de seguridad](../SECURITY.md)
 
 ---
 

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/assets/logo.png" width="160" alt="LibreFang Logo" />
+  <img src="../public/assets/logo.png" width="160" alt="LibreFang Logo" />
 </p>
 
 <h1 align="center">LibreFang</h1>
@@ -11,15 +11,15 @@
 </p>
 
 <p align="center">
-  <strong>다국어 버전:</strong> <a href="README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
+  <strong>다국어 버전:</strong> <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
 </p>
 
 <p align="center">
   <a href="https://librefang.ai/">웹사이트</a> &bull;
   <a href="https://github.com/librefang/librefang">GitHub</a> &bull;
-  <a href="GOVERNANCE.md">거버넌스</a> &bull;
-  <a href="CONTRIBUTING.md">기여</a> &bull;
-  <a href="SECURITY.md">보안</a>
+  <a href="../GOVERNANCE.md">거버넌스</a> &bull;
+  <a href="../CONTRIBUTING.md">기여</a> &bull;
+  <a href="../SECURITY.md">보안</a>
 </p>
 
 <p align="center">
@@ -28,6 +28,12 @@
   <img src="https://img.shields.io/badge/community-maintained-brightgreen?style=flat-square" alt="커뮤니티 관리" />
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
   <img src="https://img.shields.io/github/forks/librefang/librefang?style=flat-square" alt="Forks" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/librefang/librefang/stargazers">
+    <img src="../public/assets/star-history.svg" alt="Star History" />
+  </a>
 </p>
 
 ---
@@ -201,7 +207,7 @@ LibreFang은 pre-1.0입니다. 아키텍처는 견고하고, 테스트 스위트
 
 ## 보안
 
-보안 취약점을 보고하려면 [SECURITY.md](SECURITY.md)의 비공개 보고 절차를 따르세요.
+보안 취약점을 보고하려면 [SECURITY.md](../SECURITY.md)의 비공개 보고 절차를 따르세요.
 
 ---
 
@@ -216,10 +222,10 @@ MIT 라이선스. LICENSE 파일을 참조하세요.
 - [GitHub](https://github.com/librefang/librefang)
 - [웹사이트](https://librefang.ai/)
 - [문서](https://docs.librefang.ai)
-- [기여 가이드](CONTRIBUTING.md)
-- [거버넌스](GOVERNANCE.md)
-- [메인테이너](MAINTAINERS.md)
-- [보안 정책](SECURITY.md)
+- [기여 가이드](../CONTRIBUTING.md)
+- [거버넌스](../GOVERNANCE.md)
+- [메인테이너](../MAINTAINERS.md)
+- [보안 정책](../SECURITY.md)
 
 ---
 

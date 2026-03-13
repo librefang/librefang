@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <strong>Translations:</strong> <a href="README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
+  <strong>Translations:</strong> <a href="README.md">English</a> | <a href="i18n/README.zh.md">中文</a> | <a href="i18n/README.ja.md">日本語</a> | <a href="i18n/README.ko.md">한국어</a> | <a href="i18n/README.es.md">Español</a> | <a href="i18n/README.de.md">Deutsch</a>
 </p>
 
 <p align="center">
@@ -35,7 +35,7 @@
 
 <p align="center">
   <a href="https://github.com/librefang/librefang/stargazers">
-    <img src="./public/assets/star-history.svg" width="500" alt="Star History" />
+    <img src="public/assets/star-history.svg" alt="Star History" />
   </a>
 </p>
 

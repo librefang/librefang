@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/assets/logo.png" width="160" alt="LibreFang Logo" />
+  <img src="../public/assets/logo.png" width="160" alt="LibreFang Logo" />
 </p>
 
 <h1 align="center">LibreFang</h1>
@@ -11,15 +11,15 @@
 </p>
 
 <p align="center">
-  <strong>多语言版本：</strong> <a href="README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
+  <strong>多语言版本：</strong> <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
 </p>
 
 <p align="center">
   <a href="https://librefang.ai/">网站</a> &bull;
   <a href="https://github.com/librefang/librefang">GitHub</a> &bull;
-  <a href="GOVERNANCE.md">治理</a> &bull;
-  <a href="CONTRIBUTING.md">贡献</a> &bull;
-  <a href="SECURITY.md">安全</a>
+  <a href="../GOVERNANCE.md">治理</a> &bull;
+  <a href="../CONTRIBUTING.md">贡献</a> &bull;
+  <a href="../SECURITY.md">安全</a>
 </p>
 
 <p align="center">
@@ -28,6 +28,12 @@
   <img src="https://img.shields.io/badge/community-maintained-brightgreen?style=flat-square" alt="社区维护" />
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
   <img src="https://img.shields.io/github/forks/librefang/librefang?style=flat-square" alt="Forks" />
+</p>
+
+<p align="center">
+  <a href="https://github.com/librefang/librefang/stargazers">
+    <img src="../public/assets/star-history.svg" alt="Star History" />
+  </a>
 </p>
 
 ---
@@ -201,7 +207,7 @@ LibreFang 是 pre-1.0。架构稳固，测试套件全面，安全模型全面�
 
 ## 安全
 
-要报告安全漏洞，请遵循 [SECURITY.md](SECURITY.md) 中的私人报告流程。
+要报告安全漏洞，请遵循 [SECURITY.md](../SECURITY.md) 中的私人报告流程。
 
 ---
 
@@ -216,10 +222,10 @@ MIT 许可证。详见 LICENSE 文件。
 - [GitHub](https://github.com/librefang/librefang)
 - [网站](https://librefang.ai/)
 - [文档](https://docs.librefang.ai)
-- [贡献指南](CONTRIBUTING.md)
-- [治理](GOVERNANCE.md)
-- [维护者](MAINTAINERS.md)
-- [安全策略](SECURITY.md)
+- [贡献指南](../CONTRIBUTING.md)
+- [治理](../GOVERNANCE.md)
+- [维护者](../MAINTAINERS.md)
+- [安全策略](../SECURITY.md)
 
 ---
 
