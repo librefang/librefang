@@ -30,6 +30,8 @@ cbc = "0.1"
 base64 = { workspace = true }
 hex = { workspace = true }
 html-escape = { workspace = true }
+regex-lite = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 roxmltree = "0.21"
 
 lettre = { workspace = true }

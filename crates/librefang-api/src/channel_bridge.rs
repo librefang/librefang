@@ -10,6 +10,7 @@ use librefang_channels::google_chat::GoogleChatAdapter;
 use librefang_channels::irc::IrcAdapter;
 use librefang_channels::matrix::MatrixAdapter;
 use librefang_channels::mattermost::MattermostAdapter;
+use librefang_channels::qq::QqAdapter;
 use librefang_channels::rocketchat::RocketChatAdapter;
 use librefang_channels::router::AgentRouter;
 use librefang_channels::signal::SignalAdapter;
@@ -1061,6 +1062,7 @@ pub async fn start_channel_bridge_with_config(
         // Wave 5
         || config.mumble.is_some()
         || config.dingtalk.is_some()
+        || config.qq.is_some()
         || config.discourse.is_some()
         || config.gitter.is_some()
         || config.ntfy.is_some()
@@ -1519,6 +1521,18 @@ pub async fn start_channel_bridge_with_config(
             let secret = read_token(&dt_config.secret_env, "DingTalk (secret)").unwrap_or_default();
             let adapter = Arc::new(DingTalkAdapter::new(token, secret, dt_config.webhook_port));
             adapters.push((adapter, dt_config.default_agent.clone()));
+        }
+    }
+
+    // QQ
+    if let Some(ref qq_config) = config.qq {
+        if let Some(secret) = read_token(&qq_config.app_secret_env, "QQ") {
+            let adapter = Arc::new(QqAdapter::new(
+                qq_config.app_id.clone(),
+                secret,
+                qq_config.allowed_users.clone(),
+            ));
+            adapters.push((adapter, qq_config.default_agent.clone()));
         }
     }
 
