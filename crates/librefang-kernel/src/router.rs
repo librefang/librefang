@@ -1009,7 +1009,7 @@ fn ascii_phrase_candidates(text: &str, min_len: usize) -> Vec<String> {
         && normalized.split_whitespace().count() <= 4
         && normalized
             .split_whitespace()
-            .any(|word| !GENERIC_ENGLISH_WORDS.contains(word))
+            .any(|word| !GENERIC_ENGLISH_WORDS.contains(&word))
     {
         phrases.extend(english_variants(&normalized));
     }
