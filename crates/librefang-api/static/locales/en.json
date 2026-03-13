@@ -307,7 +307,8 @@
     "actionWorkflowRun": "Workflow Run",
     "actionTriggerFired": "Trigger Fired",
     "actionSkillInstalled": "Skill Installed",
-    "actionMcpConnected": "MCP Connected"
+    "actionMcpConnected": "MCP Connected",
+    "loadError": "Could not load overview data."
   },
   "security": {
     "merkleAudit": "Merkle Audit",

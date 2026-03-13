@@ -307,7 +307,8 @@
     "actionWorkflowRun": "工作流运行",
     "actionTriggerFired": "触发器已触发",
     "actionSkillInstalled": "技能已安装",
-    "actionMcpConnected": "MCP 已连接"
+    "actionMcpConnected": "MCP 已连接",
+    "loadError": "无法加载概览数据。"
   },
   "security": {
     "merkleAudit": "默克尔审计",

@@ -57,7 +57,7 @@ function overviewPage() {
         ]);
         this.lastRefresh = Date.now();
       } catch(e) {
-        this.loadError = e.message || 'Could not load overview data.';
+        this.loadError = e.message || this.t('overview.loadError', 'Could not load overview data.');
       }
       this.loading = false;
     },
