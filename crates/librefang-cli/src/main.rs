@@ -7313,6 +7313,7 @@ fn download_text(url: &str) -> Result<String, String> {
         .map_err(|e| format!("Failed to read response body: {e}"))
 }
 
+#[cfg(not(windows))]
 fn installed_binary_version(path: &std::path::Path) -> Option<String> {
     let output = std::process::Command::new(path)
         .arg("--version")
