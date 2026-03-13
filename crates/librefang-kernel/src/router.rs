@@ -120,48 +120,39 @@ const BUNDLED_TEMPLATE_MANIFESTS: &[(&str, &str)] = &[
     ("writer", include_str!("../../../agents/writer/agent.toml")),
 ];
 const GENERIC_ENGLISH_WORDS: &[&str] = &[
+    "a",
     "agent",
+    "an",
+    "and",
     "assistant",
+    "dedicated",
     "default",
     "expert",
+    "for",
+    "friendly",
     "general",
+    "general-purpose",
     "helper",
+    "helpful",
     "management",
+    "multi-language",
+    "multilingual",
+    "of",
+    "or",
     "planning",
+    "professional",
     "productivity",
+    "senior",
     "specialist",
     "support",
     "system",
     "task",
     "template",
+    "the",
     "tool",
+    "to",
+    "with",
     "workflow",
-];
-const GENERIC_CHINESE_PHRASES: &[&str] = &[
-    "任务处理",
-    "任务支持",
-    "任务管理",
-    "任务拆解",
-    "任务执行",
-    "内容",
-    "助手",
-    "功能",
-    "管理",
-    "模板",
-    "流程",
-    "生成",
-    "规划",
-    "处理",
-    "安排",
-    "设计",
-    "跟进",
-    "输出",
-    "记录",
-    "分析",
-    "研究",
-    "支持",
-    "解释",
-    "沟通",
 ];
 
 struct RouteRule {
@@ -855,35 +846,22 @@ fn english_variants(text: &str) -> Vec<String> {
 }
 
 fn description_phrases(description: &str) -> Vec<String> {
-    let mut text = description.trim().to_string();
+    let text = description.trim();
     if text.is_empty() {
         return Vec::new();
     }
 
-    if let Some((_, tail)) = text.split_once("用于") {
-        text = tail.to_string();
-    }
-
-    let normalized = text.replace("以及", "、").replace(['并', '与'], "、");
     let mut phrases = Vec::new();
 
-    for raw in normalized.split(|ch| "、，,。；;：:（）()/".contains(ch)) {
-        let phrase = trim_phrase_prefixes(raw.trim());
-        if phrase.is_empty() {
+    for chunk in split_phrase_chunks(text) {
+        if chunk.is_empty() {
             continue;
         }
 
-        if is_ascii_phrase(phrase) {
-            for variant in english_variants(phrase) {
-                if variant.len() >= 4 && !GENERIC_ENGLISH_WORDS.contains(&variant.as_str()) {
-                    phrases.push(variant);
-                }
-            }
-            continue;
-        }
-
-        if phrase.chars().count() <= 12 && !GENERIC_CHINESE_PHRASES.contains(&phrase) {
-            phrases.push(phrase.to_string());
+        if is_ascii_phrase(&chunk) {
+            phrases.extend(ascii_phrase_candidates(&chunk, 4));
+        } else if is_meaningful_unicode_phrase(&chunk) {
+            phrases.push(chunk);
         }
     }
 
@@ -900,15 +878,8 @@ fn tag_phrases(tags: &[String]) -> Vec<String> {
         }
 
         if is_ascii_phrase(normalized) {
-            for variant in english_variants(normalized) {
-                if variant.len() >= 3 && !GENERIC_ENGLISH_WORDS.contains(&variant.as_str()) {
-                    phrases.push(variant);
-                }
-            }
-            continue;
-        }
-
-        if normalized.chars().count() >= 2 && !GENERIC_CHINESE_PHRASES.contains(&normalized) {
+            phrases.extend(ascii_phrase_candidates(normalized, 3));
+        } else if is_meaningful_unicode_phrase(normalized) {
             phrases.push(normalized.to_string());
         }
     }
@@ -965,24 +936,94 @@ fn phrase_matches(message: &str, phrase: &str) -> bool {
     message.to_lowercase().contains(&candidate.to_lowercase())
 }
 
-fn trim_phrase_prefixes(mut phrase: &str) -> &str {
-    for prefix in [
-        "用于",
-        "帮助",
-        "负责",
-        "专门",
-        "专业",
-        "高级",
-        "默认",
-        "友好的",
-        "多语言",
-    ] {
-        if phrase.starts_with(prefix) {
-            phrase = &phrase[prefix.len()..];
-            break;
-        }
+fn split_phrase_chunks(text: &str) -> Vec<String> {
+    text.split(is_phrase_separator)
+        .filter_map(normalize_phrase_chunk)
+        .collect()
+}
+
+fn is_phrase_separator(ch: char) -> bool {
+    ch == '\n'
+        || ch == '\r'
+        || ch == '\t'
+        || ch.is_ascii_punctuation()
+        || matches!(
+            ch,
+            '\u{3001}' // 、
+                | '\u{3002}' // 。
+                | '\u{FF0C}' // ，
+                | '\u{FF1B}' // ；
+                | '\u{FF1A}' // ：
+                | '\u{FF08}' // （
+                | '\u{FF09}' // ）
+                | '\u{2013}' // –
+                | '\u{2014}' // —
+        )
+}
+
+fn normalize_phrase_chunk(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_matches(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-');
+    if trimmed.is_empty() {
+        return None;
     }
-    phrase.trim()
+
+    if !is_ascii_phrase(trimmed) {
+        return Some(trimmed.to_string());
+    }
+
+    let words: Vec<&str> = trimmed
+        .split([' ', '-', '_'])
+        .filter(|word| !word.is_empty())
+        .collect();
+    let start = words
+        .iter()
+        .position(|word| !GENERIC_ENGLISH_WORDS.contains(&word.to_ascii_lowercase().as_str()))
+        .unwrap_or(words.len());
+    let end = words
+        .iter()
+        .rposition(|word| !GENERIC_ENGLISH_WORDS.contains(&word.to_ascii_lowercase().as_str()))
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+
+    if start >= end {
+        return None;
+    }
+
+    Some(words[start..end].join(" "))
+}
+
+fn ascii_phrase_candidates(text: &str, min_len: usize) -> Vec<String> {
+    let normalized = text.trim().to_lowercase();
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+
+    let content_words: Vec<String> = normalized
+        .split([' ', '-', '_'])
+        .filter(|word| word.len() >= min_len && !GENERIC_ENGLISH_WORDS.contains(word))
+        .map(str::to_string)
+        .collect();
+    let mut phrases = Vec::new();
+
+    if normalized.len() >= min_len
+        && normalized.split_whitespace().count() <= 4
+        && normalized
+            .split_whitespace()
+            .any(|word| !GENERIC_ENGLISH_WORDS.contains(word))
+    {
+        phrases.extend(english_variants(&normalized));
+    }
+
+    phrases.extend(content_words.iter().cloned());
+    for window in content_words.windows(2) {
+        phrases.push(window.join(" "));
+    }
+
+    dedupe(phrases)
+}
+
+fn is_meaningful_unicode_phrase(text: &str) -> bool {
+    (2..=32).contains(&text.chars().count())
 }
 
 fn is_ascii_phrase(value: &str) -> bool {
@@ -1074,6 +1115,25 @@ weak_aliases = ["changelog"]
         );
         assert_eq!(selection.template, "orchestrator");
         assert!(selection.score > 0);
+    }
+
+    #[test]
+    fn test_description_phrases_extract_language_agnostic_keywords() {
+        let phrases = description_phrases(
+            "Friendly multi-language translation agent for document translation, localization, and cross-cultural communication.",
+        );
+        assert!(phrases.contains(&"translation".to_string()));
+        assert!(phrases.contains(&"document".to_string()));
+        assert!(phrases.contains(&"localization".to_string()));
+        assert!(phrases.contains(&"cross cultural".to_string()));
+        assert!(!phrases.contains(&"friendly".to_string()));
+    }
+
+    #[test]
+    fn test_tag_phrases_keep_non_ascii_tags_without_language_specific_rules() {
+        let phrases = tag_phrases(&["分析".to_string(), "release-notes".to_string()]);
+        assert!(phrases.contains(&"分析".to_string()));
+        assert!(phrases.contains(&"release notes".to_string()));
     }
 
     #[test]
