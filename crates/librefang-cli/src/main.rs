@@ -1600,17 +1600,17 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
             if let Some(base) = find_daemon_in_home(&daemon.home_dir) {
                 let pid = child.id();
                 std::mem::forget(child);
-                ui::success("Daemon started in background");
+                ui::success(&i18n::t("daemon-started-bg"));
                 ui::kv("PID", &pid.to_string());
-                ui::kv("API", &base);
-                ui::kv("Dashboard", &format!("{base}/"));
+                ui::kv(&i18n::t("label-api"), &base);
+                ui::kv(&i18n::t("label-dashboard"), &format!("{base}/"));
                 ui::kv("Log", &log_path.display().to_string());
                 if tail {
-                    ui::hint("Ctrl+C stops log tailing; the daemon keeps running");
+                    ui::hint(&i18n::t("hint-tail-stop"));
                     ui::blank();
                     show_log_file(&log_path, 50, true);
                 } else {
-                    ui::hint("Use `librefang stop` to stop the daemon");
+                    ui::hint(&i18n::t("hint-stop-daemon"));
                 }
                 return;
             }
@@ -1636,15 +1636,15 @@ fn cmd_start(config: Option<PathBuf>, tail: bool, spawned: bool, foreground: boo
             if Instant::now() >= deadline {
                 let pid = child.id();
                 std::mem::forget(child);
-                ui::success("Daemon launched in background and is still starting");
+                ui::success(&i18n::t("daemon-still-starting"));
                 ui::kv("PID", &pid.to_string());
                 ui::kv("Log", &log_path.display().to_string());
                 if tail {
-                    ui::hint("Ctrl+C stops log tailing; the daemon keeps running");
+                    ui::hint(&i18n::t("hint-tail-stop"));
                     ui::blank();
                     show_log_file(&log_path, 50, true);
                 } else {
-                    ui::hint("Run `librefang status` to check readiness");
+                    ui::hint(&i18n::t("hint-check-status"));
                 }
                 return;
             }
@@ -2155,8 +2155,8 @@ fn cmd_status(config: Option<PathBuf>, json: bool) {
         );
         ui::kv("Provider", body["default_provider"].as_str().unwrap_or("?"));
         ui::kv("Model", body["default_model"].as_str().unwrap_or("?"));
-        ui::kv("API", &base);
-        ui::kv("Dashboard", &format!("{base}/"));
+        ui::kv(&i18n::t("label-api"), &base);
+        ui::kv(&i18n::t("label-dashboard"), &format!("{base}/"));
         ui::kv("Data dir", body["data_dir"].as_str().unwrap_or("?"));
         ui::kv(
             "Uptime",
@@ -6395,7 +6395,7 @@ fn cmd_system_info(json: bool) {
         );
         ui::kv("Provider", body["default_provider"].as_str().unwrap_or("?"));
         ui::kv("Model", body["default_model"].as_str().unwrap_or("?"));
-        ui::kv("API", &base);
+        ui::kv(&i18n::t("label-api"), &base);
         ui::kv("Data dir", body["data_dir"].as_str().unwrap_or("?"));
         ui::kv(
             "Uptime",
