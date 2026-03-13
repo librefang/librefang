@@ -30,8 +30,8 @@ const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 /// OAuth scopes.
 const SCOPE: &str = "openid profile email offline_access";
 
-/// Local callback server bind address.
-const CALLBACK_BIND: &str = "127.0.0.1:0";
+/// Local callback server bind address (port 1455 matches OpenAI's registered redirect_uri).
+const CALLBACK_BIND: &str = "127.0.0.1:1455";
 
 /// Local callback server timeout (seconds).
 const AUTH_TIMEOUT_SECS: u64 = 300;
@@ -85,7 +85,7 @@ pub fn create_state() -> String {
 
 /// Build the full authorization URL with all required parameters.
 pub fn build_authorization_url(port: u16, code_challenge: &str, state: &str) -> String {
-    let redirect_uri = format!("http://127.0.0.1:{port}/auth/callback");
+    let redirect_uri = format!("http://localhost:{port}/auth/callback");
 
     // Build query parameters manually to keep full control of encoding.
     let params = [
@@ -197,7 +197,7 @@ pub async fn exchange_code_for_tokens(
     code_verifier: &str,
     port: u16,
 ) -> Result<ChatGptAuthResult, String> {
-    let redirect_uri = format!("http://127.0.0.1:{port}/auth/callback");
+    let redirect_uri = format!("http://localhost:{port}/auth/callback");
 
     let params = [
         ("grant_type", "authorization_code"),
