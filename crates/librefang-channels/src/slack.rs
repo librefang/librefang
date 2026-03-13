@@ -461,7 +461,9 @@ mod tests {
         assert_eq!(msg.channel, ChannelType::Slack);
         assert_eq!(msg.sender.platform_id, "C789");
         assert_eq!(
-            msg.metadata.get(SENDER_USER_ID_KEY).and_then(|v| v.as_str()),
+            msg.metadata
+                .get(SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
             Some("U456")
         );
         assert!(msg.is_group);
@@ -577,7 +579,9 @@ mod tests {
         assert_eq!(msg.channel, ChannelType::Slack);
         assert_eq!(msg.sender.platform_id, "C789");
         assert_eq!(
-            msg.metadata.get(SENDER_USER_ID_KEY).and_then(|v| v.as_str()),
+            msg.metadata
+                .get(SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
             Some("U456")
         );
         assert!(matches!(msg.content, ChannelContent::Text(ref t) if t == "Edited message text"));
@@ -598,7 +602,9 @@ mod tests {
         assert!(!msg.is_group);
         assert_eq!(msg.sender.platform_id, "D789");
         assert_eq!(
-            msg.metadata.get(SENDER_USER_ID_KEY).and_then(|v| v.as_str()),
+            msg.metadata
+                .get(SENDER_USER_ID_KEY)
+                .and_then(|v| v.as_str()),
             Some("U456")
         );
     }
