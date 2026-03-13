@@ -3040,8 +3040,16 @@ decay_rate = 0.05
             ("ANTHROPIC_API_KEY", "Anthropic", "api.anthropic.com:443"),
             ("GROQ_API_KEY", "Groq", "api.groq.com:443"),
             ("DEEPSEEK_API_KEY", "DeepSeek", "api.deepseek.com:443"),
-            ("GEMINI_API_KEY", "Gemini", "generativelanguage.googleapis.com:443"),
-            ("GOOGLE_API_KEY", "Google", "generativelanguage.googleapis.com:443"),
+            (
+                "GEMINI_API_KEY",
+                "Gemini",
+                "generativelanguage.googleapis.com:443",
+            ),
+            (
+                "GOOGLE_API_KEY",
+                "Google",
+                "generativelanguage.googleapis.com:443",
+            ),
             ("OPENROUTER_API_KEY", "OpenRouter", "openrouter.ai:443"),
             ("TOGETHER_API_KEY", "Together", "api.together.xyz:443"),
             ("MISTRAL_API_KEY", "Mistral", "api.mistral.ai:443"),
