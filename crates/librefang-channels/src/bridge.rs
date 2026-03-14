@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use librefang_types::agent::AgentId;
 use librefang_types::config::{ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat};
-use librefang_types::message::ContentBlock;
+use librefang_types::message::{ContentBlock, SenderContext};
 use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
@@ -27,6 +27,20 @@ use tracing::{debug, error, info, warn};
 pub trait ChannelBridgeHandle: Send + Sync {
     /// Send a message to an agent and get the text response.
     async fn send_message(&self, agent_id: AgentId, message: &str) -> Result<String, String>;
+
+    /// Send a message to an agent with sender identity context.
+    ///
+    /// The sender context is propagated to the agent's system prompt so it knows
+    /// who is messaging and from which channel. Default falls back to `send_message()`.
+    async fn send_message_with_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> Result<String, String> {
+        let _ = sender; // default impl ignores sender context
+        self.send_message(agent_id, message).await
+    }
 
     /// Send a message with structured content blocks (text + images) to an agent.
     ///
@@ -46,6 +60,19 @@ pub trait ChannelBridgeHandle: Send + Sync {
             .collect::<Vec<_>>()
             .join("\n");
         self.send_message(agent_id, &text).await
+    }
+
+    /// Send a message with structured content blocks and sender identity context.
+    ///
+    /// Default falls back to `send_message_with_blocks()`.
+    async fn send_message_with_blocks_and_sender(
+        &self,
+        agent_id: AgentId,
+        blocks: Vec<ContentBlock>,
+        sender: &SenderContext,
+    ) -> Result<String, String> {
+        let _ = sender; // default impl ignores sender context
+        self.send_message_with_blocks(agent_id, blocks).await
     }
 
     /// Find an agent by name, returning its ID.
@@ -900,13 +927,27 @@ async fn dispatch_message(
     // Send typing indicator (best-effort)
     let _ = adapter.send_typing(&message.sender).await;
 
+    // Build sender identity context for the agent
+    let sender_ctx = SenderContext {
+        channel: Some(ct_str.to_string()),
+        sender_id: Some(message.sender.platform_id.clone()),
+        sender_name: if message.sender.display_name.is_empty() {
+            None
+        } else {
+            Some(message.sender.display_name.clone())
+        },
+    };
+
     // Lifecycle reaction: ⏳ Queued → 🤔 Thinking → ✅ Done / ❌ Error
     let msg_id = &message.platform_message_id;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
     // Send to agent and relay response
-    match handle.send_message(agent_id, &text).await {
+    match handle
+        .send_message_with_sender(agent_id, &text, &sender_ctx)
+        .await
+    {
         Ok(response) => {
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
             send_response(adapter, &message.sender, response, thread_id, output_format).await;
@@ -1155,13 +1196,24 @@ async fn dispatch_with_blocks(
 
     let _ = adapter.send_typing(&message.sender).await;
 
+    // Build sender identity context for the agent
+    let sender_ctx = SenderContext {
+        channel: Some(ct_str.to_string()),
+        sender_id: Some(message.sender.platform_id.clone()),
+        sender_name: if message.sender.display_name.is_empty() {
+            None
+        } else {
+            Some(message.sender.display_name.clone())
+        },
+    };
+
     // Lifecycle reaction: ⏳ Queued → 🤔 Thinking → ✅ Done / ❌ Error
     let msg_id = &message.platform_message_id;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
     match handle
-        .send_message_with_blocks(agent_id, blocks.clone())
+        .send_message_with_blocks_and_sender(agent_id, blocks.clone(), &sender_ctx)
         .await
     {
         Ok(response) => {

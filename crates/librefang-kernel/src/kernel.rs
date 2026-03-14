@@ -1421,6 +1421,42 @@ impl LibreFangKernel {
             .await
     }
 
+    /// Send a message to an agent with sender identity context.
+    ///
+    /// The sender context is propagated to the agent's system prompt so it knows
+    /// who is messaging and from which channel.
+    pub async fn send_message_with_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &librefang_types::message::SenderContext,
+    ) -> KernelResult<AgentLoopResult> {
+        let handle: Option<Arc<dyn KernelHandle>> = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>);
+        self.send_message_inner(agent_id, message, handle, None, Some(sender))
+            .await
+    }
+
+    /// Send a multimodal message with sender identity context.
+    pub async fn send_message_with_blocks_and_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+        sender: &librefang_types::message::SenderContext,
+    ) -> KernelResult<AgentLoopResult> {
+        let handle: Option<Arc<dyn KernelHandle>> = self
+            .self_handle
+            .get()
+            .and_then(|w| w.upgrade())
+            .map(|arc| arc as Arc<dyn KernelHandle>);
+        self.send_message_inner(agent_id, message, handle, Some(blocks), Some(sender))
+            .await
+    }
+
     /// Send a multimodal message (text + images) to an agent and get a response.
     ///
     /// Used by channel bridges when a user sends a photo — the image is downloaded,
@@ -1447,7 +1483,7 @@ impl LibreFangKernel {
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
     ) -> KernelResult<AgentLoopResult> {
-        self.send_message_with_handle_and_blocks(agent_id, message, kernel_handle, None)
+        self.send_message_inner(agent_id, message, kernel_handle, None, None)
             .await
     }
 
@@ -1466,6 +1502,19 @@ impl LibreFangKernel {
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
+    ) -> KernelResult<AgentLoopResult> {
+        self.send_message_inner(agent_id, message, kernel_handle, content_blocks, None)
+            .await
+    }
+
+    /// Internal send method that all public send methods delegate to.
+    async fn send_message_inner(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
+        sender_context: Option<&librefang_types::message::SenderContext>,
     ) -> KernelResult<AgentLoopResult> {
         // Acquire per-agent lock to serialize concurrent messages for the same agent.
         // This prevents session corruption when multiple messages arrive in quick
@@ -1497,13 +1546,27 @@ impl LibreFangKernel {
                 self.execute_python_agent(&entry, agent_id, message).await
             }
             "builtin:router" => {
-                self.execute_router_agent(&entry, agent_id, message, kernel_handle, content_blocks)
-                    .await
+                self.execute_router_agent(
+                    &entry,
+                    agent_id,
+                    message,
+                    kernel_handle,
+                    content_blocks,
+                    sender_context,
+                )
+                .await
             }
             _ => {
                 // Default: LLM agent loop (builtin:chat or any unrecognized module)
-                self.execute_llm_agent(&entry, agent_id, message, kernel_handle, content_blocks)
-                    .await
+                self.execute_llm_agent(
+                    &entry,
+                    agent_id,
+                    message,
+                    kernel_handle,
+                    content_blocks,
+                    sender_context,
+                )
+                .await
             }
         };
 
@@ -1745,7 +1808,9 @@ impl LibreFangKernel {
                     .ok()
                     .and_then(|(s, _)| s),
                 user_name,
-                channel_type: None,
+                channel_type: None, // streaming path does not have sender context yet
+                sender_id: None,
+                sender_name: None,
                 is_subagent: manifest
                     .metadata
                     .get("is_subagent")
@@ -2115,7 +2180,9 @@ impl LibreFangKernel {
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
+        _sender_context: Option<&librefang_types::message::SenderContext>,
     ) -> KernelResult<AgentLoopResult> {
+        // TODO: propagate sender_context through routed hand/template dispatch
         let hand_selection = router::auto_select_hand(message);
         let template_selection =
             router::auto_select_template(message, &self.config.home_dir.join("agents"));
@@ -2309,6 +2376,7 @@ impl LibreFangKernel {
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
+        sender_context: Option<&librefang_types::message::SenderContext>,
     ) -> KernelResult<AgentLoopResult> {
         // Check metering quota before starting
         self.metering
@@ -2413,7 +2481,9 @@ impl LibreFangKernel {
                     .ok()
                     .and_then(|(s, _)| s),
                 user_name,
-                channel_type: None,
+                channel_type: sender_context.and_then(|sc| sc.channel.clone()),
+                sender_id: sender_context.and_then(|sc| sc.sender_id.clone()),
+                sender_name: sender_context.and_then(|sc| sc.sender_name.clone()),
                 is_subagent: manifest
                     .metadata
                     .get("is_subagent")

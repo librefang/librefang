@@ -230,6 +230,24 @@ impl TokenUsage {
     }
 }
 
+/// Sender identity context propagated from channel messages to the agent loop.
+///
+/// When a message arrives through a channel (Telegram, Discord, Slack, etc.),
+/// this struct carries the sender's identity so the agent can address users by
+/// name and distinguish between users in group chats.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SenderContext {
+    /// Channel type (e.g. "telegram", "discord", "slack").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel: Option<String>,
+    /// Platform-specific user ID.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_id: Option<String>,
+    /// Human-readable display name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
+}
+
 /// Reply directives extracted from agent output.
 ///
 /// These control how the response is delivered back to the user/channel:
@@ -308,6 +326,28 @@ mod tests {
         let json = serde_json::json!({"type": "future_block_type"});
         let block: ContentBlock = serde_json::from_value(json).unwrap();
         assert!(matches!(block, ContentBlock::Unknown));
+    }
+
+    #[test]
+    fn test_sender_context_serde() {
+        let ctx = SenderContext {
+            channel: Some("telegram".to_string()),
+            sender_id: Some("12345".to_string()),
+            sender_name: Some("Alice".to_string()),
+        };
+        let json = serde_json::to_string(&ctx).unwrap();
+        let back: SenderContext = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.channel.as_deref(), Some("telegram"));
+        assert_eq!(back.sender_id.as_deref(), Some("12345"));
+        assert_eq!(back.sender_name.as_deref(), Some("Alice"));
+    }
+
+    #[test]
+    fn test_sender_context_default() {
+        let ctx = SenderContext::default();
+        assert!(ctx.channel.is_none());
+        assert!(ctx.sender_id.is_none());
+        assert!(ctx.sender_name.is_none());
     }
 
     #[test]

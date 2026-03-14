@@ -42,6 +42,11 @@ pub struct MessageRequest {
     /// Optional file attachments (uploaded via /upload endpoint).
     #[serde(default)]
     pub attachments: Vec<AttachmentRef>,
+    /// Optional sender identity context (channel, user ID, display name).
+    /// When provided, the agent's system prompt includes the sender's identity
+    /// so it can address users by name and distinguish between users.
+    #[serde(default)]
+    pub sender: Option<librefang_types::message::SenderContext>,
 }
 
 /// Response from sending a message.
