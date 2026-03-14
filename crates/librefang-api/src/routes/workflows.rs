@@ -7,7 +7,8 @@ use axum::response::IntoResponse;
 use axum::Json;
 use librefang_kernel::triggers::{TriggerId, TriggerPattern};
 use librefang_kernel::workflow::{
-    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep,
+    ErrorMode, StepAgent, StepMode, Workflow, WorkflowId, WorkflowStep, WorkflowTemplate,
+    WorkflowTemplateId, WorkflowTemplateRegistry, WorkflowTemplateStep,
 };
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_types::agent::AgentId;
@@ -1058,4 +1059,206 @@ pub async fn cron_job_status(
             Json(serde_json::json!({"error": "Invalid job ID"})),
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Workflow template routes
+// ---------------------------------------------------------------------------
+
+/// GET /api/workflows/templates — List available workflow templates.
+pub async fn list_workflow_templates(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let category = params.get("category").map(|s| s.as_str());
+    let templates = state.kernel.workflow_templates.list(category).await;
+    let list: Vec<serde_json::Value> = templates
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "id": t.id.to_string(),
+                "name": t.name,
+                "description": t.description,
+                "author": t.author,
+                "version": t.version,
+                "category": t.category,
+                "tags": t.tags,
+                "steps_count": t.steps.len(),
+                "created_at": t.created_at.to_rfc3339(),
+            })
+        })
+        .collect();
+    Json(list)
+}
+
+/// GET /api/workflows/templates/:id — Get a single workflow template with full details.
+pub async fn get_workflow_template(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let template_id = WorkflowTemplateId(match id.parse() {
+        Ok(uuid) => uuid,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid template ID"})),
+            );
+        }
+    });
+
+    match state.kernel.workflow_templates.get(template_id).await {
+        Some(t) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": t.id.to_string(),
+                "name": t.name,
+                "description": t.description,
+                "author": t.author,
+                "version": t.version,
+                "category": t.category,
+                "tags": t.tags,
+                "steps": t.steps.iter().map(|s| serde_json::json!({
+                    "name": s.name,
+                    "agent_name": s.agent_name,
+                    "prompt_template": s.prompt_template,
+                    "mode": serde_json::to_value(&s.mode).unwrap_or_default(),
+                    "timeout_secs": s.timeout_secs,
+                    "error_mode": serde_json::to_value(&s.error_mode).unwrap_or_default(),
+                    "output_var": s.output_var,
+                    "depends_on": s.depends_on,
+                })).collect::<Vec<_>>(),
+                "created_at": t.created_at.to_rfc3339(),
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Template not found"})),
+        ),
+    }
+}
+
+/// POST /api/workflows/from-template — Create a workflow from a template.
+pub async fn create_workflow_from_template(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let template_id_str = match req["template_id"].as_str() {
+        Some(id) => id,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing 'template_id'"})),
+            );
+        }
+    };
+
+    let template_id = WorkflowTemplateId(match template_id_str.parse() {
+        Ok(uuid) => uuid,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid template ID"})),
+            );
+        }
+    });
+
+    let template = match state.kernel.workflow_templates.get(template_id).await {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Template not found"})),
+            );
+        }
+    };
+
+    let workflow = WorkflowTemplateRegistry::instantiate(&template);
+    let workflow_id = state.kernel.register_workflow(workflow).await;
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "workflow_id": workflow_id.to_string(),
+            "from_template": template.name,
+        })),
+    )
+}
+
+/// POST /api/workflows/:id/save-as-template — Save an existing workflow as a template.
+pub async fn save_workflow_as_template(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let workflow_id = WorkflowId(match id.parse() {
+        Ok(uuid) => uuid,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid workflow ID"})),
+            );
+        }
+    });
+
+    let workflow = match state.kernel.workflows.get_workflow(workflow_id).await {
+        Some(w) => w,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Workflow not found"})),
+            );
+        }
+    };
+
+    let author = req["author"].as_str().unwrap_or("user").to_string();
+    let version = req["version"].as_str().unwrap_or("1.0.0").to_string();
+    let category = req["category"].as_str().unwrap_or("custom").to_string();
+    let tags: Vec<String> = req["tags"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let template_steps: Vec<WorkflowTemplateStep> = workflow
+        .steps
+        .iter()
+        .map(|s| {
+            let agent_name = match &s.agent {
+                StepAgent::ByName { name } => name.clone(),
+                StepAgent::ById { id } => id.clone(),
+            };
+            WorkflowTemplateStep {
+                name: s.name.clone(),
+                agent_name,
+                prompt_template: s.prompt_template.clone(),
+                mode: s.mode.clone(),
+                timeout_secs: s.timeout_secs,
+                error_mode: s.error_mode.clone(),
+                output_var: s.output_var.clone(),
+                depends_on: vec![],
+            }
+        })
+        .collect();
+
+    let template = WorkflowTemplate {
+        id: WorkflowTemplateId::new(),
+        name: workflow.name,
+        description: workflow.description,
+        author,
+        version,
+        category,
+        tags,
+        steps: template_steps,
+        created_at: chrono::Utc::now(),
+    };
+
+    let template_id = state.kernel.workflow_templates.save(template).await;
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({"template_id": template_id.to_string()})),
+    )
 }
