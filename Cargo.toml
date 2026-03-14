@@ -110,6 +110,7 @@ hmac = "0.12"
 hex = "0.4"
 subtle = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+rsa = { version = "0.9", features = ["pkcs1", "sha2"] }
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 
