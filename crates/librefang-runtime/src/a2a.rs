@@ -402,7 +402,7 @@ impl A2aClient {
     /// Create a new A2A client.
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::builder()
+            client: crate::http_client::proxied_client_builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .unwrap_or_default(),

@@ -76,7 +76,7 @@ impl Default for CopilotTokenCache {
 ///
 /// Response: {"token": "tid=...;exp=...;sku=...;proxy-ep=...", "expires_at": unix_timestamp}
 pub async fn exchange_copilot_token(github_token: &str) -> Result<CachedToken, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::proxied_client_builder()
         .timeout(TOKEN_EXCHANGE_TIMEOUT)
         .build()
         .map_err(|e| format!("Failed to build HTTP client: {e}"))?;

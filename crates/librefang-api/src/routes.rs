@@ -2574,7 +2574,7 @@ pub async fn test_channel(
 
 /// Send a real test message to a specific channel/chat on the given platform.
 async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Result<(), String> {
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::proxied_client();
     let test_msg = "LibreFang test message — your channel is connected!";
 
     match channel_name {
@@ -8021,7 +8021,7 @@ pub async fn test_provider(
 
     let start = std::time::Instant::now();
     let api_key_val = api_key.unwrap_or_default();
-    let client = reqwest::Client::builder()
+    let client = librefang_runtime::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap_or_default();
