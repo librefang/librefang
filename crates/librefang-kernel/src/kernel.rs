@@ -589,7 +589,69 @@ impl LibreFangKernel {
         let primary_result = drivers::create_driver(&driver_config);
         let mut driver_chain: Vec<Arc<dyn LlmDriver>> = Vec::new();
 
+        // Check if auth_profiles are configured for the default provider.
+        // If multiple profiles exist, wrap the primary driver in a TokenRotationDriver
+        // for automatic key rotation on rate-limit/quota errors.
+        let has_rotation_profiles = config
+            .auth_profiles
+            .get(&config.default_model.provider)
+            .map(|p| p.len() > 1)
+            .unwrap_or(false);
+
         match &primary_result {
+            Ok(d) if has_rotation_profiles => {
+                // Build a rotation pool from auth_profiles
+                let profiles = config.auth_profiles[&config.default_model.provider].clone();
+                let mut rotation_drivers: Vec<(Arc<dyn LlmDriver>, String)> = Vec::new();
+                // Include the primary driver as the first slot
+                rotation_drivers.push((d.clone(), "primary".to_string()));
+                let base_url = config.default_model.base_url.clone().or_else(|| {
+                    config
+                        .provider_urls
+                        .get(&config.default_model.provider)
+                        .cloned()
+                });
+                for profile in &profiles {
+                    if let Ok(key) = std::env::var(&profile.api_key_env) {
+                        if key.is_empty() {
+                            continue;
+                        }
+                        let profile_config = DriverConfig {
+                            provider: config.default_model.provider.clone(),
+                            api_key: Some(key),
+                            base_url: base_url.clone(),
+                            skip_permissions: true,
+                        };
+                        match drivers::create_driver(&profile_config) {
+                            Ok(profile_driver) => {
+                                rotation_drivers.push((profile_driver, profile.name.clone()));
+                            }
+                            Err(e) => {
+                                warn!(
+                                    profile = %profile.name,
+                                    error = %e,
+                                    "Auth profile driver creation failed — skipped"
+                                );
+                            }
+                        }
+                    }
+                }
+                if rotation_drivers.len() > 1 {
+                    info!(
+                        provider = %config.default_model.provider,
+                        pool_size = rotation_drivers.len(),
+                        "Token rotation enabled for default provider"
+                    );
+                    let rotation = drivers::token_rotation::TokenRotationDriver::new(
+                        rotation_drivers,
+                        config.default_model.provider.clone(),
+                    );
+                    driver_chain.push(Arc::new(rotation));
+                } else {
+                    // Only one key actually resolved — use it directly
+                    driver_chain.push(d.clone());
+                }
+            }
             Ok(d) => driver_chain.push(d.clone()),
             Err(e) => {
                 warn!(
