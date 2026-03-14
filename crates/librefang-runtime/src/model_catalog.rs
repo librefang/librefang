@@ -1243,4 +1243,42 @@ aliases = []
             );
         }
     }
+
+    #[test]
+    fn test_parse_remote_catalog_without_provider_on_models() {
+        // Remote model-catalog repo omits `provider` on each [[models]] entry
+        // because it's already in the [provider] section.
+        let toml_content = r#"
+[provider]
+id = "test-remote"
+display_name = "Test Remote"
+api_key_env = "TEST_REMOTE_KEY"
+base_url = "https://api.test-remote.example.com"
+key_required = true
+
+[[models]]
+id = "test-remote-model-1"
+display_name = "Test Remote Model 1"
+tier = "frontier"
+context_window = 200000
+max_output_tokens = 128000
+input_cost_per_m = 5.0
+output_cost_per_m = 25.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["trm1"]
+"#;
+        let file: ModelCatalogFile =
+            toml::from_str(toml_content).expect("should parse without provider on models");
+        assert_eq!(file.models.len(), 1);
+        assert!(file.models[0].provider.is_empty());
+
+        let mut catalog = ModelCatalog::new();
+        let added = catalog.merge_catalog_file(file);
+        assert_eq!(added, 1);
+
+        let model = catalog.find_model("test-remote-model-1").unwrap();
+        assert_eq!(model.provider, "test-remote");
+    }
 }
