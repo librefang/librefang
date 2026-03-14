@@ -41,6 +41,8 @@ pub struct TwistAdapter {
     allowed_channels: Vec<String>,
     /// HTTP client for API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -62,10 +64,16 @@ impl TwistAdapter {
             workspace_id,
             allowed_channels,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             last_comment_ids: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Validate credentials by fetching the authenticated user's info.
@@ -280,6 +288,7 @@ impl ChannelAdapter for TwistAdapter {
         let client = self.client.clone();
         let last_comment_ids = Arc::clone(&self.last_comment_ids);
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             // Discover channels if not configured
@@ -445,7 +454,7 @@ impl ChannelAdapter for TwistAdapter {
                                 ChannelContent::Text(content.to_string())
                             };
 
-                            let channel_msg = ChannelMessage {
+                            let mut channel_msg = ChannelMessage {
                                 channel: ChannelType::Custom("twist".to_string()),
                                 platform_message_id: comment_id.to_string(),
                                 sender: ChannelUser {
@@ -480,6 +489,12 @@ impl ChannelAdapter for TwistAdapter {
                                 },
                             };
 
+                            // Inject account_id for multi-bot routing
+                            if let Some(ref aid) = account_id {
+                                channel_msg
+                                    .metadata
+                                    .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
                             if tx.send(channel_msg).await.is_err() {
                                 return;
                             }

@@ -130,7 +130,11 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// Get per-channel overrides for a given channel type.
     ///
     /// Returns `None` if the channel is not configured or has no overrides.
-    async fn channel_overrides(&self, _channel_type: &str) -> Option<ChannelOverrides> {
+    async fn channel_overrides(
+        &self,
+        _channel_type: &str,
+        _account_id: Option<&str>,
+    ) -> Option<ChannelOverrides> {
         None
     }
 
@@ -588,7 +592,12 @@ async fn dispatch_message(
     let ct_str = channel_type_str(&message.channel);
 
     // Fetch per-channel overrides (if configured)
-    let overrides = handle.channel_overrides(ct_str).await;
+    let overrides = handle
+        .channel_overrides(
+            ct_str,
+            message.metadata.get("account_id").and_then(|v| v.as_str()),
+        )
+        .await;
     let channel_default_format = default_output_format_for_channel(ct_str);
     let output_format = overrides
         .as_ref()
@@ -841,11 +850,27 @@ async fn dispatch_message(
         }
     }
 
-    // Route to agent (standard path)
-    let agent_id = router.resolve(
+    // Route to agent (standard path) — use resolve_with_context to support account_id
+    let ctx = crate::router::BindingContext {
+        channel: crate::router::channel_type_to_str(&message.channel).to_string(),
+        account_id: message
+            .metadata
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        peer_id: message.sender.platform_id.clone(),
+        guild_id: message
+            .metadata
+            .get("guild_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        roles: Vec::new(),
+    };
+    let agent_id = router.resolve_with_context(
         &message.channel,
         &message.sender.platform_id,
         message.sender.librefang_user.as_deref(),
+        &ctx,
     );
     let channel_key = format!("{:?}", message.channel);
 
@@ -1100,11 +1125,27 @@ async fn dispatch_with_blocks(
     thread_id: Option<&str>,
     output_format: OutputFormat,
 ) {
-    // Route to agent (same logic as text path)
-    let agent_id = router.resolve(
+    // Route to agent (same logic as text path) — use resolve_with_context for account_id
+    let ctx = crate::router::BindingContext {
+        channel: crate::router::channel_type_to_str(&message.channel).to_string(),
+        account_id: message
+            .metadata
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        peer_id: message.sender.platform_id.clone(),
+        guild_id: message
+            .metadata
+            .get("guild_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
+        roles: Vec::new(),
+    };
+    let agent_id = router.resolve_with_context(
         &message.channel,
         &message.sender.platform_id,
         message.sender.librefang_user.as_deref(),
+        &ctx,
     );
     let channel_key = format!("{:?}", message.channel);
 

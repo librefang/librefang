@@ -50,6 +50,8 @@ pub struct RevoltAdapter {
     allowed_channels: Vec<String>,
     /// HTTP client for outbound REST API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -69,6 +71,11 @@ impl RevoltAdapter {
             DEFAULT_WS_URL.to_string(),
         )
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
 
     /// Create a new Revolt adapter with custom API and WebSocket URLs.
     pub fn with_urls(bot_token: String, api_url: String, ws_url: String) -> Self {
@@ -81,6 +88,7 @@ impl RevoltAdapter {
             ws_url,
             allowed_channels: Vec::new(),
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_user_id: Arc::new(RwLock::new(None)),
@@ -315,6 +323,7 @@ impl ChannelAdapter for RevoltAdapter {
         let bot_user_id = Arc::clone(&self.bot_user_id);
         let allowed_channels = self.allowed_channels.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
@@ -411,12 +420,16 @@ impl ChannelAdapter for RevoltAdapter {
                                             debug!("Revolt: pong received");
                                         }
                                         "Message" => {
-                                            if let Some(channel_msg) = parse_revolt_message(
+                                            if let Some(mut channel_msg) = parse_revolt_message(
                                                 &data,
                                                 &own_id,
                                                 &allowed_channels,
                                             ) {
-                                                if tx.send(channel_msg).await.is_err() {
+                                                // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                if tx.send(channel_msg).await.is_err() {
                                                     return;
                                                 }
                                             }

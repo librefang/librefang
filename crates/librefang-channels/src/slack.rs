@@ -29,6 +29,8 @@ pub struct SlackAdapter {
     bot_token: Zeroizing<String>,
     client: reqwest::Client,
     allowed_channels: Vec<String>,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
     /// Bot's own user ID (populated after auth.test).
@@ -43,10 +45,17 @@ impl SlackAdapter {
             bot_token: Zeroizing::new(bot_token),
             client: reqwest::Client::new(),
             allowed_channels,
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_user_id: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Validate the bot token by calling auth.test.
@@ -132,6 +141,7 @@ impl ChannelAdapter for SlackAdapter {
         let app_token = self.app_token.clone();
         let bot_user_id = self.bot_user_id.clone();
         let allowed_channels = self.allowed_channels.clone();
+        let account_id = self.account_id.clone();
         let client = self.client.clone();
         let mut shutdown = self.shutdown_rx.clone();
 
@@ -241,9 +251,14 @@ impl ChannelAdapter for SlackAdapter {
 
                             // Extract the event
                             let event = &payload["payload"]["event"];
-                            if let Some(msg) =
+                            if let Some(mut msg) =
                                 parse_slack_event(event, &bot_user_id, &allowed_channels).await
                             {
+                                // Tag message with account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    msg.metadata
+                                        .insert("account_id".to_string(), serde_json::json!(aid));
+                                }
                                 debug!(
                                     "Slack message from {}: {:?}",
                                     msg.sender.display_name, msg.content

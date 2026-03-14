@@ -58,6 +58,8 @@ pub struct WebhookAdapter {
     callback_url: Option<String>,
     /// HTTP client for outbound requests.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -77,9 +79,15 @@ impl WebhookAdapter {
             listen_port,
             callback_url,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Compute HMAC-SHA256 signature of data with the shared secret.
@@ -182,6 +190,7 @@ impl ChannelAdapter for WebhookAdapter {
         let port = self.listen_port;
         let secret = self.secret.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = Arc::new(self.account_id.clone());
 
         info!("Webhook adapter starting HTTP server on port {port}");
 
@@ -243,7 +252,7 @@ impl ChannelAdapter for WebhookAdapter {
                                     ChannelContent::Text(message)
                                 };
 
-                                let msg = ChannelMessage {
+                                let mut msg = ChannelMessage {
                                     channel: ChannelType::Custom("webhook".to_string()),
                                     platform_message_id: format!(
                                         "wh-{}",
@@ -262,6 +271,11 @@ impl ChannelAdapter for WebhookAdapter {
                                     metadata,
                                 };
 
+                                // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = *account_id {
+                                    msg.metadata
+                                        .insert("account_id".to_string(), serde_json::json!(aid));
+                                }
                                 let _ = tx.send(msg).await;
                             }
 

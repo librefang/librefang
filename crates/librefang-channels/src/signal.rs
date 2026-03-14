@@ -26,6 +26,8 @@ pub struct SignalAdapter {
     client: reqwest::Client,
     /// Allowed phone numbers (empty = allow all).
     allowed_users: Vec<String>,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -40,9 +42,15 @@ impl SignalAdapter {
             phone_number,
             client: reqwest::Client::new(),
             allowed_users,
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Send a message via signal-cli REST API.
@@ -111,6 +119,7 @@ impl ChannelAdapter for SignalAdapter {
         let allowed_users = self.allowed_users.clone();
         let client = self.client.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         info!(
             "Starting Signal adapter (polling {} every {:?})",
@@ -186,7 +195,7 @@ impl ChannelAdapter for SignalAdapter {
                         ChannelContent::Text(text.to_string())
                     };
 
-                    let channel_msg = ChannelMessage {
+                    let mut channel_msg = ChannelMessage {
                         channel: ChannelType::Signal,
                         platform_message_id: envelope["timestamp"]
                             .as_u64()
@@ -205,6 +214,12 @@ impl ChannelAdapter for SignalAdapter {
                         metadata: HashMap::new(),
                     };
 
+                    // Inject account_id for multi-bot routing
+                    if let Some(ref aid) = account_id {
+                        channel_msg
+                            .metadata
+                            .insert("account_id".to_string(), serde_json::json!(aid));
+                    }
                     if tx.send(channel_msg).await.is_err() {
                         break;
                     }

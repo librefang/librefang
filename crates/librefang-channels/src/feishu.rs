@@ -53,6 +53,8 @@ pub struct FeishuAdapter {
     encrypt_key: Option<String>,
     /// HTTP client for API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -76,10 +78,16 @@ impl FeishuAdapter {
             verification_token: None,
             encrypt_key: None,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             cached_token: Arc::new(RwLock::new(None)),
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Create a new Feishu adapter with webhook verification.
@@ -391,6 +399,7 @@ impl ChannelAdapter for FeishuAdapter {
         let port = self.webhook_port;
         let verification_token = self.verification_token.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = Arc::new(self.account_id.clone());
 
         tokio::spawn(async move {
             let verification_token = Arc::new(verification_token);
@@ -430,7 +439,14 @@ impl ChannelAdapter for FeishuAdapter {
                             if let Some(schema) = body.0["schema"].as_str() {
                                 if schema == "2.0" {
                                     // V2 event format
-                                    if let Some(msg) = parse_feishu_event(&body.0) {
+                                    if let Some(mut msg) = parse_feishu_event(&body.0) {
+                                        // Inject account_id for multi-bot routing
+                                        if let Some(ref aid) = *account_id {
+                                            msg.metadata.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(aid),
+                                            );
+                                        }
                                         let _ = tx.send(msg).await;
                                     }
                                 }
@@ -472,7 +488,7 @@ impl ChannelAdapter for FeishuAdapter {
                                             ChannelContent::Text(text.to_string())
                                         };
 
-                                        let channel_msg = ChannelMessage {
+                                        let mut channel_msg = ChannelMessage {
                                             channel: ChannelType::Custom("feishu".to_string()),
                                             platform_message_id: msg_id,
                                             sender: ChannelUser {
@@ -488,6 +504,13 @@ impl ChannelAdapter for FeishuAdapter {
                                             metadata: HashMap::new(),
                                         };
 
+                                        // Inject account_id for multi-bot routing
+                                        if let Some(ref aid) = *account_id {
+                                            channel_msg.metadata.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(aid),
+                                            );
+                                        }
                                         let _ = tx.send(channel_msg).await;
                                     }
                                 }

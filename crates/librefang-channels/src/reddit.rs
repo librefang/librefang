@@ -56,6 +56,8 @@ pub struct RedditAdapter {
     subreddits: Vec<String>,
     /// HTTP client for API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -97,11 +99,17 @@ impl RedditAdapter {
             password: Zeroizing::new(password),
             subreddits,
             client,
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             cached_token: Arc::new(RwLock::new(None)),
             seen_comments: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Obtain a valid OAuth2 bearer token, refreshing if expired or missing.
@@ -345,6 +353,7 @@ impl ChannelAdapter for RedditAdapter {
         let password = self.password.clone();
         let reddit_username = self.username.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let poll_interval = Duration::from_secs(POLL_INTERVAL_SECS);
@@ -458,10 +467,15 @@ impl ChannelAdapter for RedditAdapter {
                             }
                         }
 
-                        if let Some(msg) = parse_reddit_comment(child, &own_username) {
+                        if let Some(mut msg) = parse_reddit_comment(child, &own_username) {
                             // Mark as seen
                             seen_comments.write().await.insert(comment_id, true);
 
+                            // Inject account_id for multi-bot routing
+                            if let Some(ref aid) = account_id {
+                                msg.metadata
+                                    .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
                             if tx.send(msg).await.is_err() {
                                 return;
                             }

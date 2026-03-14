@@ -47,6 +47,8 @@ pub struct LineAdapter {
     webhook_port: u16,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -66,9 +68,15 @@ impl LineAdapter {
             access_token: Zeroizing::new(access_token),
             webhook_port,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Verify the X-Line-Signature header using HMAC-SHA256.
@@ -348,6 +356,7 @@ impl ChannelAdapter for LineAdapter {
         let port = self.webhook_port;
         let channel_secret = self.channel_secret.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = Arc::new(self.account_id.clone());
 
         tokio::spawn(async move {
             let channel_secret = Arc::new(channel_secret);
@@ -391,7 +400,14 @@ impl ChannelAdapter for LineAdapter {
                             // Parse events array
                             if let Some(events) = body.0["events"].as_array() {
                                 for event in events {
-                                    if let Some(msg) = parse_line_event(event) {
+                                    if let Some(mut msg) = parse_line_event(event) {
+                                        // Inject account_id for multi-bot routing
+                                        if let Some(ref aid) = *account_id {
+                                            msg.metadata.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(aid),
+                                            );
+                                        }
                                         let _ = tx.send(msg).await;
                                     }
                                 }

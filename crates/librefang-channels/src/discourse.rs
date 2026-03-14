@@ -36,6 +36,8 @@ pub struct DiscourseAdapter {
     categories: Vec<String>,
     /// HTTP client.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -65,10 +67,16 @@ impl DiscourseAdapter {
             api_username,
             categories,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             last_post_id: Arc::new(RwLock::new(0)),
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Add Discourse API auth headers to a request builder.
@@ -202,6 +210,7 @@ impl ChannelAdapter for DiscourseAdapter {
         }
 
         let poll_interval = Duration::from_secs(POLL_INTERVAL_SECS);
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
@@ -294,7 +303,7 @@ impl ChannelAdapter for DiscourseAdapter {
                         ChannelContent::Text(raw.to_string())
                     };
 
-                    let msg = ChannelMessage {
+                    let mut msg = ChannelMessage {
                         channel: ChannelType::Custom("discourse".to_string()),
                         platform_message_id: format!("discourse-post-{}", post_id),
                         sender: ChannelUser {
@@ -329,6 +338,11 @@ impl ChannelAdapter for DiscourseAdapter {
                         },
                     };
 
+                    // Inject account_id for multi-bot routing
+                    if let Some(ref aid) = account_id {
+                        msg.metadata
+                            .insert("account_id".to_string(), serde_json::json!(aid));
+                    }
                     if tx.send(msg).await.is_err() {
                         return;
                     }

@@ -42,6 +42,8 @@ pub struct DiscordAdapter {
     allowed_users: Vec<String>,
     ignore_bots: bool,
     intents: u64,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
     /// Bot's own user ID (populated after READY event).
@@ -68,12 +70,18 @@ impl DiscordAdapter {
             allowed_users,
             ignore_bots,
             intents,
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_user_id: Arc::new(RwLock::new(None)),
             session_id: Arc::new(RwLock::new(None)),
             resume_gateway_url: Arc::new(RwLock::new(None)),
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Get the WebSocket gateway URL from the Discord API.
@@ -163,6 +171,7 @@ impl ChannelAdapter for DiscordAdapter {
         let session_id_store = self.session_id.clone();
         let resume_url_store = self.resume_gateway_url.clone();
         let mut shutdown = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let mut backoff = INITIAL_BACKOFF;
@@ -318,7 +327,7 @@ impl ChannelAdapter for DiscordAdapter {
                                 }
 
                                 "MESSAGE_CREATE" | "MESSAGE_UPDATE" => {
-                                    if let Some(msg) = parse_discord_message(
+                                    if let Some(mut msg) = parse_discord_message(
                                         d,
                                         &bot_user_id,
                                         &allowed_guilds,
@@ -331,6 +340,13 @@ impl ChannelAdapter for DiscordAdapter {
                                             "Discord {event_name} from {}: {:?}",
                                             msg.sender.display_name, msg.content
                                         );
+                                        // Inject account_id for multi-bot routing
+                                        if let Some(ref aid) = account_id {
+                                            msg.metadata.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(aid),
+                                            );
+                                        }
                                         if tx.send(msg).await.is_err() {
                                             return;
                                         }

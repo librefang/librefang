@@ -45,6 +45,8 @@ pub struct QqAdapter {
     app_secret: Zeroizing<String>,
     client: reqwest::Client,
     allowed_users: Vec<String>,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
     connected: Arc<AtomicBool>,
@@ -67,6 +69,7 @@ impl QqAdapter {
                 .build()
                 .expect("failed to build HTTP client"),
             allowed_users,
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             connected: Arc::new(AtomicBool::new(false)),
@@ -76,6 +79,11 @@ impl QqAdapter {
             last_error: Arc::new(RwLock::new(None)),
             access_token: Arc::new(RwLock::new(None)),
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Send a reply to QQ.
@@ -200,7 +208,7 @@ fn parse_dispatch_event(
     // Strip bot mention prefix (e.g., "/@ Bot " or "<@!botid>")
     let clean_content = content.trim_start_matches('/').trim().to_string();
 
-    let msg = ChannelMessage {
+    let mut msg = ChannelMessage {
         channel: ChannelType::Custom("qq".to_string()),
         platform_message_id: msg_id.clone(),
         sender: ChannelUser {
@@ -251,6 +259,7 @@ impl ChannelAdapter for QqAdapter {
         let messages_received = self.messages_received.clone();
         let last_error = self.last_error.clone();
         let access_token = self.access_token.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let mut backoff = INITIAL_BACKOFF;
@@ -373,7 +382,11 @@ impl ChannelAdapter for QqAdapter {
                                             if let Some((msg, _endpoint, _msg_id)) = parse_dispatch_event(event_type, data) {
                                                 if allowed_users.is_empty() || allowed_users.iter().any(|u| u == &msg.sender.platform_id) {
                                                     messages_received.fetch_add(1, Ordering::Relaxed);
-                                                    if tx.send(msg).await.is_err() {
+                                                    // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                if tx.send(msg).await.is_err() {
                                                         info!("QQ: receiver dropped, stopping");
                                                         return;
                                                     }

@@ -34,6 +34,8 @@ pub struct XmppAdapter {
     port: u16,
     /// MUC rooms to join (e.g., "room@conference.example.com").
     rooms: Vec<String>,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     #[allow(dead_code)]
@@ -63,9 +65,15 @@ impl XmppAdapter {
             server,
             port,
             rooms,
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Get the bare JID (without resource).

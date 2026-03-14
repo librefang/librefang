@@ -30,6 +30,8 @@ pub struct MatrixAdapter {
     client: reqwest::Client,
     /// Allowed room IDs (empty = all joined rooms).
     allowed_rooms: Vec<String>,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -52,11 +54,18 @@ impl MatrixAdapter {
             access_token: Zeroizing::new(access_token),
             client: reqwest::Client::new(),
             allowed_rooms,
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             since_token: Arc::new(RwLock::new(None)),
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Send a text message to a Matrix room.
     async fn api_send_message(
@@ -148,6 +157,7 @@ impl ChannelAdapter for MatrixAdapter {
         let client = self.client.clone();
         let since_token = Arc::clone(&self.since_token);
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
@@ -245,7 +255,7 @@ impl ChannelAdapter for MatrixAdapter {
 
                                 let event_id = event["event_id"].as_str().unwrap_or("").to_string();
 
-                                let channel_msg = ChannelMessage {
+                                let mut channel_msg = ChannelMessage {
                                     channel: ChannelType::Matrix,
                                     platform_message_id: event_id,
                                     sender: ChannelUser {
@@ -261,6 +271,10 @@ impl ChannelAdapter for MatrixAdapter {
                                     metadata: HashMap::new(),
                                 };
 
+                                // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
                                 if tx.send(channel_msg).await.is_err() {
                                     return;
                                 }

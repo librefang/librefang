@@ -46,6 +46,8 @@ pub struct BlueskyAdapter {
     service_url: String,
     /// HTTP client for API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -74,6 +76,11 @@ impl BlueskyAdapter {
     pub fn new(identifier: String, app_password: String) -> Self {
         Self::with_service_url(identifier, app_password, DEFAULT_SERVICE_URL.to_string())
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
 
     /// Create a new Bluesky adapter with a custom PDS service URL.
     pub fn with_service_url(identifier: String, app_password: String, service_url: String) -> Self {
@@ -84,6 +91,7 @@ impl BlueskyAdapter {
             app_password: Zeroizing::new(app_password),
             service_url,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             session: Arc::new(RwLock::new(None)),
@@ -361,6 +369,7 @@ impl ChannelAdapter for BlueskyAdapter {
         let identifier = self.identifier.clone();
         let app_password = self.app_password.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let poll_interval = Duration::from_secs(POLL_INTERVAL_SECS);
@@ -485,7 +494,12 @@ impl ChannelAdapter for BlueskyAdapter {
                         }
                     }
 
-                    if let Some(msg) = parse_bluesky_notification(notif, &own_did) {
+                    if let Some(mut msg) = parse_bluesky_notification(notif, &own_did) {
+                        // Inject account_id for multi-bot routing
+                        if let Some(ref aid) = account_id {
+                            msg.metadata
+                                .insert("account_id".to_string(), serde_json::json!(aid));
+                        }
                         if tx.send(msg).await.is_err() {
                             return;
                         }

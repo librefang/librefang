@@ -50,6 +50,8 @@ pub struct IrcAdapter {
     /// Reserved for future TLS support. Currently only plaintext is implemented.
     #[allow(dead_code)]
     use_tls: bool,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -83,10 +85,16 @@ impl IrcAdapter {
             password: password.map(Zeroizing::new),
             channels,
             use_tls,
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             write_tx: Arc::new(RwLock::new(None)),
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Format the server address as `host:port`.
@@ -242,6 +250,7 @@ impl ChannelAdapter for IrcAdapter {
         let password = self.password.clone();
         let channels = self.channels.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let mut backoff = INITIAL_BACKOFF;
@@ -343,12 +352,16 @@ impl ChannelAdapter for IrcAdapter {
 
                                 // PRIVMSG — incoming message
                                 "PRIVMSG" => {
-                                    if let Some(msg) = parse_privmsg(&parsed, &nick_clone) {
+                                    if let Some(mut msg) = parse_privmsg(&parsed, &nick_clone) {
                                         debug!(
                                             "IRC message from {}: {:?}",
                                             msg.sender.display_name, msg.content
                                         );
-                                        if tx.send(msg).await.is_err() {
+                                        // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                if tx.send(msg).await.is_err() {
                                             return;
                                         }
                                     }

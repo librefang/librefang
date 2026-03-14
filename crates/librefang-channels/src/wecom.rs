@@ -213,6 +213,8 @@ pub struct WeComAdapter {
     webhook_port: u16,
     /// HTTP client for API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -232,10 +234,16 @@ impl WeComAdapter {
             token: None,
             webhook_port,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             cached_token: Arc::new(RwLock::new(None)),
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Create a new WeCom adapter with callback verification.
@@ -371,6 +379,7 @@ impl ChannelAdapter for WeComAdapter {
         let encoding_aes_key = self.encoding_aes_key.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+        let account_id = Arc::new(self.account_id.clone());
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| format!("failed to bind WeCom webhook listener on {addr}: {e}"))?;
@@ -495,7 +504,7 @@ impl ChannelAdapter for WeComAdapter {
                                 if (event == "subscribe" || event == "enter_agent")
                                     && !user_id.is_empty()
                                 {
-                                    let msg = ChannelMessage {
+                                    let mut msg = ChannelMessage {
                                         channel: ChannelType::Custom("wecom".to_string()),
                                         platform_message_id: String::new(),
                                         sender: ChannelUser {
@@ -510,7 +519,11 @@ impl ChannelAdapter for WeComAdapter {
                                         thread_id: None,
                                         metadata: HashMap::new(),
                                     };
-                                    let _ = tx.send(msg).await;
+                                    // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = *account_id {
+                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                let _ = tx.send(msg).await;
                                 }
 
                                 return wecom_success_response();
@@ -521,7 +534,7 @@ impl ChannelAdapter for WeComAdapter {
                                 let msg_id = fields.get("MsgId").cloned().unwrap_or_default();
 
                                 if !user_id.is_empty() && !content.is_empty() {
-                                    let msg = ChannelMessage {
+                                    let mut msg = ChannelMessage {
                                         channel: ChannelType::Custom("wecom".to_string()),
                                         platform_message_id: msg_id,
                                         sender: ChannelUser {
@@ -536,7 +549,11 @@ impl ChannelAdapter for WeComAdapter {
                                         thread_id: None,
                                         metadata: HashMap::new(),
                                     };
-                                    let _ = tx.send(msg).await;
+                                    // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = *account_id {
+                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                let _ = tx.send(msg).await;
                                 }
                             }
 

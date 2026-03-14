@@ -34,6 +34,8 @@ pub struct LinkedInAdapter {
     organization_id: String,
     /// HTTP client.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -59,10 +61,16 @@ impl LinkedInAdapter {
             access_token: Zeroizing::new(access_token),
             organization_id,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             last_seen_ts: Arc::new(RwLock::new(0)),
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Build an authenticated request builder.
@@ -242,6 +250,7 @@ impl ChannelAdapter for LinkedInAdapter {
         }
 
         let poll_interval = Duration::from_secs(POLL_INTERVAL_SECS);
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
@@ -319,7 +328,7 @@ impl ChannelAdapter for LinkedInAdapter {
                         ChannelContent::Text(body_text)
                     };
 
-                    let msg = ChannelMessage {
+                    let mut msg = ChannelMessage {
                         channel: ChannelType::Custom("linkedin".to_string()),
                         platform_message_id: id,
                         sender: ChannelUser {
@@ -346,6 +355,11 @@ impl ChannelAdapter for LinkedInAdapter {
                         },
                     };
 
+                    // Inject account_id for multi-bot routing
+                    if let Some(ref aid) = account_id {
+                        msg.metadata
+                            .insert("account_id".to_string(), serde_json::json!(aid));
+                    }
                     if tx.send(msg).await.is_err() {
                         return;
                     }

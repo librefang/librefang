@@ -36,6 +36,8 @@ pub struct MattermostAdapter {
     allowed_channels: Vec<String>,
     /// HTTP client for outbound REST API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -56,10 +58,16 @@ impl MattermostAdapter {
             token: Zeroizing::new(token),
             allowed_channels,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_user_id: Arc::new(RwLock::new(None)),
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Validate the token by calling `GET /api/v4/users/me`.
@@ -250,6 +258,7 @@ impl ChannelAdapter for MattermostAdapter {
         let bot_user_id = self.bot_user_id.clone();
         let allowed_channels = self.allowed_channels.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let mut backoff = INITIAL_BACKOFF;
@@ -356,7 +365,7 @@ impl ChannelAdapter for MattermostAdapter {
 
                     // Parse events
                     let bot_id_guard = bot_user_id.read().await;
-                    if let Some(channel_msg) =
+                    if let Some(mut channel_msg) =
                         parse_mattermost_event(&payload, &bot_id_guard, &allowed_channels)
                     {
                         debug!(
@@ -364,6 +373,12 @@ impl ChannelAdapter for MattermostAdapter {
                             channel_msg.sender.display_name, channel_msg.content
                         );
                         drop(bot_id_guard);
+                        // Inject account_id for multi-bot routing
+                        if let Some(ref aid) = account_id {
+                            channel_msg
+                                .metadata
+                                .insert("account_id".to_string(), serde_json::json!(aid));
+                        }
                         if tx.send(channel_msg).await.is_err() {
                             return;
                         }

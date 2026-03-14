@@ -41,6 +41,8 @@ pub struct MessengerAdapter {
     webhook_port: u16,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -60,9 +62,15 @@ impl MessengerAdapter {
             verify_token: Zeroizing::new(verify_token),
             webhook_port,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Validate the page token by calling the Graph API to get page info.
@@ -276,6 +284,7 @@ impl ChannelAdapter for MessengerAdapter {
         let port = self.webhook_port;
         let verify_token = self.verify_token.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = Arc::new(self.account_id.clone());
 
         tokio::spawn(async move {
             let verify_token = Arc::new(verify_token);
@@ -321,6 +330,13 @@ impl ChannelAdapter for MessengerAdapter {
                                 for entry in entries {
                                     let msgs = parse_messenger_entry(entry);
                                     for msg in msgs {
+                                        // Inject account_id for multi-bot routing
+                                        if let Some(ref aid) = *account_id {
+                                            msg.metadata.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(aid),
+                                            );
+                                        }
                                         let _ = tx.send(msg).await;
                                     }
                                 }

@@ -39,6 +39,8 @@ pub struct GuildedAdapter {
     server_ids: Vec<String>,
     /// HTTP client for REST API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -56,9 +58,15 @@ impl GuildedAdapter {
             bot_token: Zeroizing::new(bot_token),
             server_ids,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Validate credentials by fetching the bot's own user info.
@@ -142,6 +150,7 @@ impl ChannelAdapter for GuildedAdapter {
         let server_ids = self.server_ids.clone();
         let own_bot_id = bot_id;
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
@@ -272,7 +281,7 @@ impl ChannelAdapter for GuildedAdapter {
                         ChannelContent::Text(content.to_string())
                     };
 
-                    let channel_msg = ChannelMessage {
+                    let mut channel_msg = ChannelMessage {
                         channel: ChannelType::Custom("guilded".to_string()),
                         platform_message_id: msg_id,
                         sender: ChannelUser {
@@ -299,6 +308,12 @@ impl ChannelAdapter for GuildedAdapter {
                         },
                     };
 
+                    // Inject account_id for multi-bot routing
+                    if let Some(ref aid) = account_id {
+                        channel_msg
+                            .metadata
+                            .insert("account_id".to_string(), serde_json::json!(aid));
+                    }
                     if tx.send(channel_msg).await.is_err() {
                         return;
                     }

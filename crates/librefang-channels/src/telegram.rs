@@ -39,6 +39,8 @@ pub struct TelegramAdapter {
     /// Bot username (without @), populated from `getMe` during `start()`.
     /// Used for @mention detection in group messages.
     bot_username: Arc<tokio::sync::RwLock<Option<String>>>,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
 }
@@ -67,9 +69,16 @@ impl TelegramAdapter {
             poll_interval,
             api_base_url,
             bot_username: Arc::new(tokio::sync::RwLock::new(None)),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
+    }
+
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Validate the bot token by calling `getMe`.
@@ -439,6 +448,7 @@ impl ChannelAdapter for TelegramAdapter {
         let poll_interval = self.poll_interval;
         let api_base_url = self.api_base_url.clone();
         let bot_username = self.bot_username.clone();
+        let account_id = self.account_id.clone();
         let mut shutdown = self.shutdown_rx.clone();
 
         tokio::spawn(async move {
@@ -552,7 +562,7 @@ impl ChannelAdapter for TelegramAdapter {
 
                     // Parse the message
                     let bot_uname = bot_username.read().await.clone();
-                    let msg = match parse_telegram_update(
+                    let mut msg = match parse_telegram_update(
                         update,
                         &allowed_users,
                         token.as_str(),
@@ -565,6 +575,12 @@ impl ChannelAdapter for TelegramAdapter {
                         Some(m) => m,
                         None => continue, // filtered out or unparseable
                     };
+
+                    // Tag message with account_id for multi-bot routing
+                    if let Some(ref aid) = account_id {
+                        msg.metadata
+                            .insert("account_id".to_string(), serde_json::json!(aid));
+                    }
 
                     debug!(
                         "Telegram message from {}: {:?}",

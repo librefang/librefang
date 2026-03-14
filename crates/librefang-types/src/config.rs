@@ -31,6 +31,100 @@ where
         .collect())
 }
 
+/// Config field that accepts either a single value or an array.
+/// Enables multi-bot configurations while staying backward-compatible.
+///
+/// TOML single-instance: `[channels.telegram]`
+/// TOML multi-instance:  `[[channels.telegram]]`
+#[derive(Debug, Clone)]
+pub struct OneOrMany<T>(pub Vec<T>);
+
+impl<T> OneOrMany<T> {
+    /// Returns true if no values are present.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    /// Returns the number of values.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    /// Returns a reference to the first value, if any.
+    pub fn first(&self) -> Option<&T> {
+        self.0.first()
+    }
+    /// Returns an iterator over the values.
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.0.iter()
+    }
+    /// Backward-compat: replaces `Option::is_some()`.
+    pub fn is_some(&self) -> bool {
+        !self.0.is_empty()
+    }
+    /// Backward-compat: replaces `Option::is_none()`.
+    pub fn is_none(&self) -> bool {
+        self.0.is_empty()
+    }
+    /// Backward-compat: replaces `Option::as_ref()` — returns the first value.
+    pub fn as_ref(&self) -> Option<&T> {
+        self.0.first()
+    }
+}
+
+impl<T> Default for OneOrMany<T> {
+    fn default() -> Self {
+        Self(Vec::new())
+    }
+}
+
+impl<T: Serialize> Serialize for OneOrMany<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.0.len() {
+            0 => serializer.serialize_none(),
+            1 => self.0[0].serialize(serializer),
+            _ => self.0.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for OneOrMany<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de;
+
+        struct OneOrManyVisitor<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> de::Visitor<'de> for OneOrManyVisitor<T> {
+            type Value = OneOrMany<T>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a single value or array of values")
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut v = Vec::new();
+                while let Some(val) = seq.next_element()? {
+                    v.push(val);
+                }
+                Ok(OneOrMany(v))
+            }
+
+            fn visit_map<M: de::MapAccess<'de>>(self, map: M) -> Result<Self::Value, M::Error> {
+                let val = T::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(OneOrMany(vec![val]))
+            }
+
+            fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(OneOrMany(Vec::new()))
+            }
+
+            fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+                Ok(OneOrMany(Vec::new()))
+            }
+        }
+
+        deserializer.deserialize_any(OneOrManyVisitor(std::marker::PhantomData))
+    }
+}
+
 /// DM (direct message) policy for a channel.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1607,96 +1701,99 @@ impl std::fmt::Debug for NetworkConfig {
 }
 
 /// Channel bridge configuration.
+///
+/// Each field uses `OneOrMany<T>` to support both single-instance (`[channels.telegram]`)
+/// and multi-instance (`[[channels.telegram]]`) TOML syntax for multi-bot routing.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelsConfig {
-    /// Telegram bot configuration (None = disabled).
-    pub telegram: Option<TelegramConfig>,
-    /// Discord bot configuration (None = disabled).
-    pub discord: Option<DiscordConfig>,
-    /// Slack bot configuration (None = disabled).
-    pub slack: Option<SlackConfig>,
-    /// WhatsApp Cloud API configuration (None = disabled).
-    pub whatsapp: Option<WhatsAppConfig>,
-    /// Signal (via signal-cli) configuration (None = disabled).
-    pub signal: Option<SignalConfig>,
-    /// Matrix protocol configuration (None = disabled).
-    pub matrix: Option<MatrixConfig>,
-    /// Email (IMAP/SMTP) configuration (None = disabled).
-    pub email: Option<EmailConfig>,
-    /// Microsoft Teams configuration (None = disabled).
-    pub teams: Option<TeamsConfig>,
-    /// Mattermost configuration (None = disabled).
-    pub mattermost: Option<MattermostConfig>,
-    /// IRC configuration (None = disabled).
-    pub irc: Option<IrcConfig>,
-    /// Google Chat configuration (None = disabled).
-    pub google_chat: Option<GoogleChatConfig>,
-    /// Twitch chat configuration (None = disabled).
-    pub twitch: Option<TwitchConfig>,
-    /// Rocket.Chat configuration (None = disabled).
-    pub rocketchat: Option<RocketChatConfig>,
-    /// Zulip configuration (None = disabled).
-    pub zulip: Option<ZulipConfig>,
-    /// XMPP/Jabber configuration (None = disabled).
-    pub xmpp: Option<XmppConfig>,
+    /// Telegram bot configuration(s).
+    pub telegram: OneOrMany<TelegramConfig>,
+    /// Discord bot configuration(s).
+    pub discord: OneOrMany<DiscordConfig>,
+    /// Slack bot configuration(s).
+    pub slack: OneOrMany<SlackConfig>,
+    /// WhatsApp Cloud API configuration(s).
+    pub whatsapp: OneOrMany<WhatsAppConfig>,
+    /// Signal (via signal-cli) configuration(s).
+    pub signal: OneOrMany<SignalConfig>,
+    /// Matrix protocol configuration(s).
+    pub matrix: OneOrMany<MatrixConfig>,
+    /// Email (IMAP/SMTP) configuration(s).
+    pub email: OneOrMany<EmailConfig>,
+    /// Microsoft Teams configuration(s).
+    pub teams: OneOrMany<TeamsConfig>,
+    /// Mattermost configuration(s).
+    pub mattermost: OneOrMany<MattermostConfig>,
+    /// IRC configuration(s).
+    pub irc: OneOrMany<IrcConfig>,
+    /// Google Chat configuration(s).
+    pub google_chat: OneOrMany<GoogleChatConfig>,
+    /// Twitch chat configuration(s).
+    pub twitch: OneOrMany<TwitchConfig>,
+    /// Rocket.Chat configuration(s).
+    pub rocketchat: OneOrMany<RocketChatConfig>,
+    /// Zulip configuration(s).
+    pub zulip: OneOrMany<ZulipConfig>,
+    /// XMPP/Jabber configuration(s).
+    pub xmpp: OneOrMany<XmppConfig>,
     // Wave 3 — High-value channels
-    /// LINE Messaging API configuration (None = disabled).
-    pub line: Option<LineConfig>,
-    /// Viber Bot API configuration (None = disabled).
-    pub viber: Option<ViberConfig>,
-    /// Facebook Messenger configuration (None = disabled).
-    pub messenger: Option<MessengerConfig>,
-    /// Reddit API configuration (None = disabled).
-    pub reddit: Option<RedditConfig>,
-    /// Mastodon Streaming API configuration (None = disabled).
-    pub mastodon: Option<MastodonConfig>,
-    /// Bluesky/AT Protocol configuration (None = disabled).
-    pub bluesky: Option<BlueskyConfig>,
-    /// Feishu/Lark Open Platform configuration (None = disabled).
-    pub feishu: Option<FeishuConfig>,
-    /// Revolt (Discord-like) configuration (None = disabled).
-    pub revolt: Option<RevoltConfig>,
+    /// LINE Messaging API configuration(s).
+    pub line: OneOrMany<LineConfig>,
+    /// Viber Bot API configuration(s).
+    pub viber: OneOrMany<ViberConfig>,
+    /// Facebook Messenger configuration(s).
+    pub messenger: OneOrMany<MessengerConfig>,
+    /// Reddit API configuration(s).
+    pub reddit: OneOrMany<RedditConfig>,
+    /// Mastodon Streaming API configuration(s).
+    pub mastodon: OneOrMany<MastodonConfig>,
+    /// Bluesky/AT Protocol configuration(s).
+    pub bluesky: OneOrMany<BlueskyConfig>,
+    /// Feishu/Lark Open Platform configuration(s).
+    pub feishu: OneOrMany<FeishuConfig>,
+    /// Revolt (Discord-like) configuration(s).
+    pub revolt: OneOrMany<RevoltConfig>,
     // Wave 4 — Enterprise & community channels
-    /// Nextcloud Talk configuration (None = disabled).
-    pub nextcloud: Option<NextcloudConfig>,
-    /// Guilded bot configuration (None = disabled).
-    pub guilded: Option<GuildedConfig>,
-    /// Keybase chat configuration (None = disabled).
-    pub keybase: Option<KeybaseConfig>,
-    /// Threema Gateway configuration (None = disabled).
-    pub threema: Option<ThreemaConfig>,
-    /// Nostr relay configuration (None = disabled).
-    pub nostr: Option<NostrConfig>,
-    /// Webex bot configuration (None = disabled).
-    pub webex: Option<WebexConfig>,
-    /// Pumble bot configuration (None = disabled).
-    pub pumble: Option<PumbleConfig>,
-    /// Flock bot configuration (None = disabled).
-    pub flock: Option<FlockConfig>,
-    /// Twist API configuration (None = disabled).
-    pub twist: Option<TwistConfig>,
+    /// Nextcloud Talk configuration(s).
+    pub nextcloud: OneOrMany<NextcloudConfig>,
+    /// Guilded bot configuration(s).
+    pub guilded: OneOrMany<GuildedConfig>,
+    /// Keybase chat configuration(s).
+    pub keybase: OneOrMany<KeybaseConfig>,
+    /// Threema Gateway configuration(s).
+    pub threema: OneOrMany<ThreemaConfig>,
+    /// Nostr relay configuration(s).
+    pub nostr: OneOrMany<NostrConfig>,
+    /// Webex bot configuration(s).
+    pub webex: OneOrMany<WebexConfig>,
+    /// Pumble bot configuration(s).
+    pub pumble: OneOrMany<PumbleConfig>,
+    /// Flock bot configuration(s).
+    pub flock: OneOrMany<FlockConfig>,
+    /// Twist API configuration(s).
+    pub twist: OneOrMany<TwistConfig>,
     // Wave 5 — Niche & differentiating channels
-    /// Mumble text chat configuration (None = disabled).
-    pub mumble: Option<MumbleConfig>,
-    /// DingTalk robot configuration (None = disabled).
-    pub dingtalk: Option<DingTalkConfig>,
-    /// QQ Bot API v2 configuration (None = disabled).
-    pub qq: Option<QqConfig>,
-    /// Discourse forum configuration (None = disabled).
-    pub discourse: Option<DiscourseConfig>,
-    /// Gitter streaming configuration (None = disabled).
-    pub gitter: Option<GitterConfig>,
-    /// ntfy.sh pub/sub configuration (None = disabled).
-    pub ntfy: Option<NtfyConfig>,
-    /// Gotify notification configuration (None = disabled).
-    pub gotify: Option<GotifyConfig>,
-    /// Generic webhook configuration (None = disabled).
-    pub webhook: Option<WebhookConfig>,
-    /// LinkedIn messaging configuration (None = disabled).
-    pub linkedin: Option<LinkedInConfig>,
-    /// WeCom/WeChat Work configuration (None = disabled).
-    pub wecom: Option<WeComConfig>,
+    /// Mumble text chat configuration(s).
+    pub mumble: OneOrMany<MumbleConfig>,
+    /// DingTalk robot configuration(s).
+    pub dingtalk: OneOrMany<DingTalkConfig>,
+    /// QQ Bot API v2 configuration(s).
+    pub qq: OneOrMany<QqConfig>,
+    /// Discourse forum configuration(s).
+    pub discourse: OneOrMany<DiscourseConfig>,
+    /// Gitter streaming configuration(s).
+    pub gitter: OneOrMany<GitterConfig>,
+    /// ntfy.sh pub/sub configuration(s).
+    pub ntfy: OneOrMany<NtfyConfig>,
+    /// Gotify notification configuration(s).
+    pub gotify: OneOrMany<GotifyConfig>,
+    /// Generic webhook configuration(s).
+    pub webhook: OneOrMany<WebhookConfig>,
+    /// LinkedIn messaging configuration(s).
+    pub linkedin: OneOrMany<LinkedInConfig>,
+    /// WeCom/WeChat Work configuration(s).
+    pub wecom: OneOrMany<WeComConfig>,
 }
 
 /// Telegram channel adapter configuration.
@@ -1709,6 +1806,9 @@ pub struct TelegramConfig {
     /// Accepts strings for consistency; numeric TOML integers are coerced to strings.
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_users: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Polling interval in seconds.
@@ -1727,6 +1827,7 @@ impl Default for TelegramConfig {
         Self {
             bot_token_env: "TELEGRAM_BOT_TOKEN".to_string(),
             allowed_users: vec![],
+            account_id: None,
             default_agent: None,
             poll_interval_secs: 1,
             api_url: None,
@@ -1748,6 +1849,9 @@ pub struct DiscordConfig {
     /// User IDs allowed to interact (empty = allow all).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_users: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Gateway intents bitmask (default: 37376 = GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT).
@@ -1767,6 +1871,7 @@ impl Default for DiscordConfig {
             bot_token_env: "DISCORD_BOT_TOKEN".to_string(),
             allowed_guilds: vec![],
             allowed_users: vec![],
+            account_id: None,
             default_agent: None,
             intents: 37376,
             ignore_bots: true,
@@ -1786,6 +1891,9 @@ pub struct SlackConfig {
     /// Channel IDs allowed to interact (empty = allow all).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_channels: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -1799,6 +1907,7 @@ impl Default for SlackConfig {
             app_token_env: "SLACK_APP_TOKEN".to_string(),
             bot_token_env: "SLACK_BOT_TOKEN".to_string(),
             allowed_channels: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -1823,6 +1932,9 @@ pub struct WhatsAppConfig {
     /// Allowed phone numbers (empty = allow all).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_users: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -1839,6 +1951,7 @@ impl Default for WhatsAppConfig {
             webhook_port: 8443,
             gateway_url_env: "WHATSAPP_WEB_GATEWAY_URL".to_string(),
             allowed_users: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -1856,6 +1969,9 @@ pub struct SignalConfig {
     /// Allowed phone numbers (empty = allow all).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_users: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -1869,6 +1985,7 @@ impl Default for SignalConfig {
             api_url: "http://localhost:8080".to_string(),
             phone_number: String::new(),
             allowed_users: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -1888,6 +2005,9 @@ pub struct MatrixConfig {
     /// Room IDs to listen in (empty = all joined rooms).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_rooms: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -1902,6 +2022,7 @@ impl Default for MatrixConfig {
             user_id: String::new(),
             access_token_env: "MATRIX_ACCESS_TOKEN".to_string(),
             allowed_rooms: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -1932,6 +2053,9 @@ pub struct EmailConfig {
     /// Only process emails from these senders (empty = all).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_senders: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -1951,6 +2075,7 @@ impl Default for EmailConfig {
             poll_interval_secs: 30,
             folders: vec!["INBOX".to_string()],
             allowed_senders: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -1970,6 +2095,9 @@ pub struct TeamsConfig {
     /// Allowed tenant IDs (empty = allow all).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_tenants: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -1984,6 +2112,7 @@ impl Default for TeamsConfig {
             app_password_env: "TEAMS_APP_PASSWORD".to_string(),
             webhook_port: 3978,
             allowed_tenants: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2001,6 +2130,9 @@ pub struct MattermostConfig {
     /// Allowed channel IDs (empty = all).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_channels: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2014,6 +2146,7 @@ impl Default for MattermostConfig {
             server_url: String::new(),
             token_env: "MATTERMOST_TOKEN".to_string(),
             allowed_channels: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2037,6 +2170,9 @@ pub struct IrcConfig {
     pub channels: Vec<String>,
     /// Use TLS (requires tokio-native-tls).
     pub use_tls: bool,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2053,6 +2189,7 @@ impl Default for IrcConfig {
             password_env: None,
             channels: vec![],
             use_tls: false,
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2070,6 +2207,9 @@ pub struct GoogleChatConfig {
     pub space_ids: Vec<String>,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2083,6 +2223,7 @@ impl Default for GoogleChatConfig {
             service_account_env: "GOOGLE_CHAT_SERVICE_ACCOUNT".to_string(),
             space_ids: vec![],
             webhook_port: 8444,
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2100,6 +2241,9 @@ pub struct TwitchConfig {
     pub channels: Vec<String>,
     /// Bot nickname.
     pub nick: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2113,6 +2257,7 @@ impl Default for TwitchConfig {
             oauth_token_env: "TWITCH_OAUTH_TOKEN".to_string(),
             channels: vec![],
             nick: "librefang".to_string(),
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2132,6 +2277,9 @@ pub struct RocketChatConfig {
     /// Allowed channel IDs (empty = all).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_channels: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2146,6 +2294,7 @@ impl Default for RocketChatConfig {
             token_env: "ROCKETCHAT_TOKEN".to_string(),
             user_id: String::new(),
             allowed_channels: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2165,6 +2314,9 @@ pub struct ZulipConfig {
     /// Streams to listen in.
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub streams: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2179,6 +2331,7 @@ impl Default for ZulipConfig {
             bot_email: String::new(),
             api_key_env: "ZULIP_API_KEY".to_string(),
             streams: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2200,6 +2353,9 @@ pub struct XmppConfig {
     /// MUC rooms to join.
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub rooms: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2215,6 +2371,7 @@ impl Default for XmppConfig {
             server: String::new(),
             port: 5222,
             rooms: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2233,6 +2390,9 @@ pub struct LineConfig {
     pub access_token_env: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2246,6 +2406,7 @@ impl Default for LineConfig {
             channel_secret_env: "LINE_CHANNEL_SECRET".to_string(),
             access_token_env: "LINE_CHANNEL_ACCESS_TOKEN".to_string(),
             webhook_port: 8450,
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2262,6 +2423,9 @@ pub struct ViberConfig {
     pub webhook_url: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2275,6 +2439,7 @@ impl Default for ViberConfig {
             auth_token_env: "VIBER_AUTH_TOKEN".to_string(),
             webhook_url: String::new(),
             webhook_port: 8451,
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2291,6 +2456,9 @@ pub struct MessengerConfig {
     pub verify_token_env: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2304,6 +2472,7 @@ impl Default for MessengerConfig {
             page_token_env: "MESSENGER_PAGE_TOKEN".to_string(),
             verify_token_env: "MESSENGER_VERIFY_TOKEN".to_string(),
             webhook_port: 8452,
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2325,6 +2494,9 @@ pub struct RedditConfig {
     /// Subreddits to monitor.
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub subreddits: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2340,6 +2512,7 @@ impl Default for RedditConfig {
             username: String::new(),
             password_env: "REDDIT_PASSWORD".to_string(),
             subreddits: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2354,6 +2527,9 @@ pub struct MastodonConfig {
     pub instance_url: String,
     /// Env var name holding the access token.
     pub access_token_env: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2366,6 +2542,7 @@ impl Default for MastodonConfig {
         Self {
             instance_url: String::new(),
             access_token_env: "MASTODON_ACCESS_TOKEN".to_string(),
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2382,6 +2559,9 @@ pub struct BlueskyConfig {
     pub app_password_env: String,
     /// PDS service URL.
     pub service_url: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2395,6 +2575,7 @@ impl Default for BlueskyConfig {
             identifier: String::new(),
             app_password_env: "BLUESKY_APP_PASSWORD".to_string(),
             service_url: "https://bsky.social".to_string(),
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2411,6 +2592,9 @@ pub struct FeishuConfig {
     pub app_secret_env: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2424,6 +2608,7 @@ impl Default for FeishuConfig {
             app_id: String::new(),
             app_secret_env: "FEISHU_APP_SECRET".to_string(),
             webhook_port: 8453,
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2446,6 +2631,9 @@ pub struct WeComConfig {
     pub token: Option<String>,
     /// Encoding AES key for callback (optional, for encrypted mode).
     pub encoding_aes_key: Option<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2462,6 +2650,7 @@ impl Default for WeComConfig {
             webhook_port: 8454,
             token: None,
             encoding_aes_key: None,
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2476,6 +2665,9 @@ pub struct RevoltConfig {
     pub bot_token_env: String,
     /// Revolt API URL.
     pub api_url: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2488,6 +2680,7 @@ impl Default for RevoltConfig {
         Self {
             bot_token_env: "REVOLT_BOT_TOKEN".to_string(),
             api_url: "https://api.revolt.chat".to_string(),
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2507,6 +2700,9 @@ pub struct NextcloudConfig {
     /// Room tokens to listen in (empty = all).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_rooms: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2520,6 +2716,7 @@ impl Default for NextcloudConfig {
             server_url: String::new(),
             token_env: "NEXTCLOUD_TOKEN".to_string(),
             allowed_rooms: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2535,6 +2732,9 @@ pub struct GuildedConfig {
     /// Server IDs to listen in (empty = all).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub server_ids: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2547,6 +2747,7 @@ impl Default for GuildedConfig {
         Self {
             bot_token_env: "GUILDED_BOT_TOKEN".to_string(),
             server_ids: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2564,6 +2765,9 @@ pub struct KeybaseConfig {
     /// Team names to listen in (empty = all DMs).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_teams: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2577,6 +2781,7 @@ impl Default for KeybaseConfig {
             username: String::new(),
             paperkey_env: "KEYBASE_PAPERKEY".to_string(),
             allowed_teams: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2593,6 +2798,9 @@ pub struct ThreemaConfig {
     pub secret_env: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2606,6 +2814,7 @@ impl Default for ThreemaConfig {
             threema_id: String::new(),
             secret_env: "THREEMA_SECRET".to_string(),
             webhook_port: 8454,
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2621,6 +2830,9 @@ pub struct NostrConfig {
     /// Relay URLs to connect to.
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub relays: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2633,6 +2845,7 @@ impl Default for NostrConfig {
         Self {
             private_key_env: "NOSTR_PRIVATE_KEY".to_string(),
             relays: vec!["wss://relay.damus.io".to_string()],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2648,6 +2861,9 @@ pub struct WebexConfig {
     /// Room IDs to listen in (empty = all).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_rooms: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2660,6 +2876,7 @@ impl Default for WebexConfig {
         Self {
             bot_token_env: "WEBEX_BOT_TOKEN".to_string(),
             allowed_rooms: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2674,6 +2891,9 @@ pub struct PumbleConfig {
     pub bot_token_env: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2686,6 +2906,7 @@ impl Default for PumbleConfig {
         Self {
             bot_token_env: "PUMBLE_BOT_TOKEN".to_string(),
             webhook_port: 8455,
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2700,6 +2921,9 @@ pub struct FlockConfig {
     pub bot_token_env: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2712,6 +2936,7 @@ impl Default for FlockConfig {
         Self {
             bot_token_env: "FLOCK_BOT_TOKEN".to_string(),
             webhook_port: 8456,
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2729,6 +2954,9 @@ pub struct TwistConfig {
     /// Channel IDs to listen in (empty = all).
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub allowed_channels: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2742,6 +2970,7 @@ impl Default for TwistConfig {
             token_env: "TWIST_TOKEN".to_string(),
             workspace_id: String::new(),
             allowed_channels: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2764,6 +2993,9 @@ pub struct MumbleConfig {
     pub password_env: String,
     /// Channel to join.
     pub channel: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2779,6 +3011,7 @@ impl Default for MumbleConfig {
             username: "librefang".to_string(),
             password_env: "MUMBLE_PASSWORD".to_string(),
             channel: String::new(),
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2795,6 +3028,9 @@ pub struct DingTalkConfig {
     pub secret_env: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2808,6 +3044,7 @@ impl Default for DingTalkConfig {
             access_token_env: "DINGTALK_ACCESS_TOKEN".to_string(),
             secret_env: "DINGTALK_SECRET".to_string(),
             webhook_port: 8457,
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2825,6 +3062,9 @@ pub struct QqConfig {
     /// QQ user IDs allowed to interact (empty = allow all).
     #[serde(default)]
     pub allowed_users: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2838,6 +3078,7 @@ impl Default for QqConfig {
             app_id: String::new(),
             app_secret_env: "QQ_BOT_APP_SECRET".to_string(),
             allowed_users: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2857,6 +3098,9 @@ pub struct DiscourseConfig {
     /// Category slugs to monitor.
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub categories: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2871,6 +3115,7 @@ impl Default for DiscourseConfig {
             api_key_env: "DISCOURSE_API_KEY".to_string(),
             api_username: "system".to_string(),
             categories: vec![],
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2885,6 +3130,9 @@ pub struct GitterConfig {
     pub token_env: String,
     /// Room ID to listen in.
     pub room_id: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2897,6 +3145,7 @@ impl Default for GitterConfig {
         Self {
             token_env: "GITTER_TOKEN".to_string(),
             room_id: String::new(),
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2913,6 +3162,9 @@ pub struct NtfyConfig {
     pub topic: String,
     /// Env var name holding the auth token (optional for public topics).
     pub token_env: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2926,6 +3178,7 @@ impl Default for NtfyConfig {
             server_url: "https://ntfy.sh".to_string(),
             topic: String::new(),
             token_env: "NTFY_TOKEN".to_string(),
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2942,6 +3195,9 @@ pub struct GotifyConfig {
     pub app_token_env: String,
     /// Env var name holding the client token (for receiving).
     pub client_token_env: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2955,6 +3211,7 @@ impl Default for GotifyConfig {
             server_url: String::new(),
             app_token_env: "GOTIFY_APP_TOKEN".to_string(),
             client_token_env: "GOTIFY_CLIENT_TOKEN".to_string(),
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2971,6 +3228,9 @@ pub struct WebhookConfig {
     pub listen_port: u16,
     /// URL to POST outgoing messages to.
     pub callback_url: Option<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -2984,6 +3244,7 @@ impl Default for WebhookConfig {
             secret_env: "WEBHOOK_SECRET".to_string(),
             listen_port: 8460,
             callback_url: None,
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -2998,6 +3259,9 @@ pub struct LinkedInConfig {
     pub access_token_env: String,
     /// Organization ID for messaging.
     pub organization_id: String,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
     /// Per-channel behavior overrides.
@@ -3010,6 +3274,7 @@ impl Default for LinkedInConfig {
         Self {
             access_token_env: "LINKEDIN_ACCESS_TOKEN".to_string(),
             organization_id: String::new(),
+            account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
         }
@@ -3023,7 +3288,7 @@ impl KernelConfig {
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
-        if let Some(ref tg) = self.channels.telegram {
+        for tg in self.channels.telegram.iter() {
             if std::env::var(&tg.bot_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3034,7 +3299,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref dc) = self.channels.discord {
+        for dc in self.channels.discord.iter() {
             if std::env::var(&dc.bot_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3045,7 +3310,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref sl) = self.channels.slack {
+        for sl in self.channels.slack.iter() {
             if std::env::var(&sl.app_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3065,7 +3330,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref wa) = self.channels.whatsapp {
+        for wa in self.channels.whatsapp.iter() {
             if std::env::var(&wa.access_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3076,7 +3341,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref mx) = self.channels.matrix {
+        for mx in self.channels.matrix.iter() {
             if std::env::var(&mx.access_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3087,7 +3352,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref em) = self.channels.email {
+        for em in self.channels.email.iter() {
             if std::env::var(&em.password_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3098,7 +3363,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref t) = self.channels.teams {
+        for t in self.channels.teams.iter() {
             if std::env::var(&t.app_password_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3109,7 +3374,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref m) = self.channels.mattermost {
+        for m in self.channels.mattermost.iter() {
             if std::env::var(&m.token_env).unwrap_or_default().is_empty() {
                 warnings.push(format!(
                     "Mattermost configured but {} is not set",
@@ -3117,12 +3382,12 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref z) = self.channels.zulip {
+        for z in self.channels.zulip.iter() {
             if std::env::var(&z.api_key_env).unwrap_or_default().is_empty() {
                 warnings.push(format!("Zulip configured but {} is not set", z.api_key_env));
             }
         }
-        if let Some(ref tw) = self.channels.twitch {
+        for tw in self.channels.twitch.iter() {
             if std::env::var(&tw.oauth_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3133,7 +3398,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref rc) = self.channels.rocketchat {
+        for rc in self.channels.rocketchat.iter() {
             if std::env::var(&rc.token_env).unwrap_or_default().is_empty() {
                 warnings.push(format!(
                     "Rocket.Chat configured but {} is not set",
@@ -3141,7 +3406,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref gc) = self.channels.google_chat {
+        for gc in self.channels.google_chat.iter() {
             if std::env::var(&gc.service_account_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3152,7 +3417,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref x) = self.channels.xmpp {
+        for x in self.channels.xmpp.iter() {
             if std::env::var(&x.password_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3161,7 +3426,7 @@ impl KernelConfig {
             }
         }
         // Wave 3 channels
-        if let Some(ref ln) = self.channels.line {
+        for ln in self.channels.line.iter() {
             if std::env::var(&ln.access_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3172,7 +3437,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref vb) = self.channels.viber {
+        for vb in self.channels.viber.iter() {
             if std::env::var(&vb.auth_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3183,7 +3448,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref ms) = self.channels.messenger {
+        for ms in self.channels.messenger.iter() {
             if std::env::var(&ms.page_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3194,7 +3459,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref rd) = self.channels.reddit {
+        for rd in self.channels.reddit.iter() {
             if std::env::var(&rd.client_secret_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3205,7 +3470,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref md) = self.channels.mastodon {
+        for md in self.channels.mastodon.iter() {
             if std::env::var(&md.access_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3216,7 +3481,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref bs) = self.channels.bluesky {
+        for bs in self.channels.bluesky.iter() {
             if std::env::var(&bs.app_password_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3227,7 +3492,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref fs) = self.channels.feishu {
+        for fs in self.channels.feishu.iter() {
             if std::env::var(&fs.app_secret_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3238,7 +3503,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref rv) = self.channels.revolt {
+        for rv in self.channels.revolt.iter() {
             if std::env::var(&rv.bot_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3250,7 +3515,7 @@ impl KernelConfig {
             }
         }
         // Wave 4 channels
-        if let Some(ref nc) = self.channels.nextcloud {
+        for nc in self.channels.nextcloud.iter() {
             if std::env::var(&nc.token_env).unwrap_or_default().is_empty() {
                 warnings.push(format!(
                     "Nextcloud configured but {} is not set",
@@ -3258,7 +3523,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref gd) = self.channels.guilded {
+        for gd in self.channels.guilded.iter() {
             if std::env::var(&gd.bot_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3269,7 +3534,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref kb) = self.channels.keybase {
+        for kb in self.channels.keybase.iter() {
             if std::env::var(&kb.paperkey_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3280,7 +3545,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref tm) = self.channels.threema {
+        for tm in self.channels.threema.iter() {
             if std::env::var(&tm.secret_env).unwrap_or_default().is_empty() {
                 warnings.push(format!(
                     "Threema configured but {} is not set",
@@ -3288,7 +3553,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref ns) = self.channels.nostr {
+        for ns in self.channels.nostr.iter() {
             if std::env::var(&ns.private_key_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3299,7 +3564,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref wx) = self.channels.webex {
+        for wx in self.channels.webex.iter() {
             if std::env::var(&wx.bot_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3310,7 +3575,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref pb) = self.channels.pumble {
+        for pb in self.channels.pumble.iter() {
             if std::env::var(&pb.bot_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3321,7 +3586,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref fl) = self.channels.flock {
+        for fl in self.channels.flock.iter() {
             if std::env::var(&fl.bot_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3332,13 +3597,13 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref tw) = self.channels.twist {
+        for tw in self.channels.twist.iter() {
             if std::env::var(&tw.token_env).unwrap_or_default().is_empty() {
                 warnings.push(format!("Twist configured but {} is not set", tw.token_env));
             }
         }
         // Wave 5 channels
-        if let Some(ref mb) = self.channels.mumble {
+        for mb in self.channels.mumble.iter() {
             if std::env::var(&mb.password_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3349,7 +3614,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref dt) = self.channels.dingtalk {
+        for dt in self.channels.dingtalk.iter() {
             if std::env::var(&dt.access_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3360,7 +3625,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref dc) = self.channels.discourse {
+        for dc in self.channels.discourse.iter() {
             if std::env::var(&dc.api_key_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3371,19 +3636,19 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref gt) = self.channels.gitter {
+        for gt in self.channels.gitter.iter() {
             if std::env::var(&gt.token_env).unwrap_or_default().is_empty() {
                 warnings.push(format!("Gitter configured but {} is not set", gt.token_env));
             }
         }
-        if let Some(ref nf) = self.channels.ntfy {
+        for nf in self.channels.ntfy.iter() {
             if !nf.token_env.is_empty()
                 && std::env::var(&nf.token_env).unwrap_or_default().is_empty()
             {
                 warnings.push(format!("ntfy configured but {} is not set", nf.token_env));
             }
         }
-        if let Some(ref gf) = self.channels.gotify {
+        for gf in self.channels.gotify.iter() {
             if std::env::var(&gf.app_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3394,7 +3659,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref wh) = self.channels.webhook {
+        for wh in self.channels.webhook.iter() {
             if std::env::var(&wh.secret_env).unwrap_or_default().is_empty() {
                 warnings.push(format!(
                     "Webhook configured but {} is not set",
@@ -3402,7 +3667,7 @@ impl KernelConfig {
                 ));
             }
         }
-        if let Some(ref li) = self.channels.linkedin {
+        for li in self.channels.linkedin.iter() {
             if std::env::var(&li.access_token_env)
                 .unwrap_or_default()
                 .is_empty()
@@ -3600,10 +3865,10 @@ mod tests {
     #[test]
     fn test_validate_missing_env_vars() {
         let mut config = KernelConfig::default();
-        config.channels.discord = Some(DiscordConfig {
+        config.channels.discord = OneOrMany(vec![DiscordConfig {
             bot_token_env: "LIBREFANG_TEST_NONEXISTENT_VAR_DC".to_string(),
             ..Default::default()
-        });
+        }]);
         let warnings = config.validate();
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Discord"));
@@ -3667,10 +3932,10 @@ mod tests {
     fn test_channels_config_with_new_channels() {
         let config = KernelConfig {
             channels: ChannelsConfig {
-                whatsapp: Some(WhatsAppConfig::default()),
-                signal: Some(SignalConfig::default()),
-                matrix: Some(MatrixConfig::default()),
-                email: Some(EmailConfig::default()),
+                whatsapp: OneOrMany(vec![WhatsAppConfig::default()]),
+                signal: OneOrMany(vec![SignalConfig::default()]),
+                matrix: OneOrMany(vec![MatrixConfig::default()]),
+                email: OneOrMany(vec![EmailConfig::default()]),
                 ..Default::default()
             },
             ..Default::default()
@@ -3745,14 +4010,14 @@ mod tests {
     fn test_all_new_channel_configs_serde() {
         let config = KernelConfig {
             channels: ChannelsConfig {
-                teams: Some(TeamsConfig::default()),
-                mattermost: Some(MattermostConfig::default()),
-                irc: Some(IrcConfig::default()),
-                google_chat: Some(GoogleChatConfig::default()),
-                twitch: Some(TwitchConfig::default()),
-                rocketchat: Some(RocketChatConfig::default()),
-                zulip: Some(ZulipConfig::default()),
-                xmpp: Some(XmppConfig::default()),
+                teams: OneOrMany(vec![TeamsConfig::default()]),
+                mattermost: OneOrMany(vec![MattermostConfig::default()]),
+                irc: OneOrMany(vec![IrcConfig::default()]),
+                google_chat: OneOrMany(vec![GoogleChatConfig::default()]),
+                twitch: OneOrMany(vec![TwitchConfig::default()]),
+                rocketchat: OneOrMany(vec![RocketChatConfig::default()]),
+                zulip: OneOrMany(vec![ZulipConfig::default()]),
+                xmpp: OneOrMany(vec![XmppConfig::default()]),
                 ..Default::default()
             },
             ..Default::default()
@@ -3953,5 +4218,88 @@ mod tests {
             config.provider_api_keys.get("azure").unwrap(),
             "AZURE_OPENAI_KEY"
         );
+    }
+
+    #[test]
+    fn test_one_or_many_single_toml_table() {
+        // Single [channels.telegram] table should parse as OneOrMany with one element
+        let toml_str = r#"
+            [channels.telegram]
+            bot_token_env = "MY_TG_TOKEN"
+            account_id = "bot1"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.channels.telegram.is_some());
+        assert_eq!(config.channels.telegram.len(), 1);
+        let tg = config.channels.telegram.first().unwrap();
+        assert_eq!(tg.bot_token_env, "MY_TG_TOKEN");
+        assert_eq!(tg.account_id.as_deref(), Some("bot1"));
+    }
+
+    #[test]
+    fn test_one_or_many_array_of_tables() {
+        // [[channels.telegram]] should parse as OneOrMany with multiple elements
+        let toml_str = r#"
+            [[channels.telegram]]
+            bot_token_env = "TG_TOKEN_1"
+            account_id = "bot1"
+            default_agent = "assistant"
+
+            [[channels.telegram]]
+            bot_token_env = "TG_TOKEN_2"
+            account_id = "bot2"
+            default_agent = "coder"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.channels.telegram.is_some());
+        assert_eq!(config.channels.telegram.len(), 2);
+
+        let bots: Vec<_> = config.channels.telegram.iter().collect();
+        assert_eq!(bots[0].bot_token_env, "TG_TOKEN_1");
+        assert_eq!(bots[0].account_id.as_deref(), Some("bot1"));
+        assert_eq!(bots[0].default_agent.as_deref(), Some("assistant"));
+        assert_eq!(bots[1].bot_token_env, "TG_TOKEN_2");
+        assert_eq!(bots[1].account_id.as_deref(), Some("bot2"));
+        assert_eq!(bots[1].default_agent.as_deref(), Some("coder"));
+    }
+
+    #[test]
+    fn test_one_or_many_empty_default() {
+        let config = KernelConfig::default();
+        assert!(config.channels.telegram.is_none());
+        assert!(config.channels.telegram.is_empty());
+        assert_eq!(config.channels.telegram.len(), 0);
+        assert!(config.channels.telegram.first().is_none());
+        assert!(config.channels.telegram.as_ref().is_none());
+    }
+
+    #[test]
+    fn test_one_or_many_serialize_roundtrip() {
+        // Single element serializes as a bare table, multi as array-of-tables
+        let single = OneOrMany(vec![TelegramConfig::default()]);
+        let json = serde_json::to_string(&single).unwrap();
+        let back: OneOrMany<TelegramConfig> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), 1);
+
+        let multi = OneOrMany(vec![TelegramConfig::default(), TelegramConfig::default()]);
+        let json = serde_json::to_string(&multi).unwrap();
+        let back: OneOrMany<TelegramConfig> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), 2);
+
+        let empty: OneOrMany<TelegramConfig> = OneOrMany::default();
+        let json = serde_json::to_string(&empty).unwrap();
+        assert_eq!(json, "null");
+    }
+
+    #[test]
+    fn test_account_id_in_channel_configs() {
+        // Verify account_id field exists and defaults to None
+        assert!(TelegramConfig::default().account_id.is_none());
+        assert!(DiscordConfig::default().account_id.is_none());
+        assert!(SlackConfig::default().account_id.is_none());
+        assert!(WhatsAppConfig::default().account_id.is_none());
+        assert!(SignalConfig::default().account_id.is_none());
+        assert!(MatrixConfig::default().account_id.is_none());
+        assert!(EmailConfig::default().account_id.is_none());
     }
 }

@@ -35,6 +35,8 @@ pub struct TwitchAdapter {
     channels: Vec<String>,
     /// Bot's IRC nickname.
     nick: String,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -53,9 +55,15 @@ impl TwitchAdapter {
             oauth_token: Zeroizing::new(oauth_token),
             channels,
             nick,
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
+    }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
     }
 
     /// Format the OAuth token for the IRC PASS command.
@@ -131,6 +139,7 @@ impl ChannelAdapter for TwitchAdapter {
             .collect();
         let bot_nick = self.nick.to_lowercase();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
@@ -239,7 +248,7 @@ impl ChannelAdapter for TwitchAdapter {
                             ChannelContent::Text(message.clone())
                         };
 
-                        let channel_msg = ChannelMessage {
+                        let mut channel_msg = ChannelMessage {
                             channel: ChannelType::Custom("twitch".to_string()),
                             platform_message_id: uuid::Uuid::new_v4().to_string(),
                             sender: ChannelUser {
@@ -255,6 +264,12 @@ impl ChannelAdapter for TwitchAdapter {
                             metadata: HashMap::new(),
                         };
 
+                        // Inject account_id for multi-bot routing
+                        if let Some(ref aid) = account_id {
+                            channel_msg
+                                .metadata
+                                .insert("account_id".to_string(), serde_json::json!(aid));
+                        }
                         if tx.send(channel_msg).await.is_err() {
                             return;
                         }

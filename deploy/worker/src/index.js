@@ -235,6 +235,7 @@ const HTML = `<!DOCTYPE html>
       text-decoration: none;
       color: var(--text);
       display: block;
+      min-width: 0;
     }
     .platform-card:hover {
       border-color: var(--accent);
@@ -279,8 +280,12 @@ const HTML = `<!DOCTYPE html>
       align-items: center;
       gap: 6px;
       max-width: 100%;
+      overflow: hidden;
     }
-    .platform-cmd code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .platform-cmd code { overflow-x: auto; white-space: nowrap; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+    .platform-cmd code::-webkit-scrollbar { height: 3px; }
+    .platform-cmd code::-webkit-scrollbar-track { background: transparent; }
+    .platform-cmd code::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     .copy-btn {
       background: var(--surface2);
       border: 1px solid var(--border);
@@ -474,7 +479,7 @@ const HTML = `<!DOCTYPE html>
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12H2"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/></svg></div>
           <div class="platform-name">Docker</div>
           <div class="platform-desc">One command, runs anywhere</div>
-          <div class="platform-cmd"><code>docker run -p 4545:4545 ghcr.io/librefang/librefang</code><button class="copy-btn" onclick="event.preventDefault();event.stopPropagation();copyText(this,'docker run -p 4545:4545 ghcr.io/librefang/librefang')">Copy</button></div>
+          <div class="platform-cmd"><code title="docker run -p 4545:4545 ghcr.io/librefang/librefang">docker run -p 4545:4545 ghcr.io/librefang/librefang</code><button class="copy-btn" onclick="event.preventDefault();event.stopPropagation();copyText(this,'docker run -p 4545:4545 ghcr.io/librefang/librefang')">Copy</button></div>
         </a>
       </div>
 
@@ -484,21 +489,21 @@ const HTML = `<!DOCTYPE html>
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div>
           <div class="platform-name">macOS</div>
           <div class="platform-desc">Homebrew or download binary</div>
-          <div class="platform-cmd"><code>brew install librefang/tap/librefang</code><button class="copy-btn" onclick="event.preventDefault();event.stopPropagation();copyText(this,'brew install librefang/tap/librefang')">Copy</button></div>
+          <div class="platform-cmd"><code title="brew install librefang/tap/librefang">brew install librefang/tap/librefang</code><button class="copy-btn" onclick="event.preventDefault();event.stopPropagation();copyText(this,'brew install librefang/tap/librefang')">Copy</button></div>
         </a>
 
         <a class="platform-card accent-blue" href="https://github.com/librefang/librefang/releases/latest" target="_blank" rel="noopener">
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
           <div class="platform-name">Linux</div>
           <div class="platform-desc">Install script or download binary</div>
-          <div class="platform-cmd"><code>curl -fsSL https://librefang.ai/install.sh | sh</code><button class="copy-btn" onclick="event.preventDefault();event.stopPropagation();copyText(this,'curl -fsSL https://librefang.ai/install.sh | sh')">Copy</button></div>
+          <div class="platform-cmd"><code title="curl -fsSL https://librefang.ai/install.sh | sh">curl -fsSL https://librefang.ai/install.sh | sh</code><button class="copy-btn" onclick="event.preventDefault();event.stopPropagation();copyText(this,'curl -fsSL https://librefang.ai/install.sh | sh')">Copy</button></div>
         </a>
 
         <a class="platform-card accent-blue" href="https://github.com/librefang/librefang/releases/latest" target="_blank" rel="noopener">
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><path d="M7.5 10l2 2 4-4"/></svg></div>
           <div class="platform-name">Windows</div>
           <div class="platform-desc">PowerShell installer or .msi</div>
-          <div class="platform-cmd"><code>irm https://librefang.ai/install.ps1 | iex</code><button class="copy-btn" onclick="event.preventDefault();event.stopPropagation();copyText(this,'irm https://librefang.ai/install.ps1 | iex')">Copy</button></div>
+          <div class="platform-cmd"><code title="irm https://librefang.ai/install.ps1 | iex">irm https://librefang.ai/install.ps1 | iex</code><button class="copy-btn" onclick="event.preventDefault();event.stopPropagation();copyText(this,'irm https://librefang.ai/install.ps1 | iex')">Copy</button></div>
         </a>
       </div>
     </div>
