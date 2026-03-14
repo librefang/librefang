@@ -4,15 +4,16 @@
 //! with alias resolution, auth status detection, and pricing lookups.
 
 use librefang_types::model_catalog::{
-    AuthStatus, ModelCatalogEntry, ModelTier, ProviderInfo, AI21_BASE_URL, ANTHROPIC_BASE_URL,
-    BEDROCK_BASE_URL, CEREBRAS_BASE_URL, CHATGPT_BASE_URL, CHUTES_BASE_URL, COHERE_BASE_URL,
-    DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL, GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL,
-    HUGGINGFACE_BASE_URL, KIMI_CODING_BASE_URL, LEMONADE_BASE_URL, LMSTUDIO_BASE_URL,
-    MINIMAX_CN_BASE_URL, MINIMAX_INTL_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL,
-    OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL,
-    QWEN_BASE_URL, REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VENICE_BASE_URL,
-    VLLM_BASE_URL, VOLCENGINE_BASE_URL, VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL,
-    ZAI_CODING_BASE_URL, ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
+    AliasesCatalogFile, AuthStatus, ModelCatalogEntry, ModelCatalogFile, ModelTier, ProviderInfo,
+    AI21_BASE_URL, ANTHROPIC_BASE_URL, BEDROCK_BASE_URL, CEREBRAS_BASE_URL, CHATGPT_BASE_URL,
+    CHUTES_BASE_URL, COHERE_BASE_URL, DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL,
+    GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL, KIMI_CODING_BASE_URL,
+    LEMONADE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_CN_BASE_URL, MINIMAX_INTL_BASE_URL,
+    MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL,
+    PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL, SAMBANOVA_BASE_URL,
+    TOGETHER_BASE_URL, VENICE_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
+    VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL,
+    ZHIPU_CODING_BASE_URL,
 };
 use std::collections::HashMap;
 
@@ -328,102 +329,6 @@ impl ModelCatalog {
         }
     }
 
-    /// Load cached catalog files from `~/.librefang/cache/catalog/`.
-    ///
-    /// These are fetched from the remote model-catalog repository via
-    /// [`crate::catalog_sync::sync_catalog()`]. Cached models override
-    /// builtins; user-local models (loaded later) override cached.
-    pub fn load_cached_catalog(&mut self) {
-        let Some(cache_dir) = crate::catalog_sync::cache_dir() else {
-            return;
-        };
-        if !cache_dir.exists() {
-            return;
-        }
-        // Load providers/*.toml files from cache
-        let providers_dir = cache_dir.join("providers");
-        if providers_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&providers_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().is_some_and(|e| e == "toml") {
-                        match self.load_provider_catalog_file(&path) {
-                            Ok(n) => {
-                                tracing::debug!(
-                                    "Loaded {} models from cached {}",
-                                    n,
-                                    path.display()
-                                );
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to load cached catalog {}: {}",
-                                    path.display(),
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        // Load aliases
-        let aliases_path = cache_dir.join("aliases.toml");
-        if aliases_path.exists() {
-            if let Err(e) = self.load_aliases_file(&aliases_path) {
-                tracing::warn!("Failed to load cached aliases: {e}");
-            }
-        }
-    }
-
-    /// Load a single provider catalog TOML file with `[[models]]` entries.
-    ///
-    /// Models already present (by ID) are updated in-place; new models are
-    /// appended. Returns the number of *new* models added.
-    fn load_provider_catalog_file(&mut self, path: &std::path::Path) -> Result<usize, String> {
-        use serde::Deserialize;
-
-        #[derive(Deserialize)]
-        struct ProviderFile {
-            #[serde(default)]
-            models: Vec<ModelCatalogEntry>,
-        }
-
-        let content = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
-        let file: ProviderFile =
-            toml::from_str(&content).map_err(|e| format!("parse error: {e}"))?;
-
-        let mut added = 0usize;
-        for model in file.models {
-            if let Some(existing) = self.models.iter_mut().find(|m| m.id == model.id) {
-                *existing = model;
-            } else {
-                self.models.push(model);
-                added += 1;
-            }
-        }
-        Ok(added)
-    }
-
-    /// Load aliases from a TOML file with an `[aliases]` table.
-    fn load_aliases_file(&mut self, path: &std::path::Path) -> Result<(), String> {
-        use serde::Deserialize;
-
-        #[derive(Deserialize)]
-        struct AliasFile {
-            #[serde(default)]
-            aliases: HashMap<String, String>,
-        }
-
-        let content = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
-        let file: AliasFile = toml::from_str(&content).map_err(|e| format!("parse error: {e}"))?;
-
-        for (alias, canonical) in file.aliases {
-            self.aliases.entry(alias).or_insert(canonical);
-        }
-        Ok(())
-    }
-
     /// Save all custom-tier models to a JSON file.
     pub fn save_custom_models(&self, path: &std::path::Path) -> Result<(), String> {
         let custom: Vec<&ModelCatalogEntry> = self
@@ -436,6 +341,178 @@ impl ModelCatalog {
         std::fs::write(path, json)
             .map_err(|e| format!("Failed to write custom models file: {e}"))?;
         Ok(())
+    }
+
+    /// Load a single TOML catalog file and merge its contents into the catalog.
+    ///
+    /// The file may contain an optional `[provider]` section and a `[[models]]`
+    /// array. This is the unified format shared between the main repository
+    /// (`catalog/providers/*.toml`) and the community model-catalog repository
+    /// (`providers/*.toml`).
+    ///
+    /// Models that already exist (by ID + provider) are skipped.
+    /// If a `[provider]` section is present and the provider is not yet
+    /// registered, it is added.
+    pub fn load_catalog_file(&mut self, path: &std::path::Path) -> Result<usize, String> {
+        let data = std::fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read catalog file {}: {e}", path.display()))?;
+        let file: ModelCatalogFile = toml::from_str(&data)
+            .map_err(|e| format!("Failed to parse catalog file {}: {e}", path.display()))?;
+        Ok(self.merge_catalog_file(file))
+    }
+
+    /// Merge a parsed [`ModelCatalogFile`] into the catalog.
+    ///
+    /// Returns the number of new models added.
+    pub fn merge_catalog_file(&mut self, file: ModelCatalogFile) -> usize {
+        // Merge provider info if present
+        if let Some(prov_toml) = file.provider {
+            let provider_id = prov_toml.id.clone();
+            if self.providers.iter().any(|p| p.id == provider_id) {
+                // Update existing provider's base_url and display_name if they differ
+                if let Some(existing) = self.providers.iter_mut().find(|p| p.id == provider_id) {
+                    existing.base_url = prov_toml.base_url;
+                    existing.display_name = prov_toml.display_name;
+                    existing.api_key_env = prov_toml.api_key_env;
+                    existing.key_required = prov_toml.key_required;
+                }
+            } else {
+                self.providers.push(prov_toml.into());
+            }
+        }
+
+        // Merge models
+        let mut added = 0usize;
+        for model in file.models {
+            let lower_id = model.id.to_lowercase();
+            let lower_provider = model.provider.to_lowercase();
+            if self.models.iter().any(|m| {
+                m.id.to_lowercase() == lower_id && m.provider.to_lowercase() == lower_provider
+            }) {
+                continue;
+            }
+            // Register aliases from the model
+            for alias in &model.aliases {
+                let lower = alias.to_lowercase();
+                self.aliases
+                    .entry(lower)
+                    .or_insert_with(|| model.id.clone());
+            }
+            let provider_id = model.provider.clone();
+            self.models.push(model);
+            added += 1;
+
+            // Update provider model count
+            if let Some(p) = self.providers.iter_mut().find(|p| p.id == provider_id) {
+                p.model_count = self
+                    .models
+                    .iter()
+                    .filter(|m| m.provider == provider_id)
+                    .count();
+            }
+        }
+        added
+    }
+
+    /// Load all `*.toml` catalog files from a directory.
+    ///
+    /// This handles both the builtin `catalog/providers/` directory and the
+    /// cached community catalog at `~/.librefang/cache/catalog/providers/`.
+    /// Also loads an `aliases.toml` file if present in the directory or its
+    /// parent.
+    ///
+    /// Returns the total number of new models added.
+    pub fn load_cached_catalog(&mut self, dir: &std::path::Path) -> Result<usize, String> {
+        if !dir.is_dir() {
+            return Ok(0);
+        }
+
+        let mut total_added = 0usize;
+
+        // Load all *.toml files in the directory
+        let entries = std::fs::read_dir(dir)
+            .map_err(|e| format!("Failed to read directory {}: {e}", dir.display()))?;
+
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("Failed to read dir entry: {e}"))?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                match self.load_catalog_file(&path) {
+                    Ok(n) => total_added += n,
+                    Err(e) => {
+                        tracing::warn!("Skipping catalog file {}: {e}", path.display());
+                    }
+                }
+            }
+        }
+
+        // Try loading aliases.toml from the directory or its parent
+        for aliases_path in &[
+            dir.join("aliases.toml"),
+            dir.parent()
+                .map(|p| p.join("aliases.toml"))
+                .unwrap_or_default(),
+        ] {
+            if aliases_path.is_file() {
+                if let Ok(data) = std::fs::read_to_string(aliases_path) {
+                    if let Ok(aliases_file) = toml::from_str::<AliasesCatalogFile>(&data) {
+                        for (alias, canonical) in aliases_file.aliases {
+                            self.aliases
+                                .entry(alias.to_lowercase())
+                                .or_insert(canonical);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+
+        Ok(total_added)
+    }
+
+    /// Load cached catalog from the default location (`~/.librefang/cache/catalog/providers/`).
+    ///
+    /// Convenience wrapper around `load_cached_catalog(dir)` for use during kernel init.
+    pub fn load_default_cached_catalog(&mut self) {
+        if let Some(home) = dirs::home_dir() {
+            let providers_dir = home
+                .join(".librefang")
+                .join("cache")
+                .join("catalog")
+                .join("providers");
+            if providers_dir.exists() {
+                match self.load_cached_catalog(&providers_dir) {
+                    Ok(n) => {
+                        if n > 0 {
+                            tracing::info!("Loaded {n} cached community models");
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to load cached catalog: {e}"),
+                }
+            }
+        }
+    }
+
+    /// Load user-defined models from `~/.librefang/model_catalog.toml`.
+    ///
+    /// User models override builtins and cached models by ID.
+    pub fn load_default_user_catalog(&mut self) {
+        if let Some(home) = dirs::home_dir() {
+            let user_catalog = home.join(".librefang").join("model_catalog.toml");
+            if user_catalog.exists() {
+                match self.load_catalog_file(&user_catalog) {
+                    Ok(n) => {
+                        if n > 0 {
+                            tracing::info!(
+                                "Loaded {n} user-defined models from {}",
+                                user_catalog.display()
+                            );
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to load user model catalog: {e}"),
+                }
+            }
+        }
     }
 }
 
@@ -4174,5 +4251,186 @@ mod tests {
         let catalog = ModelCatalog::new();
         let entry = catalog.find_model("claude-code").unwrap();
         assert_eq!(entry.id, "claude-code/sonnet");
+    }
+
+    #[test]
+    fn test_load_catalog_file_with_provider() {
+        let toml_content = r#"
+[provider]
+id = "test-provider"
+display_name = "Test Provider"
+api_key_env = "TEST_API_KEY"
+base_url = "https://api.test.example.com"
+key_required = true
+
+[[models]]
+id = "test-model-1"
+display_name = "Test Model 1"
+provider = "test-provider"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 1.0
+output_cost_per_m = 3.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["tm1"]
+"#;
+        let file: ModelCatalogFile = toml::from_str(toml_content).unwrap();
+        let mut catalog = ModelCatalog::new();
+        let initial_models = catalog.list_models().len();
+        let initial_providers = catalog.list_providers().len();
+
+        let added = catalog.merge_catalog_file(file);
+        assert_eq!(added, 1);
+        assert_eq!(catalog.list_models().len(), initial_models + 1);
+        assert_eq!(catalog.list_providers().len(), initial_providers + 1);
+
+        // Verify the model was added
+        let model = catalog.find_model("test-model-1").unwrap();
+        assert_eq!(model.provider, "test-provider");
+        assert_eq!(model.tier, ModelTier::Smart);
+
+        // Verify the provider was added
+        let provider = catalog.get_provider("test-provider").unwrap();
+        assert_eq!(provider.display_name, "Test Provider");
+        assert_eq!(provider.base_url, "https://api.test.example.com");
+        assert_eq!(provider.model_count, 1);
+
+        // Verify alias was registered
+        let aliased = catalog.find_model("tm1").unwrap();
+        assert_eq!(aliased.id, "test-model-1");
+    }
+
+    #[test]
+    fn test_load_catalog_file_without_provider() {
+        let toml_content = r#"
+[[models]]
+id = "test-standalone-model"
+display_name = "Standalone Model"
+provider = "anthropic"
+tier = "fast"
+context_window = 32000
+max_output_tokens = 4096
+input_cost_per_m = 0.5
+output_cost_per_m = 1.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+"#;
+        let file: ModelCatalogFile = toml::from_str(toml_content).unwrap();
+        assert!(file.provider.is_none());
+
+        let mut catalog = ModelCatalog::new();
+        let added = catalog.merge_catalog_file(file);
+        assert_eq!(added, 1);
+
+        let model = catalog.find_model("test-standalone-model").unwrap();
+        assert_eq!(model.provider, "anthropic");
+    }
+
+    #[test]
+    fn test_merge_catalog_skips_duplicate_models() {
+        let toml_content = r#"
+[[models]]
+id = "claude-sonnet-4-20250514"
+display_name = "Claude Sonnet 4"
+provider = "anthropic"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 64000
+input_cost_per_m = 3.0
+output_cost_per_m = 15.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+"#;
+        let file: ModelCatalogFile = toml::from_str(toml_content).unwrap();
+        let mut catalog = ModelCatalog::new();
+        let initial_models = catalog.list_models().len();
+
+        let added = catalog.merge_catalog_file(file);
+        assert_eq!(added, 0); // Already exists
+        assert_eq!(catalog.list_models().len(), initial_models);
+    }
+
+    #[test]
+    fn test_load_cached_catalog_from_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_content = r#"
+[provider]
+id = "cached-provider"
+display_name = "Cached Provider"
+api_key_env = "CACHED_API_KEY"
+base_url = "https://api.cached.example.com"
+key_required = true
+
+[[models]]
+id = "cached-model-1"
+display_name = "Cached Model 1"
+provider = "cached-provider"
+tier = "balanced"
+context_window = 64000
+max_output_tokens = 4096
+input_cost_per_m = 0.5
+output_cost_per_m = 1.5
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+"#;
+        std::fs::write(dir.path().join("cached.toml"), toml_content).unwrap();
+
+        let mut catalog = ModelCatalog::new();
+        let added = catalog.load_cached_catalog(dir.path()).unwrap();
+        assert_eq!(added, 1);
+
+        let model = catalog.find_model("cached-model-1").unwrap();
+        assert_eq!(model.provider, "cached-provider");
+
+        let provider = catalog.get_provider("cached-provider").unwrap();
+        assert_eq!(provider.base_url, "https://api.cached.example.com");
+    }
+
+    #[test]
+    fn test_builtin_toml_files_parse() {
+        // Verify all TOML catalog files in catalog/providers/ are valid
+        let catalog_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("catalog")
+            .join("providers");
+        if catalog_dir.is_dir() {
+            let mut total_models = 0;
+            let mut total_providers = 0;
+            for entry in std::fs::read_dir(&catalog_dir).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                    let data = std::fs::read_to_string(&path).unwrap();
+                    let file: ModelCatalogFile = toml::from_str(&data).unwrap_or_else(|e| {
+                        panic!("Failed to parse {}: {e}", path.display());
+                    });
+                    if file.provider.is_some() {
+                        total_providers += 1;
+                    }
+                    total_models += file.models.len();
+                }
+            }
+            // We expect at least 25 providers and 100 models
+            assert!(
+                total_providers >= 25,
+                "Expected at least 25 providers, got {total_providers}"
+            );
+            assert!(
+                total_models >= 100,
+                "Expected at least 100 models, got {total_models}"
+            );
+        }
     }
 }
