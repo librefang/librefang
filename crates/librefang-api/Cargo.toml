@@ -10,7 +10,7 @@ librefang-types = { path = "../librefang-types" }
 librefang-kernel = { path = "../librefang-kernel" }
 librefang-runtime = { path = "../librefang-runtime" }
 librefang-memory = { path = "../librefang-memory" }
-librefang-channels = { path = "../librefang-channels" }
+librefang-channels = { path = "../librefang-channels", default-features = false }
 librefang-wire = { path = "../librefang-wire" }
 librefang-skills = { path = "../librefang-skills" }
 librefang-hands = { path = "../librefang-hands" }
@@ -35,6 +35,55 @@ subtle = { workspace = true }
 base64 = { workspace = true }
 socket2 = { workspace = true }
 reqwest = { workspace = true }
+
+[features]
+default = ["librefang-channels/default"]
+
+# Individual channel features — forwarded to librefang-channels
+channel-telegram = ["librefang-channels/channel-telegram"]
+channel-discord = ["librefang-channels/channel-discord"]
+channel-slack = ["librefang-channels/channel-slack"]
+channel-matrix = ["librefang-channels/channel-matrix"]
+channel-email = ["librefang-channels/channel-email"]
+channel-webhook = ["librefang-channels/channel-webhook"]
+channel-whatsapp = ["librefang-channels/channel-whatsapp"]
+channel-signal = ["librefang-channels/channel-signal"]
+channel-teams = ["librefang-channels/channel-teams"]
+channel-mattermost = ["librefang-channels/channel-mattermost"]
+channel-irc = ["librefang-channels/channel-irc"]
+channel-google-chat = ["librefang-channels/channel-google-chat"]
+channel-twitch = ["librefang-channels/channel-twitch"]
+channel-rocketchat = ["librefang-channels/channel-rocketchat"]
+channel-zulip = ["librefang-channels/channel-zulip"]
+channel-xmpp = ["librefang-channels/channel-xmpp"]
+channel-bluesky = ["librefang-channels/channel-bluesky"]
+channel-feishu = ["librefang-channels/channel-feishu"]
+channel-line = ["librefang-channels/channel-line"]
+channel-mastodon = ["librefang-channels/channel-mastodon"]
+channel-messenger = ["librefang-channels/channel-messenger"]
+channel-reddit = ["librefang-channels/channel-reddit"]
+channel-revolt = ["librefang-channels/channel-revolt"]
+channel-viber = ["librefang-channels/channel-viber"]
+channel-flock = ["librefang-channels/channel-flock"]
+channel-guilded = ["librefang-channels/channel-guilded"]
+channel-keybase = ["librefang-channels/channel-keybase"]
+channel-nextcloud = ["librefang-channels/channel-nextcloud"]
+channel-nostr = ["librefang-channels/channel-nostr"]
+channel-pumble = ["librefang-channels/channel-pumble"]
+channel-threema = ["librefang-channels/channel-threema"]
+channel-twist = ["librefang-channels/channel-twist"]
+channel-webex = ["librefang-channels/channel-webex"]
+channel-dingtalk = ["librefang-channels/channel-dingtalk"]
+channel-discourse = ["librefang-channels/channel-discourse"]
+channel-gitter = ["librefang-channels/channel-gitter"]
+channel-gotify = ["librefang-channels/channel-gotify"]
+channel-linkedin = ["librefang-channels/channel-linkedin"]
+channel-mumble = ["librefang-channels/channel-mumble"]
+channel-ntfy = ["librefang-channels/channel-ntfy"]
+channel-qq = ["librefang-channels/channel-qq"]
+channel-wecom = ["librefang-channels/channel-wecom"]
+
+all-channels = ["librefang-channels/all-channels"]
 
 [dev-dependencies]
 tokio-test = { workspace = true }

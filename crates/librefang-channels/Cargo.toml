@@ -5,6 +5,111 @@ edition.workspace = true
 license.workspace = true
 description = "Channel Bridge Layer — pluggable messaging integrations for LibreFang"
 
+[features]
+default = [
+    "channel-telegram",
+    "channel-discord",
+    "channel-slack",
+    "channel-matrix",
+    "channel-email",
+    "channel-webhook",
+    "channel-whatsapp",
+    "channel-signal",
+    "channel-teams",
+    "channel-mattermost",
+    "channel-irc",
+    "channel-google-chat",
+]
+
+all-channels = [
+    "channel-telegram",
+    "channel-discord",
+    "channel-slack",
+    "channel-matrix",
+    "channel-email",
+    "channel-webhook",
+    "channel-whatsapp",
+    "channel-signal",
+    "channel-teams",
+    "channel-mattermost",
+    "channel-irc",
+    "channel-google-chat",
+    "channel-twitch",
+    "channel-rocketchat",
+    "channel-zulip",
+    "channel-xmpp",
+    "channel-bluesky",
+    "channel-feishu",
+    "channel-line",
+    "channel-mastodon",
+    "channel-messenger",
+    "channel-reddit",
+    "channel-revolt",
+    "channel-viber",
+    "channel-flock",
+    "channel-guilded",
+    "channel-keybase",
+    "channel-nextcloud",
+    "channel-nostr",
+    "channel-pumble",
+    "channel-threema",
+    "channel-twist",
+    "channel-webex",
+    "channel-dingtalk",
+    "channel-discourse",
+    "channel-gitter",
+    "channel-gotify",
+    "channel-linkedin",
+    "channel-mumble",
+    "channel-ntfy",
+    "channel-qq",
+    "channel-wecom",
+]
+
+# Individual channel features
+channel-telegram = []
+channel-discord = []
+channel-slack = []
+channel-matrix = []
+channel-email = ["dep:lettre", "dep:imap", "dep:native-tls", "dep:mailparse"]
+channel-webhook = []
+channel-whatsapp = []
+channel-signal = []
+channel-teams = []
+channel-mattermost = []
+channel-irc = []
+channel-google-chat = []
+channel-twitch = []
+channel-rocketchat = []
+channel-zulip = []
+channel-xmpp = []
+channel-bluesky = []
+channel-feishu = []
+channel-line = []
+channel-mastodon = []
+channel-messenger = []
+channel-reddit = []
+channel-revolt = []
+channel-viber = []
+channel-flock = []
+channel-guilded = []
+channel-keybase = []
+channel-nextcloud = []
+channel-nostr = []
+channel-pumble = []
+channel-threema = []
+channel-twist = []
+channel-webex = []
+channel-dingtalk = []
+channel-discourse = []
+channel-gitter = []
+channel-gotify = []
+channel-linkedin = []
+channel-mumble = []
+channel-ntfy = []
+channel-qq = ["dep:rustls"]
+channel-wecom = ["dep:roxmltree", "dep:aes", "dep:cbc"]
+
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 tokio = { workspace = true }
@@ -25,19 +130,21 @@ axum = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 sha1 = { workspace = true }
-aes = "0.8"
-cbc = "0.1"
 base64 = { workspace = true }
 hex = { workspace = true }
 html-escape = { workspace = true }
 regex-lite = { workspace = true }
-rustls = { version = "0.23", default-features = false, features = ["ring"] }
-roxmltree = "0.21"
 
-lettre = { workspace = true }
-imap = { workspace = true }
-native-tls = { workspace = true }
-mailparse = { workspace = true }
+# Channel-specific optional dependencies
+aes = { version = "0.8", optional = true }
+cbc = { version = "0.1", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
+roxmltree = { version = "0.21", optional = true }
+
+lettre = { workspace = true, optional = true }
+imap = { workspace = true, optional = true }
+native-tls = { workspace = true, optional = true }
+mailparse = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

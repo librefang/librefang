@@ -10,7 +10,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 librefang-kernel = { path = "../librefang-kernel" }
-librefang-api = { path = "../librefang-api" }
+librefang-api = { path = "../librefang-api", default-features = false }
 librefang-types = { path = "../librefang-types" }
 tokio = { workspace = true }
 axum = { workspace = true }
@@ -30,6 +30,8 @@ toml = { workspace = true }
 open = "5"
 
 [features]
+default = ["librefang-api/default"]
+all-channels = ["librefang-api/all-channels"]
 # Tauri uses custom-protocol in production builds
 custom-protocol = ["tauri/custom-protocol"]
 
