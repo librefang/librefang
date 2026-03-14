@@ -10632,6 +10632,78 @@ pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoRespo
     Json(serde_json::json!({"commands": commands}))
 }
 
+/// GET /api/commands/{name} — Return a single command by name.
+///
+/// The `name` path parameter should be the command name with or without the
+/// leading slash (e.g. "help" or "/help" both match `/help`).
+/// Returns 404 if the command is not found.
+pub async fn get_command(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Normalise: ensure lookup key has a leading slash
+    let lookup = if name.starts_with('/') {
+        name.clone()
+    } else {
+        format!("/{name}")
+    };
+
+    // Built-in commands
+    let builtins = [
+        ("/help", "Show available commands"),
+        ("/new", "Reset session (clear history)"),
+        ("/compact", "Trigger LLM session compaction"),
+        ("/model", "Show or switch model (/model [name])"),
+        ("/stop", "Cancel current agent run"),
+        ("/usage", "Show session token usage & cost"),
+        (
+            "/think",
+            "Toggle extended thinking (/think [on|off|stream])",
+        ),
+        ("/context", "Show context window usage & pressure"),
+        (
+            "/verbose",
+            "Cycle tool detail level (/verbose [off|on|full])",
+        ),
+        ("/queue", "Check if agent is processing"),
+        ("/status", "Show system status"),
+        ("/clear", "Clear chat display"),
+        ("/exit", "Disconnect from agent"),
+    ];
+
+    for (cmd, desc) in &builtins {
+        if cmd.eq_ignore_ascii_case(&lookup) {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({"cmd": cmd, "desc": desc})),
+            );
+        }
+    }
+
+    // Skill-registered commands
+    if let Ok(registry) = state.kernel.skill_registry.read() {
+        for skill in registry.list() {
+            let skill_cmd = format!("/{}", skill.manifest.skill.name);
+            if skill_cmd.eq_ignore_ascii_case(&lookup) {
+                let desc: String = skill.manifest.skill.description.chars().take(80).collect();
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "cmd": skill_cmd,
+                        "desc": if desc.is_empty() { format!("Skill: {}", skill.manifest.skill.name) } else { desc },
+                        "source": "skill",
+                    })),
+                );
+            }
+        }
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": format!("Command '{}' not found", lookup)})),
+    )
+}
+
 /// SECURITY: Validate webhook bearer token using constant-time comparison.
 fn validate_webhook_token(headers: &axum::http::HeaderMap, token_env: &str) -> bool {
     let expected = match std::env::var(token_env) {
@@ -11288,4 +11360,72 @@ pub async fn catalog_status() -> impl IntoResponse {
     Json(serde_json::json!({
         "last_sync": last_sync,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use librefang_types::config::KernelConfig;
+
+    /// Helper: build a minimal AppState backed by a real kernel.
+    fn test_app_state() -> Arc<AppState> {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-api-cmd-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_get_command_builtin_found() {
+        let state = test_app_state();
+        let resp = get_command(State(state), Path("help".to_string())).await;
+        let (status, Json(body)) = resp;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cmd"], "/help");
+        assert!(!body["desc"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_command_builtin_with_slash() {
+        let state = test_app_state();
+        let resp = get_command(State(state), Path("/stop".to_string())).await;
+        let (status, Json(body)) = resp;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cmd"], "/stop");
+    }
+
+    #[tokio::test]
+    async fn test_get_command_not_found() {
+        let state = test_app_state();
+        let resp = get_command(State(state), Path("nonexistent".to_string())).await;
+        let (status, Json(body)) = resp;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body["error"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_get_command_case_insensitive() {
+        let state = test_app_state();
+        let resp = get_command(State(state), Path("HELP".to_string())).await;
+        let (status, Json(body)) = resp;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cmd"], "/help");
+    }
 }

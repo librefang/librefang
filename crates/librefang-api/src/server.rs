@@ -579,6 +579,10 @@ pub async fn build_router(
         .route("/api/shutdown", axum::routing::post(routes::shutdown))
         // Chat commands endpoint (dynamic slash menu)
         .route("/api/commands", axum::routing::get(routes::list_commands))
+        .route(
+            "/api/commands/{name}",
+            axum::routing::get(routes::get_command),
+        )
         // Config reload endpoint
         .route(
             "/api/config/reload",
