@@ -402,7 +402,7 @@ impl A2aClient {
     /// Create a new A2A client.
     pub fn new() -> Self {
         Self {
-            client: crate::http_client::client_builder()
+            client: crate::http_client::proxied_client_builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("HTTP client build"),

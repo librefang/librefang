@@ -40,7 +40,7 @@ impl WebSearchEngine {
         cache: Arc<WebCache>,
         brave_auth_profiles: Vec<(String, u32)>,
     ) -> Self {
-        let client = crate::http_client::client_builder()
+        let client = crate::http_client::proxied_client_builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .expect("HTTP client build");

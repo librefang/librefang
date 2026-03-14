@@ -180,10 +180,7 @@ impl ChatGptDriver {
                 base_url
             },
             token_cache: ChatGptTokenCache::new(),
-            client: crate::http_client::client_builder()
-                .user_agent(crate::USER_AGENT)
-                .build()
-                .expect("HTTP client build"),
+            client: crate::http_client::proxied_client(),
         }
     }
 
