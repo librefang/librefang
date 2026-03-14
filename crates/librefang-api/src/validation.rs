@@ -81,10 +81,7 @@ where
 {
     type Rejection = ValidationError;
 
-    async fn from_request(
-        req: axum::extract::Request,
-        state: &S,
-    ) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
         match Json::<T>::from_request(req, state).await {
             Ok(Json(value)) => Ok(ValidatedJson(value)),
             Err(rejection) => {
@@ -98,9 +95,7 @@ where
                     JsonRejection::MissingJsonContentType(_) => {
                         "Missing Content-Type: application/json header".to_string()
                     }
-                    JsonRejection::BytesRejection(_) => {
-                        "Failed to read request body".to_string()
-                    }
+                    JsonRejection::BytesRejection(_) => "Failed to read request body".to_string(),
                     other => {
                         format!("JSON rejection: {other}")
                     }
@@ -142,13 +137,14 @@ pub fn check_not_empty(field_name: &str, value: &str) -> Result<(), ValidationEr
 
 /// Check JSON nesting depth does not exceed `max_depth`.
 /// Useful for `serde_json::Value` payloads that could be arbitrarily nested.
-pub fn check_json_depth(value: &serde_json::Value, max_depth: usize) -> Result<(), ValidationError> {
+pub fn check_json_depth(
+    value: &serde_json::Value,
+    max_depth: usize,
+) -> Result<(), ValidationError> {
     fn depth(v: &serde_json::Value) -> usize {
         match v {
             serde_json::Value::Array(arr) => 1 + arr.iter().map(depth).max().unwrap_or(0),
-            serde_json::Value::Object(map) => {
-                1 + map.values().map(depth).max().unwrap_or(0)
-            }
+            serde_json::Value::Object(map) => 1 + map.values().map(depth).max().unwrap_or(0),
             _ => 0,
         }
     }
@@ -306,8 +302,8 @@ mod tests {
 
     #[test]
     fn test_constants_are_reasonable() {
-        assert!(MAX_REQUEST_BODY_BYTES >= 1024);
-        assert!(MAX_STRING_FIELD_LEN >= 1000);
-        assert!(MAX_JSON_DEPTH >= 10);
+        const { assert!(MAX_REQUEST_BODY_BYTES >= 1024) };
+        const { assert!(MAX_STRING_FIELD_LEN >= 1000) };
+        const { assert!(MAX_JSON_DEPTH >= 10) };
     }
 }
