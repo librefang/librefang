@@ -1,6 +1,6 @@
 # Agent Templates Catalog
 
-LibreFang ships with **30 pre-built agent templates** organized into 4 performance tiers. Each template is a ready-to-spawn `agent.toml` manifest located in the `agents/` directory. Templates cover software engineering, business operations, personal productivity, and everyday tasks.
+LibreFang ships with **31 pre-built agent templates** organized into 4 performance tiers. Each template is a ready-to-spawn `agent.toml` manifest located in the `agents/` directory. Templates cover software engineering, business operations, personal productivity, and everyday tasks.
 
 ## Quick Start
 
@@ -99,6 +99,7 @@ For lightweight, high-speed tasks: ops monitoring, translation, tutoring, wellne
 | tutor | groq | llama-3.3-70b-versatile |
 | health-tracker | groq | llama-3.3-70b-versatile |
 | personal-finance | groq | llama-3.3-70b-versatile |
+| recipe-assistant | groq | llama-3.3-70b-versatile |
 | travel-planner | groq | llama-3.3-70b-versatile |
 | home-automation | groq | llama-3.3-70b-versatile |
 
@@ -747,6 +748,29 @@ Creates detailed budgets using frameworks like 50/30/20, zero-based budgeting, a
 ```bash
 librefang spawn personal-finance
 # "Analyze this month's expense CSV and show me where I'm over budget"
+```
+
+---
+
+### recipe-assistant
+
+**Tier 4 -- Fast** | `groq/llama-3.3-70b-versatile` | No fallback
+
+> Cooking assistant that helps with recipes, meal plans, ingredient substitutions, and portion adjustments.
+
+Discovers recipes based on available ingredients, dietary preferences, and cuisine type. Scales portions up or down with accurate proportional adjustments, handling non-linear scaling for seasoning and leavening. Suggests ingredient substitutions for dietary restrictions or missing items. Creates structured weekly meal plans that minimize food waste and balance nutrition. Generates organized grocery lists grouped by store section. Explains cooking techniques at the user's skill level.
+
+- **Tags**: `cooking`, `recipes`, `meal-planning`, `nutrition`, `food`
+- **Temperature**: 0.5
+- **Max tokens**: 4096
+- **Token quota**: 100,000/hour
+- **Max concurrent tools**: 5
+- **Tools**: `file_read`, `file_write`, `file_list`, `memory_store`, `memory_recall`, `web_fetch`, `web_search`
+- **Capabilities**: `network = ["*"]`, `memory_read = ["*"]`, `memory_write = ["self.*"]`
+
+```bash
+librefang spawn recipe-assistant
+# "I have chicken thighs, rice, and broccoli -- suggest a 30-minute dinner recipe"
 ```
 
 ---
