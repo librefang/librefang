@@ -429,8 +429,9 @@ pub async fn build_router(
         )
         .route("/api/comms/send", axum::routing::post(routes::comms_send))
         .route("/api/comms/task", axum::routing::post(routes::comms_task))
-        // Tools endpoint
+        // Tools endpoints
         .route("/api/tools", axum::routing::get(routes::list_tools))
+        .route("/api/tools/{name}", axum::routing::get(routes::get_tool))
         // Config endpoints
         .route("/api/config", axum::routing::get(routes::get_config))
         .route(
