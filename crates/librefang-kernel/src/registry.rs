@@ -345,7 +345,6 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use librefang_types::agent::*;
-    use std::collections::HashMap;
 
     fn test_entry(name: &str) -> AgentEntry {
         AgentEntry {
