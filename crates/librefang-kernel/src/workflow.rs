@@ -8,7 +8,7 @@
 //! - Loop until a condition is met
 //! - Store outputs in named variables for later reference
 //!
-//! Workflows are defined as Rust structs or loaded from JSON/YAML/TOML files.
+//! Workflows are defined as Rust structs or loaded from JSON/TOML files.
 
 use chrono::{DateTime, Utc};
 use librefang_types::agent::AgentId;
@@ -221,6 +221,77 @@ impl WorkflowEngine {
         self.workflows.write().await.insert(id, workflow);
         info!(workflow_id = %id, "Workflow registered");
         id
+    }
+
+    /// Load and register all workflow definitions from a directory (sync version for boot).
+    ///
+    /// Scans for `*.workflow.toml` and `*.workflow.json` files. Each file is
+    /// parsed into a [`Workflow`] and registered in the engine.  Invalid files
+    /// are logged as warnings and skipped.
+    ///
+    /// This is a blocking version intended for use during daemon startup before
+    /// the async runtime is processing concurrent requests.
+    pub fn load_from_dir_sync(&self, dir: &Path) -> usize {
+        if !dir.is_dir() {
+            debug!(path = %dir.display(), "Workflows directory does not exist, skipping");
+            return 0;
+        }
+
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                warn!(path = %dir.display(), "Failed to read workflows directory: {e}");
+                return 0;
+            }
+        };
+
+        let mut count = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+
+            let workflow = if name.ends_with(".workflow.toml") {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => match toml::from_str::<Workflow>(&content) {
+                        Ok(w) => Some(w),
+                        Err(e) => {
+                            warn!(path = %path.display(), "Invalid workflow TOML: {e}");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        warn!(path = %path.display(), "Failed to read workflow file: {e}");
+                        None
+                    }
+                }
+            } else if name.ends_with(".workflow.json") {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => match serde_json::from_str::<Workflow>(&content) {
+                        Ok(w) => Some(w),
+                        Err(e) => {
+                            warn!(path = %path.display(), "Invalid workflow JSON: {e}");
+                            None
+                        }
+                    },
+                    Err(e) => {
+                        warn!(path = %path.display(), "Failed to read workflow file: {e}");
+                        None
+                    }
+                }
+            } else {
+                continue;
+            };
+
+            if let Some(wf) = workflow {
+                let wf_name = wf.name.clone();
+                let wf_id = wf.id;
+                self.workflows.blocking_write().insert(wf_id, wf);
+                info!(workflow_id = %wf_id, name = %wf_name, path = %path.display(), "Auto-registered workflow from disk");
+                count += 1;
+            }
+        }
+
+        count
     }
 
     /// List all registered workflows.
