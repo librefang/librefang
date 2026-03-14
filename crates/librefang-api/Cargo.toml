@@ -90,3 +90,4 @@ all-channels = ["librefang-channels/all-channels"]
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
 uuid = { workspace = true }
+http-body-util = "0.1"
