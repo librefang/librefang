@@ -148,6 +148,10 @@ pub async fn build_router(
         )
         .route("/api/profiles", axum::routing::get(routes::list_profiles))
         .route(
+            "/api/profiles/{name}",
+            axum::routing::get(routes::get_profile),
+        )
+        .route(
             "/api/agents/{id}/message",
             axum::routing::post(routes::send_message),
         )
@@ -273,6 +277,15 @@ pub async fn build_router(
                 .put(routes::set_agent_kv_key)
                 .delete(routes::delete_agent_kv_key),
         )
+        // Memory export/import endpoints
+        .route(
+            "/api/agents/{id}/memory/export",
+            axum::routing::get(routes::export_agent_memory),
+        )
+        .route(
+            "/api/agents/{id}/memory/import",
+            axum::routing::post(routes::import_agent_memory),
+        )
         // Trigger endpoints
         .route(
             "/api/triggers",
@@ -395,7 +408,11 @@ pub async fn build_router(
         // MCP server endpoints
         .route(
             "/api/mcp/servers",
-            axum::routing::get(routes::list_mcp_servers),
+            axum::routing::get(routes::list_mcp_servers).post(routes::add_mcp_server),
+        )
+        .route(
+            "/api/mcp/servers/{name}",
+            axum::routing::put(routes::update_mcp_server).delete(routes::delete_mcp_server),
         )
         // Audit endpoints
         .route(
@@ -501,7 +518,11 @@ pub async fn build_router(
         .route("/api/models", axum::routing::get(routes::list_models))
         .route(
             "/api/models/aliases",
-            axum::routing::get(routes::list_aliases),
+            axum::routing::get(routes::list_aliases).post(routes::create_alias),
+        )
+        .route(
+            "/api/models/aliases/{alias}",
+            axum::routing::delete(routes::delete_alias),
         )
         .route(
             "/api/models/custom",
@@ -546,6 +567,23 @@ pub async fn build_router(
         .route(
             "/api/skills/create",
             axum::routing::post(routes::create_skill),
+        )
+        // Extension management endpoints
+        .route(
+            "/api/extensions",
+            axum::routing::get(routes::list_extensions),
+        )
+        .route(
+            "/api/extensions/install",
+            axum::routing::post(routes::install_extension),
+        )
+        .route(
+            "/api/extensions/uninstall",
+            axum::routing::post(routes::uninstall_extension),
+        )
+        .route(
+            "/api/extensions/{name}",
+            axum::routing::get(routes::get_extension),
         )
         // Migration endpoints
         .route(
