@@ -43,6 +43,75 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
     response
 }
 
+/// API version headers middleware.
+///
+/// Adds `X-API-Version` to every response so clients always know which version
+/// they are talking to. When a request targets `/api/v1/...` the header reflects
+/// `v1`; for the unversioned `/api/...` alias it returns the latest version.
+///
+/// Also performs content-type negotiation: if the `Accept` header contains
+/// `application/vnd.librefang.<version>+json` the response version header
+/// reflects the negotiated version. If the requested version is unknown the
+/// server returns `406 Not Acceptable`.
+pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response<Body> {
+    let path = request.uri().path().to_string();
+
+    // Check Accept header for version negotiation
+    let accept_version = request
+        .headers()
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|accept| {
+            // Parse application/vnd.librefang.v1+json
+            accept.split(',').map(str::trim).find_map(|media| {
+                media
+                    .strip_prefix("application/vnd.librefang.")
+                    .and_then(|rest| rest.strip_suffix("+json"))
+                    .map(|ver| ver.to_string())
+            })
+        });
+
+    // Validate negotiated version if provided
+    if let Some(ref ver) = accept_version {
+        let known = crate::server::API_VERSIONS
+            .iter()
+            .any(|(v, _)| *v == ver.as_str());
+        if !known {
+            return Response::builder()
+                .status(StatusCode::NOT_ACCEPTABLE)
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({
+                        "error": format!("Unsupported API version: {ver}"),
+                        "available": crate::server::API_VERSIONS
+                            .iter()
+                            .map(|(v, _)| *v)
+                            .collect::<Vec<_>>(),
+                    })
+                    .to_string(),
+                ))
+                .unwrap_or_default();
+        }
+    }
+
+    let mut response = next.run(request).await;
+
+    // Determine the version to report
+    let version = if let Some(ver) = accept_version {
+        ver
+    } else if path.starts_with("/api/v1/") || path == "/api/v1" {
+        "v1".to_string()
+    } else {
+        crate::server::API_VERSION_LATEST.to_string()
+    };
+
+    if let Ok(val) = version.parse() {
+        response.headers_mut().insert("x-api-version", val);
+    }
+
+    response
+}
+
 /// Bearer token authentication middleware.
 ///
 /// When `api_key` is non-empty (after trimming), requests to non-public
@@ -57,8 +126,19 @@ pub async fn auth(
     // SECURITY: Capture method early for method-aware public endpoint checks.
     let method = request.method().clone();
 
-    // Shutdown is loopback-only (CLI on same machine) — skip token auth
-    let path = request.uri().path();
+    // Shutdown is loopback-only (CLI on same machine) — skip token auth.
+    // Normalize versioned paths: /api/v1/foo → /api/foo so public endpoint
+    // checks work identically for both /api/ and /api/v1/ prefixes.
+    let raw_path = request.uri().path().to_string();
+    let normalized;
+    let path: &str = if raw_path.starts_with("/api/v1/") {
+        normalized = format!("/api{}", &raw_path[7..]);
+        normalized.as_str()
+    } else if raw_path == "/api/v1" {
+        "/api"
+    } else {
+        &raw_path
+    };
     if path == "/api/shutdown" {
         let is_loopback = request
             .extensions()
@@ -81,6 +161,7 @@ pub async fn auth(
         || path == "/favicon.ico"
         || (path == "/.well-known/agent.json" && is_get)
         || (path.starts_with("/a2a/") && is_get)
+        || path == "/api/versions"
         || path == "/api/health"
         || path == "/api/health/detail"
         || path == "/api/status"
