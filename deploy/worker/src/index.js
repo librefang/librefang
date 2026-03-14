@@ -241,6 +241,7 @@ const HTML = `<!DOCTYPE html>
       transform: translateY(-2px);
       box-shadow: 0 4px 20px rgba(139, 92, 246, 0.15);
     }
+    .platform-grid .platform-card:last-child:nth-child(odd) { max-width: calc(50% - 7px); }
     .platform-card.accent-purple:hover { border-color: var(--accent); box-shadow: 0 4px 20px rgba(139, 92, 246, 0.15); }
     .platform-card.accent-green:hover { border-color: var(--green); box-shadow: 0 4px 20px rgba(52, 211, 153, 0.15); }
     .platform-card.accent-blue:hover { border-color: var(--blue); box-shadow: 0 4px 20px rgba(96, 165, 250, 0.15); }
