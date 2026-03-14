@@ -1678,7 +1678,8 @@ fn spawn_detached_daemon(
         .args(detached_daemon_args(config))
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
+        .stderr(Stdio::from(stderr))
+        .envs(std::env::vars());
 
     #[cfg(unix)]
     {
