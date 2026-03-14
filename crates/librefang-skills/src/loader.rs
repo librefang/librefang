@@ -309,7 +309,7 @@ mod tests {
         let manifest = SkillManifest {
             skill: SkillMeta {
                 name: "test-prompt".to_string(),
-                version: "0.4.0".to_string(),
+                version: librefang_types::VERSION.to_string(),
                 description: "A prompt-only test".to_string(),
                 author: String::new(),
                 license: String::new(),

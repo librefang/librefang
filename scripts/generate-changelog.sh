@@ -33,17 +33,17 @@ if [ -n "$BASE_TAG" ]; then
     BASE_DATE=$(git -C "$REPO_ROOT" log -1 --format=%aI "$BASE_TAG" 2>/dev/null || echo "")
 fi
 
-FETCH_ARGS="--repo librefang/librefang --state merged --json number,title,author --limit 200"
-if [ -n "${BASE_DATE:-}" ]; then
-    FETCH_ARGS="$FETCH_ARGS --search merged:>=${BASE_DATE}"
-fi
-
-if command -v gh &>/dev/null; then
-    PRS=$(gh pr list $FETCH_ARGS 2>/dev/null || echo "[]")
-else
+if ! command -v gh &>/dev/null; then
     echo "Error: gh CLI required" >&2
     exit 1
 fi
+
+FETCH_ARGS=(--repo librefang/librefang --state merged --json number,title,author --limit 200)
+if [ -n "${BASE_DATE:-}" ]; then
+    FETCH_ARGS+=(--search "merged:>=${BASE_DATE}")
+fi
+
+PRS=$(gh pr list "${FETCH_ARGS[@]}" 2>/dev/null || echo "[]")
 
 # --- Classify by prefix ---
 

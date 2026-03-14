@@ -1029,7 +1029,7 @@ mod tests {
                 "capabilities": {},
                 "clientInfo": {
                     "name": "librefang",
-                    "version": "0.4.0"
+                    "version": librefang_types::VERSION
                 }
             })),
         };

@@ -8,12 +8,15 @@
 ##
 ## For the full reference, see: docs/skill-development.md
 
+[skill]
 name = "meeting-agenda"
 version = "0.1.0"
 description = "Generate a structured meeting agenda from a topic and duration."
 author = "your-name"
-runtime = "prompt"
 tags = ["meeting", "productivity", "example"]
+
+[runtime]
+type = "promptonly"
 
 [input]
 topic = { type = "string", description = "The meeting topic", required = true }

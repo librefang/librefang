@@ -5,13 +5,16 @@
 ##
 ## For the full reference, see: docs/skill-development.md
 
+[skill]
 name = "word-counter"
 version = "0.1.0"
 description = "Count words, sentences, and characters in text."
 author = "your-name"
-runtime = "python"
-entry = "main.py"
 tags = ["text", "utility", "example"]
+
+[runtime]
+type = "python"
+entry = "main.py"
 
 [input]
 text = { type = "string", description = "The text to analyze", required = true }

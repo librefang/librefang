@@ -6259,30 +6259,10 @@ mod tests {
     fn test_manifest_to_capabilities() {
         let mut manifest = AgentManifest {
             name: "test".to_string(),
-            version: "0.4.0".to_string(),
             description: "test".to_string(),
             author: "test".to_string(),
             module: "test".to_string(),
-            schedule: ScheduleMode::default(),
-            model: ModelConfig::default(),
-            fallback_models: vec![],
-            resources: ResourceQuota::default(),
-            priority: Priority::default(),
-            capabilities: ManifestCapabilities::default(),
-            profile: None,
-            tools: HashMap::new(),
-            skills: vec![],
-            mcp_servers: vec![],
-            metadata: HashMap::new(),
-            tags: vec![],
-            routing: None,
-            autonomous: None,
-            pinned_model: None,
-            workspace: None,
-            generate_identity_files: true,
-            exec_policy: None,
-            tool_allowlist: vec![],
-            tool_blocklist: vec![],
+            ..Default::default()
         };
         manifest.capabilities.tools = vec!["file_read".to_string(), "web_fetch".to_string()];
         manifest.capabilities.agent_spawn = true;
@@ -6296,30 +6276,11 @@ mod tests {
     fn test_manifest(name: &str, description: &str, tags: Vec<String>) -> AgentManifest {
         AgentManifest {
             name: name.to_string(),
-            version: "0.4.0".to_string(),
             description: description.to_string(),
             author: "test".to_string(),
             module: "builtin:chat".to_string(),
-            schedule: ScheduleMode::default(),
-            model: ModelConfig::default(),
-            fallback_models: vec![],
-            resources: ResourceQuota::default(),
-            priority: Priority::default(),
-            capabilities: ManifestCapabilities::default(),
-            profile: None,
-            tools: HashMap::new(),
-            skills: vec![],
-            mcp_servers: vec![],
-            metadata: HashMap::new(),
             tags,
-            routing: None,
-            autonomous: None,
-            pinned_model: None,
-            workspace: None,
-            generate_identity_files: true,
-            exec_policy: None,
-            tool_allowlist: vec![],
-            tool_blocklist: vec![],
+            ..Default::default()
         }
     }
 

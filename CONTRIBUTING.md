@@ -349,7 +349,7 @@ For skills that are just prompt engineering, no code is needed:
 name = "summarize-email"
 version = "0.1.0"
 description = "Summarize an email thread."
-runtime = "prompt"
+runtime = "promptonly"
 tags = ["email", "productivity"]
 
 [input]

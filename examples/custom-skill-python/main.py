@@ -11,7 +11,7 @@ def run(input: dict) -> str:
     text = input.get("text", "")
 
     words = len(text.split())
-    sentences = len(re.split(r"[.!?]+", text.strip())) if text.strip() else 0
+    sentences = len([s for s in re.split(r"[.!?]+", text.strip()) if s.strip()]) if text.strip() else 0
     characters = len(text)
 
     return (
