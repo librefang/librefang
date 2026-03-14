@@ -1,5 +1,5 @@
 ---
-title: "Hello, LibreFang! — オープンソース Agent OS の紹介"
+title: "Hello, LibreFang! — The Open-Source Agent Operating System"
 emoji: "🦊"
 type: "tech"
 topics: ["rust", "ai", "agent", "opensource", "librefang"]
@@ -8,41 +8,41 @@ published: true
 
 # Hello, LibreFang!
 
-LibreFang は Rust で構築されたオープンソースの Agent Operating System です。
+LibreFang is an open-source Agent Operating System built in Rust.
 
-## なぜ LibreFang？
+## Why LibreFang?
 
-"Libre" は自由を意味します。オープンソースプロジェクトは、ライセンスだけでなく、ガバナンス、コントリビューション、コラボレーションにおいても真にオープンであるべきだと考えています。
+"Libre" means freedom. We believe an open-source project should be truly open — not just in license, but in governance, contribution, and collaboration.
 
-## 特徴
+## Features
 
-- **14 の Rust crate** — モジュラー、高速、メモリ安全
-- **40 のメッセージングチャネル** — Telegram, Discord, Slack など
-- **60 のバンドルスキル** — すぐに使える
-- **16 のセキュリティレイヤー** — WASM サンドボックス、RBAC、監査証跡
-- **2,100+ テスト** — Clippy 警告ゼロ
+- **14 Rust crates** — modular, fast, and memory-safe
+- **40 messaging channels** — Telegram, Discord, Slack, and 37 more
+- **60 bundled skills** — ready to use out of the box
+- **16 security layers** — WASM sandbox, RBAC, audit trails, and more
+- **2,100+ tests** — zero clippy warnings
 
-## クイックスタート
+## Quick Start
 
 ```bash
 export GROQ_API_KEY="your-key"
 librefang init && librefang start
-# http://127.0.0.1:4545 を開く
+# Open http://127.0.0.1:4545
 ```
 
-## コントリビューション
+## Contributing
 
-Rust の経験がなくても貢献できます：
+You don't need Rust experience to contribute:
 
-| 種類 | Rust 必要？ |
-|------|-----------|
-| Agent テンプレート (TOML) | 不要 |
-| スキル (Python/JS) | 不要 |
-| ドキュメント / 翻訳 | 不要 |
-| チャネルアダプター | 必要 |
-| コア機能 | 必要 |
+| Type | Rust required? |
+|------|---------------|
+| Agent templates (TOML) | No |
+| Skills (Python/JS) | No |
+| Documentation / Translation | No |
+| Channel adapters | Yes |
+| Core features | Yes |
 
-## リンク
+## Links
 
 - [GitHub](https://github.com/librefang/librefang)
 - [Discord](https://discord.gg/DzTYqAZZmc)
