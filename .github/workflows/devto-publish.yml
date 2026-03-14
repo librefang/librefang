@@ -1,0 +1,95 @@
+name: Publish to Dev.to
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'articles/*.md'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Publish articles
+        env:
+          DEVTO_API_KEY: ${{ secrets.DEVTO_API_KEY }}
+        run: |
+          if [ -z "$DEVTO_API_KEY" ]; then
+            echo "No Dev.to API key configured, skipping"
+            exit 0
+          fi
+
+          for article in articles/*.md; do
+            [ -f "$article" ] || continue
+            FILENAME=$(basename "$article" .md)
+
+            # Parse front matter
+            TITLE=$(sed -n 's/^title: *"\(.*\)"/\1/p' "$article" | head -1)
+            DESCRIPTION=$(sed -n 's/^description: *"\(.*\)"/\1/p' "$article" | head -1)
+            TAGS=$(sed -n 's/^tags: *//p' "$article" | head -1)
+            PUBLISHED=$(sed -n 's/^published: *//p' "$article" | head -1)
+            COVER=$(sed -n 's/^cover_image: *//p' "$article" | head -1)
+            CANONICAL=$(sed -n 's/^canonical_url: *//p' "$article" | head -1)
+
+            [ -z "$TITLE" ] && echo "Skipping $article (no title)" && continue
+            [ "$PUBLISHED" != "true" ] && echo "Skipping $article (not published)" && continue
+
+            # Extract body (everything after second ---)
+            BODY=$(awk '/^---$/{c++;next} c>=2{print}' "$article")
+
+            # Check if article already exists on Dev.to
+            EXISTING=$(curl -s -H "api-key: $DEVTO_API_KEY" \
+              "https://dev.to/api/articles/me?per_page=100" | \
+              python3 -c "
+          import json,sys
+          articles = json.load(sys.stdin)
+          for a in articles:
+              if a.get('title') == '''$TITLE''':
+                  print(a['id'])
+                  break
+          " 2>/dev/null || true)
+
+            # Build JSON payload
+            PAYLOAD=$(python3 -c "
+          import json
+          body = open('$article').read()
+          # Remove front matter
+          parts = body.split('---', 2)
+          if len(parts) >= 3:
+              body_content = parts[2].strip()
+          else:
+              body_content = body
+
+          article = {
+              'title': '''$TITLE''',
+              'body_markdown': body_content,
+              'published': True,
+              'tags': [t.strip() for t in '''$TAGS'''.split(',') if t.strip()],
+          }
+          if '''$DESCRIPTION''':
+              article['description'] = '''$DESCRIPTION'''
+          if '''$COVER''':
+              article['main_image'] = '''$COVER'''
+          if '''$CANONICAL''':
+              article['canonical_url'] = '''$CANONICAL'''
+
+          print(json.dumps({'article': article}))
+          ")
+
+            if [ -n "$EXISTING" ]; then
+              echo "Updating: $TITLE (id=$EXISTING)"
+              curl -s -X PUT "https://dev.to/api/articles/$EXISTING" \
+                -H "api-key: $DEVTO_API_KEY" \
+                -H "Content-Type: application/json" \
+                -d "$PAYLOAD" | python3 -c "import json,sys;print(json.load(sys.stdin).get('url',''))" 2>/dev/null
+            else
+              echo "Creating: $TITLE"
+              curl -s -X POST "https://dev.to/api/articles" \
+                -H "api-key: $DEVTO_API_KEY" \
+                -H "Content-Type: application/json" \
+                -d "$PAYLOAD" | python3 -c "import json,sys;print(json.load(sys.stdin).get('url',''))" 2>/dev/null
+            fi
+          done
