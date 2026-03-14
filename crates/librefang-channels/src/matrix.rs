@@ -1,7 +1,8 @@
 //! Matrix channel adapter.
 //!
 //! Uses the Matrix Client-Server API (via reqwest) for sending and receiving messages.
-//! Implements /sync long-polling for real-time message reception.
+//! Implements /sync long-polling with exponential backoff on failures for automatic
+//! reconnection after connection drops.
 
 use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser};
 use async_trait::async_trait;
@@ -12,9 +13,14 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch, RwLock};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
+/// Maximum backoff duration on sync failures.
+const MAX_BACKOFF: Duration = Duration::from_secs(60);
+/// Initial backoff duration on sync failures.
+const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+/// Matrix /sync long-polling timeout in milliseconds.
 const SYNC_TIMEOUT_MS: u64 = 30000;
 const MAX_MESSAGE_LEN: usize = 4096;
 
@@ -65,7 +71,6 @@ impl MatrixAdapter {
         self.account_id = account_id;
         self
     }
-
 
     /// Send a text message to a Matrix room.
     async fn api_send_message(
@@ -160,7 +165,7 @@ impl ChannelAdapter for MatrixAdapter {
         let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
-            let mut backoff = Duration::from_secs(1);
+            let mut backoff = INITIAL_BACKOFF;
 
             loop {
                 // Build /sync URL
@@ -182,9 +187,9 @@ impl ChannelAdapter for MatrixAdapter {
                         match result {
                             Ok(r) => r,
                             Err(e) => {
-                                warn!("Matrix sync error: {e}");
+                                warn!("Matrix /sync network error: {e}, retrying in {backoff:?}");
                                 tokio::time::sleep(backoff).await;
-                                backoff = (backoff * 2).min(Duration::from_secs(60));
+                                backoff = calculate_backoff(backoff);
                                 continue;
                             }
                         }
@@ -192,13 +197,18 @@ impl ChannelAdapter for MatrixAdapter {
                 };
 
                 if !resp.status().is_success() {
-                    warn!("Matrix sync returned {}", resp.status());
+                    let status = resp.status();
+                    warn!("Matrix /sync failed ({status}), retrying in {backoff:?}");
                     tokio::time::sleep(backoff).await;
-                    backoff = (backoff * 2).min(Duration::from_secs(60));
+                    backoff = calculate_backoff(backoff);
                     continue;
                 }
 
-                backoff = Duration::from_secs(1);
+                // Reset backoff on success
+                if backoff > INITIAL_BACKOFF {
+                    debug!("Matrix /sync recovered, resetting backoff");
+                }
+                backoff = INITIAL_BACKOFF;
 
                 let body: serde_json::Value = match resp.json().await {
                     Ok(b) => b,
@@ -273,7 +283,9 @@ impl ChannelAdapter for MatrixAdapter {
 
                                 // Inject account_id for multi-bot routing
                                 if let Some(ref aid) = account_id {
-                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                    channel_msg
+                                        .metadata
+                                        .insert("account_id".to_string(), serde_json::json!(aid));
                                 }
                                 if tx.send(channel_msg).await.is_err() {
                                     return;
@@ -333,6 +345,11 @@ impl ChannelAdapter for MatrixAdapter {
     }
 }
 
+/// Calculate exponential backoff capped at MAX_BACKOFF.
+pub fn calculate_backoff(current: Duration) -> Duration {
+    (current * 2).min(MAX_BACKOFF)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +383,63 @@ mod tests {
             vec![],
         );
         assert!(open.is_allowed_room("!any:matrix.org"));
+    }
+
+    #[test]
+    fn test_backoff_calculation() {
+        let b1 = calculate_backoff(Duration::from_secs(1));
+        assert_eq!(b1, Duration::from_secs(2));
+
+        let b2 = calculate_backoff(Duration::from_secs(2));
+        assert_eq!(b2, Duration::from_secs(4));
+
+        let b3 = calculate_backoff(Duration::from_secs(32));
+        assert_eq!(b3, Duration::from_secs(60)); // capped at MAX_BACKOFF
+
+        let b4 = calculate_backoff(Duration::from_secs(60));
+        assert_eq!(b4, Duration::from_secs(60)); // stays at MAX_BACKOFF
+    }
+
+    #[test]
+    fn test_backoff_constants() {
+        assert_eq!(INITIAL_BACKOFF, Duration::from_secs(1));
+        assert_eq!(MAX_BACKOFF, Duration::from_secs(60));
+        assert!(INITIAL_BACKOFF < MAX_BACKOFF);
+    }
+
+    #[test]
+    fn test_backoff_progression() {
+        // Verify the full backoff sequence from INITIAL to MAX
+        let mut current = INITIAL_BACKOFF;
+        let expected = [1, 2, 4, 8, 16, 32, 60, 60];
+        for &exp_secs in &expected {
+            assert_eq!(
+                current.as_secs(),
+                if current == INITIAL_BACKOFF && exp_secs == 1 {
+                    1
+                } else {
+                    current.as_secs()
+                }
+            );
+            current = calculate_backoff(current);
+            // After calculate_backoff, verify next value
+        }
+        // Simpler: just walk the sequence
+        let mut b = INITIAL_BACKOFF;
+        assert_eq!(b, Duration::from_secs(1));
+        b = calculate_backoff(b);
+        assert_eq!(b, Duration::from_secs(2));
+        b = calculate_backoff(b);
+        assert_eq!(b, Duration::from_secs(4));
+        b = calculate_backoff(b);
+        assert_eq!(b, Duration::from_secs(8));
+        b = calculate_backoff(b);
+        assert_eq!(b, Duration::from_secs(16));
+        b = calculate_backoff(b);
+        assert_eq!(b, Duration::from_secs(32));
+        b = calculate_backoff(b);
+        assert_eq!(b, Duration::from_secs(60));
+        b = calculate_backoff(b);
+        assert_eq!(b, Duration::from_secs(60)); // stays capped
     }
 }

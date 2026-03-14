@@ -120,6 +120,8 @@ async fn start_test_server_with_provider(
             "/api/workflows/{id}/runs",
             axum::routing::get(routes::list_workflow_runs),
         )
+        .route("/api/tools", axum::routing::get(routes::list_tools))
+        .route("/api/tools/{name}", axum::routing::get(routes::get_tool))
         .route("/api/shutdown", axum::routing::post(routes::shutdown))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(TraceLayer::new_for_http())
@@ -856,4 +858,72 @@ async fn test_auth_disabled_when_no_key() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
+}
+
+// ---------------------------------------------------------------------------
+// Tool endpoints
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_list_tools() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{}/api/tools", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["tools"].is_array());
+    assert!(body["total"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn test_get_tool_found() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // First list tools to get a known tool name
+    let resp = client
+        .get(format!("{}/api/tools", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let first_tool_name = body["tools"][0]["name"].as_str().unwrap().to_string();
+
+    // Now fetch that specific tool
+    let resp = client
+        .get(format!("{}/api/tools/{}", server.base_url, first_tool_name))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let tool: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(tool["name"].as_str().unwrap(), first_tool_name);
+    assert!(tool["description"].is_string());
+    assert!(tool["input_schema"].is_object());
+}
+
+#[tokio::test]
+async fn test_get_tool_not_found() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!(
+            "{}/api/tools/nonexistent_tool_xyz",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("not found"));
 }

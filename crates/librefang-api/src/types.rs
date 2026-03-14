@@ -101,3 +101,50 @@ pub struct ClawHubInstallRequest {
     /// ClawHub skill slug (e.g., "github-helper").
     pub slug: String,
 }
+
+/// Request to install an extension (integration).
+#[derive(Debug, Deserialize)]
+pub struct ExtensionInstallRequest {
+    /// Extension/integration ID (e.g., "github", "slack").
+    pub name: String,
+}
+
+/// Request to uninstall an extension (integration).
+#[derive(Debug, Deserialize)]
+pub struct ExtensionUninstallRequest {
+    /// Extension/integration ID to remove.
+    pub name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_install_request_deserialize() {
+        let json = r#"{"name": "github"}"#;
+        let req: ExtensionInstallRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.name, "github");
+    }
+
+    #[test]
+    fn extension_uninstall_request_deserialize() {
+        let json = r#"{"name": "slack"}"#;
+        let req: ExtensionUninstallRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.name, "slack");
+    }
+
+    #[test]
+    fn extension_install_request_missing_name_fails() {
+        let json = r#"{}"#;
+        let result = serde_json::from_str::<ExtensionInstallRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extension_uninstall_request_missing_name_fails() {
+        let json = r#"{}"#;
+        let result = serde_json::from_str::<ExtensionUninstallRequest>(json);
+        assert!(result.is_err());
+    }
+}
