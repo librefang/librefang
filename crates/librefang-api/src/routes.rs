@@ -4622,6 +4622,299 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
     }))
 }
 
+/// POST /api/mcp/servers — Add a new MCP server configuration.
+///
+/// Expects a JSON body matching `McpServerConfigEntry` (name, transport, timeout_secs, env).
+/// Persists to config.toml and triggers a config reload.
+pub async fn add_mcp_server(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    // Validate required fields
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing or empty 'name' field"})),
+            );
+        }
+    };
+
+    if body.get("transport").is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing 'transport' field"})),
+        );
+    }
+
+    // Validate by deserializing the body into McpServerConfigEntry
+    let entry: librefang_types::config::McpServerConfigEntry = match serde_json::from_value(body) {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Invalid MCP server config: {e}")})),
+            );
+        }
+    };
+
+    // Check for duplicate name
+    if state
+        .kernel
+        .config
+        .mcp_servers
+        .iter()
+        .any(|s| s.name == name)
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("MCP server '{}' already exists", name)})),
+        );
+    }
+
+    // Persist to config.toml
+    let config_path = state.kernel.config.home_dir.join("config.toml");
+    if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to write config: {e}")})),
+        );
+    }
+
+    // Trigger config reload
+    let reload_status = match state.kernel.reload_config() {
+        Ok(plan) => {
+            if plan.restart_required {
+                "applied_partial"
+            } else {
+                "applied"
+            }
+        }
+        Err(_) => "saved_reload_failed",
+    };
+
+    state.kernel.audit_log.record(
+        "system",
+        librefang_runtime::audit::AuditAction::ConfigChange,
+        format!("mcp_server added: {name}"),
+        "completed",
+    );
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "status": "added",
+            "name": name,
+            "reload": reload_status,
+        })),
+    )
+}
+
+/// PUT /api/mcp/servers/{name} — Update an existing MCP server configuration.
+///
+/// Replaces the existing entry with the provided JSON body. The `name` path
+/// parameter identifies which server to update; the body's `name` field (if
+/// present) is ignored in favour of the path parameter.
+pub async fn update_mcp_server(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Json(mut body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    // Ensure the entry exists
+    if !state
+        .kernel
+        .config
+        .mcp_servers
+        .iter()
+        .any(|s| s.name == name)
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("MCP server '{}' not found", name)})),
+        );
+    }
+
+    // Force the name in body to match the path parameter
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("name".to_string(), serde_json::json!(name));
+    }
+
+    if body.get("transport").is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing 'transport' field"})),
+        );
+    }
+
+    // Validate by deserializing
+    let entry: librefang_types::config::McpServerConfigEntry = match serde_json::from_value(body) {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Invalid MCP server config: {e}")})),
+            );
+        }
+    };
+
+    // Persist — upsert replaces an existing entry with the same name
+    let config_path = state.kernel.config.home_dir.join("config.toml");
+    if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to write config: {e}")})),
+        );
+    }
+
+    let reload_status = match state.kernel.reload_config() {
+        Ok(plan) => {
+            if plan.restart_required {
+                "applied_partial"
+            } else {
+                "applied"
+            }
+        }
+        Err(_) => "saved_reload_failed",
+    };
+
+    state.kernel.audit_log.record(
+        "system",
+        librefang_runtime::audit::AuditAction::ConfigChange,
+        format!("mcp_server updated: {name}"),
+        "completed",
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "updated",
+            "name": name,
+            "reload": reload_status,
+        })),
+    )
+}
+
+/// DELETE /api/mcp/servers/{name} — Remove an MCP server configuration.
+pub async fn delete_mcp_server(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    // Ensure the entry exists
+    if !state
+        .kernel
+        .config
+        .mcp_servers
+        .iter()
+        .any(|s| s.name == name)
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("MCP server '{}' not found", name)})),
+        );
+    }
+
+    let config_path = state.kernel.config.home_dir.join("config.toml");
+    if let Err(e) = remove_mcp_server_config(&config_path, &name) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to write config: {e}")})),
+        );
+    }
+
+    let reload_status = match state.kernel.reload_config() {
+        Ok(plan) => {
+            if plan.restart_required {
+                "applied_partial"
+            } else {
+                "applied"
+            }
+        }
+        Err(_) => "saved_reload_failed",
+    };
+
+    state.kernel.audit_log.record(
+        "system",
+        librefang_runtime::audit::AuditAction::ConfigChange,
+        format!("mcp_server removed: {name}"),
+        "completed",
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "removed",
+            "name": name,
+            "reload": reload_status,
+        })),
+    )
+}
+
+/// Upsert an MCP server entry in config.toml's `[[mcp_servers]]` array.
+///
+/// If an entry with the same name already exists it is replaced; otherwise a
+/// new entry is appended.
+fn upsert_mcp_server_config(
+    config_path: &std::path::Path,
+    entry: &librefang_types::config::McpServerConfigEntry,
+) -> Result<(), String> {
+    let mut table: toml::value::Table = if config_path.exists() {
+        let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+        toml::from_str(&content).unwrap_or_default()
+    } else {
+        toml::value::Table::new()
+    };
+
+    // Serialize the entry to a TOML value via JSON round-trip
+    let entry_json = serde_json::to_value(entry).map_err(|e| e.to_string())?;
+    let entry_toml = json_to_toml_value(&entry_json);
+
+    let servers = table
+        .entry("mcp_servers".to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()));
+
+    if let toml::Value::Array(ref mut arr) = servers {
+        // Remove existing entry with same name (if any)
+        arr.retain(|v| {
+            v.as_table()
+                .and_then(|t| t.get("name"))
+                .and_then(|n| n.as_str())
+                .map(|n| n != entry.name)
+                .unwrap_or(true)
+        });
+        // Append new/updated entry
+        arr.push(entry_toml);
+    }
+
+    let toml_string = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+    std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Remove an MCP server entry from config.toml's `[[mcp_servers]]` array by name.
+fn remove_mcp_server_config(config_path: &std::path::Path, name: &str) -> Result<(), String> {
+    let mut table: toml::value::Table = if config_path.exists() {
+        let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+        toml::from_str(&content).unwrap_or_default()
+    } else {
+        return Ok(());
+    };
+
+    if let Some(toml::Value::Array(ref mut arr)) = table.get_mut("mcp_servers") {
+        arr.retain(|v| {
+            v.as_table()
+                .and_then(|t| t.get("name"))
+                .and_then(|n| n.as_str())
+                .map(|n| n != name)
+                .unwrap_or(true)
+        });
+    }
+
+    let toml_string = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
+    std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Audit endpoints
 // ---------------------------------------------------------------------------
