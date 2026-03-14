@@ -1,3 +1,7 @@
+<!-- PR title must follow conventional commit format: type[scope]: description -->
+<!-- Examples: feat: add X, fix(kernel): resolve Y, docs: update Z -->
+<!-- Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert -->
+
 ## Type
 
 <!-- Check one: -->
