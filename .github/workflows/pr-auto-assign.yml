@@ -1,0 +1,29 @@
+name: PR Auto Assign
+
+on:
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto-assign PR author and request review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR="${{ github.event.pull_request.number }}"
+          AUTHOR="${{ github.event.pull_request.user.login }}"
+          REPO="${{ github.repository }}"
+
+          # Assign PR to author
+          gh pr edit "$PR" --repo "$REPO" --add-assignee "$AUTHOR"
+
+          # Request review from CODEOWNERS (skip if author is the owner)
+          if [ "$AUTHOR" != "houko" ]; then
+            gh pr edit "$PR" --repo "$REPO" --add-reviewer "houko"
+          fi
