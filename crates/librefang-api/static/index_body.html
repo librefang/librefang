@@ -3097,6 +3097,26 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               <h4 data-i18n="settingsPage.modelCatalog">Model Catalog</h4>
               <p data-i18n="settingsPage.modelCatalogDesc">Browse all available models across providers. Models marked "Available" have their provider configured and ready to use.</p>
             </div>
+            <!-- Catalog Sync -->
+            <div class="info-card mb-4" style="border:1px solid var(--border)">
+              <div class="flex justify-between items-center" style="flex-wrap:wrap;gap:0.5rem">
+                <div>
+                  <h4 style="margin:0 0 4px" data-i18n="settingsPage.catalogSync">Catalog Sync</h4>
+                  <p class="text-xs text-dim" style="margin:0">
+                    <span data-i18n="settingsPage.catalogSyncDesc">Community-maintained model definitions from</span>
+                    <a href="https://github.com/librefang/model-catalog" target="_blank" rel="noopener" style="color:var(--accent-light)">librefang/model-catalog</a>
+                  </p>
+                </div>
+                <div class="flex items-center gap-2" style="flex-wrap:wrap">
+                  <span class="text-xs text-dim" x-text="catalogLastSyncText()"></span>
+                  <button class="btn btn-primary btn-sm" @click="updateCatalog()" :disabled="catalogUpdating">
+                    <span x-show="!catalogUpdating" data-i18n="settingsPage.updateCatalog">Update Catalog</span>
+                    <span x-show="catalogUpdating" class="flex items-center gap-1"><span class="spinner" style="width:10px;height:10px;border-width:2px"></span> <span data-i18n="settingsPage.updating">Updating...</span></span>
+                  </button>
+                </div>
+              </div>
+              <div x-show="catalogResult" class="text-xs mt-2" :style="catalogResult.startsWith('Error') ? 'color:var(--error)' : 'color:var(--success)'" x-text="catalogResult"></div>
+            </div>
             <div class="flex gap-2 mb-4" style="flex-wrap:wrap">
               <div class="search-input" style="flex:1;min-width:200px">
                 <span style="color:var(--text-muted)"><svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg></span>

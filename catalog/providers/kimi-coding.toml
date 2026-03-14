@@ -1,0 +1,20 @@
+[provider]
+id = "kimi_coding"
+display_name = "Kimi for Code"
+api_key_env = "KIMI_API_KEY"
+base_url = "https://api.kimi.com/coding"
+key_required = true
+
+[[models]]
+id = "kimi-for-coding"
+display_name = "Kimi For Coding"
+provider = "kimi_coding"
+tier = "frontier"
+context_window = 262144
+max_output_tokens = 32768
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []

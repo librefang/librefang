@@ -1,0 +1,146 @@
+[provider]
+id = "gemini"
+display_name = "Google Gemini"
+api_key_env = "GEMINI_API_KEY"
+base_url = "https://generativelanguage.googleapis.com"
+key_required = true
+
+[[models]]
+id = "gemini-3.1-pro-preview"
+display_name = "Gemini 3.1 Pro Preview"
+provider = "gemini"
+tier = "frontier"
+context_window = 1048576
+max_output_tokens = 65536
+input_cost_per_m = 2.5
+output_cost_per_m = 15.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["gemini-pro"]
+
+[[models]]
+id = "gemini-3-flash-preview"
+display_name = "Gemini 3 Flash Preview"
+provider = "gemini"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 65536
+input_cost_per_m = 0.15
+output_cost_per_m = 0.6
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["gemini-flash"]
+
+[[models]]
+id = "gemini-3.1-flash-lite-preview"
+display_name = "Gemini 3.1 Flash Lite Preview"
+provider = "gemini"
+tier = "fast"
+context_window = 1048576
+max_output_tokens = 8192
+input_cost_per_m = 0.04
+output_cost_per_m = 0.15
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "gemini-2.5-flash-lite"
+display_name = "Gemini 2.5 Flash Lite"
+provider = "gemini"
+tier = "fast"
+context_window = 1048576
+max_output_tokens = 8192
+input_cost_per_m = 0.04
+output_cost_per_m = 0.15
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "gemini-2.5-pro"
+display_name = "Gemini 2.5 Pro"
+provider = "gemini"
+tier = "frontier"
+context_window = 1048576
+max_output_tokens = 65536
+input_cost_per_m = 1.25
+output_cost_per_m = 10.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "gemini-2.5-flash"
+display_name = "Gemini 2.5 Flash"
+provider = "gemini"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 65536
+input_cost_per_m = 0.15
+output_cost_per_m = 0.6
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["flash"]
+
+[[models]]
+id = "gemini-2.0-flash"
+display_name = "Gemini 2.0 Flash"
+provider = "gemini"
+tier = "fast"
+context_window = 1048576
+max_output_tokens = 8192
+input_cost_per_m = 0.1
+output_cost_per_m = 0.4
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "gemini-2.0-flash-lite"
+display_name = "Gemini 2.0 Flash Lite"
+provider = "gemini"
+tier = "fast"
+context_window = 1048576
+max_output_tokens = 8192
+input_cost_per_m = 0.075
+output_cost_per_m = 0.3
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "gemini-1.5-pro"
+display_name = "Gemini 1.5 Pro"
+provider = "gemini"
+tier = "smart"
+context_window = 2097152
+max_output_tokens = 8192
+input_cost_per_m = 1.25
+output_cost_per_m = 5.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "gemini-1.5-flash"
+display_name = "Gemini 1.5 Flash"
+provider = "gemini"
+tier = "fast"
+context_window = 1048576
+max_output_tokens = 8192
+input_cost_per_m = 0.075
+output_cost_per_m = 0.3
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []

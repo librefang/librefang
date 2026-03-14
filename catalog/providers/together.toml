@@ -1,0 +1,118 @@
+[provider]
+id = "together"
+display_name = "Together AI"
+api_key_env = "TOGETHER_API_KEY"
+base_url = "https://api.together.xyz/v1"
+key_required = true
+
+[[models]]
+id = "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo"
+display_name = "Llama 3.1 405B (Together)"
+provider = "together"
+tier = "frontier"
+context_window = 130000
+max_output_tokens = 4096
+input_cost_per_m = 3.5
+output_cost_per_m = 3.5
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+display_name = "Llama 3.3 70B (Together)"
+provider = "together"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.88
+output_cost_per_m = 0.88
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+display_name = "Llama 4 Maverick (Together)"
+provider = "together"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 8192
+input_cost_per_m = 0.27
+output_cost_per_m = 0.35
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+display_name = "Llama 4 Scout (Together)"
+provider = "together"
+tier = "balanced"
+context_window = 512000
+max_output_tokens = 8192
+input_cost_per_m = 0.18
+output_cost_per_m = 0.3
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "deepseek-ai/DeepSeek-R1"
+display_name = "DeepSeek R1 (Together)"
+provider = "together"
+tier = "frontier"
+context_window = 64000
+max_output_tokens = 8192
+input_cost_per_m = 3.0
+output_cost_per_m = 7.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "deepseek-ai/DeepSeek-V3"
+display_name = "DeepSeek V3 (Together)"
+provider = "together"
+tier = "smart"
+context_window = 64000
+max_output_tokens = 8192
+input_cost_per_m = 0.9
+output_cost_per_m = 0.9
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "Qwen/Qwen2.5-72B-Instruct-Turbo"
+display_name = "Qwen 2.5 72B (Together)"
+provider = "together"
+tier = "smart"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.2
+output_cost_per_m = 0.6
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "mistralai/Mixtral-8x22B-Instruct-v0.1"
+display_name = "Mixtral 8x22B (Together)"
+provider = "together"
+tier = "balanced"
+context_window = 65536
+max_output_tokens = 4096
+input_cost_per_m = 0.6
+output_cost_per_m = 0.6
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []

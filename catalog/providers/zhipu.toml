@@ -1,0 +1,90 @@
+[provider]
+id = "zhipu"
+display_name = "Zhipu AI (GLM)"
+api_key_env = "ZHIPU_API_KEY"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+key_required = true
+
+[[models]]
+id = "glm-4-plus"
+display_name = "GLM-4 Plus"
+provider = "zhipu"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.6
+output_cost_per_m = 2.2
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["glm"]
+
+[[models]]
+id = "glm-4-flash"
+display_name = "GLM-4 Flash"
+provider = "zhipu"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "glm-4v-plus"
+display_name = "GLM-4V Plus"
+provider = "zhipu"
+tier = "smart"
+context_window = 8192
+max_output_tokens = 4096
+input_cost_per_m = 0.6
+output_cost_per_m = 2.2
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "glm-4-long"
+display_name = "GLM-4 Long"
+provider = "zhipu"
+tier = "balanced"
+context_window = 1000000
+max_output_tokens = 8192
+input_cost_per_m = 0.1
+output_cost_per_m = 0.1
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "glm-5-20250605"
+display_name = "GLM-5"
+provider = "zhipu"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 1.0
+output_cost_per_m = 3.2
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["glm-5"]
+
+[[models]]
+id = "glm-4.7"
+display_name = "GLM-4.7"
+provider = "zhipu"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.6
+output_cost_per_m = 2.2
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []

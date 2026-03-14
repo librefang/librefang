@@ -1,0 +1,62 @@
+[provider]
+id = "cohere"
+display_name = "Cohere"
+api_key_env = "COHERE_API_KEY"
+base_url = "https://api.cohere.com/v2"
+key_required = true
+
+[[models]]
+id = "command-r-plus"
+display_name = "Command R+"
+provider = "cohere"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 2.5
+output_cost_per_m = 10.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["command-r"]
+
+[[models]]
+id = "command-r-08-2024"
+display_name = "Command R (Aug 2024)"
+provider = "cohere"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.15
+output_cost_per_m = 0.6
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "command-a"
+display_name = "Command A"
+provider = "cohere"
+tier = "smart"
+context_window = 256000
+max_output_tokens = 8192
+input_cost_per_m = 2.5
+output_cost_per_m = 10.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["command"]
+
+[[models]]
+id = "command-light"
+display_name = "Command Light"
+provider = "cohere"
+tier = "fast"
+context_window = 4096
+max_output_tokens = 4096
+input_cost_per_m = 0.3
+output_cost_per_m = 0.6
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []

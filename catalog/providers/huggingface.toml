@@ -1,0 +1,48 @@
+[provider]
+id = "huggingface"
+display_name = "Hugging Face"
+api_key_env = "HF_API_KEY"
+base_url = "https://api-inference.huggingface.co/v1"
+key_required = true
+
+[[models]]
+id = "hf/meta-llama/Llama-3.3-70B-Instruct"
+display_name = "Llama 3.3 70B (HF)"
+provider = "huggingface"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.3
+output_cost_per_m = 0.3
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "hf/deepseek-ai/DeepSeek-R1"
+display_name = "DeepSeek R1 (HF)"
+provider = "huggingface"
+tier = "smart"
+context_window = 64000
+max_output_tokens = 4096
+input_cost_per_m = 0.3
+output_cost_per_m = 0.3
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "hf/Qwen/Qwen2.5-72B-Instruct"
+display_name = "Qwen 2.5 72B (HF)"
+provider = "huggingface"
+tier = "balanced"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.3
+output_cost_per_m = 0.3
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []

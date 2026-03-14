@@ -1,0 +1,76 @@
+[provider]
+id = "chatgpt"
+display_name = "ChatGPT (Session Auth)"
+api_key_env = "CHATGPT_SESSION_TOKEN"
+base_url = "https://chatgpt.com/backend-api"
+key_required = true
+
+[[models]]
+id = "gpt-5.4-codex"
+display_name = "GPT-5.4 Codex"
+provider = "chatgpt"
+tier = "frontier"
+context_window = 200000
+max_output_tokens = 65536
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["chatgpt-5.4"]
+
+[[models]]
+id = "gpt-5.3-codex"
+display_name = "GPT-5.3 Codex"
+provider = "chatgpt"
+tier = "frontier"
+context_window = 200000
+max_output_tokens = 65536
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["chatgpt-5.3"]
+
+[[models]]
+id = "gpt-5.2-codex"
+display_name = "GPT-5.2 Codex"
+provider = "chatgpt"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 65536
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["chatgpt-5.2"]
+
+[[models]]
+id = "gpt-5.1-codex"
+display_name = "GPT-5.1 Codex"
+provider = "chatgpt"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 65536
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["chatgpt-5.1"]
+
+[[models]]
+id = "gpt-5.1-codex-mini"
+display_name = "GPT-5.1 Codex Mini"
+provider = "chatgpt"
+tier = "balanced"
+context_window = 200000
+max_output_tokens = 65536
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["chatgpt-mini", "chatgpt"]
