@@ -480,6 +480,18 @@ MIT License. See the LICENSE file for details.
 
 ---
 
+## Contributors
+
+Thanks to everyone who has contributed to LibreFang!
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>
+
+> Want to join? Check out our [Contributing Guide](CONTRIBUTING.md) — no Rust experience required for many tasks.
+
+---
+
 <p align="center">
   <strong>Built with Rust. Secured with 16 layers. Agents that actually work for you.</strong>
 </p>
