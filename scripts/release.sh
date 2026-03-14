@@ -44,7 +44,7 @@ git -C "$REPO_ROOT" pull --rebase origin main
 
 # --- Determine version ---
 
-PREV_TAG=$(git -C "$REPO_ROOT" tag --sort=-creatordate | grep -E '^v[0-9]' | head -1 || true)
+PREV_TAG=$(git -C "$REPO_ROOT" tag --sort=-creatordate | grep -E '^v[0-9]' | grep -vE '(alpha|beta|rc)' | head -1 || true)
 if [ -z "$PREV_TAG" ]; then
     echo "Warning: no previous version tag found, reading from Cargo.toml"
 fi
