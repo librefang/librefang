@@ -1,0 +1,23 @@
+## JSON Formatter Skill
+##
+## Pretty-prints JSON with optional key sorting.
+## To test: librefang skill test ./skills/community/json-formatter --input '{"json_text": "{\"b\":2,\"a\":1}", "sort_keys": true}'
+##
+## For the full reference, see: docs/skill-development.md
+
+[skill]
+name = "json-formatter"
+version = "0.1.0"
+description = "Pretty-print JSON with optional key sorting."
+author = "librefang-community"
+license = "MIT"
+tags = ["json", "formatter", "utility"]
+
+[runtime]
+type = "python"
+entry = "main.py"
+
+[input]
+json_text = { type = "string", description = "The raw JSON string to format", required = true }
+sort_keys = { type = "boolean", description = "Sort object keys alphabetically (default: false)", required = false }
+indent = { type = "integer", description = "Number of spaces for indentation (default: 2)", required = false }
