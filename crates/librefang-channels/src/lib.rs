@@ -10,6 +10,7 @@
 pub mod bridge;
 pub mod formatter;
 pub mod router;
+pub mod sidecar;
 pub mod types;
 
 // Individual channel adapters — feature-gated (alphabetical order)
