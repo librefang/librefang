@@ -498,11 +498,7 @@ fn create_driver_from_entry(
         .api_key
         .clone()
         .or_else(|| std::env::var(entry.api_key_env).ok())
-        .or_else(|| {
-            entry
-                .alt_api_key_env
-                .and_then(|v| std::env::var(v).ok())
-        })
+        .or_else(|| entry.alt_api_key_env.and_then(|v| std::env::var(v).ok()))
         .unwrap_or_default();
 
     // Special: OpenAI also checks Codex credential
