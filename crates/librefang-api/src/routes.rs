@@ -2312,6 +2312,13 @@ pub async fn configure_channel(
         }
 
         if let Some(env_var) = field_def.env_var {
+            // Validate env var name and value before writing
+            if let Err(msg) = validate_env_var(env_var, value) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": msg})),
+                );
+            }
             // Secret field — write to secrets.env and set in process
             if let Err(e) = write_secret_env(&secrets_path, env_var, value) {
                 return (
@@ -7587,6 +7594,72 @@ pub async fn create_skill(
 }
 
 // ── Helper functions for secrets.env management ────────────────────────
+
+/// Denylist of critical system environment variables that must not be overwritten.
+const DENIED_ENV_VARS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "TERM",
+    "LANG",
+    "PWD",
+];
+
+/// Maximum allowed length for an environment variable value.
+const ENV_VALUE_MAX_LEN: usize = 4096;
+
+/// Validate an environment variable name and value before setting them.
+///
+/// Rules:
+/// - Name must match `^[A-Za-z_][A-Za-z0-9_]*$`
+/// - Name must not be in the system denylist
+/// - Value length must not exceed [`ENV_VALUE_MAX_LEN`]
+fn validate_env_var(name: &str, value: &str) -> Result<(), String> {
+    // Check name format: must start with letter or underscore, then alphanumeric/underscore
+    if name.is_empty() {
+        return Err("Environment variable name must not be empty".to_string());
+    }
+    let first = name.as_bytes()[0];
+    if !(first.is_ascii_alphabetic() || first == b'_') {
+        return Err(format!(
+            "Environment variable name '{}' must start with a letter or underscore",
+            name
+        ));
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return Err(format!(
+            "Environment variable name '{}' contains invalid characters (only A-Z, a-z, 0-9, _ allowed)",
+            name
+        ));
+    }
+
+    // Check denylist
+    let upper = name.to_ascii_uppercase();
+    if DENIED_ENV_VARS.iter().any(|&d| d == upper) {
+        return Err(format!(
+            "Environment variable '{}' is a protected system variable and cannot be overwritten",
+            name
+        ));
+    }
+
+    // Check value length
+    if value.len() > ENV_VALUE_MAX_LEN {
+        return Err(format!(
+            "Environment variable value exceeds maximum length of {} bytes",
+            ENV_VALUE_MAX_LEN
+        ));
+    }
+
+    Ok(())
+}
 
 /// Write or update a key in the secrets.env file.
 /// File format: one `KEY=value` per line. Existing keys are overwritten.
