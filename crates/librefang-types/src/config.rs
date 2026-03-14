@@ -945,6 +945,36 @@ impl Default for ThinkingConfig {
     }
 }
 
+/// Configuration for a sidecar channel adapter (external process-based).
+///
+/// Sidecar adapters allow external processes written in any language to act as
+/// channel adapters. Communication uses newline-delimited JSON over stdin/stdout.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [[sidecar_channels]]
+/// name = "my-telegram"
+/// command = "python3"
+/// args = ["adapters/telegram_adapter.py"]
+/// env = { TELEGRAM_BOT_TOKEN = "xxx" }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SidecarChannelConfig {
+    /// Display name for this adapter.
+    pub name: String,
+    /// Command to execute (e.g., "python3", "/usr/local/bin/my-adapter").
+    pub command: String,
+    /// Arguments to pass to the command.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables to pass to the subprocess.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    /// Channel type identifier (defaults to Custom(name)).
+    #[serde(default)]
+    pub channel_type: Option<String>,
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1078,6 +1108,9 @@ pub struct KernelConfig {
     /// OAuth client ID overrides for PKCE flows.
     #[serde(default)]
     pub oauth: OAuthConfig,
+    /// Sidecar channel adapters (external process-based).
+    #[serde(default)]
+    pub sidecar_channels: Vec<SidecarChannelConfig>,
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1325,6 +1358,7 @@ impl Default for KernelConfig {
             provider_urls: HashMap::new(),
             provider_api_keys: HashMap::new(),
             oauth: OAuthConfig::default(),
+            sidecar_channels: Vec::new(),
         }
     }
 }

@@ -5,6 +5,7 @@
 
 use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
+use librefang_channels::sidecar::SidecarAdapter;
 use librefang_channels::types::ChannelAdapter;
 
 // Feature-gated adapter imports
@@ -1073,6 +1074,7 @@ pub async fn start_channel_bridge_with_config(
     kernel: Arc<LibreFangKernel>,
     config: &librefang_types::config::ChannelsConfig,
 ) -> (Option<BridgeManager>, Vec<String>) {
+<<<<<<< HEAD
     // Check which channels have config — only consider enabled features
     #[allow(unused_mut)]
     let mut has_any = false;
@@ -1136,6 +1138,11 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(gotify, "channel-gotify", "Gotify");
     check_channel!(webhook, "channel-webhook", "Webhook");
     check_channel!(linkedin, "channel-linkedin", "LinkedIn");
+
+    // Sidecar channels (always available, not feature-gated)
+    if !kernel.config.sidecar_channels.is_empty() {
+        has_any = true;
+    }
 
     if !has_any {
         return (None, Vec::new());
@@ -1717,6 +1724,17 @@ pub async fn start_channel_bridge_with_config(
             ));
             adapters.push((adapter, li_config.default_agent.clone()));
         }
+    }
+
+    // ── Sidecar channel adapters ───────────────────────────────
+    for sidecar_config in &kernel.config.sidecar_channels {
+        info!(
+            name = %sidecar_config.name,
+            command = %sidecar_config.command,
+            "Registering sidecar channel adapter"
+        );
+        let adapter = Arc::new(SidecarAdapter::new(sidecar_config));
+        adapters.push((adapter, None));
     }
 
     if adapters.is_empty() {
