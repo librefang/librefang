@@ -5398,8 +5398,12 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
             | "moonshot" | "openrouter" | "volcengine" | "doubao" | "dashscope" => {
                 return Some(prefix.to_string());
             }
-            // "kimi" is a brand alias for moonshot
-            "kimi" => {
+            // "z.ai" is a domain alias for the zai provider
+            "z.ai" => {
+                return Some("zai".to_string());
+            }
+            // "kimi" / "kimi2" are brand aliases for moonshot
+            "kimi" | "kimi2" => {
                 return Some("moonshot".to_string());
             }
             _ => {}
