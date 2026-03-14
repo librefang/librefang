@@ -55,16 +55,101 @@ const MAX_HISTORY_MESSAGES: usize = 20;
 ///
 /// Many models are stored as `provider/org/model` (e.g. `openrouter/google/gemini-2.5-flash`)
 /// but the upstream API expects just `org/model` (e.g. `google/gemini-2.5-flash`).
+///
+/// For providers that require qualified `org/model` format (OpenRouter, Together, Fireworks,
+/// Replicate, Chutes), bare model names like `gemini-2.5-flash` are normalized to their
+/// fully-qualified form (e.g. `google/gemini-2.5-flash`) to prevent 400 errors.
 pub fn strip_provider_prefix(model: &str, provider: &str) -> String {
     let slash_prefix = format!("{}/", provider);
     let colon_prefix = format!("{}:", provider);
-    if model.starts_with(&slash_prefix) {
+    let stripped = if model.starts_with(&slash_prefix) {
         model[slash_prefix.len()..].to_string()
     } else if model.starts_with(&colon_prefix) {
         model[colon_prefix.len()..].to_string()
     } else {
         model.to_string()
+    };
+
+    // Providers that require org/model format — normalize bare model names.
+    if needs_qualified_model_id(provider) && !stripped.contains('/') {
+        if let Some(qualified) = normalize_bare_model_id(&stripped) {
+            warn!(
+                provider,
+                bare_model = %stripped,
+                qualified_model = %qualified,
+                "Normalized bare model ID to qualified format for provider"
+            );
+            return qualified;
+        }
+        warn!(
+            provider,
+            model = %stripped,
+            "Model ID has no org/ prefix which is required by this provider. \
+             This may cause API errors. Use the format 'org/model-name' \
+             (e.g. 'google/gemini-2.5-flash' for OpenRouter)."
+        );
     }
+
+    stripped
+}
+
+/// Providers that require model IDs in `org/model` format.
+fn needs_qualified_model_id(provider: &str) -> bool {
+    matches!(
+        provider,
+        "openrouter" | "together" | "fireworks" | "replicate" | "chutes" | "huggingface"
+    )
+}
+
+/// Try to resolve a bare model name to a fully-qualified `org/model` identifier.
+///
+/// This covers common model names that users might enter without the org prefix.
+/// Returns `None` if the model name is not recognized.
+fn normalize_bare_model_id(bare_model: &str) -> Option<String> {
+    // Normalize to lowercase for matching, preserve `:suffix` (e.g. `:free`)
+    let (base, suffix) = match bare_model.split_once(':') {
+        Some((b, s)) => (b, format!(":{s}")),
+        None => (bare_model, String::new()),
+    };
+    let lower = base.to_lowercase();
+
+    let qualified = match lower.as_str() {
+        // Google models
+        m if m.starts_with("gemini-") || m.starts_with("gemma-") => {
+            format!("google/{base}{suffix}")
+        }
+        // Anthropic models
+        m if m.starts_with("claude-") => format!("anthropic/{base}{suffix}"),
+        // OpenAI models
+        m if m.starts_with("gpt-")
+            || m.starts_with("o1")
+            || m.starts_with("o3")
+            || m.starts_with("o4") =>
+        {
+            format!("openai/{base}{suffix}")
+        }
+        // Meta Llama models
+        m if m.starts_with("llama-") => format!("meta-llama/{base}{suffix}"),
+        // DeepSeek models
+        m if m.starts_with("deepseek-") => format!("deepseek/{base}{suffix}"),
+        // Mistral models
+        m if m.starts_with("mistral-")
+            || m.starts_with("mixtral-")
+            || m.starts_with("codestral") =>
+        {
+            format!("mistralai/{base}{suffix}")
+        }
+        // Qwen models
+        m if m.starts_with("qwen-") || m.starts_with("qwq") => {
+            format!("qwen/{base}{suffix}")
+        }
+        // Cohere models
+        m if m.starts_with("command-") => format!("cohere/{base}{suffix}"),
+        // Not recognized — return None so the caller can warn
+        _ => return None,
+    };
+
+    Some(qualified)
 }
 
 /// Default context window size (tokens) for token-based trimming.
@@ -4014,5 +4099,162 @@ mod tests {
             events.push(ev);
         }
         assert!(!events.is_empty(), "Should have received stream events");
+    }
+
+    // --- Tests for strip_provider_prefix and model ID normalization ---
+
+    #[test]
+    fn test_strip_provider_prefix_basic() {
+        assert_eq!(
+            strip_provider_prefix("openrouter/google/gemini-2.5-flash", "openrouter"),
+            "google/gemini-2.5-flash"
+        );
+        assert_eq!(
+            strip_provider_prefix("openrouter:google/gemini-2.5-flash", "openrouter"),
+            "google/gemini-2.5-flash"
+        );
+    }
+
+    #[test]
+    fn test_strip_provider_prefix_no_prefix() {
+        // Already qualified — should pass through unchanged
+        assert_eq!(
+            strip_provider_prefix("google/gemini-2.5-flash", "openrouter"),
+            "google/gemini-2.5-flash"
+        );
+    }
+
+    #[test]
+    fn test_strip_provider_prefix_non_openrouter() {
+        // Non-OpenRouter providers: bare names should pass through
+        assert_eq!(strip_provider_prefix("gpt-4o", "openai"), "gpt-4o");
+        assert_eq!(
+            strip_provider_prefix("claude-sonnet-4-20250514", "anthropic"),
+            "claude-sonnet-4-20250514"
+        );
+    }
+
+    #[test]
+    fn test_normalize_bare_model_openrouter_gemini() {
+        // Bare "gemini-2.5-flash" with openrouter → "google/gemini-2.5-flash"
+        assert_eq!(
+            strip_provider_prefix("gemini-2.5-flash", "openrouter"),
+            "google/gemini-2.5-flash"
+        );
+    }
+
+    #[test]
+    fn test_normalize_bare_model_openrouter_claude() {
+        assert_eq!(
+            strip_provider_prefix("claude-sonnet-4", "openrouter"),
+            "anthropic/claude-sonnet-4"
+        );
+    }
+
+    #[test]
+    fn test_normalize_bare_model_openrouter_gpt() {
+        assert_eq!(
+            strip_provider_prefix("gpt-4o", "openrouter"),
+            "openai/gpt-4o"
+        );
+    }
+
+    #[test]
+    fn test_normalize_bare_model_openrouter_llama() {
+        assert_eq!(
+            strip_provider_prefix("llama-3.3-70b-instruct", "openrouter"),
+            "meta-llama/llama-3.3-70b-instruct"
+        );
+    }
+
+    #[test]
+    fn test_normalize_bare_model_openrouter_deepseek() {
+        assert_eq!(
+            strip_provider_prefix("deepseek-chat", "openrouter"),
+            "deepseek/deepseek-chat"
+        );
+        assert_eq!(
+            strip_provider_prefix("deepseek-r1", "openrouter"),
+            "deepseek/deepseek-r1"
+        );
+    }
+
+    #[test]
+    fn test_normalize_bare_model_openrouter_mistral() {
+        assert_eq!(
+            strip_provider_prefix("mistral-large-latest", "openrouter"),
+            "mistralai/mistral-large-latest"
+        );
+    }
+
+    #[test]
+    fn test_normalize_bare_model_openrouter_qwen() {
+        assert_eq!(
+            strip_provider_prefix("qwen-2.5-72b-instruct", "openrouter"),
+            "qwen/qwen-2.5-72b-instruct"
+        );
+    }
+
+    #[test]
+    fn test_normalize_bare_model_with_free_suffix() {
+        assert_eq!(
+            strip_provider_prefix("gemma-2-9b-it:free", "openrouter"),
+            "google/gemma-2-9b-it:free"
+        );
+        assert_eq!(
+            strip_provider_prefix("deepseek-r1:free", "openrouter"),
+            "deepseek/deepseek-r1:free"
+        );
+    }
+
+    #[test]
+    fn test_normalize_bare_model_together() {
+        // Together also uses org/model format
+        assert_eq!(
+            strip_provider_prefix("llama-3.3-70b-instruct", "together"),
+            "meta-llama/llama-3.3-70b-instruct"
+        );
+    }
+
+    #[test]
+    fn test_normalize_unknown_bare_model_passes_through() {
+        // Unknown model name should pass through with a warning (not panic)
+        assert_eq!(
+            strip_provider_prefix("my-custom-model", "openrouter"),
+            "my-custom-model"
+        );
+    }
+
+    #[test]
+    fn test_normalize_openai_o_series() {
+        assert_eq!(
+            strip_provider_prefix("o1-preview", "openrouter"),
+            "openai/o1-preview"
+        );
+        assert_eq!(
+            strip_provider_prefix("o3-mini", "openrouter"),
+            "openai/o3-mini"
+        );
+    }
+
+    #[test]
+    fn test_normalize_command_r() {
+        assert_eq!(
+            strip_provider_prefix("command-r-plus", "openrouter"),
+            "cohere/command-r-plus"
+        );
+    }
+
+    #[test]
+    fn test_needs_qualified_model_id() {
+        assert!(needs_qualified_model_id("openrouter"));
+        assert!(needs_qualified_model_id("together"));
+        assert!(needs_qualified_model_id("fireworks"));
+        assert!(needs_qualified_model_id("replicate"));
+        assert!(needs_qualified_model_id("chutes"));
+        assert!(needs_qualified_model_id("huggingface"));
+        assert!(!needs_qualified_model_id("openai"));
+        assert!(!needs_qualified_model_id("anthropic"));
+        assert!(!needs_qualified_model_id("groq"));
     }
 }
