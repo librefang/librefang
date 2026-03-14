@@ -6238,6 +6238,50 @@ pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> imp
     Json(serde_json::json!({"agents": items, "total": items.len()}))
 }
 
+/// GET /api/a2a/agents/{id} — Get a specific external A2A agent by index, URL, or name.
+pub async fn a2a_get_external_agent(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agents = state
+        .kernel
+        .a2a_external_agents
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let make_response = |(_, card): &(String, librefang_runtime::a2a::AgentCard)| {
+        serde_json::json!({
+            "name": card.name,
+            "url": card.url,
+            "description": card.description,
+            "skills": card.skills,
+            "version": card.version,
+        })
+    };
+
+    // Try by index first
+    if let Ok(idx) = id.parse::<usize>() {
+        if let Some(entry) = agents.get(idx) {
+            return (StatusCode::OK, Json(make_response(entry)));
+        }
+    }
+
+    // Try by URL match
+    if let Some(entry) = agents.iter().find(|(_, c)| c.url == id) {
+        return (StatusCode::OK, Json(make_response(entry)));
+    }
+
+    // Try by agent name
+    if let Some(entry) = agents.iter().find(|(_, c)| c.name == id) {
+        return (StatusCode::OK, Json(make_response(entry)));
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": format!("A2A agent '{}' not found", id)})),
+    )
+}
+
 /// POST /api/a2a/discover — Discover a new external A2A agent by URL.
 pub async fn a2a_discover_external(
     State(state): State<Arc<AppState>>,

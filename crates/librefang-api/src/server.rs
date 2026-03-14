@@ -612,6 +612,10 @@ pub async fn build_router(
             axum::routing::get(routes::a2a_list_external_agents),
         )
         .route(
+            "/api/a2a/agents/{id}",
+            axum::routing::get(routes::a2a_get_external_agent),
+        )
+        .route(
             "/api/a2a/discover",
             axum::routing::post(routes::a2a_discover_external),
         )
