@@ -224,6 +224,14 @@ pub async fn build_router(
             axum::routing::get(routes::get_agent_file).put(routes::set_agent_file),
         )
         .route(
+            "/api/agents/{id}/metrics",
+            axum::routing::get(routes::agent_metrics),
+        )
+        .route(
+            "/api/agents/{id}/logs",
+            axum::routing::get(routes::agent_logs),
+        )
+        .route(
             "/api/agents/{id}/deliveries",
             axum::routing::get(routes::get_agent_deliveries),
         )
