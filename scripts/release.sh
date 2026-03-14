@@ -50,9 +50,10 @@ if [ -z "$PREV_TAG" ]; then
 fi
 
 # Read current version from Cargo.toml (authoritative source)
-CURRENT=$("$SYNC_SCRIPT" 2>/dev/null | grep 'current version' | sed 's/.*: //' || true)
+CURRENT=$(awk '/^\[workspace\.package\]/{f=1;next} f&&/^version/{match($0,/"[^"]+"/);print substr($0,RSTART+1,RLENGTH-2);exit}' "$REPO_ROOT/Cargo.toml")
 if [ -z "$CURRENT" ]; then
-    CURRENT=$(awk '/^\[workspace\.package\]/{f=1;next} f&&/^version/{match($0,/"[^"]+"/);print substr($0,RSTART+1,RLENGTH-2);exit}' "$REPO_ROOT/Cargo.toml")
+    echo "Error: could not read version from Cargo.toml" >&2
+    exit 1
 fi
 
 MAJOR=$(echo "$CURRENT" | cut -d. -f1)
