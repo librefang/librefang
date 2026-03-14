@@ -3027,6 +3027,11 @@ impl Default for BlueskyConfig {
 }
 
 /// Feishu/Lark Open Platform channel adapter configuration.
+///
+/// Feishu (CN) and Lark (international) share the same API — set `region` to
+/// `"intl"` for Lark or `"cn"` (default) for Feishu. The `receive_mode` field
+/// controls whether the adapter uses a webhook HTTP server or a long-lived
+/// WebSocket connection (default) to receive events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FeishuConfig {
@@ -3034,8 +3039,20 @@ pub struct FeishuConfig {
     pub app_id: String,
     /// Env var name holding the app secret.
     pub app_secret_env: String,
-    /// Port for the incoming webhook.
+    /// API region: `"cn"` for Feishu (default) or `"intl"` for Lark.
+    #[serde(default)]
+    pub region: String,
+    /// How to receive inbound events: `"websocket"` (default) or `"webhook"`.
+    #[serde(default = "default_receive_mode")]
+    pub receive_mode: String,
+    /// Port for the incoming webhook (only used when `receive_mode = "webhook"`).
     pub webhook_port: u16,
+    /// Verification token for webhook event validation (webhook mode only).
+    #[serde(default)]
+    pub verification_token: Option<String>,
+    /// Encrypt key for webhook event decryption (webhook mode only).
+    #[serde(default)]
+    pub encrypt_key: Option<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
     pub account_id: Option<String>,
@@ -3046,12 +3063,20 @@ pub struct FeishuConfig {
     pub overrides: ChannelOverrides,
 }
 
+fn default_receive_mode() -> String {
+    "websocket".to_string()
+}
+
 impl Default for FeishuConfig {
     fn default() -> Self {
         Self {
             app_id: String::new(),
             app_secret_env: "FEISHU_APP_SECRET".to_string(),
+            region: "cn".to_string(),
+            receive_mode: "websocket".to_string(),
             webhook_port: 8453,
+            verification_token: None,
+            encrypt_key: None,
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

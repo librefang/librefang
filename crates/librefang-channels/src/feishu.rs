@@ -1,9 +1,19 @@
-//! Feishu/Lark Open Platform channel adapter.
+//! Unified Feishu/Lark Open Platform channel adapter.
 //!
-//! Uses the Feishu Open API for sending messages and a webhook HTTP server for
-//! receiving inbound events. Authentication is performed via a tenant access token
-//! obtained from `https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal`.
-//! The token is cached and refreshed automatically (2-hour expiry).
+//! Feishu (CN) and Lark (international) are the same ByteDance product with
+//! different API domains. This adapter auto-detects the region based on
+//! configuration or explicit `region` setting.
+//!
+//! ## Receive modes
+//!
+//! - **Webhook** (legacy): HTTP server that receives event callbacks from the
+//!   Feishu/Lark platform. Requires a public IP or reverse proxy.
+//! - **WebSocket** (default): Long-lived WebSocket connection to the Feishu/Lark
+//!   event gateway. No public IP required. Lower latency.
+//!
+//! Authentication is performed via a tenant access token obtained from the
+//! `/auth/v3/tenant_access_token/internal` endpoint. The token is cached and
+//! refreshed automatically (2-hour expiry).
 
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
@@ -16,18 +26,100 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
-/// Feishu tenant access token endpoint.
-const FEISHU_TOKEN_URL: &str =
-    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal";
+// ---------------------------------------------------------------------------
+// Region
+// ---------------------------------------------------------------------------
 
-/// Feishu send message endpoint.
-const FEISHU_SEND_URL: &str = "https://open.feishu.cn/open-apis/im/v1/messages";
+/// Feishu/Lark API region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeishuRegion {
+    /// China mainland — `open.feishu.cn`
+    Cn,
+    /// International — `open.larksuite.com`
+    Intl,
+}
 
-/// Feishu bot info endpoint.
-const FEISHU_BOT_INFO_URL: &str = "https://open.feishu.cn/open-apis/bot/v3/info";
+impl Default for FeishuRegion {
+    fn default() -> Self {
+        Self::Cn
+    }
+}
+
+impl FeishuRegion {
+    /// Base URL for REST API calls.
+    fn api_base(self) -> &'static str {
+        match self {
+            Self::Cn => "https://open.feishu.cn",
+            Self::Intl => "https://open.larksuite.com",
+        }
+    }
+
+    /// WebSocket event gateway URL.
+    fn ws_gateway(self) -> &'static str {
+        match self {
+            Self::Cn => "wss://open.feishu.cn/event/ws",
+            Self::Intl => "wss://open.larksuite.com/event/ws",
+        }
+    }
+
+    /// Human-readable label used in log messages.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cn => "Feishu",
+            Self::Intl => "Lark",
+        }
+    }
+
+    /// Detect region from an `app_id` prefix or domain hint.
+    ///
+    /// Feishu CN app IDs start with `cli_`, while Lark international IDs
+    /// typically start with `cli_a` (longer prefix). This is a best-effort
+    /// heuristic — explicit configuration should be preferred.
+    pub fn detect(app_id: &str, domain_hint: Option<&str>) -> Self {
+        if let Some(hint) = domain_hint {
+            let h = hint.to_lowercase();
+            if h.contains("larksuite") || h.contains("lark") {
+                return Self::Intl;
+            }
+            if h.contains("feishu") {
+                return Self::Cn;
+            }
+        }
+        // Default: treat as CN (the more common deployment).
+        // NOTE: We cannot reliably distinguish by app_id alone, so we fall
+        // back to Cn unless explicitly configured otherwise.
+        let _ = app_id;
+        Self::Cn
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Receive mode
+// ---------------------------------------------------------------------------
+
+/// How the adapter receives inbound events from the Feishu/Lark platform.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FeishuReceiveMode {
+    /// HTTP webhook server (requires public IP / reverse proxy).
+    Webhook,
+    /// Long-lived WebSocket connection (default, no public IP required).
+    Websocket,
+}
+
+impl Default for FeishuReceiveMode {
+    fn default() -> Self {
+        Self::Websocket
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 /// Maximum Feishu message text length (characters).
 const MAX_MESSAGE_LEN: usize = 4096;
@@ -35,21 +127,35 @@ const MAX_MESSAGE_LEN: usize = 4096;
 /// Token refresh buffer — refresh 5 minutes before actual expiry.
 const TOKEN_REFRESH_BUFFER_SECS: u64 = 300;
 
-/// Feishu/Lark Open Platform adapter.
+/// Initial back-off for WebSocket reconnection.
+const WS_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Maximum back-off between WebSocket reconnection attempts.
+const WS_MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+// ---------------------------------------------------------------------------
+// Adapter
+// ---------------------------------------------------------------------------
+
+/// Unified Feishu/Lark Open Platform adapter.
 ///
-/// Inbound messages arrive via a webhook HTTP server that receives event
-/// callbacks from the Feishu platform. Outbound messages are sent via the
-/// Feishu IM API with a tenant access token for authentication.
+/// Supports both Feishu (CN) and Lark (international) regions, and both
+/// webhook and WebSocket receive modes.
 pub struct FeishuAdapter {
     /// Feishu app ID.
     app_id: String,
     /// SECURITY: Feishu app secret, zeroized on drop.
     app_secret: Zeroizing<String>,
-    /// Port on which the inbound webhook HTTP server listens.
+    /// Region (CN or international).
+    region: FeishuRegion,
+    /// How to receive inbound events.
+    receive_mode: FeishuReceiveMode,
+    /// Port on which the inbound webhook HTTP server listens (webhook mode only).
     webhook_port: u16,
     /// Optional verification token for webhook event validation.
     verification_token: Option<String>,
     /// Optional encrypt key for webhook event decryption.
+    /// TODO: implement AES-CBC decryption for encrypted event payloads.
     encrypt_key: Option<String>,
     /// HTTP client for API calls.
     client: reqwest::Client,
@@ -63,17 +169,20 @@ pub struct FeishuAdapter {
 }
 
 impl FeishuAdapter {
-    /// Create a new Feishu adapter.
-    ///
-    /// # Arguments
-    /// * `app_id` - Feishu application ID.
-    /// * `app_secret` - Feishu application secret.
-    /// * `webhook_port` - Local port for the inbound webhook HTTP server.
-    pub fn new(app_id: String, app_secret: String, webhook_port: u16) -> Self {
+    /// Create a new Feishu/Lark adapter with the given region and receive mode.
+    pub fn new(
+        app_id: String,
+        app_secret: String,
+        webhook_port: u16,
+        region: FeishuRegion,
+        receive_mode: FeishuReceiveMode,
+    ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             app_id,
             app_secret: Zeroizing::new(app_secret),
+            region,
+            receive_mode,
             webhook_port,
             verification_token: None,
             encrypt_key: None,
@@ -84,85 +193,62 @@ impl FeishuAdapter {
             cached_token: Arc::new(RwLock::new(None)),
         }
     }
+
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
         self
     }
 
-    /// Create a new Feishu adapter with webhook verification.
+    /// Set webhook verification credentials. Returns self for builder chaining.
     pub fn with_verification(
-        app_id: String,
-        app_secret: String,
-        webhook_port: u16,
+        mut self,
         verification_token: Option<String>,
         encrypt_key: Option<String>,
     ) -> Self {
-        let mut adapter = Self::new(app_id, app_secret, webhook_port);
-        adapter.verification_token = verification_token;
-        adapter.encrypt_key = encrypt_key;
-        adapter
+        self.verification_token = verification_token;
+        self.encrypt_key = encrypt_key;
+        self
+    }
+
+    /// Region-aware token URL.
+    fn token_url(&self) -> String {
+        format!(
+            "{}/open-apis/auth/v3/tenant_access_token/internal",
+            self.region.api_base()
+        )
+    }
+
+    /// Region-aware send message URL.
+    fn send_url(&self) -> String {
+        format!("{}/open-apis/im/v1/messages", self.region.api_base())
+    }
+
+    /// Region-aware bot info URL.
+    fn bot_info_url(&self) -> String {
+        format!("{}/open-apis/bot/v3/info", self.region.api_base())
     }
 
     /// Obtain a valid tenant access token, refreshing if expired or missing.
     async fn get_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // Check cache first
-        {
-            let guard = self.cached_token.read().await;
-            if let Some((ref token, expiry)) = *guard {
-                if Instant::now() < expiry {
-                    return Ok(token.clone());
-                }
-            }
-        }
-
-        // Fetch a new tenant access token
-        let body = serde_json::json!({
-            "app_id": self.app_id,
-            "app_secret": self.app_secret.as_str(),
-        });
-
-        let resp = self
-            .client
-            .post(FEISHU_TOKEN_URL)
-            .json(&body)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let resp_body = resp.text().await.unwrap_or_default();
-            return Err(format!("Feishu token request failed {status}: {resp_body}").into());
-        }
-
-        let resp_body: serde_json::Value = resp.json().await?;
-        let code = resp_body["code"].as_i64().unwrap_or(-1);
-        if code != 0 {
-            let msg = resp_body["msg"].as_str().unwrap_or("unknown error");
-            return Err(format!("Feishu token error: {msg}").into());
-        }
-
-        let tenant_access_token = resp_body["tenant_access_token"]
-            .as_str()
-            .ok_or("Missing tenant_access_token")?
-            .to_string();
-        let expire = resp_body["expire"].as_u64().unwrap_or(7200);
-
-        // Cache with safety buffer
-        let expiry =
-            Instant::now() + Duration::from_secs(expire.saturating_sub(TOKEN_REFRESH_BUFFER_SECS));
-        *self.cached_token.write().await = Some((tenant_access_token.clone(), expiry));
-
-        Ok(tenant_access_token)
+        get_token_static(
+            &self.client,
+            self.region,
+            &self.app_id,
+            &self.app_secret,
+            &self.cached_token,
+        )
+        .await
     }
 
     /// Validate credentials by fetching bot info.
     async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let label = self.region.label();
         let token = self.get_token().await?;
 
         let resp = self
             .client
-            .get(FEISHU_BOT_INFO_URL)
+            .get(self.bot_info_url())
             .bearer_auth(&token)
             .send()
             .await?;
@@ -170,34 +256,36 @@ impl FeishuAdapter {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Feishu authentication failed {status}: {body}").into());
+            return Err(format!("{label} authentication failed {status}: {body}").into());
         }
 
         let body: serde_json::Value = resp.json().await?;
         let code = body["code"].as_i64().unwrap_or(-1);
         if code != 0 {
             let msg = body["msg"].as_str().unwrap_or("unknown error");
-            return Err(format!("Feishu bot info error: {msg}").into());
+            return Err(format!("{label} bot info error: {msg}").into());
         }
 
+        let default_name = format!("{label} Bot");
         let bot_name = body["bot"]["app_name"]
             .as_str()
-            .unwrap_or("Feishu Bot")
+            .unwrap_or(&default_name)
             .to_string();
         Ok(bot_name)
     }
 
-    /// Send a text message to a Feishu chat.
+    /// Send a text message to a Feishu/Lark chat.
     async fn api_send_message(
         &self,
         receive_id: &str,
         receive_id_type: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let label = self.region.label();
         let token = self.get_token().await?;
         let encoded_type: String =
             url::form_urlencoded::byte_serialize(receive_id_type.as_bytes()).collect();
-        let url = format!("{}?receive_id_type={}", FEISHU_SEND_URL, encoded_type);
+        let url = format!("{}?receive_id_type={}", self.send_url(), encoded_type);
 
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -223,14 +311,14 @@ impl FeishuAdapter {
             if !resp.status().is_success() {
                 let status = resp.status();
                 let resp_body = resp.text().await.unwrap_or_default();
-                return Err(format!("Feishu send message error {status}: {resp_body}").into());
+                return Err(format!("{label} send message error {status}: {resp_body}").into());
             }
 
             let resp_body: serde_json::Value = resp.json().await?;
             let code = resp_body["code"].as_i64().unwrap_or(-1);
             if code != 0 {
                 let msg = resp_body["msg"].as_str().unwrap_or("unknown error");
-                warn!("Feishu send message API error: {msg}");
+                warn!("{label} send message API error: {msg}");
             }
         }
 
@@ -244,9 +332,11 @@ impl FeishuAdapter {
         message_id: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let label = self.region.label();
         let token = self.get_token().await?;
         let url = format!(
-            "https://open.feishu.cn/open-apis/im/v1/messages/{}/reply",
+            "{}/open-apis/im/v1/messages/{}/reply",
+            self.region.api_base(),
             message_id
         );
 
@@ -270,13 +360,13 @@ impl FeishuAdapter {
         if !resp.status().is_success() {
             let status = resp.status();
             let resp_body = resp.text().await.unwrap_or_default();
-            return Err(format!("Feishu reply message error {status}: {resp_body}").into());
+            return Err(format!("{label} reply message error {status}: {resp_body}").into());
         }
 
         Ok(())
     }
 
-    /// Send an interactive card message to a Feishu chat.
+    /// Send an interactive card message to a Feishu/Lark chat.
     ///
     /// Uses the Feishu IM API with `msg_type: "interactive"` to send a card
     /// built from a `serde_json::Value` card template.
@@ -286,10 +376,11 @@ impl FeishuAdapter {
         receive_id_type: &str,
         card: &serde_json::Value,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let label = self.region.label();
         let token = self.get_token().await?;
         let encoded_type: String =
             url::form_urlencoded::byte_serialize(receive_id_type.as_bytes()).collect();
-        let url = format!("{}?receive_id_type={}", FEISHU_SEND_URL, encoded_type);
+        let url = format!("{}?receive_id_type={}", self.send_url(), encoded_type);
 
         // Feishu API requires `content` to be a JSON-encoded string, not a nested object.
         let body = serde_json::json!({
@@ -309,21 +400,21 @@ impl FeishuAdapter {
         if !resp.status().is_success() {
             let status = resp.status();
             let resp_body = resp.text().await.unwrap_or_default();
-            return Err(format!("Feishu send card error {status}: {resp_body}").into());
+            return Err(format!("{label} send card error {status}: {resp_body}").into());
         }
 
         let resp_body: serde_json::Value = resp.json().await?;
         let code = resp_body["code"].as_i64().unwrap_or(-1);
         if code != 0 {
             let msg = resp_body["msg"].as_str().unwrap_or("unknown error");
-            error!("Feishu send card API error (code={code}): {msg}");
-            return Err(format!("Feishu send card API error (code={code}): {msg}").into());
+            error!("{label} send card API error (code={code}): {msg}");
+            return Err(format!("{label} send card API error (code={code}): {msg}").into());
         }
 
         Ok(())
     }
 
-    /// Send an approval card to a Feishu chat for an agent permission request.
+    /// Send an approval card to a Feishu/Lark chat for an agent permission request.
     ///
     /// Renders an interactive card with Approve / Deny buttons. When the user
     /// clicks a button, Feishu sends a `card.action.trigger` callback to the
@@ -341,7 +432,324 @@ impl FeishuAdapter {
         let card = build_approval_card(request_id, agent_id, tool_name, action_summary, risk_level);
         self.send_card(chat_id, "chat_id", &card).await
     }
+
+    // -----------------------------------------------------------------------
+    // Webhook receive mode
+    // -----------------------------------------------------------------------
+
+    /// Start the webhook HTTP server and return a message stream.
+    fn start_webhook(&self, tx: mpsc::Sender<ChannelMessage>) {
+        let port = self.webhook_port;
+        let verification_token = self.verification_token.clone();
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = Arc::new(self.account_id.clone());
+        let label = self.region.label();
+        let region = self.region;
+
+        tokio::spawn(async move {
+            let verification_token = Arc::new(verification_token);
+            let tx = Arc::new(tx);
+
+            let app = axum::Router::new().route(
+                "/feishu/webhook",
+                axum::routing::post({
+                    let vt = Arc::clone(&verification_token);
+                    let tx = Arc::clone(&tx);
+                    move |body: axum::extract::Json<serde_json::Value>| {
+                        let vt = Arc::clone(&vt);
+                        let tx = Arc::clone(&tx);
+                        async move {
+                            // Handle URL verification challenge
+                            if let Some(challenge) = body.0.get("challenge") {
+                                // Verify token if configured
+                                if let Some(ref expected_token) = *vt {
+                                    let token = body.0["token"].as_str().unwrap_or("");
+                                    if token != expected_token {
+                                        warn!("{}: invalid verification token", label);
+                                        return (
+                                            axum::http::StatusCode::FORBIDDEN,
+                                            axum::Json(serde_json::json!({})),
+                                        );
+                                    }
+                                }
+                                return (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!({
+                                        "challenge": challenge,
+                                    })),
+                                );
+                            }
+
+                            // Handle event callback
+                            if let Some(schema) = body.0["schema"].as_str() {
+                                if schema == "2.0" {
+                                    // V2 event format — try message first, then card action
+                                    let parsed = parse_feishu_event(&body.0, region)
+                                        .or_else(|| parse_card_action(&body.0));
+                                    if let Some(mut msg) = parsed {
+                                        // Inject account_id for multi-bot routing
+                                        if let Some(ref aid) = *account_id {
+                                            msg.metadata.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(aid),
+                                            );
+                                        }
+                                        let _ = tx.send(msg).await;
+                                    }
+                                }
+                            } else {
+                                // V1 event format (legacy)
+                                if let Some(mut msg) = parse_feishu_event_v1(&body.0, region) {
+                                    if let Some(ref aid) = *account_id {
+                                        msg.metadata.insert(
+                                            "account_id".to_string(),
+                                            serde_json::json!(aid),
+                                        );
+                                    }
+                                    let _ = tx.send(msg).await;
+                                }
+                            }
+
+                            (
+                                axum::http::StatusCode::OK,
+                                axum::Json(serde_json::json!({})),
+                            )
+                        }
+                    }
+                }),
+            );
+
+            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+            info!("{label} webhook server listening on {addr}");
+
+            let listener = match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!("{label} webhook bind failed: {e}");
+                    return;
+                }
+            };
+
+            let server = axum::serve(listener, app);
+
+            tokio::select! {
+                result = server => {
+                    if let Err(e) = result {
+                        warn!("{label} webhook server error: {e}");
+                    }
+                }
+                _ = shutdown_rx.changed() => {
+                    info!("{label} adapter shutting down (webhook)");
+                }
+            }
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // WebSocket receive mode
+    // -----------------------------------------------------------------------
+
+    /// Start a WebSocket connection to the Feishu/Lark event gateway and
+    /// forward received events as `ChannelMessage`s.
+    fn start_websocket(&self, tx: mpsc::Sender<ChannelMessage>) {
+        let app_id = self.app_id.clone();
+        let app_secret = self.app_secret.clone();
+        let region = self.region;
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = Arc::new(self.account_id.clone());
+        let cached_token = Arc::clone(&self.cached_token);
+        let client = self.client.clone();
+
+        tokio::spawn(async move {
+            let label = region.label();
+            let mut backoff = WS_INITIAL_BACKOFF;
+
+            loop {
+                // Obtain a fresh token for the WS handshake.
+                let token =
+                    match get_token_static(&client, region, &app_id, &app_secret, &cached_token)
+                        .await
+                    {
+                        Ok(t) => t,
+                        Err(e) => {
+                            error!("{label}: failed to obtain token for WS: {e}");
+                            tokio::time::sleep(backoff).await;
+                            backoff = (backoff * 2).min(WS_MAX_BACKOFF);
+                            continue;
+                        }
+                    };
+
+                // Build WS URL with authorization.
+                let ws_url = format!("{}?app_id={}&token={}", region.ws_gateway(), app_id, token);
+
+                info!("{label}: connecting to WebSocket event gateway...");
+
+                let ws_result = tokio_tungstenite::connect_async(&ws_url).await;
+                let (ws_stream, _) = match ws_result {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        error!("{label}: WebSocket connection failed: {e}");
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(WS_MAX_BACKOFF);
+                        continue;
+                    }
+                };
+
+                info!("{label}: WebSocket connected");
+                backoff = WS_INITIAL_BACKOFF;
+
+                use futures::{SinkExt, StreamExt};
+                let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+                // Heartbeat interval (default 30 s, may be overridden by server).
+                let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+                ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+                loop {
+                    tokio::select! {
+                        // Shutdown signal
+                        _ = shutdown_rx.changed() => {
+                            info!("{label}: shutting down WebSocket");
+                            let _ = ws_tx.close().await;
+                            return;
+                        }
+                        // Heartbeat ping
+                        _ = ping_interval.tick() => {
+                            let ping = serde_json::json!({"type": "ping"});
+                            if let Err(e) = ws_tx.send(
+                                tokio_tungstenite::tungstenite::Message::Text(ping.to_string().into())
+                            ).await {
+                                warn!("{label}: WS ping send failed: {e}");
+                                break;
+                            }
+                        }
+                        // Incoming message
+                        msg = ws_rx.next() => {
+                            match msg {
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text))) => {
+                                    debug!("{label}: WS recv: {}", &text[..text.len().min(500)]);
+                                    let payload: serde_json::Value = match serde_json::from_str(&text) {
+                                        Ok(v) => v,
+                                        Err(e) => {
+                                            warn!("{label}: WS payload parse error: {e}");
+                                            continue;
+                                        }
+                                    };
+
+                                    // Handle pong / service messages
+                                    if let Some(msg_type) = payload["type"].as_str() {
+                                        if msg_type == "pong" {
+                                            debug!("{label}: WS pong received");
+                                            continue;
+                                        }
+                                    }
+
+                                    // The WS gateway wraps the normal event callback
+                                    // in an envelope: { "header": {...}, "event": {...} }
+                                    // which matches the v2 schema.
+                                    let parsed = parse_feishu_event(&payload, region)
+                                        .or_else(|| parse_card_action(&payload));
+                                    if let Some(mut channel_msg) = parsed {
+                                        if let Some(ref aid) = *account_id {
+                                            channel_msg.metadata.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(aid),
+                                            );
+                                        }
+                                        if tx.send(channel_msg).await.is_err() {
+                                            info!("{label}: channel receiver dropped, exiting WS loop");
+                                            return;
+                                        }
+                                    }
+                                }
+                                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) => {
+                                    info!("{label}: WebSocket closed by server");
+                                    break;
+                                }
+                                Some(Err(e)) => {
+                                    warn!("{label}: WebSocket error: {e}");
+                                    break;
+                                }
+                                None => {
+                                    info!("{label}: WebSocket stream ended");
+                                    break;
+                                }
+                                _ => {} // Ping/Pong/Binary handled by tungstenite
+                            }
+                        }
+                    }
+                }
+
+                // Reconnect with back-off
+                warn!("{label}: WebSocket disconnected, reconnecting in {backoff:?}...");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(WS_MAX_BACKOFF);
+            }
+        });
+    }
 }
+
+/// Static helper so the WS task (which cannot borrow `&self`) can refresh the
+/// tenant access token.
+async fn get_token_static(
+    client: &reqwest::Client,
+    region: FeishuRegion,
+    app_id: &str,
+    app_secret: &str,
+    cached_token: &RwLock<Option<(String, Instant)>>,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    // Check cache
+    {
+        let guard = cached_token.read().await;
+        if let Some((ref token, expiry)) = *guard {
+            if Instant::now() < expiry {
+                return Ok(token.clone());
+            }
+        }
+    }
+
+    let label = region.label();
+    let url = format!(
+        "{}/open-apis/auth/v3/tenant_access_token/internal",
+        region.api_base()
+    );
+
+    let body = serde_json::json!({
+        "app_id": app_id,
+        "app_secret": app_secret,
+    });
+
+    let resp = client.post(&url).json(&body).send().await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let resp_body = resp.text().await.unwrap_or_default();
+        return Err(format!("{label} token request failed {status}: {resp_body}").into());
+    }
+
+    let resp_body: serde_json::Value = resp.json().await?;
+    let code = resp_body["code"].as_i64().unwrap_or(-1);
+    if code != 0 {
+        let msg = resp_body["msg"].as_str().unwrap_or("unknown error");
+        return Err(format!("{label} token error: {msg}").into());
+    }
+
+    let tenant_access_token = resp_body["tenant_access_token"]
+        .as_str()
+        .ok_or("Missing tenant_access_token")?
+        .to_string();
+    let expire = resp_body["expire"].as_u64().unwrap_or(7200);
+
+    let expiry =
+        Instant::now() + Duration::from_secs(expire.saturating_sub(TOKEN_REFRESH_BUFFER_SECS));
+    *cached_token.write().await = Some((tenant_access_token.clone(), expiry));
+
+    Ok(tenant_access_token)
+}
+
+// ---------------------------------------------------------------------------
+// Approval card builder
+// ---------------------------------------------------------------------------
 
 /// Build a Feishu interactive message card for an approval request.
 ///
@@ -445,6 +853,10 @@ pub fn build_approval_card(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Event parsing
+// ---------------------------------------------------------------------------
+
 /// Parse a Feishu card action callback into a `/approve` or `/reject` command.
 ///
 /// Handles `card.action.trigger` events from interactive card button clicks.
@@ -529,11 +941,10 @@ fn parse_card_action(event: &serde_json::Value) -> Option<ChannelMessage> {
     })
 }
 
-/// Parse a Feishu webhook event into a `ChannelMessage`.
+/// Parse a Feishu/Lark v2 webhook/WS event into a `ChannelMessage`.
 ///
 /// Handles `im.message.receive_v1` events with text message type.
-fn parse_feishu_event(event: &serde_json::Value) -> Option<ChannelMessage> {
-    // Feishu v2 event schema
+fn parse_feishu_event(event: &serde_json::Value, region: FeishuRegion) -> Option<ChannelMessage> {
     let header = event.get("header")?;
     let event_type = header["event_type"].as_str().unwrap_or("");
 
@@ -577,6 +988,7 @@ fn parse_feishu_event(event: &serde_json::Value) -> Option<ChannelMessage> {
     }
 
     let is_group = chat_type == "group";
+    let channel_label = region.label().to_lowercase();
 
     let msg_content = if text.starts_with('/') {
         let parts: Vec<&str> = text.splitn(2, ' ').collect();
@@ -610,12 +1022,16 @@ fn parse_feishu_event(event: &serde_json::Value) -> Option<ChannelMessage> {
         "sender_id".to_string(),
         serde_json::Value::String(sender_id.clone()),
     );
+    metadata.insert(
+        "region".to_string(),
+        serde_json::Value::String(channel_label.clone()),
+    );
     if let Some(mentions) = message.get("mentions") {
         metadata.insert("mentions".to_string(), mentions.clone());
     }
 
     Some(ChannelMessage {
-        channel: ChannelType::Custom("feishu".to_string()),
+        channel: ChannelType::Custom(channel_label),
         platform_message_id: message_id,
         sender: ChannelUser {
             platform_id: chat_id,
@@ -631,14 +1047,81 @@ fn parse_feishu_event(event: &serde_json::Value) -> Option<ChannelMessage> {
     })
 }
 
+/// Parse a Feishu/Lark v1 (legacy) webhook event.
+fn parse_feishu_event_v1(body: &serde_json::Value, region: FeishuRegion) -> Option<ChannelMessage> {
+    let event = body.get("event")?;
+    let event_type = event["type"].as_str().unwrap_or("");
+    if event_type != "message" {
+        return None;
+    }
+
+    // V1 events don't have a `sender_type` field like v2.
+    // However, if `open_id` is empty the event likely came from the bot itself
+    // or is malformed — skip it to prevent potential echo loops.
+    let open_id_check = event["open_id"].as_str().unwrap_or("");
+    if open_id_check.is_empty() {
+        return None;
+    }
+
+    let text = event["text"].as_str().unwrap_or("");
+    if text.is_empty() {
+        return None;
+    }
+
+    let open_id = event["open_id"].as_str().unwrap_or("").to_string();
+    let chat_id = event["open_chat_id"].as_str().unwrap_or("").to_string();
+    let msg_id = event["open_message_id"].as_str().unwrap_or("").to_string();
+    let is_group = event["chat_type"].as_str().unwrap_or("") == "group";
+
+    let channel_label = region.label().to_lowercase();
+
+    let content = if text.starts_with('/') {
+        let parts: Vec<&str> = text.splitn(2, ' ').collect();
+        let cmd = parts[0].trim_start_matches('/');
+        let args: Vec<String> = parts
+            .get(1)
+            .map(|a| a.split_whitespace().map(String::from).collect())
+            .unwrap_or_default();
+        ChannelContent::Command {
+            name: cmd.to_string(),
+            args,
+        }
+    } else {
+        ChannelContent::Text(text.to_string())
+    };
+
+    Some(ChannelMessage {
+        channel: ChannelType::Custom(channel_label),
+        platform_message_id: msg_id,
+        sender: ChannelUser {
+            platform_id: chat_id,
+            display_name: open_id,
+            librefang_user: None,
+        },
+        content,
+        target_agent: None,
+        timestamp: Utc::now(),
+        is_group,
+        thread_id: None,
+        metadata: HashMap::new(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// ChannelAdapter impl
+// ---------------------------------------------------------------------------
+
 #[async_trait]
 impl ChannelAdapter for FeishuAdapter {
     fn name(&self) -> &str {
-        "feishu"
+        match self.region {
+            FeishuRegion::Cn => "feishu",
+            FeishuRegion::Intl => "lark",
+        }
     }
 
     fn channel_type(&self) -> ChannelType {
-        ChannelType::Custom("feishu".to_string())
+        ChannelType::Custom(self.name().to_string())
     }
 
     async fn start(
@@ -647,166 +1130,27 @@ impl ChannelAdapter for FeishuAdapter {
         Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
         Box<dyn std::error::Error + Send + Sync>,
     > {
+        let label = self.region.label();
+
         // Validate credentials
         let bot_name = self.validate().await?;
-        info!("Feishu adapter authenticated as {bot_name}");
+        info!("{label} adapter authenticated as {bot_name}");
 
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
-        let port = self.webhook_port;
-        let verification_token = self.verification_token.clone();
-        let mut shutdown_rx = self.shutdown_rx.clone();
-        let account_id = Arc::new(self.account_id.clone());
 
-        tokio::spawn(async move {
-            let verification_token = Arc::new(verification_token);
-            let tx = Arc::new(tx);
-
-            let app = axum::Router::new().route(
-                "/feishu/webhook",
-                axum::routing::post({
-                    let vt = Arc::clone(&verification_token);
-                    let tx = Arc::clone(&tx);
-                    move |body: axum::extract::Json<serde_json::Value>| {
-                        let vt = Arc::clone(&vt);
-                        let tx = Arc::clone(&tx);
-                        async move {
-                            // Handle URL verification challenge
-                            if let Some(challenge) = body.0.get("challenge") {
-                                // Verify token if configured
-                                if let Some(ref expected_token) = *vt {
-                                    let token = body.0["token"].as_str().unwrap_or("");
-                                    if token != expected_token {
-                                        warn!("Feishu: invalid verification token");
-                                        return (
-                                            axum::http::StatusCode::FORBIDDEN,
-                                            axum::Json(serde_json::json!({})),
-                                        );
-                                    }
-                                }
-                                return (
-                                    axum::http::StatusCode::OK,
-                                    axum::Json(serde_json::json!({
-                                        "challenge": challenge,
-                                    })),
-                                );
-                            }
-
-                            // Handle event callback
-                            if let Some(schema) = body.0["schema"].as_str() {
-                                if schema == "2.0" {
-                                    // V2 event format — try message first, then card action
-                                    let parsed = parse_feishu_event(&body.0)
-                                        .or_else(|| parse_card_action(&body.0));
-                                    if let Some(mut msg) = parsed {
-                                        // Inject account_id for multi-bot routing
-                                        if let Some(ref aid) = *account_id {
-                                            msg.metadata.insert(
-                                                "account_id".to_string(),
-                                                serde_json::json!(aid),
-                                            );
-                                        }
-                                        let _ = tx.send(msg).await;
-                                    }
-                                }
-                            } else {
-                                // V1 event format (legacy)
-                                let event_type = body.0["event"]["type"].as_str().unwrap_or("");
-                                if event_type == "message" {
-                                    // Legacy format handling
-                                    let event = &body.0["event"];
-                                    let text = event["text"].as_str().unwrap_or("");
-                                    if !text.is_empty() {
-                                        let open_id =
-                                            event["open_id"].as_str().unwrap_or("").to_string();
-                                        let chat_id = event["open_chat_id"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string();
-                                        let msg_id = event["open_message_id"]
-                                            .as_str()
-                                            .unwrap_or("")
-                                            .to_string();
-                                        let is_group =
-                                            event["chat_type"].as_str().unwrap_or("") == "group";
-
-                                        let content = if text.starts_with('/') {
-                                            let parts: Vec<&str> = text.splitn(2, ' ').collect();
-                                            let cmd = parts[0].trim_start_matches('/');
-                                            let args: Vec<String> = parts
-                                                .get(1)
-                                                .map(|a| {
-                                                    a.split_whitespace().map(String::from).collect()
-                                                })
-                                                .unwrap_or_default();
-                                            ChannelContent::Command {
-                                                name: cmd.to_string(),
-                                                args,
-                                            }
-                                        } else {
-                                            ChannelContent::Text(text.to_string())
-                                        };
-
-                                        let mut channel_msg = ChannelMessage {
-                                            channel: ChannelType::Custom("feishu".to_string()),
-                                            platform_message_id: msg_id,
-                                            sender: ChannelUser {
-                                                platform_id: chat_id,
-                                                display_name: open_id,
-                                                librefang_user: None,
-                                            },
-                                            content,
-                                            target_agent: None,
-                                            timestamp: Utc::now(),
-                                            is_group,
-                                            thread_id: None,
-                                            metadata: HashMap::new(),
-                                        };
-
-                                        // Inject account_id for multi-bot routing
-                                        if let Some(ref aid) = *account_id {
-                                            channel_msg.metadata.insert(
-                                                "account_id".to_string(),
-                                                serde_json::json!(aid),
-                                            );
-                                        }
-                                        let _ = tx.send(channel_msg).await;
-                                    }
-                                }
-                            }
-
-                            (
-                                axum::http::StatusCode::OK,
-                                axum::Json(serde_json::json!({})),
-                            )
-                        }
-                    }
-                }),
-            );
-
-            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-            info!("Feishu webhook server listening on {addr}");
-
-            let listener = match tokio::net::TcpListener::bind(addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    warn!("Feishu webhook bind failed: {e}");
-                    return;
-                }
-            };
-
-            let server = axum::serve(listener, app);
-
-            tokio::select! {
-                result = server => {
-                    if let Err(e) = result {
-                        warn!("Feishu webhook server error: {e}");
-                    }
-                }
-                _ = shutdown_rx.changed() => {
-                    info!("Feishu adapter shutting down");
-                }
+        match self.receive_mode {
+            FeishuReceiveMode::Webhook => {
+                info!(
+                    "{label}: starting in webhook receive mode (port {})",
+                    self.webhook_port
+                );
+                self.start_webhook(tx);
             }
-        });
+            FeishuReceiveMode::Websocket => {
+                info!("{label}: starting in WebSocket receive mode");
+                self.start_websocket(tx);
+            }
+        }
 
         Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
     }
@@ -818,7 +1162,6 @@ impl ChannelAdapter for FeishuAdapter {
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
-                // Use chat_id as receive_id with chat_id type
                 self.api_send_message(&user.platform_id, "chat_id", &text)
                     .await?;
             }
@@ -834,7 +1177,7 @@ impl ChannelAdapter for FeishuAdapter {
         &self,
         _user: &ChannelUser,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Feishu does not support typing indicators via REST API
+        // Feishu/Lark does not support typing indicators via REST API
         Ok(())
     }
 
@@ -844,28 +1187,61 @@ impl ChannelAdapter for FeishuAdapter {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_feishu_adapter_creation() {
-        let adapter =
-            FeishuAdapter::new("cli_abc123".to_string(), "app-secret-456".to_string(), 9000);
+        let adapter = FeishuAdapter::new(
+            "cli_abc123".to_string(),
+            "app-secret-456".to_string(),
+            9000,
+            FeishuRegion::Cn,
+            FeishuReceiveMode::Websocket,
+        );
         assert_eq!(adapter.name(), "feishu");
         assert_eq!(
             adapter.channel_type(),
             ChannelType::Custom("feishu".to_string())
         );
         assert_eq!(adapter.webhook_port, 9000);
+        assert_eq!(adapter.region, FeishuRegion::Cn);
+        assert_eq!(adapter.receive_mode, FeishuReceiveMode::Websocket);
+    }
+
+    #[test]
+    fn test_lark_adapter_creation() {
+        let adapter = FeishuAdapter::new(
+            "cli_abc123".to_string(),
+            "app-secret-456".to_string(),
+            9000,
+            FeishuRegion::Intl,
+            FeishuReceiveMode::Webhook,
+        );
+        assert_eq!(adapter.name(), "lark");
+        assert_eq!(
+            adapter.channel_type(),
+            ChannelType::Custom("lark".to_string())
+        );
+        assert_eq!(adapter.region, FeishuRegion::Intl);
+        assert_eq!(adapter.receive_mode, FeishuReceiveMode::Webhook);
     }
 
     #[test]
     fn test_feishu_with_verification() {
-        let adapter = FeishuAdapter::with_verification(
+        let adapter = FeishuAdapter::new(
             "cli_abc123".to_string(),
             "secret".to_string(),
             9000,
+            FeishuRegion::Cn,
+            FeishuReceiveMode::Webhook,
+        )
+        .with_verification(
             Some("verify-token".to_string()),
             Some("encrypt-key".to_string()),
         );
@@ -875,8 +1251,80 @@ mod tests {
 
     #[test]
     fn test_feishu_app_id_stored() {
-        let adapter = FeishuAdapter::new("cli_test".to_string(), "secret".to_string(), 8080);
+        let adapter = FeishuAdapter::new(
+            "cli_test".to_string(),
+            "secret".to_string(),
+            8080,
+            FeishuRegion::Cn,
+            FeishuReceiveMode::Websocket,
+        );
         assert_eq!(adapter.app_id, "cli_test");
+    }
+
+    #[test]
+    fn test_region_api_base() {
+        assert_eq!(FeishuRegion::Cn.api_base(), "https://open.feishu.cn");
+        assert_eq!(FeishuRegion::Intl.api_base(), "https://open.larksuite.com");
+    }
+
+    #[test]
+    fn test_region_ws_gateway() {
+        assert_eq!(
+            FeishuRegion::Cn.ws_gateway(),
+            "wss://open.feishu.cn/event/ws"
+        );
+        assert_eq!(
+            FeishuRegion::Intl.ws_gateway(),
+            "wss://open.larksuite.com/event/ws"
+        );
+    }
+
+    #[test]
+    fn test_region_detect_from_domain() {
+        assert_eq!(
+            FeishuRegion::detect("cli_abc", Some("open.feishu.cn")),
+            FeishuRegion::Cn
+        );
+        assert_eq!(
+            FeishuRegion::detect("cli_abc", Some("open.larksuite.com")),
+            FeishuRegion::Intl
+        );
+        assert_eq!(FeishuRegion::detect("cli_abc", None), FeishuRegion::Cn);
+    }
+
+    #[test]
+    fn test_region_default_is_cn() {
+        assert_eq!(FeishuRegion::default(), FeishuRegion::Cn);
+    }
+
+    #[test]
+    fn test_receive_mode_default_is_websocket() {
+        assert_eq!(FeishuReceiveMode::default(), FeishuReceiveMode::Websocket);
+    }
+
+    #[test]
+    fn test_region_urls() {
+        let adapter = FeishuAdapter::new(
+            "cli_test".to_string(),
+            "secret".to_string(),
+            8080,
+            FeishuRegion::Cn,
+            FeishuReceiveMode::Websocket,
+        );
+        assert!(adapter.token_url().contains("feishu.cn"));
+        assert!(adapter.send_url().contains("feishu.cn"));
+        assert!(adapter.bot_info_url().contains("feishu.cn"));
+
+        let adapter_intl = FeishuAdapter::new(
+            "cli_test".to_string(),
+            "secret".to_string(),
+            8080,
+            FeishuRegion::Intl,
+            FeishuReceiveMode::Websocket,
+        );
+        assert!(adapter_intl.token_url().contains("larksuite.com"));
+        assert!(adapter_intl.send_url().contains("larksuite.com"));
+        assert!(adapter_intl.bot_info_url().contains("larksuite.com"));
     }
 
     #[test]
@@ -910,11 +1358,47 @@ mod tests {
             }
         });
 
-        let msg = parse_feishu_event(&event).unwrap();
+        let msg = parse_feishu_event(&event, FeishuRegion::Cn).unwrap();
         assert_eq!(msg.channel, ChannelType::Custom("feishu".to_string()));
         assert_eq!(msg.platform_message_id, "om_abc123");
         assert!(!msg.is_group);
         assert!(matches!(msg.content, ChannelContent::Text(ref t) if t == "Hello from Feishu!"));
+        // Verify region metadata
+        assert_eq!(
+            msg.metadata.get("region"),
+            Some(&serde_json::Value::String("feishu".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_parse_lark_event_v2_text() {
+        let event = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-001",
+                "event_type": "im.message.receive_v1"
+            },
+            "event": {
+                "sender": {
+                    "sender_id": { "open_id": "ou_abc123" },
+                    "sender_type": "user"
+                },
+                "message": {
+                    "message_id": "om_abc123",
+                    "chat_id": "oc_chat123",
+                    "chat_type": "p2p",
+                    "message_type": "text",
+                    "content": "{\"text\":\"Hello from Lark!\"}"
+                }
+            }
+        });
+
+        let msg = parse_feishu_event(&event, FeishuRegion::Intl).unwrap();
+        assert_eq!(msg.channel, ChannelType::Custom("lark".to_string()));
+        assert_eq!(
+            msg.metadata.get("region"),
+            Some(&serde_json::Value::String("lark".to_string()))
+        );
     }
 
     #[test]
@@ -927,9 +1411,7 @@ mod tests {
             },
             "event": {
                 "sender": {
-                    "sender_id": {
-                        "open_id": "ou_abc123"
-                    },
+                    "sender_id": { "open_id": "ou_abc123" },
                     "sender_type": "user"
                 },
                 "message": {
@@ -942,7 +1424,7 @@ mod tests {
             }
         });
 
-        let msg = parse_feishu_event(&event).unwrap();
+        let msg = parse_feishu_event(&event, FeishuRegion::Cn).unwrap();
         assert!(msg.is_group);
     }
 
@@ -956,9 +1438,7 @@ mod tests {
             },
             "event": {
                 "sender": {
-                    "sender_id": {
-                        "open_id": "ou_abc123"
-                    },
+                    "sender_id": { "open_id": "ou_abc123" },
                     "sender_type": "user"
                 },
                 "message": {
@@ -971,7 +1451,7 @@ mod tests {
             }
         });
 
-        let msg = parse_feishu_event(&event).unwrap();
+        let msg = parse_feishu_event(&event, FeishuRegion::Cn).unwrap();
         match &msg.content {
             ChannelContent::Command { name, args } => {
                 assert_eq!(name, "help");
@@ -991,9 +1471,7 @@ mod tests {
             },
             "event": {
                 "sender": {
-                    "sender_id": {
-                        "open_id": "ou_bot"
-                    },
+                    "sender_id": { "open_id": "ou_bot" },
                     "sender_type": "bot"
                 },
                 "message": {
@@ -1006,7 +1484,7 @@ mod tests {
             }
         });
 
-        assert!(parse_feishu_event(&event).is_none());
+        assert!(parse_feishu_event(&event, FeishuRegion::Cn).is_none());
     }
 
     #[test]
@@ -1019,9 +1497,7 @@ mod tests {
             },
             "event": {
                 "sender": {
-                    "sender_id": {
-                        "open_id": "ou_user1"
-                    },
+                    "sender_id": { "open_id": "ou_user1" },
                     "sender_type": "user"
                 },
                 "message": {
@@ -1034,7 +1510,7 @@ mod tests {
             }
         });
 
-        assert!(parse_feishu_event(&event).is_none());
+        assert!(parse_feishu_event(&event, FeishuRegion::Cn).is_none());
     }
 
     #[test]
@@ -1048,7 +1524,7 @@ mod tests {
             "event": {}
         });
 
-        assert!(parse_feishu_event(&event).is_none());
+        assert!(parse_feishu_event(&event, FeishuRegion::Cn).is_none());
     }
 
     #[test]
@@ -1061,9 +1537,7 @@ mod tests {
             },
             "event": {
                 "sender": {
-                    "sender_id": {
-                        "open_id": "ou_user1"
-                    },
+                    "sender_id": { "open_id": "ou_user1" },
                     "sender_type": "user"
                 },
                 "message": {
@@ -1077,8 +1551,80 @@ mod tests {
             }
         });
 
-        let msg = parse_feishu_event(&event).unwrap();
+        let msg = parse_feishu_event(&event, FeishuRegion::Cn).unwrap();
         assert_eq!(msg.thread_id, Some("om_root1".to_string()));
+    }
+
+    #[test]
+    fn test_parse_feishu_event_v1_legacy() {
+        let body = serde_json::json!({
+            "event": {
+                "type": "message",
+                "text": "Hello legacy",
+                "open_id": "ou_user1",
+                "open_chat_id": "oc_chat1",
+                "open_message_id": "om_legacy1",
+                "chat_type": "p2p"
+            }
+        });
+
+        let msg = parse_feishu_event_v1(&body, FeishuRegion::Cn).unwrap();
+        assert_eq!(msg.channel, ChannelType::Custom("feishu".to_string()));
+        assert!(matches!(msg.content, ChannelContent::Text(ref t) if t == "Hello legacy"));
+    }
+
+    #[test]
+    fn test_parse_feishu_event_v1_empty_text() {
+        let body = serde_json::json!({
+            "event": {
+                "type": "message",
+                "text": "",
+                "open_id": "ou_user1",
+                "open_chat_id": "oc_chat1",
+                "open_message_id": "om_empty",
+                "chat_type": "p2p"
+            }
+        });
+
+        assert!(parse_feishu_event_v1(&body, FeishuRegion::Cn).is_none());
+    }
+
+    #[test]
+    fn test_parse_feishu_event_v1_empty_open_id() {
+        let body = serde_json::json!({
+            "event": {
+                "type": "message",
+                "text": "should be skipped",
+                "open_id": "",
+                "open_chat_id": "oc_chat1",
+                "open_message_id": "om_echo",
+                "chat_type": "p2p"
+            }
+        });
+
+        assert!(parse_feishu_event_v1(&body, FeishuRegion::Cn).is_none());
+    }
+
+    #[test]
+    fn test_region_serde_roundtrip() {
+        let cn: FeishuRegion = serde_json::from_str("\"cn\"").unwrap();
+        assert_eq!(cn, FeishuRegion::Cn);
+        let intl: FeishuRegion = serde_json::from_str("\"intl\"").unwrap();
+        assert_eq!(intl, FeishuRegion::Intl);
+
+        assert_eq!(serde_json::to_string(&FeishuRegion::Cn).unwrap(), "\"cn\"");
+        assert_eq!(
+            serde_json::to_string(&FeishuRegion::Intl).unwrap(),
+            "\"intl\""
+        );
+    }
+
+    #[test]
+    fn test_receive_mode_serde_roundtrip() {
+        let ws: FeishuReceiveMode = serde_json::from_str("\"websocket\"").unwrap();
+        assert_eq!(ws, FeishuReceiveMode::Websocket);
+        let wh: FeishuReceiveMode = serde_json::from_str("\"webhook\"").unwrap();
+        assert_eq!(wh, FeishuReceiveMode::Webhook);
     }
 
     // -----------------------------------------------------------------------
