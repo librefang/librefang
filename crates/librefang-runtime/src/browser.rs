@@ -259,6 +259,20 @@ impl BrowserSession {
             args.push("--disable-gpu".to_string());
         }
 
+        // On Linux, Chromium refuses to start as root without --no-sandbox.
+        // This is common in Docker containers and server installs.
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let is_root = std::fs::metadata("/proc/self")
+                .map(|m| m.uid() == 0)
+                .unwrap_or(false);
+            if is_root {
+                warn!("Running as root — adding --no-sandbox flag for Chromium");
+                args.push("--no-sandbox".to_string());
+            }
+        }
+
         let mut cmd = tokio::process::Command::new(&chrome_path);
         cmd.args(&args);
         cmd.stderr(std::process::Stdio::piped());
