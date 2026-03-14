@@ -740,6 +740,7 @@ pub async fn build_router(
             api_key,
             middleware::auth,
         ))
+        .layer(axum::middleware::from_fn(middleware::accept_language))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::oauth::oidc_auth_middleware,
