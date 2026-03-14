@@ -3050,6 +3050,152 @@ pub async fn delete_agent_kv_key(
     }
 }
 
+/// GET /api/agents/:id/memory/export — Export all KV memory for an agent as JSON.
+pub async fn export_agent_memory(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(aid) => aid,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            );
+        }
+    };
+
+    // Verify agent exists
+    if state.kernel.registry.get(agent_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Agent not found"})),
+        );
+    }
+
+    match state.kernel.memory.list_kv(agent_id) {
+        Ok(pairs) => {
+            let kv_map: serde_json::Map<String, serde_json::Value> = pairs.into_iter().collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "agent_id": agent_id.0.to_string(),
+                    "version": 1,
+                    "kv": kv_map,
+                })),
+            )
+        }
+        Err(e) => {
+            tracing::warn!("Memory export failed for agent {agent_id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Memory export failed"})),
+            )
+        }
+    }
+}
+
+/// POST /api/agents/:id/memory/import — Import KV memory from JSON into an agent.
+///
+/// Accepts a JSON body with a `kv` object mapping string keys to JSON values.
+/// Optionally accepts `clear_existing: true` to wipe existing memory before import.
+pub async fn import_agent_memory(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(aid) => aid,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            );
+        }
+    };
+
+    // Verify agent exists
+    if state.kernel.registry.get(agent_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Agent not found"})),
+        );
+    }
+
+    let kv = match body.get("kv").and_then(|v| v.as_object()) {
+        Some(obj) => obj.clone(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"error": "Missing or invalid 'kv' object in request body"}),
+                ),
+            );
+        }
+    };
+
+    let clear_existing = body
+        .get("clear_existing")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Clear existing memory if requested
+    if clear_existing {
+        match state.kernel.memory.list_kv(agent_id) {
+            Ok(existing) => {
+                for (key, _) in existing {
+                    if let Err(e) = state.kernel.memory.structured_delete(agent_id, &key) {
+                        tracing::warn!("Failed to delete key '{key}' during import clear: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to list existing KV during import clear: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "Memory import failed during clear"})),
+                );
+            }
+        }
+    }
+
+    let mut imported = 0u64;
+    let mut errors = Vec::new();
+
+    for (key, value) in &kv {
+        match state
+            .kernel
+            .memory
+            .structured_set(agent_id, key, value.clone())
+        {
+            Ok(()) => imported += 1,
+            Err(e) => {
+                tracing::warn!("Memory import failed for key '{key}': {e}");
+                errors.push(key.clone());
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "imported",
+                "keys_imported": imported,
+            })),
+        )
+    } else {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "partial",
+                "keys_imported": imported,
+                "failed_keys": errors,
+            })),
+        )
+    }
+}
+
 /// GET /api/health — Minimal liveness probe (public, no auth required).
 /// Returns only status and version to prevent information leakage.
 /// Use GET /api/health/detail for full diagnostics (requires auth).

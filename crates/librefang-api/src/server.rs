@@ -273,6 +273,15 @@ pub async fn build_router(
                 .put(routes::set_agent_kv_key)
                 .delete(routes::delete_agent_kv_key),
         )
+        // Memory export/import endpoints
+        .route(
+            "/api/agents/{id}/memory/export",
+            axum::routing::get(routes::export_agent_memory),
+        )
+        .route(
+            "/api/agents/{id}/memory/import",
+            axum::routing::post(routes::import_agent_memory),
+        )
         // Trigger endpoints
         .route(
             "/api/triggers",
