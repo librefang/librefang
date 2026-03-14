@@ -15,6 +15,7 @@ use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
@@ -6238,6 +6239,73 @@ pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> imp
     Json(serde_json::json!({"agents": items, "total": items.len()}))
 }
 
+/// Check whether a URL is safe to fetch (not targeting internal/private networks).
+/// Returns `Ok(())` if the URL is safe, or `Err(message)` describing the problem.
+fn is_url_safe_for_ssrf(raw_url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(raw_url).map_err(|e| format!("Invalid URL: {e}"))?;
+
+    // Only allow http and https schemes
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("Unsupported URL scheme: {other}")),
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?;
+
+    // Block localhost by hostname
+    if host.eq_ignore_ascii_case("localhost") {
+        return Err("Requests to localhost are not allowed".to_string());
+    }
+
+    // Try to parse the host as an IP address directly, or resolve the hostname
+    let addrs: Vec<IpAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
+        vec![ip]
+    } else {
+        // Resolve hostname — use port 80 as a dummy for resolution
+        let socket_addr = format!("{host}:80");
+        match std::net::ToSocketAddrs::to_socket_addrs(&socket_addr.as_str()) {
+            Ok(iter) => iter.map(|sa| sa.ip()).collect(),
+            Err(_) => {
+                // If resolution fails, we still block — don't allow unresolvable hosts
+                return Err(format!("Cannot resolve host: {host}"));
+            }
+        }
+    };
+
+    for ip in &addrs {
+        if is_private_ip(ip) {
+            return Err(format!(
+                "Requests to private/internal IP addresses are not allowed ({ip})"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns true if the IP address is in a private, loopback, link-local, or
+/// otherwise internal range that should not be reachable from user-supplied URLs.
+fn is_private_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()              // 127.0.0.0/8
+                || v4.is_private()         // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                || v4.is_link_local()      // 169.254.0.0/16 (cloud metadata)
+                || v4.is_broadcast()       // 255.255.255.255
+                || v4.is_unspecified()     // 0.0.0.0
+                || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64 // 100.64.0.0/10 (CGNAT)
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()              // ::1
+                || v6.is_unspecified()     // ::
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 (unique local)
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // fe80::/10 (link-local)
+        }
+    }
+}
+
 /// POST /api/a2a/discover — Discover a new external A2A agent by URL.
 pub async fn a2a_discover_external(
     State(state): State<Arc<AppState>>,
@@ -6252,6 +6320,14 @@ pub async fn a2a_discover_external(
             )
         }
     };
+
+    // SSRF protection: validate URL before making any outbound request
+    if let Err(reason) = is_url_safe_for_ssrf(&url) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": reason})),
+        );
+    }
 
     let client = librefang_runtime::a2a::A2aClient::new();
     match client.discover(&url).await {
