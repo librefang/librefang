@@ -437,11 +437,6 @@ const HTML = `<!DOCTYPE html>
       <img src="https://raw.githubusercontent.com/librefang/librefang/main/public/assets/logo.png" alt="LibreFang" class="logo">
       <h1>Deploy LibreFang</h1>
       <p class="subtitle">Choose your platform</p>
-      <div class="badge-row">
-        <span class="badge"><span class="dot dot-green"></span>Free LLM included</span>
-        <span class="badge"><span class="dot dot-purple"></span>No API key needed</span>
-        <span class="badge"><span class="dot dot-orange"></span>1 GB storage</span>
-      </div>
     </div>
 
     <!-- Platform selection grid -->
@@ -511,6 +506,12 @@ const HTML = `<!DOCTYPE html>
     <!-- Fly.io deploy form (hidden until selected) -->
     <div id="fly-deploy" style="display:none;">
       <button class="back-btn" onclick="showPlatforms()">&larr; Back to platforms</button>
+
+      <div class="badge-row">
+        <span class="badge"><span class="dot dot-green"></span>Free LLM included</span>
+        <span class="badge"><span class="dot dot-purple"></span>No API key needed</span>
+        <span class="badge"><span class="dot dot-orange"></span>1 GB storage</span>
+      </div>
 
       <div id="form-section">
         <div class="free-note">
