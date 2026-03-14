@@ -113,9 +113,24 @@ pub enum HookEvent {
 pub struct AgentId(pub Uuid);
 
 impl AgentId {
+    /// A fixed namespace UUID for deriving deterministic hand-agent IDs.
+    /// Generated once via UUID v4; never changes.
+    const HAND_NAMESPACE: Uuid = Uuid::from_bytes([
+        0x9b, 0x6a, 0xe3, 0x2d, 0x7a, 0x4f, 0x4c, 0x1e, 0x8d, 0x0f, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5,
+        0xf6,
+    ]);
+
     /// Generate a new random AgentId.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Generate a deterministic AgentId for a hand agent.
+    ///
+    /// Uses UUID v5 (SHA-1) with a fixed namespace so the same `hand_id`
+    /// always maps to the same UUID across daemon restarts.
+    pub fn from_hand_id(hand_id: &str) -> Self {
+        Self(Uuid::new_v5(&Self::HAND_NAMESPACE, hand_id.as_bytes()))
     }
 }
 
@@ -665,6 +680,20 @@ mod tests {
         let display = format!("{}", id);
         assert!(!display.is_empty());
         assert_eq!(display.len(), 36); // UUID v4 string length
+    }
+
+    #[test]
+    fn test_agent_id_from_hand_id_deterministic() {
+        let a = AgentId::from_hand_id("browser");
+        let b = AgentId::from_hand_id("browser");
+        assert_eq!(a, b, "same hand_id must produce same AgentId");
+    }
+
+    #[test]
+    fn test_agent_id_from_hand_id_differs_per_hand() {
+        let a = AgentId::from_hand_id("browser");
+        let b = AgentId::from_hand_id("coder");
+        assert_ne!(a, b, "different hand_ids must produce different AgentIds");
     }
 
     #[test]

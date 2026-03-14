@@ -1231,7 +1231,18 @@ impl LibreFangKernel {
         parent: Option<AgentId>,
         source_toml_path: Option<PathBuf>,
     ) -> KernelResult<AgentId> {
-        let agent_id = AgentId::new();
+        self.spawn_agent_inner(manifest, parent, source_toml_path, None)
+    }
+
+    /// Spawn a new agent with all options including a predetermined ID.
+    fn spawn_agent_inner(
+        &self,
+        manifest: AgentManifest,
+        parent: Option<AgentId>,
+        source_toml_path: Option<PathBuf>,
+        predetermined_id: Option<AgentId>,
+    ) -> KernelResult<AgentId> {
+        let agent_id = predetermined_id.unwrap_or_else(AgentId::new);
         let session_id = SessionId::new();
         let name = manifest.name.clone();
 
@@ -3429,7 +3440,16 @@ impl LibreFangKernel {
             }
         }
 
-        let agent_id = self.spawn_agent_with_source(manifest, Some(hand_manifest_path.clone()))?;
+        // Use a deterministic UUID derived from the hand_id so the same hand
+        // always gets the same agent ID across daemon restarts.  This keeps
+        // triggers and cron jobs that reference the UUID stable (#313).
+        let deterministic_id = AgentId::from_hand_id(hand_id);
+        let agent_id = self.spawn_agent_inner(
+            manifest,
+            None,
+            Some(hand_manifest_path.clone()),
+            Some(deterministic_id),
+        )?;
 
         // Restore triggers from the old agent under the new agent ID (#519).
         if !saved_triggers.is_empty() {
