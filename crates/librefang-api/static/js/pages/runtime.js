@@ -96,7 +96,7 @@ document.addEventListener('alpine:init', function() {
           this.version = ver.version || '-';
           this.platform = ver.platform || '-';
           this.arch = ver.arch || '-';
-          this.agentCount = Array.isArray(agents) ? agents.length : 0;
+          this.agentCount = agents && agents.total != null ? agents.total : (Array.isArray(agents) ? agents.length : 0);
           this.defaultModel = status.default_model || '-';
           this.apiListen = status.api_listen || status.listen || '-';
           this.homeDir = status.home_dir || '-';

@@ -62,7 +62,7 @@ function memoryPage() {
     loadAgents: function() {
       var self = this;
       LibreFangAPI.request('GET', '/api/agents').then(function(data) {
-        self.agents = data || [];
+        self.agents = Array.isArray(data) ? data : (data && data.items ? data.items : []);
       }).catch(function() {
         self.agents = [];
       });

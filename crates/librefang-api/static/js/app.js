@@ -118,8 +118,8 @@ document.addEventListener('alpine:init', function() {
 
     async refreshAgents() {
       try {
-        var agents = await LibreFangAPI.get('/api/agents');
-        this.agents = Array.isArray(agents) ? agents : [];
+        var res = await LibreFangAPI.get('/api/agents');
+        this.agents = Array.isArray(res) ? res : (res && res.items ? res.items : []);
         this.agentCount = this.agents.length;
       } catch(e) { /* silent */ }
     },
