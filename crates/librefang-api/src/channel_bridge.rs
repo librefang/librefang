@@ -45,7 +45,7 @@ use librefang_channels::zulip::ZulipAdapter;
 #[cfg(feature = "channel-bluesky")]
 use librefang_channels::bluesky::BlueskyAdapter;
 #[cfg(feature = "channel-feishu")]
-use librefang_channels::feishu::FeishuAdapter;
+use librefang_channels::feishu::{FeishuAdapter, FeishuReceiveMode, FeishuRegion};
 #[cfg(feature = "channel-line")]
 use librefang_channels::line::LineAdapter;
 #[cfg(feature = "channel-mastodon")]
@@ -1613,13 +1613,32 @@ pub async fn start_channel_bridge_with_config(
         }
     }
 
-    // Feishu/Lark
+    // Feishu/Lark (unified adapter)
     #[cfg(feature = "channel-feishu")]
     for fs_config in config.feishu.iter() {
-        if let Some(secret) = read_token(&fs_config.app_secret_env, "Feishu") {
+        let region = match fs_config.region.as_str() {
+            "intl" | "lark" => FeishuRegion::Intl,
+            _ => FeishuRegion::Cn,
+        };
+        let receive_mode = match fs_config.receive_mode.as_str() {
+            "webhook" => FeishuReceiveMode::Webhook,
+            _ => FeishuReceiveMode::Websocket,
+        };
+        let label = region.label();
+        if let Some(secret) = read_token(&fs_config.app_secret_env, label) {
             let adapter = Arc::new(
-                FeishuAdapter::new(fs_config.app_id.clone(), secret, fs_config.webhook_port)
-                    .with_account_id(fs_config.account_id.clone()),
+                FeishuAdapter::new(
+                    fs_config.app_id.clone(),
+                    secret,
+                    fs_config.webhook_port,
+                    region,
+                    receive_mode,
+                )
+                .with_account_id(fs_config.account_id.clone())
+                .with_verification(
+                    fs_config.verification_token.clone(),
+                    fs_config.encrypt_key.clone(),
+                ),
             );
             adapters.push((
                 adapter,
