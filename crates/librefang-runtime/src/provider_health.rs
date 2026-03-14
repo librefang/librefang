@@ -99,7 +99,7 @@ impl Default for ProbeCache {
 pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
     let start = Instant::now();
 
-    let client = match reqwest::Client::builder()
+    let client = match crate::http_client::proxied_client_builder()
         .connect_timeout(Duration::from_secs(PROBE_CONNECT_TIMEOUT_SECS))
         .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
         .build()
@@ -229,7 +229,7 @@ pub async fn probe_model(
 ) -> Result<u64, String> {
     let start = Instant::now();
 
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;

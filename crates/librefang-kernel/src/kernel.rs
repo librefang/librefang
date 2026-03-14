@@ -539,6 +539,10 @@ impl LibreFangKernel {
             warn!("Config: {}", w);
         }
 
+        // Initialise global HTTP proxy settings so all outbound reqwest
+        // clients pick up proxy configuration from config.toml / env vars.
+        librefang_runtime::http_client::init_proxy(config.proxy.clone());
+
         // Ensure data directory exists
         std::fs::create_dir_all(&config.data_dir)
             .map_err(|e| KernelError::BootFailed(format!("Failed to create data dir: {e}")))?;
@@ -5507,7 +5511,7 @@ async fn cron_deliver_response(
         }
         CronDelivery::Webhook { url } => {
             tracing::debug!(url = %url, "Cron: delivering via webhook");
-            let client = reqwest::Client::builder()
+            let client = librefang_runtime::http_client::proxied_client_builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build();
             if let Ok(client) = client {

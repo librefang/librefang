@@ -1069,6 +1069,35 @@ pub struct SidecarChannelConfig {
     pub channel_type: Option<String>,
 }
 
+/// HTTP proxy configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [proxy]
+/// http_proxy = "http://proxy.corp.example:8080"
+/// https_proxy = "http://proxy.corp.example:8080"
+/// no_proxy = "localhost,127.0.0.1,.internal.corp"
+/// ```
+///
+/// Environment variables `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are also
+/// respected as fallbacks when the config fields are empty.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// HTTP proxy URL (e.g. `http://proxy:8080`).
+    /// Falls back to `HTTP_PROXY` / `http_proxy` env var.
+    #[serde(default)]
+    pub http_proxy: Option<String>,
+    /// HTTPS proxy URL (e.g. `http://proxy:8080`).
+    /// Falls back to `HTTPS_PROXY` / `https_proxy` env var.
+    #[serde(default)]
+    pub https_proxy: Option<String>,
+    /// Comma-separated list of hosts/domains that should bypass the proxy.
+    /// Falls back to `NO_PROXY` / `no_proxy` env var.
+    #[serde(default)]
+    pub no_proxy: Option<String>,
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1205,6 +1234,9 @@ pub struct KernelConfig {
     /// Sidecar channel adapters (external process-based).
     #[serde(default)]
     pub sidecar_channels: Vec<SidecarChannelConfig>,
+    /// HTTP proxy configuration for all outbound connections.
+    #[serde(default)]
+    pub proxy: ProxyConfig,
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1453,6 +1485,7 @@ impl Default for KernelConfig {
             provider_api_keys: HashMap::new(),
             oauth: OAuthConfig::default(),
             sidecar_channels: Vec::new(),
+            proxy: ProxyConfig::default(),
         }
     }
 }

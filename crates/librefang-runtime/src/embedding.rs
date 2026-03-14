@@ -96,7 +96,7 @@ impl OpenAIEmbeddingDriver {
             api_key: Zeroizing::new(config.api_key),
             base_url: config.base_url,
             model: config.model,
-            client: reqwest::Client::new(),
+            client: crate::http_client::proxied_client(),
             dims,
         })
     }

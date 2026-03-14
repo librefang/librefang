@@ -134,7 +134,7 @@ impl MediaEngine {
             .text("model", model.to_string())
             .text("response_format", "text");
 
-        let client = reqwest::Client::new();
+        let client = crate::http_client::proxied_client();
         let resp = client
             .post(api_url)
             .bearer_auth(&api_key)
