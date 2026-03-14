@@ -40,6 +40,8 @@ pub struct MastodonAdapter {
     access_token: Zeroizing<String>,
     /// HTTP client for API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -60,11 +62,18 @@ impl MastodonAdapter {
             instance_url,
             access_token: Zeroizing::new(access_token),
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             own_account_id: Arc::new(RwLock::new(None)),
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Validate the access token by calling `/api/v1/accounts/verify_credentials`.
     async fn validate(&self) -> Result<(String, String), Box<dyn std::error::Error>> {
@@ -327,6 +336,7 @@ impl ChannelAdapter for MastodonAdapter {
         let own_account_id = account_id;
         let client = self.client.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let poll_interval = Duration::from_secs(SSE_RECONNECT_DELAY_SECS);
@@ -389,11 +399,15 @@ impl ChannelAdapter for MastodonAdapter {
                                             if let Ok(notif) =
                                                 serde_json::from_str::<serde_json::Value>(data)
                                             {
-                                                if let Some(msg) = parse_mastodon_notification(
+                                                if let Some(mut msg) = parse_mastodon_notification(
                                                     &notif,
                                                     &own_account_id,
                                                 ) {
-                                                    let _ = tx.send(msg).await;
+                                                    // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                let _ = tx.send(msg).await;
                                                 }
                                             }
                                         }
@@ -460,8 +474,12 @@ impl ChannelAdapter for MastodonAdapter {
                     if let Some(nid) = notif["id"].as_str() {
                         last_notification_id = Some(nid.to_string());
                     }
-                    if let Some(msg) = parse_mastodon_notification(notif, &own_account_id) {
-                        if tx.send(msg).await.is_err() {
+                    if let Some(mut msg) = parse_mastodon_notification(notif, &own_account_id) {
+                        // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                if tx.send(msg).await.is_err() {
                             return;
                         }
                     }

@@ -44,6 +44,8 @@ pub struct TeamsAdapter {
     allowed_tenants: Vec<String>,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -71,11 +73,18 @@ impl TeamsAdapter {
             webhook_port,
             allowed_tenants,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             cached_token: Arc::new(RwLock::new(None)),
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Obtain a valid OAuth2 bearer token, refreshing if expired or missing.
     async fn get_token(&self) -> Result<String, Box<dyn std::error::Error>> {
@@ -292,6 +301,7 @@ impl ChannelAdapter for TeamsAdapter {
         let app_id = self.app_id.clone();
         let allowed_tenants = self.allowed_tenants.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = Arc::new(self.account_id.clone());
 
         tokio::spawn(async move {
             // Build the axum webhook router
@@ -310,7 +320,11 @@ impl ChannelAdapter for TeamsAdapter {
                         let tenants = Arc::clone(&tenants);
                         let tx = Arc::clone(&tx);
                         async move {
-                            if let Some(msg) = parse_teams_activity(&body, &app_id, &tenants) {
+                            if let Some(mut msg) = parse_teams_activity(&body, &app_id, &tenants) {
+                                // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = *account_id {
+                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
                                 let _ = tx.send(msg).await;
                             }
                             axum::http::StatusCode::OK

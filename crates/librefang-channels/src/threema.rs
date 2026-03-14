@@ -37,6 +37,8 @@ pub struct ThreemaAdapter {
     webhook_port: u16,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -56,10 +58,17 @@ impl ThreemaAdapter {
             secret: Zeroizing::new(secret),
             webhook_port,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Validate credentials by checking the remaining credits.
     async fn validate(&self) -> Result<u64, Box<dyn std::error::Error>> {
@@ -199,6 +208,7 @@ impl ChannelAdapter for ThreemaAdapter {
         let port = self.webhook_port;
         let own_id = self.threema_id.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             // Bind a webhook HTTP listener for inbound messages
@@ -298,8 +308,12 @@ impl ChannelAdapter for ThreemaAdapter {
                                 .collect()
                         };
 
-                    if let Some(msg) = parse_threema_webhook(&payload, &own_id) {
-                        let _ = tx.send(msg).await;
+                    if let Some(mut msg) = parse_threema_webhook(&payload, &own_id) {
+                        // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                let _ = tx.send(msg).await;
                     }
                 });
             }

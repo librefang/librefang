@@ -33,6 +33,8 @@ pub struct GitterAdapter {
     room_id: String,
     /// HTTP client.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -50,10 +52,17 @@ impl GitterAdapter {
             token: Zeroizing::new(token),
             room_id,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Validate token by fetching the authenticated user.
     async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
@@ -168,6 +177,7 @@ impl ChannelAdapter for GitterAdapter {
         let room_id = self.room_id.clone();
         let token = self.token.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let stream_client = reqwest::Client::builder()
@@ -268,7 +278,7 @@ impl ChannelAdapter for GitterAdapter {
                                                 ChannelContent::Text(text)
                                             };
 
-                                            let msg = ChannelMessage {
+                                            let mut msg = ChannelMessage {
                                                 channel: ChannelType::Custom(
                                                     "gitter".to_string(),
                                                 ),
@@ -295,7 +305,11 @@ impl ChannelAdapter for GitterAdapter {
                                                 },
                                             };
 
-                                            if tx.send(msg).await.is_err() {
+                                            // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                if tx.send(msg).await.is_err() {
                                                 return;
                                             }
                                         }

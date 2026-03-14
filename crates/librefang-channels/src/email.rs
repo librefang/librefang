@@ -62,6 +62,8 @@ pub struct EmailAdapter {
     folders: Vec<String>,
     /// Only process emails from these senders (empty = all).
     allowed_senders: Vec<String>,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -98,11 +100,18 @@ impl EmailAdapter {
                 folders
             },
             allowed_senders,
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             reply_ctx: Arc::new(DashMap::new()),
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Check if a sender is in the allowlist (empty = allow all). Used in tests.
     #[allow(dead_code)]
@@ -328,6 +337,7 @@ impl ChannelAdapter for EmailAdapter {
         let allowed_senders = self.allowed_senders.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let reply_ctx = self.reply_ctx.clone();
+        let account_id = self.account_id.clone();
 
         info!(
             "Starting email adapter (IMAP: {}:{}, SMTP: {}:{}, polling every {:?})",
@@ -399,7 +409,7 @@ impl ChannelAdapter for EmailAdapter {
                         format!("Subject: {clean_subject}\n\n{}", body.trim())
                     };
 
-                    let msg = ChannelMessage {
+                    let mut msg = ChannelMessage {
                         channel: ChannelType::Email,
                         platform_message_id: message_id.clone(),
                         sender: ChannelUser {
@@ -415,7 +425,11 @@ impl ChannelAdapter for EmailAdapter {
                         metadata: std::collections::HashMap::new(),
                     };
 
-                    if tx.send(msg).await.is_err() {
+                    // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                if tx.send(msg).await.is_err() {
                         info!("Email channel receiver dropped, stopping poll");
                         return;
                     }

@@ -33,6 +33,8 @@ pub struct RocketChatAdapter {
     allowed_channels: Vec<String>,
     /// HTTP client.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -62,11 +64,18 @@ impl RocketChatAdapter {
             user_id,
             allowed_channels,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             last_timestamps: Arc::new(RwLock::new(HashMap::new())),
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Add auth headers to a request builder.
     fn auth_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -156,6 +165,7 @@ impl ChannelAdapter for RocketChatAdapter {
         let client = self.client.clone();
         let last_timestamps = Arc::clone(&self.last_timestamps);
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             // Determine channels to poll
@@ -305,7 +315,7 @@ impl ChannelAdapter for RocketChatAdapter {
                             ChannelContent::Text(text.to_string())
                         };
 
-                        let channel_msg = ChannelMessage {
+                        let mut channel_msg = ChannelMessage {
                             channel: ChannelType::Custom("rocketchat".to_string()),
                             platform_message_id: msg_id,
                             sender: ChannelUser {
@@ -328,7 +338,11 @@ impl ChannelAdapter for RocketChatAdapter {
                             },
                         };
 
-                        if tx.send(channel_msg).await.is_err() {
+                        // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                if tx.send(channel_msg).await.is_err() {
                             return;
                         }
                     }

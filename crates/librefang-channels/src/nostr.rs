@@ -33,6 +33,8 @@ pub struct NostrAdapter {
     private_key: Zeroizing<String>,
     /// List of relay WebSocket URLs to connect to.
     relays: Vec<String>,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -51,11 +53,18 @@ impl NostrAdapter {
         Self {
             private_key: Zeroizing::new(private_key),
             relays,
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             seen_events: Arc::new(RwLock::new(std::collections::HashSet::new())),
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Derive a public key hex string from the private key.
     /// In a real implementation this would use secp256k1 scalar multiplication.
@@ -180,6 +189,7 @@ impl ChannelAdapter for NostrAdapter {
         let seen_events = Arc::clone(&self.seen_events);
         let private_key = self.private_key.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         // Spawn a task per relay for parallel connections
         for relay_url in relays {
@@ -339,7 +349,7 @@ impl ChannelAdapter for NostrAdapter {
 
                         let kind = event["kind"].as_i64().unwrap_or(0);
 
-                        let channel_msg = ChannelMessage {
+                        let mut channel_msg = ChannelMessage {
                             channel: ChannelType::Custom("nostr".to_string()),
                             platform_message_id: event_id,
                             sender: ChannelUser {
@@ -373,7 +383,11 @@ impl ChannelAdapter for NostrAdapter {
                             },
                         };
 
-                        if tx.send(channel_msg).await.is_err() {
+                        // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                if tx.send(channel_msg).await.is_err() {
                             return;
                         }
                     };

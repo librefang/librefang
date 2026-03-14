@@ -33,6 +33,8 @@ pub struct ZulipAdapter {
     streams: Vec<String>,
     /// HTTP client.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -62,11 +64,18 @@ impl ZulipAdapter {
             api_key: Zeroizing::new(api_key),
             streams,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             queue_id: Arc::new(RwLock::new(None)),
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Register an event queue with the Zulip server.
     async fn register_queue(&self) -> Result<(String, i64), Box<dyn std::error::Error>> {
@@ -208,6 +217,7 @@ impl ChannelAdapter for ZulipAdapter {
         let client = self.client.clone();
         let queue_id_lock = Arc::clone(&self.queue_id);
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let mut current_queue_id = initial_queue_id;
@@ -385,7 +395,7 @@ impl ChannelAdapter for ZulipAdapter {
                         ChannelContent::Text(content.to_string())
                     };
 
-                    let channel_msg = ChannelMessage {
+                    let mut channel_msg = ChannelMessage {
                         channel: ChannelType::Custom("zulip".to_string()),
                         platform_message_id: msg_id,
                         sender: ChannelUser {
@@ -412,7 +422,11 @@ impl ChannelAdapter for ZulipAdapter {
                         },
                     };
 
-                    if tx.send(channel_msg).await.is_err() {
+                    // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                if tx.send(channel_msg).await.is_err() {
                         return;
                     }
                 }

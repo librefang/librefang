@@ -34,6 +34,8 @@ pub struct NtfyAdapter {
     token: Zeroizing<String>,
     /// HTTP client.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -58,10 +60,17 @@ impl NtfyAdapter {
             topic,
             token: Zeroizing::new(token),
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Build an authenticated request builder.
     fn auth_request(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -161,6 +170,7 @@ impl ChannelAdapter for NtfyAdapter {
         let topic = self.topic.clone();
         let token = self.token.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let sse_client = reqwest::Client::builder()
@@ -259,7 +269,7 @@ impl ChannelAdapter for NtfyAdapter {
                                                     ChannelContent::Text(message)
                                                 };
 
-                                                let msg = ChannelMessage {
+                                                let mut msg = ChannelMessage {
                                                     channel: ChannelType::Custom(
                                                         "ntfy".to_string(),
                                                     ),
@@ -286,7 +296,11 @@ impl ChannelAdapter for NtfyAdapter {
                                                     },
                                                 };
 
-                                                if tx.send(msg).await.is_err() {
+                                                // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                if tx.send(msg).await.is_err() {
                                                     return;
                                                 }
                                             }

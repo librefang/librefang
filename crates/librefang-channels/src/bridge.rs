@@ -130,7 +130,11 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// Get per-channel overrides for a given channel type.
     ///
     /// Returns `None` if the channel is not configured or has no overrides.
-    async fn channel_overrides(&self, _channel_type: &str) -> Option<ChannelOverrides> {
+    async fn channel_overrides(
+        &self,
+        _channel_type: &str,
+        _account_id: Option<&str>,
+    ) -> Option<ChannelOverrides> {
         None
     }
 
@@ -588,7 +592,12 @@ async fn dispatch_message(
     let ct_str = channel_type_str(&message.channel);
 
     // Fetch per-channel overrides (if configured)
-    let overrides = handle.channel_overrides(ct_str).await;
+    let overrides = handle
+        .channel_overrides(
+            ct_str,
+            message.metadata.get("account_id").and_then(|v| v.as_str()),
+        )
+        .await;
     let channel_default_format = default_output_format_for_channel(ct_str);
     let output_format = overrides
         .as_ref()

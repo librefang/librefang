@@ -40,6 +40,8 @@ pub struct WebexAdapter {
     allowed_rooms: Vec<String>,
     /// HTTP client for REST API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -59,11 +61,18 @@ impl WebexAdapter {
             bot_token: Zeroizing::new(bot_token),
             allowed_rooms,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_info: Arc::new(RwLock::new(None)),
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Validate credentials and retrieve bot identity.
     async fn validate(&self) -> Result<(String, String), Box<dyn std::error::Error>> {
@@ -252,6 +261,7 @@ impl ChannelAdapter for WebexAdapter {
         let client = self.client.clone();
         let own_bot_id = bot_id;
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
             let mut backoff = Duration::from_secs(1);
@@ -400,7 +410,7 @@ impl ChannelAdapter for WebexAdapter {
                         ChannelContent::Text(msg_text.to_string())
                     };
 
-                    let channel_msg = ChannelMessage {
+                    let mut channel_msg = ChannelMessage {
                         channel: ChannelType::Custom("webex".to_string()),
                         platform_message_id: message_id.to_string(),
                         sender: ChannelUser {
@@ -427,7 +437,11 @@ impl ChannelAdapter for WebexAdapter {
                         },
                     };
 
-                    if tx.send(channel_msg).await.is_err() {
+                    // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = account_id {
+                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
+                                if tx.send(channel_msg).await.is_err() {
                         return;
                     }
                 };

@@ -36,6 +36,8 @@ pub struct FlockAdapter {
     webhook_port: u16,
     /// HTTP client for outbound API calls.
     client: reqwest::Client,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -53,10 +55,17 @@ impl FlockAdapter {
             bot_token: Zeroizing::new(bot_token),
             webhook_port,
             client: reqwest::Client::new(),
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Validate credentials by fetching bot/app info.
     async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
@@ -252,6 +261,7 @@ impl ChannelAdapter for FlockAdapter {
         let port = self.webhook_port;
         let own_user_id = bot_user_id;
         let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = Arc::new(self.account_id.clone());
 
         tokio::spawn(async move {
             let user_id_shared = Arc::new(own_user_id);
@@ -271,7 +281,11 @@ impl ChannelAdapter for FlockAdapter {
                                 return axum::http::StatusCode::OK;
                             }
 
-                            if let Some(msg) = parse_flock_event(&body, &user_id) {
+                            if let Some(mut msg) = parse_flock_event(&body, &user_id) {
+                                // Inject account_id for multi-bot routing
+                                if let Some(ref aid) = *account_id {
+                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                }
                                 let _ = tx.send(msg).await;
                             }
 

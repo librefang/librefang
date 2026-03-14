@@ -37,6 +37,8 @@ pub struct WhatsAppAdapter {
     allowed_users: Vec<String>,
     /// Optional WhatsApp Web gateway URL for QR/Web mode (e.g. "http://127.0.0.1:3009").
     gateway_url: Option<String>,
+    /// Optional account identifier for multi-bot routing.
+    account_id: Option<String>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -60,10 +62,17 @@ impl WhatsAppAdapter {
             client: reqwest::Client::new(),
             allowed_users,
             gateway_url: None,
+            account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
     }
+    /// Set the account_id for multi-bot routing. Returns self for builder chaining.
+    pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
+        self.account_id = account_id;
+        self
+    }
+
 
     /// Create a new WhatsApp adapter with gateway URL for Web/QR mode.
     ///
