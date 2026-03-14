@@ -1,0 +1,105 @@
+# Together AI models (8)
+
+[[models]]
+id = "meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo"
+display_name = "Llama 3.1 405B (Together)"
+provider = "together"
+tier = "frontier"
+context_window = 130000
+max_output_tokens = 4096
+input_cost_per_m = 3.50
+output_cost_per_m = 3.50
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+display_name = "Llama 3.3 70B (Together)"
+provider = "together"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.88
+output_cost_per_m = 0.88
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+display_name = "Llama 4 Maverick (Together)"
+provider = "together"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 8192
+input_cost_per_m = 0.27
+output_cost_per_m = 0.35
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+display_name = "Llama 4 Scout (Together)"
+provider = "together"
+tier = "balanced"
+context_window = 512000
+max_output_tokens = 8192
+input_cost_per_m = 0.18
+output_cost_per_m = 0.30
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "deepseek-ai/DeepSeek-R1"
+display_name = "DeepSeek R1 (Together)"
+provider = "together"
+tier = "frontier"
+context_window = 64000
+max_output_tokens = 8192
+input_cost_per_m = 3.00
+output_cost_per_m = 7.00
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "deepseek-ai/DeepSeek-V3"
+display_name = "DeepSeek V3 (Together)"
+provider = "together"
+tier = "smart"
+context_window = 64000
+max_output_tokens = 8192
+input_cost_per_m = 0.90
+output_cost_per_m = 0.90
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "Qwen/Qwen2.5-72B-Instruct-Turbo"
+display_name = "Qwen 2.5 72B (Together)"
+provider = "together"
+tier = "smart"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.20
+output_cost_per_m = 0.60
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "mistralai/Mixtral-8x22B-Instruct-v0.1"
+display_name = "Mixtral 8x22B (Together)"
+provider = "together"
+tier = "balanced"
+context_window = 65536
+max_output_tokens = 4096
+input_cost_per_m = 0.60
+output_cost_per_m = 0.60
+supports_tools = true
+supports_vision = false
+supports_streaming = true

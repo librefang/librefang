@@ -1,0 +1,111 @@
+# Local provider models -- Ollama (6) + vLLM (1) + LM Studio (1)
+
+# Ollama models
+
+[[models]]
+id = "llama3.2"
+display_name = "Llama 3.2 (Ollama)"
+provider = "ollama"
+tier = "local"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "llama3.1"
+display_name = "Llama 3.1 (Ollama)"
+provider = "ollama"
+tier = "local"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "mistral:latest"
+display_name = "Mistral (Ollama)"
+provider = "ollama"
+tier = "local"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "qwen2.5"
+display_name = "Qwen 2.5 (Ollama)"
+provider = "ollama"
+tier = "local"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "phi3"
+display_name = "Phi-3 (Ollama)"
+provider = "ollama"
+tier = "local"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "deepseek-r1:latest"
+display_name = "DeepSeek R1 (Ollama)"
+provider = "ollama"
+tier = "local"
+context_window = 64000
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+
+# vLLM
+
+[[models]]
+id = "vllm-local"
+display_name = "vLLM Local Model"
+provider = "vllm"
+tier = "local"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+# LM Studio
+
+[[models]]
+id = "lmstudio-local"
+display_name = "LM Studio Local Model"
+provider = "lmstudio"
+tier = "local"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true

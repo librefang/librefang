@@ -1,0 +1,122 @@
+# xAI Grok models (9)
+
+[[models]]
+id = "grok-4-0709"
+display_name = "Grok 4"
+provider = "xai"
+tier = "frontier"
+context_window = 256000
+max_output_tokens = 32768
+input_cost_per_m = 3.0
+output_cost_per_m = 15.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["grok", "grok-4"]
+
+[[models]]
+id = "grok-4-fast-reasoning"
+display_name = "Grok 4 Fast Reasoning"
+provider = "xai"
+tier = "smart"
+context_window = 256000
+max_output_tokens = 32768
+input_cost_per_m = 1.0
+output_cost_per_m = 5.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "grok-4-fast-non-reasoning"
+display_name = "Grok 4 Fast Non-Reasoning"
+provider = "xai"
+tier = "smart"
+context_window = 256000
+max_output_tokens = 32768
+input_cost_per_m = 1.0
+output_cost_per_m = 5.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "grok-4-1-fast-reasoning"
+display_name = "Grok 4.1 Fast Reasoning"
+provider = "xai"
+tier = "fast"
+context_window = 2000000
+max_output_tokens = 32768
+input_cost_per_m = 0.20
+output_cost_per_m = 0.50
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["grok-fast"]
+
+[[models]]
+id = "grok-4-1-fast-non-reasoning"
+display_name = "Grok 4.1 Fast Non-Reasoning"
+provider = "xai"
+tier = "fast"
+context_window = 2000000
+max_output_tokens = 32768
+input_cost_per_m = 0.20
+output_cost_per_m = 0.50
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "grok-3"
+display_name = "Grok 3"
+provider = "xai"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 32768
+input_cost_per_m = 3.0
+output_cost_per_m = 15.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["grok3"]
+
+[[models]]
+id = "grok-3-mini"
+display_name = "Grok 3 Mini"
+provider = "xai"
+tier = "balanced"
+context_window = 131072
+max_output_tokens = 32768
+input_cost_per_m = 0.30
+output_cost_per_m = 0.50
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "grok-2"
+display_name = "Grok 2"
+provider = "xai"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 32768
+input_cost_per_m = 2.0
+output_cost_per_m = 10.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+[[models]]
+id = "grok-2-mini"
+display_name = "Grok 2 Mini"
+provider = "xai"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 32768
+input_cost_per_m = 0.30
+output_cost_per_m = 0.50
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["grok-mini"]

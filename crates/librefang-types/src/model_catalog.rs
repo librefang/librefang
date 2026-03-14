@@ -1,7 +1,36 @@
 //! Model catalog types — shared data structures for the model registry.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
+
+// ---------------------------------------------------------------------------
+// TOML catalog file wrapper types — used for deserializing catalog files.
+// ---------------------------------------------------------------------------
+
+/// Wrapper for deserializing a TOML file containing model entries.
+#[derive(Debug, Deserialize)]
+pub struct ModelCatalogFile {
+    /// Model entries in the file.
+    #[serde(default)]
+    pub models: Vec<ModelCatalogEntry>,
+}
+
+/// Wrapper for deserializing a TOML file containing provider entries.
+#[derive(Debug, Deserialize)]
+pub struct ProviderCatalogFile {
+    /// Provider entries in the file.
+    #[serde(default)]
+    pub providers: Vec<ProviderInfo>,
+}
+
+/// Wrapper for deserializing a TOML file containing alias mappings.
+#[derive(Debug, Deserialize)]
+pub struct AliasCatalogFile {
+    /// Alias mappings (short name -> canonical model ID).
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
+}
 
 // ---------------------------------------------------------------------------
 // Canonical provider base URLs — single source of truth.
@@ -178,8 +207,10 @@ pub struct ProviderInfo {
     /// Whether an API key is required (false for local providers).
     pub key_required: bool,
     /// Runtime-detected authentication status.
+    #[serde(default)]
     pub auth_status: AuthStatus,
     /// Number of models from this provider in the catalog.
+    #[serde(default)]
     pub model_count: usize,
 }
 

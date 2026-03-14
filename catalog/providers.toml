@@ -1,0 +1,276 @@
+# LibreFang Provider Registry
+# Each provider entry defines authentication and endpoint configuration.
+# auth_status and model_count are runtime-computed and ignored if present.
+
+[[providers]]
+id = "anthropic"
+display_name = "Anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+key_required = true
+
+[[providers]]
+id = "openai"
+display_name = "OpenAI"
+api_key_env = "OPENAI_API_KEY"
+base_url = "https://api.openai.com/v1"
+key_required = true
+
+[[providers]]
+id = "gemini"
+display_name = "Google Gemini"
+api_key_env = "GEMINI_API_KEY"
+base_url = "https://generativelanguage.googleapis.com"
+key_required = true
+
+[[providers]]
+id = "deepseek"
+display_name = "DeepSeek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com/v1"
+key_required = true
+
+[[providers]]
+id = "groq"
+display_name = "Groq"
+api_key_env = "GROQ_API_KEY"
+base_url = "https://api.groq.com/openai/v1"
+key_required = true
+
+[[providers]]
+id = "openrouter"
+display_name = "OpenRouter"
+api_key_env = "OPENROUTER_API_KEY"
+base_url = "https://openrouter.ai/api/v1"
+key_required = true
+
+[[providers]]
+id = "mistral"
+display_name = "Mistral AI"
+api_key_env = "MISTRAL_API_KEY"
+base_url = "https://api.mistral.ai/v1"
+key_required = true
+
+[[providers]]
+id = "together"
+display_name = "Together AI"
+api_key_env = "TOGETHER_API_KEY"
+base_url = "https://api.together.xyz/v1"
+key_required = true
+
+[[providers]]
+id = "fireworks"
+display_name = "Fireworks AI"
+api_key_env = "FIREWORKS_API_KEY"
+base_url = "https://api.fireworks.ai/inference/v1"
+key_required = true
+
+[[providers]]
+id = "ollama"
+display_name = "Ollama"
+api_key_env = "OLLAMA_API_KEY"
+base_url = "http://localhost:11434/v1"
+key_required = false
+
+[[providers]]
+id = "vllm"
+display_name = "vLLM"
+api_key_env = "VLLM_API_KEY"
+base_url = "http://localhost:8000/v1"
+key_required = false
+
+[[providers]]
+id = "lmstudio"
+display_name = "LM Studio"
+api_key_env = "LMSTUDIO_API_KEY"
+base_url = "http://localhost:1234/v1"
+key_required = false
+
+[[providers]]
+id = "lemonade"
+display_name = "Lemonade"
+api_key_env = "LEMONADE_API_KEY"
+base_url = "http://localhost:8888/api/v1"
+key_required = false
+
+[[providers]]
+id = "perplexity"
+display_name = "Perplexity AI"
+api_key_env = "PERPLEXITY_API_KEY"
+base_url = "https://api.perplexity.ai"
+key_required = true
+
+[[providers]]
+id = "cohere"
+display_name = "Cohere"
+api_key_env = "COHERE_API_KEY"
+base_url = "https://api.cohere.com/v2"
+key_required = true
+
+[[providers]]
+id = "ai21"
+display_name = "AI21 Labs"
+api_key_env = "AI21_API_KEY"
+base_url = "https://api.ai21.com/studio/v1"
+key_required = true
+
+[[providers]]
+id = "cerebras"
+display_name = "Cerebras"
+api_key_env = "CEREBRAS_API_KEY"
+base_url = "https://api.cerebras.ai/v1"
+key_required = true
+
+[[providers]]
+id = "sambanova"
+display_name = "SambaNova"
+api_key_env = "SAMBANOVA_API_KEY"
+base_url = "https://api.sambanova.ai/v1"
+key_required = true
+
+[[providers]]
+id = "huggingface"
+display_name = "Hugging Face"
+api_key_env = "HF_API_KEY"
+base_url = "https://api-inference.huggingface.co/v1"
+key_required = true
+
+[[providers]]
+id = "xai"
+display_name = "xAI"
+api_key_env = "XAI_API_KEY"
+base_url = "https://api.x.ai/v1"
+key_required = true
+
+[[providers]]
+id = "replicate"
+display_name = "Replicate"
+api_key_env = "REPLICATE_API_TOKEN"
+base_url = "https://api.replicate.com/v1"
+key_required = true
+
+[[providers]]
+id = "github-copilot"
+display_name = "GitHub Copilot"
+api_key_env = "GITHUB_TOKEN"
+base_url = "https://api.githubcopilot.com"
+key_required = true
+
+[[providers]]
+id = "chutes"
+display_name = "Chutes.ai"
+api_key_env = "CHUTES_API_KEY"
+base_url = "https://llm.chutes.ai/v1"
+key_required = true
+
+[[providers]]
+id = "venice"
+display_name = "Venice.ai"
+api_key_env = "VENICE_API_KEY"
+base_url = "https://api.venice.ai/api/v1"
+key_required = true
+
+[[providers]]
+id = "qwen"
+display_name = "Qwen (Alibaba)"
+api_key_env = "DASHSCOPE_API_KEY"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+key_required = true
+
+[[providers]]
+id = "minimax"
+display_name = "MiniMax (International)"
+api_key_env = "MINIMAX_API_KEY"
+base_url = "https://api.minimax.io/v1"
+key_required = true
+
+[[providers]]
+id = "minimax-cn"
+display_name = "MiniMax (China)"
+api_key_env = "MINIMAX_CN_API_KEY"
+base_url = "https://api.minimaxi.com/v1"
+key_required = true
+
+[[providers]]
+id = "zhipu"
+display_name = "Zhipu AI (GLM)"
+api_key_env = "ZHIPU_API_KEY"
+base_url = "https://open.bigmodel.cn/api/paas/v4"
+key_required = true
+
+[[providers]]
+id = "zhipu_coding"
+display_name = "Zhipu Coding (CodeGeeX)"
+api_key_env = "ZHIPU_API_KEY"
+base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+key_required = true
+
+[[providers]]
+id = "zai"
+display_name = "Z.AI"
+api_key_env = "ZHIPU_API_KEY"
+base_url = "https://api.z.ai/api/paas/v4"
+key_required = true
+
+[[providers]]
+id = "zai_coding"
+display_name = "Z.AI Coding"
+api_key_env = "ZHIPU_API_KEY"
+base_url = "https://api.z.ai/api/coding/paas/v4"
+key_required = true
+
+[[providers]]
+id = "moonshot"
+display_name = "Moonshot (Kimi)"
+api_key_env = "MOONSHOT_API_KEY"
+base_url = "https://api.moonshot.ai/v1"
+key_required = true
+
+[[providers]]
+id = "kimi_coding"
+display_name = "Kimi for Code"
+api_key_env = "KIMI_API_KEY"
+base_url = "https://api.kimi.com/coding"
+key_required = true
+
+[[providers]]
+id = "qianfan"
+display_name = "Baidu Qianfan"
+api_key_env = "QIANFAN_API_KEY"
+base_url = "https://qianfan.baidubce.com/v2"
+key_required = true
+
+[[providers]]
+id = "volcengine"
+display_name = "Volcano Engine (Doubao)"
+api_key_env = "VOLCENGINE_API_KEY"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+key_required = true
+
+[[providers]]
+id = "volcengine_coding"
+display_name = "Volcano Engine Coding Plan"
+api_key_env = "VOLCENGINE_API_KEY"
+base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
+key_required = true
+
+[[providers]]
+id = "bedrock"
+display_name = "AWS Bedrock"
+api_key_env = "AWS_ACCESS_KEY_ID"
+base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+key_required = true
+
+[[providers]]
+id = "chatgpt"
+display_name = "ChatGPT (Session Auth)"
+api_key_env = "CHATGPT_SESSION_TOKEN"
+base_url = "https://chatgpt.com/backend-api"
+key_required = true
+
+[[providers]]
+id = "claude-code"
+display_name = "Claude Code"
+api_key_env = ""
+base_url = ""
+key_required = false

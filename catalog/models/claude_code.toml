@@ -1,0 +1,43 @@
+# Claude Code CLI models (3) -- subprocess-based
+
+[[models]]
+id = "claude-code/opus"
+display_name = "Claude Opus (CLI)"
+provider = "claude-code"
+tier = "frontier"
+context_window = 200000
+max_output_tokens = 128000
+input_cost_per_m = 5.0
+output_cost_per_m = 25.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = ["claude-code-opus"]
+
+[[models]]
+id = "claude-code/sonnet"
+display_name = "Claude Sonnet (CLI)"
+provider = "claude-code"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 64000
+input_cost_per_m = 3.0
+output_cost_per_m = 15.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = ["claude-code", "claude-code-sonnet"]
+
+[[models]]
+id = "claude-code/haiku"
+display_name = "Claude Haiku (CLI)"
+provider = "claude-code"
+tier = "fast"
+context_window = 200000
+max_output_tokens = 8192
+input_cost_per_m = 0.25
+output_cost_per_m = 1.25
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = ["claude-code-haiku"]

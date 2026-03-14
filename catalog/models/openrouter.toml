@@ -1,0 +1,211 @@
+# OpenRouter models (16) -- pass-through models using real upstream IDs
+
+[[models]]
+id = "openrouter/google/gemini-2.5-flash"
+display_name = "Gemini 2.5 Flash (OpenRouter)"
+provider = "openrouter"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 65536
+input_cost_per_m = 0.15
+output_cost_per_m = 0.60
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+[[models]]
+id = "openrouter/anthropic/claude-sonnet-4"
+display_name = "Claude Sonnet 4 (OpenRouter)"
+provider = "openrouter"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 64000
+input_cost_per_m = 3.0
+output_cost_per_m = 15.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+[[models]]
+id = "openrouter/openai/gpt-4o"
+display_name = "GPT-4o (OpenRouter)"
+provider = "openrouter"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 16384
+input_cost_per_m = 2.5
+output_cost_per_m = 10.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+[[models]]
+id = "openrouter/deepseek/deepseek-chat"
+display_name = "DeepSeek V3 (OpenRouter)"
+provider = "openrouter"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 32768
+input_cost_per_m = 0.14
+output_cost_per_m = 0.28
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "openrouter/meta-llama/llama-3.3-70b-instruct"
+display_name = "Llama 3.3 70B (OpenRouter)"
+provider = "openrouter"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 32768
+input_cost_per_m = 0.39
+output_cost_per_m = 0.39
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "openrouter/qwen/qwen-2.5-72b-instruct"
+display_name = "Qwen 2.5 72B (OpenRouter)"
+provider = "openrouter"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 32768
+input_cost_per_m = 0.36
+output_cost_per_m = 0.36
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "openrouter/google/gemini-2.5-pro"
+display_name = "Gemini 2.5 Pro (OpenRouter)"
+provider = "openrouter"
+tier = "frontier"
+context_window = 1048576
+max_output_tokens = 65536
+input_cost_per_m = 1.25
+output_cost_per_m = 10.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+[[models]]
+id = "openrouter/mistralai/mistral-large-latest"
+display_name = "Mistral Large (OpenRouter)"
+provider = "openrouter"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 2.0
+output_cost_per_m = 6.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "openrouter/google/gemma-2-9b-it"
+display_name = "Gemma 2 9B (OpenRouter)"
+provider = "openrouter"
+tier = "fast"
+context_window = 8192
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "openrouter/deepseek/deepseek-r1"
+display_name = "DeepSeek R1 (OpenRouter)"
+provider = "openrouter"
+tier = "frontier"
+context_window = 128000
+max_output_tokens = 32768
+input_cost_per_m = 0.55
+output_cost_per_m = 2.19
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+
+# OpenRouter free models
+
+[[models]]
+id = "openrouter/google/gemma-2-9b-it:free"
+display_name = "Gemma 2 9B Free (OpenRouter)"
+provider = "openrouter"
+tier = "fast"
+context_window = 8192
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "openrouter/meta-llama/llama-3.1-8b-instruct:free"
+display_name = "Llama 3.1 8B Free (OpenRouter)"
+provider = "openrouter"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "openrouter/qwen/qwen-2.5-7b-instruct:free"
+display_name = "Qwen 2.5 7B Free (OpenRouter)"
+provider = "openrouter"
+tier = "fast"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "openrouter/mistralai/mistral-7b-instruct:free"
+display_name = "Mistral 7B Free (OpenRouter)"
+provider = "openrouter"
+tier = "fast"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "openrouter/huggingfaceh4/zephyr-7b-beta:free"
+display_name = "Zephyr 7B Free (OpenRouter)"
+provider = "openrouter"
+tier = "fast"
+context_window = 4096
+max_output_tokens = 2048
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "openrouter/deepseek/deepseek-r1:free"
+display_name = "DeepSeek R1 Free (OpenRouter)"
+provider = "openrouter"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 32768
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true

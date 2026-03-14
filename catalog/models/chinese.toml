@@ -1,0 +1,625 @@
+# Chinese provider models
+
+# Qwen / Alibaba (11)
+
+[[models]]
+id = "qwen-max"
+display_name = "Qwen Max"
+provider = "qwen"
+tier = "frontier"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 4.00
+output_cost_per_m = 12.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "qwen-plus"
+display_name = "Qwen Plus"
+provider = "qwen"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.80
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["qwen"]
+
+[[models]]
+id = "qwen-turbo"
+display_name = "Qwen Turbo"
+provider = "qwen"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.30
+output_cost_per_m = 0.60
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "qwen-vl-plus"
+display_name = "Qwen VL Plus"
+provider = "qwen"
+tier = "smart"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 1.50
+output_cost_per_m = 4.50
+supports_tools = false
+supports_vision = true
+supports_streaming = true
+
+[[models]]
+id = "qwen-coder-plus"
+display_name = "Qwen Coder Plus"
+provider = "qwen"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.80
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "qwen-long"
+display_name = "Qwen Long"
+provider = "qwen"
+tier = "balanced"
+context_window = 1000000
+max_output_tokens = 8192
+input_cost_per_m = 0.50
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "qwen3-235b-a22b"
+display_name = "Qwen3 235B"
+provider = "qwen"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 4.00
+output_cost_per_m = 12.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["qwen3"]
+
+[[models]]
+id = "qwen3-30b-a3b"
+display_name = "Qwen3 30B"
+provider = "qwen"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.30
+output_cost_per_m = 0.60
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "qwen-coder-plus-latest"
+display_name = "Qwen Coder Plus (Latest)"
+provider = "qwen"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.80
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["qwen-coder"]
+
+[[models]]
+id = "qwen2.5-coder-32b-instruct"
+display_name = "Qwen 2.5 Coder 32B"
+provider = "qwen"
+tier = "balanced"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.80
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "qwen-vl-max"
+display_name = "Qwen VL Max"
+provider = "qwen"
+tier = "frontier"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 3.00
+output_cost_per_m = 9.00
+supports_tools = false
+supports_vision = true
+supports_streaming = true
+
+# MiniMax International (6)
+
+[[models]]
+id = "minimax-text-01"
+display_name = "MiniMax Text 01"
+provider = "minimax"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 16384
+input_cost_per_m = 1.00
+output_cost_per_m = 3.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["minimax"]
+
+[[models]]
+id = "MiniMax-M2.5"
+display_name = "MiniMax M2.5"
+provider = "minimax"
+tier = "frontier"
+context_window = 1048576
+max_output_tokens = 16384
+input_cost_per_m = 1.10
+output_cost_per_m = 4.40
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["minimax-m2.5"]
+
+[[models]]
+id = "MiniMax-M2.5-highspeed"
+display_name = "MiniMax M2.5 Highspeed"
+provider = "minimax"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 16384
+input_cost_per_m = 0.80
+output_cost_per_m = 3.20
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["minimax-m2.5-highspeed", "m2.5-highspeed"]
+
+[[models]]
+id = "MiniMax-M2.1"
+display_name = "MiniMax M2.1"
+provider = "minimax"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 16384
+input_cost_per_m = 1.00
+output_cost_per_m = 3.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["minimax-m2.1"]
+
+[[models]]
+id = "abab6.5-chat"
+display_name = "ABAB 6.5 Chat"
+provider = "minimax"
+tier = "balanced"
+context_window = 245760
+max_output_tokens = 8192
+input_cost_per_m = 0.50
+output_cost_per_m = 1.50
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "abab7-chat"
+display_name = "ABAB 7 Chat"
+provider = "minimax"
+tier = "smart"
+context_window = 524288
+max_output_tokens = 16384
+input_cost_per_m = 0.80
+output_cost_per_m = 2.40
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["abab7"]
+
+# MiniMax China (6) -- same models, different endpoint (minimaxi.com)
+
+[[models]]
+id = "minimax-text-01"
+display_name = "MiniMax Text 01"
+provider = "minimax-cn"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 16384
+input_cost_per_m = 1.00
+output_cost_per_m = 3.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "MiniMax-M2.5"
+display_name = "MiniMax M2.5"
+provider = "minimax-cn"
+tier = "frontier"
+context_window = 1048576
+max_output_tokens = 16384
+input_cost_per_m = 1.10
+output_cost_per_m = 4.40
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+[[models]]
+id = "MiniMax-M2.5-highspeed"
+display_name = "MiniMax M2.5 Highspeed"
+provider = "minimax-cn"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 16384
+input_cost_per_m = 0.80
+output_cost_per_m = 3.20
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+[[models]]
+id = "MiniMax-M2.1"
+display_name = "MiniMax M2.1"
+provider = "minimax-cn"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 16384
+input_cost_per_m = 1.00
+output_cost_per_m = 3.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "abab6.5-chat"
+display_name = "ABAB 6.5 Chat"
+provider = "minimax-cn"
+tier = "balanced"
+context_window = 245760
+max_output_tokens = 8192
+input_cost_per_m = 0.50
+output_cost_per_m = 1.50
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "abab7-chat"
+display_name = "ABAB 7 Chat"
+provider = "minimax-cn"
+tier = "smart"
+context_window = 524288
+max_output_tokens = 16384
+input_cost_per_m = 0.80
+output_cost_per_m = 2.40
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+# Zhipu AI / GLM (6)
+
+[[models]]
+id = "glm-4-plus"
+display_name = "GLM-4 Plus"
+provider = "zhipu"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.60
+output_cost_per_m = 2.20
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["glm"]
+
+[[models]]
+id = "glm-4-flash"
+display_name = "GLM-4 Flash"
+provider = "zhipu"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "glm-4v-plus"
+display_name = "GLM-4V Plus"
+provider = "zhipu"
+tier = "smart"
+context_window = 8192
+max_output_tokens = 4096
+input_cost_per_m = 0.60
+output_cost_per_m = 2.20
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+[[models]]
+id = "glm-4-long"
+display_name = "GLM-4 Long"
+provider = "zhipu"
+tier = "balanced"
+context_window = 1000000
+max_output_tokens = 8192
+input_cost_per_m = 0.10
+output_cost_per_m = 0.10
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "glm-5-20250605"
+display_name = "GLM-5"
+provider = "zhipu"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 1.00
+output_cost_per_m = 3.20
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["glm-5"]
+
+[[models]]
+id = "glm-4.7"
+display_name = "GLM-4.7"
+provider = "zhipu"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.60
+output_cost_per_m = 2.20
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+# Zhipu Coding / CodeGeeX (1)
+
+[[models]]
+id = "codegeex-4"
+display_name = "CodeGeeX 4"
+provider = "zhipu_coding"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.10
+output_cost_per_m = 0.10
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["codegeex"]
+
+# Z.AI Coding / GLM Coding Models (2)
+
+[[models]]
+id = "glm-5-coding"
+display_name = "GLM-5 Coding"
+provider = "zai_coding"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 2.00
+output_cost_per_m = 8.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["glm-5-code", "glm-coding"]
+
+[[models]]
+id = "glm-4.7-coding"
+display_name = "GLM-4.7 Coding"
+provider = "zai_coding"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 1.50
+output_cost_per_m = 5.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["glm-4.7-code"]
+
+# Moonshot / Kimi (5)
+
+[[models]]
+id = "moonshot-v1-128k"
+display_name = "Moonshot V1 128K"
+provider = "moonshot"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.80
+output_cost_per_m = 0.80
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "moonshot-v1-32k"
+display_name = "Moonshot V1 32K"
+provider = "moonshot"
+tier = "balanced"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 0.30
+output_cost_per_m = 0.30
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "moonshot-v1-8k"
+display_name = "Moonshot V1 8K"
+provider = "moonshot"
+tier = "fast"
+context_window = 8192
+max_output_tokens = 4096
+input_cost_per_m = 0.10
+output_cost_per_m = 0.10
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "kimi-k2"
+display_name = "Kimi K2"
+provider = "moonshot"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 2.00
+output_cost_per_m = 8.00
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+[[models]]
+id = "kimi-k2.5"
+display_name = "Kimi K2.5"
+provider = "moonshot"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 2.00
+output_cost_per_m = 8.00
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["kimi-k2.5-0711"]
+
+# Kimi for Code (1)
+
+[[models]]
+id = "kimi-for-coding"
+display_name = "Kimi For Coding"
+provider = "kimi_coding"
+tier = "frontier"
+context_window = 262144
+max_output_tokens = 32768
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+
+# Baidu Qianfan / ERNIE (3)
+
+[[models]]
+id = "ernie-4.5-8k"
+display_name = "ERNIE 4.5 8K"
+provider = "qianfan"
+tier = "smart"
+context_window = 8192
+max_output_tokens = 4096
+input_cost_per_m = 2.00
+output_cost_per_m = 6.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["ernie"]
+
+[[models]]
+id = "ernie-4.0-turbo-8k"
+display_name = "ERNIE 4.0 Turbo 8K"
+provider = "qianfan"
+tier = "balanced"
+context_window = 8192
+max_output_tokens = 4096
+input_cost_per_m = 1.00
+output_cost_per_m = 3.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "ernie-speed-128k"
+display_name = "ERNIE Speed 128K"
+provider = "qianfan"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+# Volcano Engine / Doubao (4)
+
+[[models]]
+id = "doubao-seed-1-6-251015"
+display_name = "Doubao Seed 1.6 Pro"
+provider = "volcengine"
+tier = "smart"
+context_window = 262144
+max_output_tokens = 16384
+input_cost_per_m = 0.80
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["doubao", "doubao-pro"]
+
+[[models]]
+id = "doubao-seed-2-0-lite"
+display_name = "Doubao Seed 2.0 Lite"
+provider = "volcengine"
+tier = "balanced"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.30
+output_cost_per_m = 0.60
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["doubao-lite"]
+
+[[models]]
+id = "doubao-seed-2-0-mini"
+display_name = "Doubao Seed 2.0 Mini"
+provider = "volcengine"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.10
+output_cost_per_m = 0.10
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["doubao-mini"]
+
+[[models]]
+id = "doubao-seed-code"
+display_name = "Doubao Seed Code"
+provider = "volcengine"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.50
+output_cost_per_m = 1.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["doubao-code"]

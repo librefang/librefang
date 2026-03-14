@@ -1,0 +1,41 @@
+# AI21 Labs models (3)
+
+[[models]]
+id = "jamba-1.5-large"
+display_name = "Jamba 1.5 Large"
+provider = "ai21"
+tier = "smart"
+context_window = 256000
+max_output_tokens = 4096
+input_cost_per_m = 2.0
+output_cost_per_m = 8.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["jamba"]
+
+[[models]]
+id = "jamba-1.5-mini"
+display_name = "Jamba 1.5 Mini"
+provider = "ai21"
+tier = "fast"
+context_window = 256000
+max_output_tokens = 4096
+input_cost_per_m = 0.20
+output_cost_per_m = 0.40
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+
+[[models]]
+id = "jamba-instruct"
+display_name = "Jamba Instruct"
+provider = "ai21"
+tier = "balanced"
+context_window = 256000
+max_output_tokens = 4096
+input_cost_per_m = 0.50
+output_cost_per_m = 0.70
+supports_tools = true
+supports_vision = false
+supports_streaming = true
