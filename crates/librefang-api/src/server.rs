@@ -139,8 +139,7 @@ pub async fn build_router(
         // Bulk agent operations (must be before /api/agents/{id} to avoid path conflicts)
         .route(
             "/api/agents/bulk",
-            axum::routing::post(routes::bulk_create_agents)
-                .delete(routes::bulk_delete_agents),
+            axum::routing::post(routes::bulk_create_agents).delete(routes::bulk_delete_agents),
         )
         .route(
             "/api/agents/bulk/start",

@@ -11311,9 +11311,7 @@ pub async fn bulk_create_agents(
     if req.agents.len() > BULK_LIMIT {
         return (
             StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": format!("Too many agents (max {})", BULK_LIMIT)}),
-            ),
+            Json(serde_json::json!({"error": format!("Too many agents (max {})", BULK_LIMIT)})),
         );
     }
 
@@ -11450,9 +11448,7 @@ pub async fn bulk_delete_agents(
     if req.agent_ids.len() > BULK_LIMIT {
         return (
             StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": format!("Too many agent IDs (max {})", BULK_LIMIT)}),
-            ),
+            Json(serde_json::json!({"error": format!("Too many agent IDs (max {})", BULK_LIMIT)})),
         );
     }
 
@@ -11518,9 +11514,7 @@ pub async fn bulk_start_agents(
     if req.agent_ids.len() > BULK_LIMIT {
         return (
             StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": format!("Too many agent IDs (max {})", BULK_LIMIT)}),
-            ),
+            Json(serde_json::json!({"error": format!("Too many agent IDs (max {})", BULK_LIMIT)})),
         );
     }
 
@@ -11587,9 +11581,7 @@ pub async fn bulk_stop_agents(
     if req.agent_ids.len() > BULK_LIMIT {
         return (
             StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": format!("Too many agent IDs (max {})", BULK_LIMIT)}),
-            ),
+            Json(serde_json::json!({"error": format!("Too many agent IDs (max {})", BULK_LIMIT)})),
         );
     }
 
