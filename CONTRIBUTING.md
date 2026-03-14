@@ -246,7 +246,7 @@ agents/my-agent/agent.toml
 
 ```toml
 name = "my-agent"
-version = "0.4.0"
+version = "0.1.0"
 description = "A brief description of what this agent does."
 author = "librefang"
 module = "builtin:chat"

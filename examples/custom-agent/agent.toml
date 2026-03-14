@@ -6,7 +6,7 @@
 ## For the full reference, see: docs/agent-templates.md
 
 name = "my-custom-agent"
-version = "0.4.0"
+version = "0.1.0"
 description = "A friendly assistant that helps with daily tasks."
 author = "your-name"
 module = "builtin:chat"
