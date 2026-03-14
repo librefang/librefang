@@ -44,12 +44,20 @@ i18n/ @librefang/community
 CONTRIBUTING.md @librefang/community
 README.md @librefang/community
 
-# ── DevOps (CI, scripts, release) ────────────────────────────────────
+# ── DevOps (CI, scripts, release, build tooling) ─────────────────────
 .github/ @librefang/devops
 scripts/ @librefang/devops
+deploy/ @librefang/devops
+xtask/ @librefang/devops
 Cargo.toml @librefang/devops @librefang/core
 Cargo.lock @librefang/devops
+Cross.toml @librefang/devops
+rust-toolchain.toml @librefang/devops
+CHANGELOG.md @librefang/devops
+MIGRATION.md @librefang/integrations
 
 # ── Governance (owner only) ──────────────────────────────────────────
 GOVERNANCE.md @houko
+MAINTAINERS.md @houko
+CODE_OF_CONDUCT.md @houko
 LICENSE @houko
