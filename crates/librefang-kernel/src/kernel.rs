@@ -702,7 +702,9 @@ impl LibreFangKernel {
                 config.provider_urls.len()
             );
         }
-        // Load user's custom models from ~/.librefang/custom_models.json
+        // Load cached catalog from remote sync (overrides builtins)
+        model_catalog.load_cached_catalog();
+        // Load user's custom models from ~/.librefang/custom_models.json (highest priority)
         let custom_models_path = config.home_dir.join("custom_models.json");
         model_catalog.load_custom_models(&custom_models_path);
         let available_count = model_catalog.available_models().len();

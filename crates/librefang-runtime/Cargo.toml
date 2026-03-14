@@ -33,6 +33,8 @@ regex-lite = { workspace = true }
 rusqlite = { workspace = true }
 tokio-tungstenite = { workspace = true }
 shlex = "1"
+toml = { workspace = true }
+dirs = { workspace = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }

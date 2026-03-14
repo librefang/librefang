@@ -328,6 +328,102 @@ impl ModelCatalog {
         }
     }
 
+    /// Load cached catalog files from `~/.librefang/cache/catalog/`.
+    ///
+    /// These are fetched from the remote model-catalog repository via
+    /// [`crate::catalog_sync::sync_catalog()`]. Cached models override
+    /// builtins; user-local models (loaded later) override cached.
+    pub fn load_cached_catalog(&mut self) {
+        let Some(cache_dir) = crate::catalog_sync::cache_dir() else {
+            return;
+        };
+        if !cache_dir.exists() {
+            return;
+        }
+        // Load providers/*.toml files from cache
+        let providers_dir = cache_dir.join("providers");
+        if providers_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&providers_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().is_some_and(|e| e == "toml") {
+                        match self.load_provider_catalog_file(&path) {
+                            Ok(n) => {
+                                tracing::debug!(
+                                    "Loaded {} models from cached {}",
+                                    n,
+                                    path.display()
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to load cached catalog {}: {}",
+                                    path.display(),
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Load aliases
+        let aliases_path = cache_dir.join("aliases.toml");
+        if aliases_path.exists() {
+            if let Err(e) = self.load_aliases_file(&aliases_path) {
+                tracing::warn!("Failed to load cached aliases: {e}");
+            }
+        }
+    }
+
+    /// Load a single provider catalog TOML file with `[[models]]` entries.
+    ///
+    /// Models already present (by ID) are updated in-place; new models are
+    /// appended. Returns the number of *new* models added.
+    fn load_provider_catalog_file(&mut self, path: &std::path::Path) -> Result<usize, String> {
+        use serde::Deserialize;
+
+        #[derive(Deserialize)]
+        struct ProviderFile {
+            #[serde(default)]
+            models: Vec<ModelCatalogEntry>,
+        }
+
+        let content = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
+        let file: ProviderFile =
+            toml::from_str(&content).map_err(|e| format!("parse error: {e}"))?;
+
+        let mut added = 0usize;
+        for model in file.models {
+            if let Some(existing) = self.models.iter_mut().find(|m| m.id == model.id) {
+                *existing = model;
+            } else {
+                self.models.push(model);
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
+
+    /// Load aliases from a TOML file with an `[aliases]` table.
+    fn load_aliases_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        use serde::Deserialize;
+
+        #[derive(Deserialize)]
+        struct AliasFile {
+            #[serde(default)]
+            aliases: HashMap<String, String>,
+        }
+
+        let content = std::fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
+        let file: AliasFile = toml::from_str(&content).map_err(|e| format!("parse error: {e}"))?;
+
+        for (alias, canonical) in file.aliases {
+            self.aliases.entry(alias).or_insert(canonical);
+        }
+        Ok(())
+    }
+
     /// Save all custom-tier models to a JSON file.
     pub fn save_custom_models(&self, path: &std::path::Path) -> Result<(), String> {
         let custom: Vec<&ModelCatalogEntry> = self

@@ -1,0 +1,62 @@
+[provider]
+id = "cerebras"
+display_name = "Cerebras"
+api_key_env = "CEREBRAS_API_KEY"
+base_url = "https://api.cerebras.ai/v1"
+key_required = true
+
+[[models]]
+id = "cerebras/llama3.3-70b"
+display_name = "Llama 3.3 70B (Cerebras)"
+provider = "cerebras"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.06
+output_cost_per_m = 0.06
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "cerebras/llama3.1-8b"
+display_name = "Llama 3.1 8B (Cerebras)"
+provider = "cerebras"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.01
+output_cost_per_m = 0.01
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "cerebras/llama-4-scout-17b"
+display_name = "Llama 4 Scout (Cerebras)"
+provider = "cerebras"
+tier = "smart"
+context_window = 512000
+max_output_tokens = 8192
+input_cost_per_m = 0.1
+output_cost_per_m = 0.1
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "cerebras/qwen-2.5-32b"
+display_name = "Qwen 2.5 32B (Cerebras)"
+provider = "cerebras"
+tier = "balanced"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 0.06
+output_cost_per_m = 0.06
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []

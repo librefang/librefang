@@ -10925,3 +10925,54 @@ fn remove_toml_section(content: &str, section: &str) -> String {
     }
     result
 }
+
+// ---------------------------------------------------------------------------
+// Catalog sync endpoints
+// ---------------------------------------------------------------------------
+
+/// POST /api/catalog/update — Sync model catalog from the remote repository.
+///
+/// Downloads the latest catalog TOML files from GitHub and caches them locally.
+/// After syncing, the kernel's in-memory catalog is refreshed.
+pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match librefang_runtime::catalog_sync::sync_catalog().await {
+        Ok(result) => {
+            // Refresh the in-memory catalog so the new models are available immediately
+            {
+                let mut catalog = state
+                    .kernel
+                    .model_catalog
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner());
+                catalog.load_cached_catalog();
+                catalog.detect_auth();
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "files_downloaded": result.files_downloaded,
+                    "models_count": result.models_count,
+                    "timestamp": result.timestamp,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": e,
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/catalog/status — Check last catalog sync time.
+pub async fn catalog_status() -> impl IntoResponse {
+    let last_sync = librefang_runtime::catalog_sync::last_sync_time();
+    Json(serde_json::json!({
+        "last_sync": last_sync,
+    }))
+}

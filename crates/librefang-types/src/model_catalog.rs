@@ -197,6 +197,98 @@ impl Default for ProviderInfo {
     }
 }
 
+/// Provider metadata as stored in TOML catalog files.
+///
+/// Unlike [`ProviderInfo`], this struct omits runtime-only fields (`auth_status`,
+/// `model_count`) so it maps 1:1 to the `[provider]` section in community catalog
+/// files at `providers/<name>.toml`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderCatalogToml {
+    /// Provider identifier (e.g. "anthropic").
+    pub id: String,
+    /// Human-readable display name (e.g. "Anthropic").
+    pub display_name: String,
+    /// Environment variable name for the API key.
+    pub api_key_env: String,
+    /// Default base URL.
+    pub base_url: String,
+    /// Whether an API key is required (false for local providers).
+    #[serde(default = "default_key_required")]
+    pub key_required: bool,
+}
+
+fn default_key_required() -> bool {
+    true
+}
+
+impl From<ProviderCatalogToml> for ProviderInfo {
+    fn from(p: ProviderCatalogToml) -> Self {
+        Self {
+            id: p.id,
+            display_name: p.display_name,
+            api_key_env: p.api_key_env,
+            base_url: p.base_url,
+            key_required: p.key_required,
+            auth_status: AuthStatus::default(),
+            model_count: 0,
+        }
+    }
+}
+
+/// A catalog file that can contain an optional `[provider]` section and a
+/// `[[models]]` array. This is the unified format shared between the main
+/// repository (`catalog/providers/*.toml`) and the community model-catalog
+/// repository (`providers/*.toml`).
+///
+/// # TOML format
+///
+/// ```toml
+/// [provider]
+/// id = "anthropic"
+/// display_name = "Anthropic"
+/// api_key_env = "ANTHROPIC_API_KEY"
+/// base_url = "https://api.anthropic.com"
+/// key_required = true
+///
+/// [[models]]
+/// id = "claude-sonnet-4-20250514"
+/// display_name = "Claude Sonnet 4"
+/// provider = "anthropic"
+/// tier = "smart"
+/// context_window = 200000
+/// max_output_tokens = 64000
+/// input_cost_per_m = 3.0
+/// output_cost_per_m = 15.0
+/// supports_tools = true
+/// supports_vision = true
+/// supports_streaming = true
+/// aliases = ["sonnet", "claude-sonnet"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCatalogFile {
+    /// Optional provider metadata (present in community catalog files).
+    pub provider: Option<ProviderCatalogToml>,
+    /// Model entries.
+    #[serde(default)]
+    pub models: Vec<ModelCatalogEntry>,
+}
+
+/// A catalog-level aliases file mapping short names to canonical model IDs.
+///
+/// # TOML format
+///
+/// ```toml
+/// [aliases]
+/// sonnet = "claude-sonnet-4-20250514"
+/// haiku = "claude-haiku-4-5-20251001"
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AliasesCatalogFile {
+    /// Alias -> canonical model ID mappings.
+    #[serde(default)]
+    pub aliases: std::collections::HashMap<String, String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +393,89 @@ mod tests {
         assert_eq!(parsed.id, "anthropic");
         assert_eq!(parsed.auth_status, AuthStatus::Configured);
         assert_eq!(parsed.model_count, 3);
+    }
+
+    #[test]
+    fn test_model_catalog_file_with_provider() {
+        let toml_str = r#"
+[provider]
+id = "anthropic"
+display_name = "Anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+key_required = true
+
+[[models]]
+id = "claude-sonnet-4-20250514"
+display_name = "Claude Sonnet 4"
+provider = "anthropic"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 64000
+input_cost_per_m = 3.0
+output_cost_per_m = 15.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["sonnet", "claude-sonnet"]
+"#;
+        let file: ModelCatalogFile = toml::from_str(toml_str).unwrap();
+        assert!(file.provider.is_some());
+        let p = file.provider.unwrap();
+        assert_eq!(p.id, "anthropic");
+        assert_eq!(p.base_url, "https://api.anthropic.com");
+        assert!(p.key_required);
+        assert_eq!(file.models.len(), 1);
+        assert_eq!(file.models[0].id, "claude-sonnet-4-20250514");
+        assert_eq!(file.models[0].tier, ModelTier::Smart);
+    }
+
+    #[test]
+    fn test_model_catalog_file_without_provider() {
+        let toml_str = r#"
+[[models]]
+id = "gpt-4o"
+display_name = "GPT-4o"
+provider = "openai"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 16384
+input_cost_per_m = 2.5
+output_cost_per_m = 10.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+"#;
+        let file: ModelCatalogFile = toml::from_str(toml_str).unwrap();
+        assert!(file.provider.is_none());
+        assert_eq!(file.models.len(), 1);
+    }
+
+    #[test]
+    fn test_provider_catalog_toml_to_provider_info() {
+        let toml_provider = ProviderCatalogToml {
+            id: "anthropic".to_string(),
+            display_name: "Anthropic".to_string(),
+            api_key_env: "ANTHROPIC_API_KEY".to_string(),
+            base_url: "https://api.anthropic.com".to_string(),
+            key_required: true,
+        };
+        let info: ProviderInfo = toml_provider.into();
+        assert_eq!(info.id, "anthropic");
+        assert_eq!(info.auth_status, AuthStatus::Missing);
+        assert_eq!(info.model_count, 0);
+    }
+
+    #[test]
+    fn test_aliases_catalog_file() {
+        let toml_str = r#"
+[aliases]
+sonnet = "claude-sonnet-4-20250514"
+haiku = "claude-haiku-4-5-20251001"
+"#;
+        let file: AliasesCatalogFile = toml::from_str(toml_str).unwrap();
+        assert_eq!(file.aliases.len(), 2);
+        assert_eq!(file.aliases["sonnet"], "claude-sonnet-4-20250514");
     }
 }

@@ -32,6 +32,9 @@ function settingsPage() {
     customProviderKey: '',
     customProviderStatus: '',
     addingCustomProvider: false,
+    catalogStatus: { last_sync: null },
+    catalogUpdating: false,
+    catalogResult: '',
     loading: true,
     loadError: '',
 
@@ -369,7 +372,8 @@ function settingsPage() {
           this.loadTools(),
           this.loadConfig(),
           this.loadProviders(),
-          this.loadModels()
+          this.loadModels(),
+          this.fetchCatalogStatus()
         ]);
       } catch(e) {
         this.loadError = e.message || this.t('settingsPage.loadError', 'Could not load settings.');
@@ -968,6 +972,51 @@ function settingsPage() {
         this.migStep = 'result';
       }
       this.migrating = false;
+    },
+
+    // -- Model Catalog Sync --
+    async fetchCatalogStatus() {
+      try {
+        var data = await LibreFangAPI.get('/api/catalog/status');
+        this.catalogStatus = data;
+      } catch(e) {
+        console.error('Failed to fetch catalog status:', e);
+      }
+    },
+
+    async updateCatalog() {
+      this.catalogUpdating = true;
+      this.catalogResult = '';
+      try {
+        var data = await LibreFangAPI.post('/api/catalog/update', {});
+        if (data.status === 'ok') {
+          this.catalogResult = this.t('settingsPage.catalogUpdated', 'Updated: {files} files, {models} models', {
+            files: data.files_downloaded,
+            models: data.models_count
+          });
+          this.catalogStatus.last_sync = data.timestamp;
+          // Refresh models list to pick up new catalog entries
+          this.loadModels();
+        } else {
+          this.catalogResult = this.t('settingsPage.catalogError', 'Error: {message}', {
+            message: data.message || 'Unknown error'
+          });
+        }
+      } catch(e) {
+        this.catalogResult = this.t('settingsPage.catalogError', 'Error: {message}', {
+          message: e.message || 'Request failed'
+        });
+      }
+      this.catalogUpdating = false;
+    },
+
+    catalogLastSyncText() {
+      if (this.catalogStatus.last_sync) {
+        return this.t('settingsPage.lastSynced', 'Last synced: {time}', {
+          time: new Date(this.catalogStatus.last_sync).toLocaleString()
+        });
+      }
+      return this.t('settingsPage.neverSynced', 'Never synced');
     },
 
     destroy() {

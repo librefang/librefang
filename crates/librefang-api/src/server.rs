@@ -510,6 +510,15 @@ pub async fn build_router(
         )
         .route("/api/models/{*id}", axum::routing::get(routes::get_model))
         .route("/api/providers", axum::routing::get(routes::list_providers))
+        // Catalog sync
+        .route(
+            "/api/catalog/update",
+            axum::routing::post(routes::catalog_update),
+        )
+        .route(
+            "/api/catalog/status",
+            axum::routing::get(routes::catalog_status),
+        )
         // Copilot OAuth (must be before parametric {name} routes)
         .route(
             "/api/providers/github-copilot/oauth/start",
