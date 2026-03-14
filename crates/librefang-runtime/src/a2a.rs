@@ -418,7 +418,7 @@ impl A2aClient {
         let response = self
             .client
             .get(&agent_json_url)
-            .header("User-Agent", "LibreFang/0.4 A2A")
+            .header("User-Agent", format!("LibreFang/{} A2A", librefang_types::VERSION))
             .send()
             .await
             .map_err(|e| format!("A2A discovery failed: {e}"))?;

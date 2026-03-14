@@ -494,7 +494,7 @@ impl Default for AgentManifest {
     fn default() -> Self {
         Self {
             name: "unnamed".to_string(),
-            version: "0.1.0".to_string(),
+            version: crate::VERSION.to_string(),
             description: String::new(),
             author: String::new(),
             module: "builtin:chat".to_string(),
@@ -754,7 +754,7 @@ mod tests {
     fn test_agent_manifest_serialization() {
         let manifest = AgentManifest {
             name: "test-agent".to_string(),
-            version: "0.1.0".to_string(),
+            version: "0.4.0".to_string(),
             description: "A test agent".to_string(),
             author: "test".to_string(),
             module: "test.wasm".to_string(),
