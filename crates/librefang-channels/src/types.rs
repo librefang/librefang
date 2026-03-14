@@ -8,6 +8,7 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::Stream;
+use tokio::sync::mpsc;
 
 /// The type of messaging channel.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -267,6 +268,37 @@ pub trait ChannelAdapter: Send + Sync {
         _thread_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
         self.send(user, content).await
+    }
+
+    /// Whether this adapter supports streaming output (progressive message updates).
+    ///
+    /// When true, the bridge will use `send_streaming()` instead of `send()` for
+    /// agent responses, enabling real-time token display.
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    /// Stream a response progressively by consuming text deltas from a channel.
+    ///
+    /// For adapters that support streaming (e.g. Telegram), this sends an initial
+    /// placeholder message, then edits it in-place as new tokens arrive. The
+    /// `thread_id` is used for forum-topic replies on supported platforms.
+    ///
+    /// Default implementation collects all deltas and sends as a single message.
+    async fn send_streaming(
+        &self,
+        user: &ChannelUser,
+        mut delta_rx: mpsc::Receiver<String>,
+        _thread_id: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut full_text = String::new();
+        while let Some(delta) = delta_rx.recv().await {
+            full_text.push_str(&delta);
+        }
+        if !full_text.is_empty() {
+            self.send(user, ChannelContent::Text(full_text)).await?;
+        }
+        Ok(())
     }
 }
 

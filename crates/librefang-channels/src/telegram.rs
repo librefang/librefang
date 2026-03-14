@@ -3,16 +3,18 @@
 //! Uses long-polling via `getUpdates` with exponential backoff on failures.
 //! No external Telegram crate — just `reqwest` for full control over error handling.
 
+use crate::formatter;
 use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
     LifecycleReaction,
 };
 use async_trait::async_trait;
 use futures::Stream;
+use librefang_types::config::OutputFormat;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
@@ -26,6 +28,11 @@ const LONG_POLL_TIMEOUT: u64 = 30;
 
 /// Default Telegram Bot API base URL.
 const DEFAULT_API_URL: &str = "https://api.telegram.org";
+
+/// Minimum interval between `editMessageText` calls during streaming.
+/// Telegram rate-limits bots to ~30 edits/minute per chat, so 1 second
+/// provides a safe margin while keeping the UX responsive.
+const STREAMING_EDIT_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// Telegram Bot API adapter using long-polling.
 pub struct TelegramAdapter {
@@ -309,6 +316,85 @@ impl TelegramAdapter {
             body["message_thread_id"] = serde_json::json!(tid);
         }
         let _ = self.client.post(&url).json(&body).send().await?;
+        Ok(())
+    }
+
+    /// Call `sendMessage` and return the message_id of the sent message.
+    ///
+    /// Used for streaming: we send an initial placeholder, then edit it in-place
+    /// as tokens arrive. Returns `None` if the API call fails.
+    async fn api_send_message_returning_id(
+        &self,
+        chat_id: i64,
+        text: &str,
+        thread_id: Option<i64>,
+    ) -> Option<i64> {
+        let url = format!(
+            "{}/bot{}/sendMessage",
+            self.api_base_url,
+            self.token.as_str()
+        );
+        let sanitized = sanitize_telegram_html(text);
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "text": sanitized,
+            "parse_mode": "HTML",
+        });
+        if let Some(tid) = thread_id {
+            body["message_thread_id"] = serde_json::json!(tid);
+        }
+
+        match self.client.post(&url).json(&body).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let json: serde_json::Value = resp.json().await.ok()?;
+                json["result"]["message_id"].as_i64()
+            }
+            Ok(resp) => {
+                let body_text = resp.text().await.unwrap_or_default();
+                warn!("Telegram sendMessage (streaming init) failed: {body_text}");
+                None
+            }
+            Err(e) => {
+                warn!("Telegram sendMessage (streaming init) network error: {e}");
+                None
+            }
+        }
+    }
+
+    /// Call `editMessageText` on the Telegram API to update an existing message.
+    ///
+    /// Used during streaming to progressively replace the message content with
+    /// accumulated tokens. Silently ignores errors (best-effort) since the final
+    /// complete text will be sent as a fallback if editing fails.
+    async fn api_edit_message(
+        &self,
+        chat_id: i64,
+        message_id: i64,
+        text: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let url = format!(
+            "{}/bot{}/editMessageText",
+            self.api_base_url,
+            self.token.as_str()
+        );
+        let sanitized = sanitize_telegram_html(text);
+        let body = serde_json::json!({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": sanitized,
+            "parse_mode": "HTML",
+        });
+
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_default();
+            // Telegram returns 400 "message is not modified" when text hasn't changed —
+            // this is expected and harmless.
+            if !body_text.contains("message is not modified") {
+                warn!("Telegram editMessageText failed ({status}): {body_text}");
+            }
+        }
         Ok(())
     }
 
@@ -644,6 +730,81 @@ impl ChannelAdapter for TelegramAdapter {
             .parse()
             .map_err(|_| format!("Invalid Telegram message_id: {message_id}"))?;
         self.fire_reaction(chat_id, msg_id, &reaction.emoji);
+        Ok(())
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn send_streaming(
+        &self,
+        user: &ChannelUser,
+        mut delta_rx: mpsc::Receiver<String>,
+        thread_id: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let chat_id: i64 = user
+            .platform_id
+            .parse()
+            .map_err(|_| format!("Invalid Telegram chat_id: {}", user.platform_id))?;
+        let tid: Option<i64> = thread_id.and_then(|t| t.parse().ok());
+
+        // Send typing indicator while we wait for the first token.
+        let _ = self.api_send_typing(chat_id, tid).await;
+
+        // Accumulate the full response text.
+        let mut full_text = String::new();
+        let mut sent_message_id: Option<i64> = None;
+        let mut last_edit = Instant::now();
+
+        while let Some(delta) = delta_rx.recv().await {
+            full_text.push_str(&delta);
+
+            // Send the initial message on the first token.
+            if sent_message_id.is_none() {
+                if let Some(msg_id) = self
+                    .api_send_message_returning_id(chat_id, &full_text, tid)
+                    .await
+                {
+                    sent_message_id = Some(msg_id);
+                    last_edit = Instant::now();
+                }
+                continue;
+            }
+
+            // Throttle edits to respect Telegram rate limits.
+            if last_edit.elapsed() >= STREAMING_EDIT_INTERVAL {
+                if let Some(msg_id) = sent_message_id {
+                    let _ = self.api_edit_message(chat_id, msg_id, &full_text).await;
+                    last_edit = Instant::now();
+                }
+            }
+        }
+
+        // Final edit with the complete, formatted text to ensure nothing is lost.
+        // During streaming we sent raw text; the final edit applies Telegram HTML formatting.
+        let formatted = formatter::format_for_channel(&full_text, OutputFormat::TelegramHtml);
+
+        if let Some(msg_id) = sent_message_id {
+            let sanitized = sanitize_telegram_html(&formatted);
+            let chunks = split_message(&sanitized, 4096);
+            if chunks.len() <= 1 {
+                // Single message — just edit in place.
+                let _ = self.api_edit_message(chat_id, msg_id, &formatted).await;
+            } else {
+                // Response exceeds 4096 chars — edit the first chunk in place,
+                // then send remaining chunks as new messages.
+                let _ = self.api_edit_message(chat_id, msg_id, chunks[0]).await;
+                for chunk in &chunks[1..] {
+                    let _ = self.api_send_message(chat_id, chunk, tid).await;
+                }
+            }
+        } else if !full_text.is_empty() {
+            // No streaming message was ever sent (first token never arrived
+            // or sendMessage failed) — fall back to a normal send.
+            self.api_send_message(chat_id, &formatted, tid).await?;
+        }
+
         Ok(())
     }
 
@@ -1642,5 +1803,27 @@ mod tests {
         let output = sanitize_telegram_html(input);
         assert!(output.contains("<b>bold</b>"));
         assert!(output.contains("&lt;thinking&gt;"));
+    }
+
+    #[test]
+    fn test_supports_streaming() {
+        let adapter = TelegramAdapter::new(
+            "fake:token".to_string(),
+            vec![],
+            Duration::from_secs(1),
+            None,
+        );
+        assert!(
+            adapter.supports_streaming(),
+            "TelegramAdapter must report streaming support"
+        );
+    }
+
+    #[test]
+    fn test_streaming_edit_interval_is_sane() {
+        // Ensure the edit interval is at least 500ms to avoid rate limiting,
+        // and at most 5s to keep the UX responsive.
+        assert!(STREAMING_EDIT_INTERVAL >= Duration::from_millis(500));
+        assert!(STREAMING_EDIT_INTERVAL <= Duration::from_secs(5));
     }
 }

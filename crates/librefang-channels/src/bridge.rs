@@ -16,7 +16,7 @@ use librefang_types::agent::AgentId;
 use librefang_types::config::{ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat};
 use librefang_types::message::ContentBlock;
 use std::sync::Arc;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 /// Kernel operations needed by channel adapters.
@@ -226,6 +226,25 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// List discovered external A2A agents.
     async fn a2a_agents_text(&self) -> String {
         "A2A agents not available.".to_string()
+    }
+
+    /// Send a message to an agent and stream text deltas back.
+    ///
+    /// Returns a receiver of incremental text chunks and a join handle for the
+    /// final complete response. Adapters that support streaming (e.g. Telegram)
+    /// can display tokens progressively instead of waiting for the full response.
+    ///
+    /// Default implementation falls back to `send_message()` and emits the
+    /// complete response as a single chunk.
+    async fn send_message_streaming(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> Result<mpsc::Receiver<String>, String> {
+        let response = self.send_message(agent_id, message).await?;
+        let (tx, rx) = mpsc::channel(1);
+        let _ = tx.send(response).await;
+        Ok(rx)
     }
 }
 
@@ -905,7 +924,58 @@ async fn dispatch_message(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
-    // Send to agent and relay response
+    // Streaming path: if the adapter supports progressive output, pipe text
+    // deltas directly to it instead of waiting for the full response.
+    if adapter.supports_streaming() {
+        match handle.send_message_streaming(agent_id, &text).await {
+            Ok(delta_rx) => {
+                send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Streaming)
+                    .await;
+
+                let stream_result = adapter
+                    .send_streaming(&message.sender, delta_rx, thread_id)
+                    .await;
+
+                let (success, error_msg) = match &stream_result {
+                    Ok(()) => {
+                        send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done)
+                            .await;
+                        (true, None)
+                    }
+                    Err(e) => {
+                        warn!("Streaming send failed: {e}");
+                        send_lifecycle_reaction(
+                            adapter,
+                            &message.sender,
+                            msg_id,
+                            AgentPhase::Error,
+                        )
+                        .await;
+                        (false, Some(e.to_string()))
+                    }
+                };
+
+                handle
+                    .record_delivery(
+                        agent_id,
+                        ct_str,
+                        &message.sender.platform_id,
+                        success,
+                        error_msg.as_deref(),
+                        thread_id,
+                    )
+                    .await;
+                return;
+            }
+            Err(e) => {
+                // Streaming not available for this request — fall through to
+                // non-streaming path below.
+                debug!("Streaming unavailable, falling back to non-streaming: {e}");
+            }
+        }
+    }
+
+    // Non-streaming path: send to agent and relay the complete response.
     match handle.send_message(agent_id, &text).await {
         Ok(response) => {
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
