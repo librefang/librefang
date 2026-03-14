@@ -456,14 +456,14 @@ const HTML = `<!DOCTYPE html>
           <div class="platform-demo"><a href="https://flyio.librefang.ai" target="_blank" rel="noopener" onclick="event.stopPropagation()">Live Demo →</a></div>
         </div>
 
-        <a class="platform-card accent-green" href="https://render.com/deploy?repo=https://github.com/librefang/librefang" target="_blank" rel="noopener">
+        <div class="platform-card accent-green" onclick="window.open('https://render.com/deploy?repo=https://github.com/librefang/librefang','_blank')">
           <span class="platform-badge badge-easiest">Easiest</span>
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/></svg></div>
           <div class="platform-name">Render</div>
           <div class="platform-desc">One-click OAuth deploy</div>
           <div class="platform-demo"><a href="https://render.librefang.ai" target="_blank" rel="noopener" onclick="event.stopPropagation()">Live Demo →</a></div>
           <div class="platform-warning">Free tier: sleeps after 15 min, no persistent storage</div>
-        </a>
+        </div>
 
         <a class="platform-card accent-blue" href="https://railway.com/template/d7ebcd2f-8107-4b3f-8860-4693bc72d018" target="_blank" rel="noopener">
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg></div>

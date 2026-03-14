@@ -467,11 +467,17 @@ pub async fn get_agent_session(
                                     // served back when loading session history.
                                     let file_id = uuid::Uuid::new_v4().to_string();
                                     let upload_dir = std::env::temp_dir().join("librefang_uploads");
-                                    let _ = std::fs::create_dir_all(&upload_dir);
+                                    if let Err(e) = std::fs::create_dir_all(&upload_dir) {
+                                        tracing::warn!("Failed to create upload directory: {e}");
+                                    }
                                     if let Ok(bytes) =
                                         base64::engine::general_purpose::STANDARD.decode(data)
                                     {
-                                        let _ = std::fs::write(upload_dir.join(&file_id), &bytes);
+                                        if let Err(e) =
+                                            std::fs::write(upload_dir.join(&file_id), &bytes)
+                                        {
+                                            tracing::warn!("Failed to write upload file: {e}");
+                                        }
                                         UPLOAD_REGISTRY.insert(
                                             file_id.clone(),
                                             UploadMeta {
@@ -2409,7 +2415,9 @@ pub async fn remove_channel(
     // Remove all secret env vars for this channel
     for field_def in meta.fields {
         if let Some(env_var) = field_def.env_var {
-            let _ = remove_secret_env(&secrets_path, env_var);
+            if let Err(e) = remove_secret_env(&secrets_path, env_var) {
+                tracing::warn!("Failed to remove secret env var: {e}");
+            }
             // SAFETY: Single-threaded config operation
             unsafe {
                 std::env::remove_var(env_var);
@@ -3159,7 +3167,9 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
 pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let skills_dir = state.kernel.config.home_dir.join("skills");
     let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
-    let _ = registry.load_all();
+    if let Err(e) = registry.load_all() {
+        tracing::warn!("Failed to reload skill registry: {e}");
+    }
 
     let skills: Vec<serde_json::Value> = registry
         .list()
@@ -3238,7 +3248,9 @@ pub async fn uninstall_skill(
 ) -> impl IntoResponse {
     let skills_dir = state.kernel.config.home_dir.join("skills");
     let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
-    let _ = registry.load_all();
+    if let Err(e) = registry.load_all() {
+        tracing::warn!("Failed to reload skill registry: {e}");
+    }
 
     match registry.remove(&req.name) {
         Ok(()) => {
@@ -5157,7 +5169,9 @@ pub async fn update_agent_budget(
         Ok(()) => {
             // Persist updated entry
             if let Some(entry) = state.kernel.registry.get(agent_id) {
-                let _ = state.kernel.memory.save_agent(&entry);
+                if let Err(e) = state.kernel.memory.save_agent(&entry) {
+                    tracing::warn!("Failed to persist agent state: {e}");
+                }
             }
             (
                 StatusCode::OK,
@@ -5462,7 +5476,9 @@ pub async fn patch_agent(
 
     // Persist updated entry to SQLite
     if let Some(entry) = state.kernel.registry.get(agent_id) {
-        let _ = state.kernel.memory.save_agent(&entry);
+        if let Err(e) = state.kernel.memory.save_agent(&entry) {
+            tracing::warn!("Failed to persist agent state: {e}");
+        }
         (
             StatusCode::OK,
             Json(
@@ -6243,6 +6259,50 @@ pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> imp
         })
         .collect();
     Json(serde_json::json!({"agents": items, "total": items.len()}))
+}
+
+/// GET /api/a2a/agents/{id} — Get a specific external A2A agent by index, URL, or name.
+pub async fn a2a_get_external_agent(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agents = state
+        .kernel
+        .a2a_external_agents
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let make_response = |(_, card): &(String, librefang_runtime::a2a::AgentCard)| {
+        serde_json::json!({
+            "name": card.name,
+            "url": card.url,
+            "description": card.description,
+            "skills": card.skills,
+            "version": card.version,
+        })
+    };
+
+    // Try by index first
+    if let Ok(idx) = id.parse::<usize>() {
+        if let Some(entry) = agents.get(idx) {
+            return (StatusCode::OK, Json(make_response(entry)));
+        }
+    }
+
+    // Try by URL match
+    if let Some(entry) = agents.iter().find(|(_, c)| c.url == id) {
+        return (StatusCode::OK, Json(make_response(entry)));
+    }
+
+    // Try by agent name
+    if let Some(entry) = agents.iter().find(|(_, c)| c.name == id) {
+        return (StatusCode::OK, Json(make_response(entry)));
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": format!("A2A agent '{}' not found", id)})),
+    )
 }
 
 /// POST /api/a2a/discover — Discover a new external A2A agent by URL.
@@ -7092,10 +7152,13 @@ pub async fn set_provider_key(
             if let Ok(existing) = std::fs::read_to_string(&config_path) {
                 // Remove existing [default_model] section if present, then append
                 let cleaned = remove_toml_section(&existing, "default_model");
-                let _ =
-                    std::fs::write(&config_path, format!("{}\n{}", cleaned.trim(), update_toml));
-            } else {
-                let _ = std::fs::write(&config_path, update_toml);
+                if let Err(e) =
+                    std::fs::write(&config_path, format!("{}\n{}", cleaned.trim(), update_toml))
+                {
+                    tracing::warn!("Failed to write config file: {e}");
+                }
+            } else if let Err(e) = std::fs::write(&config_path, update_toml) {
+                tracing::warn!("Failed to write config file: {e}");
             }
 
             // Hot-update the in-memory default model override so resolve_driver()
@@ -7687,7 +7750,9 @@ fn write_secret_env(path: &std::path::Path, key: &str, value: &str) -> Result<()
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("Failed to set file permissions: {e}");
+        }
     }
 
     Ok(())
@@ -7984,7 +8049,9 @@ pub async fn remove_integration(
     state.kernel.extension_health.unregister(&id);
 
     // Hot-disconnect the removed MCP server
-    let _ = state.kernel.reload_extension_mcps().await;
+    if let Err(e) = state.kernel.reload_extension_mcps().await {
+        tracing::warn!("Failed to reload MCP extensions: {e}");
+    }
 
     (
         StatusCode::OK,
@@ -8106,6 +8173,37 @@ pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResp
         Err(e) => {
             tracing::warn!("Failed to load schedules: {e}");
             Json(serde_json::json!({"schedules": [], "total": 0, "error": format!("{e}")}))
+        }
+    }
+}
+
+/// GET /api/schedules/{id} — Get a specific schedule by ID.
+pub async fn get_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_id = schedule_shared_agent_id();
+    match state.kernel.memory.structured_get(agent_id, SCHEDULES_KEY) {
+        Ok(Some(serde_json::Value::Array(arr))) => {
+            if let Some(schedule) = arr.iter().find(|s| s["id"].as_str() == Some(&id)) {
+                (StatusCode::OK, Json(schedule.clone()))
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": format!("Schedule '{}' not found", id)})),
+                )
+            }
+        }
+        Ok(_) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("Schedule '{}' not found", id)})),
+        ),
+        Err(e) => {
+            tracing::warn!("Failed to load schedules: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Failed to load schedules: {e}")})),
+            )
         }
     }
 }
@@ -8396,11 +8494,13 @@ pub async fn run_schedule(
             break;
         }
     }
-    let _ = state.kernel.memory.structured_set(
+    if let Err(e) = state.kernel.memory.structured_set(
         shared_id,
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules_updated),
-    );
+    ) {
+        tracing::warn!("Failed to save structured data: {e}");
+    }
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
     match state
@@ -8499,7 +8599,9 @@ pub async fn update_agent_identity(
         Ok(()) => {
             // Persist identity to SQLite
             if let Some(entry) = state.kernel.registry.get(agent_id) {
-                let _ = state.kernel.memory.save_agent(&entry);
+                if let Err(e) = state.kernel.memory.save_agent(&entry) {
+                    tracing::warn!("Failed to persist agent state: {e}");
+                }
             }
             (
                 StatusCode::OK,
@@ -8844,7 +8946,9 @@ pub async fn clone_agent(
                     let src_file = src_can.join(fname);
                     let dst_file = dst_can.join(fname);
                     if src_file.exists() {
-                        let _ = std::fs::copy(&src_file, &dst_file);
+                        if let Err(e) = std::fs::copy(&src_file, &dst_file) {
+                            tracing::warn!("Failed to copy file: {e}");
+                        }
                     }
                 }
             }
@@ -8852,10 +8956,13 @@ pub async fn clone_agent(
     }
 
     // Copy identity from source
-    let _ = state
+    if let Err(e) = state
         .kernel
         .registry
-        .update_identity(new_id, source.identity.clone());
+        .update_identity(new_id, source.identity.clone())
+    {
+        tracing::warn!("Failed to copy agent identity: {e}");
+    }
 
     (
         StatusCode::CREATED,
@@ -9127,7 +9234,9 @@ pub async fn set_agent_file(
         );
     }
     if let Err(e) = std::fs::rename(&tmp_path, &file_path) {
-        let _ = std::fs::remove_file(&tmp_path);
+        if let Err(e) = std::fs::remove_file(&tmp_path) {
+            tracing::warn!("Failed to remove temporary file: {e}");
+        }
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Rename failed: {e}")})),
@@ -9927,7 +10036,9 @@ pub async fn delete_cron_job(
             let job_id = librefang_types::scheduler::CronJobId(uuid);
             match state.kernel.cron_scheduler.remove_job(job_id) {
                 Ok(_) => {
-                    let _ = state.kernel.cron_scheduler.persist();
+                    if let Err(e) = state.kernel.cron_scheduler.persist() {
+                        tracing::warn!("Failed to persist cron scheduler state: {e}");
+                    }
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({"status": "deleted"})),
@@ -9958,7 +10069,9 @@ pub async fn toggle_cron_job(
             let job_id = librefang_types::scheduler::CronJobId(uuid);
             match state.kernel.cron_scheduler.set_enabled(job_id, enabled) {
                 Ok(()) => {
-                    let _ = state.kernel.cron_scheduler.persist();
+                    if let Err(e) = state.kernel.cron_scheduler.persist() {
+                        tracing::warn!("Failed to persist cron scheduler state: {e}");
+                    }
                     (
                         StatusCode::OK,
                         Json(serde_json::json!({"id": id, "enabled": enabled})),

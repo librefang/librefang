@@ -1,5 +1,5 @@
 name = "assistant"
-version = "0.4.3-beta2-20260314"
+version = "0.4.3-beta3-20260314"
 description = "General-purpose assistant agent. The default OpenClaw agent for everyday tasks, questions, and conversations."
 author = "librefang"
 module = "builtin:chat"
