@@ -289,7 +289,9 @@ pub async fn build_router(
         )
         .route(
             "/api/schedules/{id}",
-            axum::routing::get(routes::get_schedule).delete(routes::delete_schedule).put(routes::update_schedule),
+            axum::routing::get(routes::get_schedule)
+                .delete(routes::delete_schedule)
+                .put(routes::update_schedule),
         )
         .route(
             "/api/schedules/{id}/run",
