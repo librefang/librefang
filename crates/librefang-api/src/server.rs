@@ -560,6 +560,23 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/pairing/notify",
             axum::routing::post(routes::pairing_notify),
         )
+        // OAuth/OIDC external authentication endpoints
+        .route(
+            "/auth/providers",
+            axum::routing::get(crate::oauth::auth_providers),
+        )
+        .route(
+            "/auth/login",
+            axum::routing::get(crate::oauth::auth_login),
+        )
+        .route(
+            "/auth/callback",
+            axum::routing::get(crate::oauth::auth_callback),
+        )
+        .route(
+            "/auth/userinfo",
+            axum::routing::get(crate::oauth::auth_userinfo),
+        )
 }
 
 /// Build the full API router with all routes, middleware, and state.

@@ -38,6 +38,7 @@ reqwest = { workspace = true }
 url = { workspace = true }
 zip = { workspace = true }
 walkdir = { workspace = true }
+jsonwebtoken = { workspace = true }
 
 [features]
 default = ["all-channels"]
