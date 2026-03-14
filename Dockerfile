@@ -32,7 +32,6 @@ COPY --from=builder /build/packages /opt/librefang/packages
 COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 EXPOSE 4545
-VOLUME /data
 ENV LIBREFANG_HOME=/data
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["librefang", "start", "--foreground"]
