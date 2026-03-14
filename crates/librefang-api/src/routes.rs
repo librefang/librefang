@@ -61,8 +61,15 @@ pub struct AppState {
 /// POST /api/agents — Spawn a new agent.
 pub async fn spawn_agent(
     State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<SpawnRequest>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(
+        lang.as_ref()
+            .map(|l| l.0 .0)
+            .unwrap_or(i18n::DEFAULT_LANGUAGE),
+    );
+
     // Resolve template name → manifest_toml if template is provided and manifest_toml is empty
     let manifest_toml = if req.manifest_toml.trim().is_empty() {
         if let Some(ref tmpl_name) = req.template {
@@ -74,7 +81,7 @@ pub async fn spawn_agent(
             if safe_name.is_empty() || safe_name != *tmpl_name {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "Invalid template name"})),
+                    Json(serde_json::json!({"error": t.t("api-error-template-invalid-name")})),
                 );
             }
             let tmpl_path = state
@@ -90,7 +97,7 @@ pub async fn spawn_agent(
                     return (
                         StatusCode::NOT_FOUND,
                         Json(
-                            serde_json::json!({"error": format!("Template '{}' not found", safe_name)}),
+                            serde_json::json!({"error": t.t_args("api-error-template-not-found", &[("name", &safe_name)])}),
                         ),
                     );
                 }
@@ -98,9 +105,7 @@ pub async fn spawn_agent(
         } else {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": "Either 'manifest_toml' or 'template' is required"}),
-                ),
+                Json(serde_json::json!({"error": t.t("api-error-template-required")})),
             );
         }
     } else {
@@ -112,7 +117,7 @@ pub async fn spawn_agent(
     if manifest_toml.len() > MAX_MANIFEST_SIZE {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Manifest too large (max 1MB)"})),
+            Json(serde_json::json!({"error": t.t("api-error-manifest-too-large")})),
         );
     }
 
@@ -126,7 +131,7 @@ pub async fn spawn_agent(
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(
-                            serde_json::json!({"error": "Signed manifest content does not match manifest_toml"}),
+                            serde_json::json!({"error": t.t("api-error-manifest-signature-mismatch")}),
                         ),
                     );
                 }
@@ -141,7 +146,7 @@ pub async fn spawn_agent(
                 );
                 return (
                     StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({"error": "Manifest signature verification failed"})),
+                    Json(serde_json::json!({"error": t.t("api-error-manifest-signature-failed")})),
                 );
             }
         }
@@ -153,7 +158,7 @@ pub async fn spawn_agent(
             tracing::warn!("Invalid manifest TOML: {e}");
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid manifest format"})),
+                Json(serde_json::json!({"error": t.t("api-error-manifest-invalid-format")})),
             );
         }
     };
@@ -171,7 +176,7 @@ pub async fn spawn_agent(
             tracing::warn!("Spawn failed: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Agent spawn failed"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-spawn-failed")})),
             )
         }
     }
@@ -338,15 +343,22 @@ pub fn inject_attachments_into_session(
 /// POST /api/agents/:id/message — Send a message to an agent.
 pub async fn send_message(
     State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Path(id): Path<String>,
     Json(req): Json<MessageRequest>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(
+        lang.as_ref()
+            .map(|l| l.0 .0)
+            .unwrap_or(i18n::DEFAULT_LANGUAGE),
+    );
+
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -356,7 +368,7 @@ pub async fn send_message(
     if req.message.len() > MAX_MESSAGE_SIZE {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
+            Json(serde_json::json!({"error": t.t("api-error-message-too-large")})),
         );
     }
 
@@ -364,7 +376,7 @@ pub async fn send_message(
     if state.kernel.registry.get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
 
