@@ -9,10 +9,10 @@
 
 services:
   - type: web
-    runtime: docker
+    runtime: image
     name: librefang
-    repo: https://github.com/librefang/librefang.git
-    dockerfilePath: ./Dockerfile
+    image:
+      url: ghcr.io/librefang/librefang:latest
     plan: free
     healthCheckPath: /api/health
     envVars:

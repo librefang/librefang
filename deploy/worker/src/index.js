@@ -441,7 +441,7 @@ const HTML = `<!DOCTYPE html>
           <div class="platform-warning">Free tier: sleeps after 15 min, no persistent storage</div>
         </a>
 
-        <a class="platform-card accent-blue" href="https://railway.com/template?template=https://github.com/librefang/librefang" target="_blank" rel="noopener">
+        <a class="platform-card accent-blue" href="https://railway.com/new/template?template=https://github.com/librefang/librefang" target="_blank" rel="noopener">
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg></div>
           <div class="platform-name">Railway</div>
           <div class="platform-desc">Simple deploy with $5 free credit</div>
