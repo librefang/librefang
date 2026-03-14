@@ -4,19 +4,18 @@
 //! `BridgeManager` which owns running adapters and dispatches messages.
 
 use crate::formatter;
+use crate::rate_limiter::ChannelRateLimiter;
 use crate::router::AgentRouter;
 use crate::types::{
     default_phase_emoji, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelUser,
     LifecycleReaction,
 };
 use async_trait::async_trait;
-use dashmap::DashMap;
 use futures::StreamExt;
 use librefang_types::agent::AgentId;
 use librefang_types::config::{ChannelOverrides, DmPolicy, GroupPolicy, OutputFormat};
 use librefang_types::message::ContentBlock;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
@@ -227,48 +226,6 @@ pub trait ChannelBridgeHandle: Send + Sync {
     /// List discovered external A2A agents.
     async fn a2a_agents_text(&self) -> String {
         "A2A agents not available.".to_string()
-    }
-}
-
-/// Per-channel rate limiter tracking message timestamps per user.
-///
-/// Key: `"{channel_type}:{platform_id}"`, Value: timestamps of recent messages.
-#[derive(Debug, Clone, Default)]
-pub struct ChannelRateLimiter {
-    /// Recent message timestamps per user key.
-    buckets: Arc<DashMap<String, Vec<Instant>>>,
-}
-
-impl ChannelRateLimiter {
-    /// Check if a user is rate-limited. Returns `Ok(())` if allowed, `Err(msg)` if blocked.
-    ///
-    /// `max_per_minute`: 0 means unlimited.
-    pub fn check(
-        &self,
-        channel_type: &str,
-        platform_id: &str,
-        max_per_minute: u32,
-    ) -> Result<(), String> {
-        if max_per_minute == 0 {
-            return Ok(());
-        }
-
-        let key = format!("{channel_type}:{platform_id}");
-        let now = Instant::now();
-        let window = std::time::Duration::from_secs(60);
-
-        let mut entry = self.buckets.entry(key).or_default();
-        // Evict timestamps older than 1 minute
-        entry.retain(|&ts| now.duration_since(ts) < window);
-
-        if entry.len() >= max_per_minute as usize {
-            return Err(format!(
-                "Rate limit exceeded ({max_per_minute} messages/minute). Please wait."
-            ));
-        }
-
-        entry.push(now);
-        Ok(())
     }
 }
 

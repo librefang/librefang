@@ -9,6 +9,7 @@
 // Core infrastructure — always compiled
 pub mod bridge;
 pub mod formatter;
+pub mod rate_limiter;
 pub mod router;
 pub mod sidecar;
 pub mod types;
@@ -46,6 +47,8 @@ pub mod line;
 pub mod linkedin;
 #[cfg(feature = "channel-mastodon")]
 pub mod mastodon;
+#[cfg(feature = "channel-matrix")]
+pub mod matrix;
 #[cfg(feature = "channel-mattermost")]
 pub mod mattermost;
 #[cfg(feature = "channel-messenger")]
