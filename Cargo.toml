@@ -87,7 +87,7 @@ wasmtime = "42"
 # HTTP server (for API daemon)
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "compression-br"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "compression-gzip", "compression-br", "limit"] }
 
 # Home directory resolution
 dirs = "6"
