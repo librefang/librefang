@@ -86,7 +86,6 @@ impl ViberAdapter {
         self
     }
 
-
     /// Create a new Viber adapter with a custom sender name and avatar.
     pub fn with_sender(
         auth_token: String,
@@ -345,7 +344,8 @@ impl ChannelAdapter for ViberAdapter {
                             if let Some(mut msg) = parse_viber_event(&body.0) {
                                 // Inject account_id for multi-bot routing
                                 if let Some(ref aid) = *account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                    msg.metadata
+                                        .insert("account_id".to_string(), serde_json::json!(aid));
                                 }
                                 let _ = tx.send(msg).await;
                             }

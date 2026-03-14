@@ -77,7 +77,6 @@ impl RevoltAdapter {
         self
     }
 
-
     /// Create a new Revolt adapter with custom API and WebSocket URLs.
     pub fn with_urls(bot_token: String, api_url: String, ws_url: String) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);

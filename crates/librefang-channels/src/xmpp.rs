@@ -76,7 +76,6 @@ impl XmppAdapter {
         self
     }
 
-
     /// Get the bare JID (without resource).
     #[allow(dead_code)]
     pub fn bare_jid(&self) -> &str {

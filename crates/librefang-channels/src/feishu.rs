@@ -90,7 +90,6 @@ impl FeishuAdapter {
         self
     }
 
-
     /// Create a new Feishu adapter with webhook verification.
     pub fn with_verification(
         app_id: String,
@@ -442,10 +441,13 @@ impl ChannelAdapter for FeishuAdapter {
                                     // V2 event format
                                     if let Some(mut msg) = parse_feishu_event(&body.0) {
                                         // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = *account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                let _ = tx.send(msg).await;
+                                        if let Some(ref aid) = *account_id {
+                                            msg.metadata.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(aid),
+                                            );
+                                        }
+                                        let _ = tx.send(msg).await;
                                     }
                                 }
                             } else {
@@ -503,10 +505,13 @@ impl ChannelAdapter for FeishuAdapter {
                                         };
 
                                         // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = *account_id {
-                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                let _ = tx.send(channel_msg).await;
+                                        if let Some(ref aid) = *account_id {
+                                            channel_msg.metadata.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(aid),
+                                            );
+                                        }
+                                        let _ = tx.send(channel_msg).await;
                                     }
                                 }
                             }

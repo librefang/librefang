@@ -63,7 +63,6 @@ impl GitterAdapter {
         self
     }
 
-
     /// Validate token by fetching the authenticated user.
     async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
         let url = "https://api.gitter.im/v1/user";

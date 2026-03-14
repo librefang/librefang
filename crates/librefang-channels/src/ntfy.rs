@@ -71,7 +71,6 @@ impl NtfyAdapter {
         self
     }
 
-
     /// Build an authenticated request builder.
     fn auth_request(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         if self.token.is_empty() {

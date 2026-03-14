@@ -85,7 +85,6 @@ impl TeamsAdapter {
         self
     }
 
-
     /// Obtain a valid OAuth2 bearer token, refreshing if expired or missing.
     async fn get_token(&self) -> Result<String, Box<dyn std::error::Error>> {
         // Check cache first
@@ -323,7 +322,8 @@ impl ChannelAdapter for TeamsAdapter {
                             if let Some(mut msg) = parse_teams_activity(&body, &app_id, &tenants) {
                                 // Inject account_id for multi-bot routing
                                 if let Some(ref aid) = *account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                    msg.metadata
+                                        .insert("account_id".to_string(), serde_json::json!(aid));
                                 }
                                 let _ = tx.send(msg).await;
                             }

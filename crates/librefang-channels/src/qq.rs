@@ -86,7 +86,6 @@ impl QqAdapter {
         self
     }
 
-
     /// Send a reply to QQ.
     async fn send_qq_message(
         &self,

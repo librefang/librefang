@@ -69,7 +69,6 @@ impl ThreemaAdapter {
         self
     }
 
-
     /// Validate credentials by checking the remaining credits.
     async fn validate(&self) -> Result<u64, Box<dyn std::error::Error>> {
         let url = format!(
@@ -310,10 +309,11 @@ impl ChannelAdapter for ThreemaAdapter {
 
                     if let Some(mut msg) = parse_threema_webhook(&payload, &own_id) {
                         // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                let _ = tx.send(msg).await;
+                        if let Some(ref aid) = account_id {
+                            msg.metadata
+                                .insert("account_id".to_string(), serde_json::json!(aid));
+                        }
+                        let _ = tx.send(msg).await;
                     }
                 });
             }

@@ -90,7 +90,6 @@ impl MumbleAdapter {
         self
     }
 
-
     /// Encode a Mumble packet: 2-byte type (BE) + 4-byte length (BE) + payload.
     fn encode_packet(msg_type: u16, payload: &[u8]) -> Vec<u8> {
         let mut buf = Vec::with_capacity(6 + payload.len());

@@ -112,7 +112,6 @@ impl EmailAdapter {
         self
     }
 
-
     /// Check if a sender is in the allowlist (empty = allow all). Used in tests.
     #[allow(dead_code)]
     fn is_allowed_sender(&self, sender: &str) -> bool {
@@ -426,10 +425,11 @@ impl ChannelAdapter for EmailAdapter {
                     };
 
                     // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(msg).await.is_err() {
+                    if let Some(ref aid) = account_id {
+                        msg.metadata
+                            .insert("account_id".to_string(), serde_json::json!(aid));
+                    }
+                    if tx.send(msg).await.is_err() {
                         info!("Email channel receiver dropped, stopping poll");
                         return;
                     }

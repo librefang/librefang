@@ -246,7 +246,6 @@ impl WeComAdapter {
         self
     }
 
-
     /// Create a new WeCom adapter with callback verification.
     pub fn with_verification(
         corp_id: String,
@@ -380,8 +379,8 @@ impl ChannelAdapter for WeComAdapter {
         let encoding_aes_key = self.encoding_aes_key.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
-        let listener = tokio::net::TcpListener::bind(addr)
         let account_id = Arc::new(self.account_id.clone());
+        let listener = tokio::net::TcpListener::bind(addr)
             .await
             .map_err(|e| format!("failed to bind WeCom webhook listener on {addr}: {e}"))?;
 

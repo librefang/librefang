@@ -67,7 +67,6 @@ impl GotifyAdapter {
         self
     }
 
-
     /// Validate the app token by checking the application info.
     async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
         let url = format!(

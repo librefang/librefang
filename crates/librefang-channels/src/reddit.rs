@@ -112,7 +112,6 @@ impl RedditAdapter {
         self
     }
 
-
     /// Obtain a valid OAuth2 bearer token, refreshing if expired or missing.
     async fn get_token(&self) -> Result<String, Box<dyn std::error::Error>> {
         // Check cache first
@@ -473,10 +472,11 @@ impl ChannelAdapter for RedditAdapter {
                             seen_comments.write().await.insert(comment_id, true);
 
                             // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(msg).await.is_err() {
+                            if let Some(ref aid) = account_id {
+                                msg.metadata
+                                    .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
+                            if tx.send(msg).await.is_err() {
                                 return;
                             }
                         }

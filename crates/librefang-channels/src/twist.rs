@@ -76,7 +76,6 @@ impl TwistAdapter {
         self
     }
 
-
     /// Validate credentials by fetching the authenticated user's info.
     async fn validate(&self) -> Result<(String, String), Box<dyn std::error::Error>> {
         let url = format!("{}/users/get_session_user", TWIST_API_BASE);
@@ -491,10 +490,12 @@ impl ChannelAdapter for TwistAdapter {
                             };
 
                             // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(channel_msg).await.is_err() {
+                            if let Some(ref aid) = account_id {
+                                channel_msg
+                                    .metadata
+                                    .insert("account_id".to_string(), serde_json::json!(aid));
+                            }
+                            if tx.send(channel_msg).await.is_err() {
                                 return;
                             }
                         }

@@ -79,7 +79,6 @@ impl DiscourseAdapter {
         self
     }
 
-
     /// Add Discourse API auth headers to a request builder.
     fn auth_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         builder
@@ -340,10 +339,11 @@ impl ChannelAdapter for DiscourseAdapter {
                     };
 
                     // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(msg).await.is_err() {
+                    if let Some(ref aid) = account_id {
+                        msg.metadata
+                            .insert("account_id".to_string(), serde_json::json!(aid));
+                    }
+                    if tx.send(msg).await.is_err() {
                         return;
                     }
                 }

@@ -82,7 +82,6 @@ impl BlueskyAdapter {
         self
     }
 
-
     /// Create a new Bluesky adapter with a custom PDS service URL.
     pub fn with_service_url(identifier: String, app_password: String, service_url: String) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -497,10 +496,11 @@ impl ChannelAdapter for BlueskyAdapter {
 
                     if let Some(mut msg) = parse_bluesky_notification(notif, &own_did) {
                         // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(msg).await.is_err() {
+                        if let Some(ref aid) = account_id {
+                            msg.metadata
+                                .insert("account_id".to_string(), serde_json::json!(aid));
+                        }
+                        if tx.send(msg).await.is_err() {
                             return;
                         }
                     }

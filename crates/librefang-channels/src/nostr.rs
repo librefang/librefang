@@ -65,7 +65,6 @@ impl NostrAdapter {
         self
     }
 
-
     /// Derive a public key hex string from the private key.
     /// In a real implementation this would use secp256k1 scalar multiplication.
     /// For now, returns a placeholder derived from the private key hash.
@@ -384,10 +383,12 @@ impl ChannelAdapter for NostrAdapter {
                         };
 
                         // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(channel_msg).await.is_err() {
+                        if let Some(ref aid) = account_id {
+                            channel_msg
+                                .metadata
+                                .insert("account_id".to_string(), serde_json::json!(aid));
+                        }
+                        if tx.send(channel_msg).await.is_err() {
                             return;
                         }
                     };

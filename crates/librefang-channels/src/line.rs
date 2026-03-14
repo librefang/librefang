@@ -79,7 +79,6 @@ impl LineAdapter {
         self
     }
 
-
     /// Verify the X-Line-Signature header using HMAC-SHA256.
     ///
     /// The signature is computed as `Base64(HMAC-SHA256(channel_secret, body))`.
@@ -403,10 +402,13 @@ impl ChannelAdapter for LineAdapter {
                                 for event in events {
                                     if let Some(mut msg) = parse_line_event(event) {
                                         // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = *account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                let _ = tx.send(msg).await;
+                                        if let Some(ref aid) = *account_id {
+                                            msg.metadata.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(aid),
+                                            );
+                                        }
+                                        let _ = tx.send(msg).await;
                                     }
                                 }
                             }

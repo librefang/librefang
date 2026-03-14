@@ -90,7 +90,6 @@ impl WebhookAdapter {
         self
     }
 
-
     /// Compute HMAC-SHA256 signature of data with the shared secret.
     ///
     /// Returns the hex-encoded digest prefixed with "sha256=".
@@ -274,7 +273,8 @@ impl ChannelAdapter for WebhookAdapter {
 
                                 // Inject account_id for multi-bot routing
                                 if let Some(ref aid) = *account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                    msg.metadata
+                                        .insert("account_id".to_string(), serde_json::json!(aid));
                                 }
                                 let _ = tx.send(msg).await;
                             }

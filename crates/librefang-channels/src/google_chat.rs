@@ -70,7 +70,6 @@ impl GoogleChatAdapter {
         self
     }
 
-
     /// Get a valid access token, refreshing if expired or missing.
     ///
     /// In a full implementation this would perform JWT signing and exchange with
@@ -336,7 +335,9 @@ impl ChannelAdapter for GoogleChatAdapter {
 
                     // Inject account_id for multi-bot routing
                     if let Some(ref aid) = *account_id {
-                        channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                        channel_msg
+                            .metadata
+                            .insert("account_id".to_string(), serde_json::json!(aid));
                     }
                     let _ = tx.send(channel_msg).await;
                 });

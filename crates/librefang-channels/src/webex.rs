@@ -73,7 +73,6 @@ impl WebexAdapter {
         self
     }
 
-
     /// Validate credentials and retrieve bot identity.
     async fn validate(&self) -> Result<(String, String), Box<dyn std::error::Error>> {
         let url = format!("{}/people/me", WEBEX_API_BASE);
@@ -438,10 +437,12 @@ impl ChannelAdapter for WebexAdapter {
                     };
 
                     // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(channel_msg).await.is_err() {
+                    if let Some(ref aid) = account_id {
+                        channel_msg
+                            .metadata
+                            .insert("account_id".to_string(), serde_json::json!(aid));
+                    }
+                    if tx.send(channel_msg).await.is_err() {
                         return;
                     }
                 };

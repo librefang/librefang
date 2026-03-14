@@ -70,7 +70,6 @@ impl MattermostAdapter {
         self
     }
 
-
     /// Validate the token by calling `GET /api/v4/users/me`.
     async fn validate_token(&self) -> Result<String, Box<dyn std::error::Error>> {
         let url = format!("{}/api/v4/users/me", self.server_url);
@@ -375,10 +374,12 @@ impl ChannelAdapter for MattermostAdapter {
                         );
                         drop(bot_id_guard);
                         // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(channel_msg).await.is_err() {
+                        if let Some(ref aid) = account_id {
+                            channel_msg
+                                .metadata
+                                .insert("account_id".to_string(), serde_json::json!(aid));
+                        }
+                        if tx.send(channel_msg).await.is_err() {
                             return;
                         }
                     }

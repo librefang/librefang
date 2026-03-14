@@ -76,7 +76,6 @@ impl ZulipAdapter {
         self
     }
 
-
     /// Register an event queue with the Zulip server.
     async fn register_queue(&self) -> Result<(String, i64), Box<dyn std::error::Error>> {
         let url = format!("{}/api/v1/register", self.server_url);
@@ -423,10 +422,12 @@ impl ChannelAdapter for ZulipAdapter {
                     };
 
                     // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(channel_msg).await.is_err() {
+                    if let Some(ref aid) = account_id {
+                        channel_msg
+                            .metadata
+                            .insert("account_id".to_string(), serde_json::json!(aid));
+                    }
+                    if tx.send(channel_msg).await.is_err() {
                         return;
                     }
                 }

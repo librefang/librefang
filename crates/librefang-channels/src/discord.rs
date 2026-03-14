@@ -84,7 +84,6 @@ impl DiscordAdapter {
         self
     }
 
-
     /// Get the WebSocket gateway URL from the Discord API.
     async fn get_gateway_url(&self) -> Result<String, Box<dyn std::error::Error>> {
         let url = format!("{DISCORD_API_BASE}/gateway/bot");
@@ -342,10 +341,13 @@ impl ChannelAdapter for DiscordAdapter {
                                             msg.sender.display_name, msg.content
                                         );
                                         // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(msg).await.is_err() {
+                                        if let Some(ref aid) = account_id {
+                                            msg.metadata.insert(
+                                                "account_id".to_string(),
+                                                serde_json::json!(aid),
+                                            );
+                                        }
+                                        if tx.send(msg).await.is_err() {
                                             return;
                                         }
                                     }

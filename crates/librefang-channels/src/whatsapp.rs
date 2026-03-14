@@ -73,7 +73,6 @@ impl WhatsAppAdapter {
         self
     }
 
-
     /// Create a new WhatsApp adapter with gateway URL for Web/QR mode.
     ///
     /// When `gateway_url` is `Some`, outgoing messages are sent via `POST {gateway_url}/message/send`

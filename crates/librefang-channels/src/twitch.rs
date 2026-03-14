@@ -66,7 +66,6 @@ impl TwitchAdapter {
         self
     }
 
-
     /// Format the OAuth token for the IRC PASS command.
     fn pass_string(&self) -> String {
         let token = self.oauth_token.as_str();
@@ -266,10 +265,12 @@ impl ChannelAdapter for TwitchAdapter {
                         };
 
                         // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(channel_msg).await.is_err() {
+                        if let Some(ref aid) = account_id {
+                            channel_msg
+                                .metadata
+                                .insert("account_id".to_string(), serde_json::json!(aid));
+                        }
+                        if tx.send(channel_msg).await.is_err() {
                             return;
                         }
                     }

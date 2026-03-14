@@ -74,7 +74,6 @@ impl MastodonAdapter {
         self
     }
 
-
     /// Validate the access token by calling `/api/v1/accounts/verify_credentials`.
     async fn validate(&self) -> Result<(String, String), Box<dyn std::error::Error>> {
         let url = format!("{}/api/v1/accounts/verify_credentials", self.instance_url);
@@ -404,10 +403,13 @@ impl ChannelAdapter for MastodonAdapter {
                                                     &own_account_id,
                                                 ) {
                                                     // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                let _ = tx.send(msg).await;
+                                                    if let Some(ref aid) = account_id {
+                                                        msg.metadata.insert(
+                                                            "account_id".to_string(),
+                                                            serde_json::json!(aid),
+                                                        );
+                                                    }
+                                                    let _ = tx.send(msg).await;
                                                 }
                                             }
                                         }
@@ -476,10 +478,11 @@ impl ChannelAdapter for MastodonAdapter {
                     }
                     if let Some(mut msg) = parse_mastodon_notification(notif, &own_account_id) {
                         // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(msg).await.is_err() {
+                        if let Some(ref aid) = account_id {
+                            msg.metadata
+                                .insert("account_id".to_string(), serde_json::json!(aid));
+                        }
+                        if tx.send(msg).await.is_err() {
                             return;
                         }
                     }

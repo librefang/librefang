@@ -97,7 +97,6 @@ impl IrcAdapter {
         self
     }
 
-
     /// Format the server address as `host:port`.
     fn addr(&self) -> String {
         format!("{}:{}", self.server, self.port)

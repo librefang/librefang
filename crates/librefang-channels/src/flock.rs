@@ -66,7 +66,6 @@ impl FlockAdapter {
         self
     }
 
-
     /// Validate credentials by fetching bot/app info.
     async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
         let url = format!(
@@ -284,7 +283,8 @@ impl ChannelAdapter for FlockAdapter {
                             if let Some(mut msg) = parse_flock_event(&body, &user_id) {
                                 // Inject account_id for multi-bot routing
                                 if let Some(ref aid) = *account_id {
-                                    msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
+                                    msg.metadata
+                                        .insert("account_id".to_string(), serde_json::json!(aid));
                                 }
                                 let _ = tx.send(msg).await;
                             }

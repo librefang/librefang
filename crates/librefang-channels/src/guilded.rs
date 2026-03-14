@@ -69,7 +69,6 @@ impl GuildedAdapter {
         self
     }
 
-
     /// Validate credentials by fetching the bot's own user info.
     async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
         let url = format!("{}/users/@me", GUILDED_API_BASE);
@@ -310,10 +309,12 @@ impl ChannelAdapter for GuildedAdapter {
                     };
 
                     // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(channel_msg).await.is_err() {
+                    if let Some(ref aid) = account_id {
+                        channel_msg
+                            .metadata
+                            .insert("account_id".to_string(), serde_json::json!(aid));
+                    }
+                    if tx.send(channel_msg).await.is_err() {
                         return;
                     }
                 };

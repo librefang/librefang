@@ -77,7 +77,6 @@ impl KeybaseAdapter {
         self
     }
 
-
     /// Build the authentication payload for API requests.
     #[allow(dead_code)]
     fn auth_payload(&self) -> serde_json::Value {
@@ -406,10 +405,12 @@ impl ChannelAdapter for KeybaseAdapter {
                         };
 
                         // Inject account_id for multi-bot routing
-                                if let Some(ref aid) = account_id {
-                                    channel_msg.metadata.insert("account_id".to_string(), serde_json::json!(aid));
-                                }
-                                if tx.send(channel_msg).await.is_err() {
+                        if let Some(ref aid) = account_id {
+                            channel_msg
+                                .metadata
+                                .insert("account_id".to_string(), serde_json::json!(aid));
+                        }
+                        if tx.send(channel_msg).await.is_err() {
                             return;
                         }
                     }
