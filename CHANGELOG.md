@@ -5,6 +5,27 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3-beta3] - 2026-03-14
+
+### Fixed
+
+- Render card empty due to nested anchor tags (#292) (@houko)
+- Use WEBSITE_REPO_TOKEN for star history workflow (#281) (@houko)
+- Auto-merge star history PR after creation (#280) (@houko)
+- Use PR instead of direct push for star history workflow (#279) (@houko)
+- Move Fly.io-specific badges from header to deploy form (#278) (@houko)
+
+### Documentation
+
+- Update star history (#293) (@houko)
+- Update star history (#284) (@houko)
+- Update star history (#283) (@houko)
+- Update star history (#282) (@houko)
+
+### Other
+
+- V0.4.3-beta2-20260314 (#277) (@houko)
+
 ## [0.4.3-beta2] - 2026-03-14
 
 ### Added

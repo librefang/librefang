@@ -357,6 +357,7 @@ impl ModelCatalog {
     /// Returns the number of new models added.
     pub fn merge_catalog_file(&mut self, file: ModelCatalogFile) -> usize {
         // Merge provider info if present
+        let file_provider_id = file.provider.as_ref().map(|p| p.id.clone());
         if let Some(prov_toml) = file.provider {
             let provider_id = prov_toml.id.clone();
             if self.providers.iter().any(|p| p.id == provider_id) {
@@ -374,7 +375,17 @@ impl ModelCatalog {
 
         // Merge models
         let mut added = 0usize;
-        for model in file.models {
+        for mut model in file.models {
+            // Back-fill provider from the [provider] section when the model
+            // entry omits it (common in community catalog files).
+            if model.provider.is_empty() {
+                if let Some(ref pid) = file_provider_id {
+                    model.provider = pid.clone();
+                } else {
+                    // No provider info at all — skip this model
+                    continue;
+                }
+            }
             let lower_id = model.id.to_lowercase();
             let lower_provider = model.provider.to_lowercase();
             if self.models.iter().any(|m| {

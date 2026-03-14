@@ -123,6 +123,10 @@ pub struct ModelCatalogEntry {
     /// Human-readable display name (e.g. "Claude Sonnet 4").
     pub display_name: String,
     /// Provider identifier (e.g. "anthropic").
+    ///
+    /// When omitted in community catalog files the provider is inferred from
+    /// the `[provider].id` section during merge.
+    #[serde(default)]
     pub provider: String,
     /// Capability tier.
     pub tier: ModelTier,

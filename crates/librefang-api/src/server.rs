@@ -289,7 +289,9 @@ pub async fn build_router(
         )
         .route(
             "/api/schedules/{id}",
-            axum::routing::delete(routes::delete_schedule).put(routes::update_schedule),
+            axum::routing::get(routes::get_schedule)
+                .delete(routes::delete_schedule)
+                .put(routes::update_schedule),
         )
         .route(
             "/api/schedules/{id}/run",
@@ -561,7 +563,7 @@ pub async fn build_router(
         )
         .route(
             "/api/cron/jobs/{id}",
-            axum::routing::delete(routes::delete_cron_job),
+            axum::routing::delete(routes::delete_cron_job).put(routes::update_cron_job),
         )
         .route(
             "/api/cron/jobs/{id}/enable",
@@ -610,6 +612,10 @@ pub async fn build_router(
         .route(
             "/api/a2a/agents",
             axum::routing::get(routes::a2a_list_external_agents),
+        )
+        .route(
+            "/api/a2a/agents/{id}",
+            axum::routing::get(routes::a2a_get_external_agent),
         )
         .route(
             "/api/a2a/discover",

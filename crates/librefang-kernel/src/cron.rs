@@ -189,6 +189,70 @@ impl CronScheduler {
         }
     }
 
+    /// Update a cron job's configuration in place.
+    ///
+    /// Supported fields in `updates`: `name`, `enabled`, `schedule`, `action`,
+    /// `delivery`, `agent_id`.  Only provided (non-null) fields are patched;
+    /// omitted fields keep their current values.
+    pub fn update_job(
+        &self,
+        id: CronJobId,
+        updates: &serde_json::Value,
+    ) -> LibreFangResult<CronJob> {
+        match self.jobs.get_mut(&id) {
+            Some(mut entry) => {
+                let meta = entry.value_mut();
+
+                if let Some(name) = updates["name"].as_str() {
+                    meta.job.name = name.to_string();
+                }
+                if let Some(enabled) = updates["enabled"].as_bool() {
+                    meta.job.enabled = enabled;
+                    if enabled {
+                        meta.consecutive_errors = 0;
+                        meta.job.next_run = Some(compute_next_run(&meta.job.schedule));
+                    }
+                }
+                if let Some(agent_id_str) = updates["agent_id"].as_str() {
+                    meta.job.agent_id = agent_id_str
+                        .parse::<AgentId>()
+                        .map_err(|e| LibreFangError::Internal(format!("Invalid agent_id: {e}")))?;
+                }
+
+                // Replace schedule if provided (must be a valid CronSchedule object).
+                if !updates["schedule"].is_null() {
+                    let schedule: CronSchedule =
+                        serde_json::from_value(updates["schedule"].clone()).map_err(|e| {
+                            LibreFangError::Internal(format!("Invalid schedule: {e}"))
+                        })?;
+                    meta.job.next_run = Some(compute_next_run(&schedule));
+                    meta.job.schedule = schedule;
+                }
+
+                // Replace action if provided.
+                if !updates["action"].is_null() {
+                    let action: librefang_types::scheduler::CronAction =
+                        serde_json::from_value(updates["action"].clone()).map_err(|e| {
+                            LibreFangError::Internal(format!("Invalid action: {e}"))
+                        })?;
+                    meta.job.action = action;
+                }
+
+                // Replace delivery if provided.
+                if !updates["delivery"].is_null() {
+                    let delivery: librefang_types::scheduler::CronDelivery =
+                        serde_json::from_value(updates["delivery"].clone()).map_err(|e| {
+                            LibreFangError::Internal(format!("Invalid delivery: {e}"))
+                        })?;
+                    meta.job.delivery = delivery;
+                }
+
+                Ok(meta.job.clone())
+            }
+            None => Err(LibreFangError::Internal(format!("Cron job {id} not found"))),
+        }
+    }
+
     // -- Queries ------------------------------------------------------------
 
     /// Get a single job by ID.
