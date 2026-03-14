@@ -8,7 +8,6 @@
 #
 # What it updates:
 #   - Cargo.toml workspace version (only when explicit version given)
-#   - agents/*/agent.toml
 #   - sdk/javascript/package.json
 #   - sdk/python/setup.py
 #   - packages/whatsapp-gateway/package.json
@@ -58,15 +57,6 @@ else
     echo "Syncing to current version: $VERSION"
 fi
 
-# --- Agent templates ---
-count=0
-for f in "$REPO_ROOT"/agents/*/agent.toml; do
-    [ -f "$f" ] || continue
-    sed -i.bak 's/^version = "[^"]*"/version = "'"$VERSION"'"/' "$f" && rm -f "$f.bak"
-    count=$((count + 1))
-done
-echo "  Updated $count agent templates"
-
 # --- JavaScript SDK (only the top-level "version" field, indented with 2 spaces) ---
 JS_PKG="$REPO_ROOT/sdk/javascript/package.json"
 if [ -f "$JS_PKG" ]; then
@@ -92,7 +82,6 @@ fi
 echo ""
 echo "Verification:"
 echo "  Cargo.toml:      $(current_version)"
-grep -h '^version' "$REPO_ROOT"/agents/hello-world/agent.toml 2>/dev/null | head -1 | sed 's/^/  agents:          /'
 grep '"version"' "$JS_PKG" 2>/dev/null | head -1 | sed 's/^[[:space:]]*/  JS SDK:          /'
 grep 'version=' "$PY_SETUP" 2>/dev/null | head -1 | sed 's/^[[:space:]]*/  Python SDK:      /'
 echo ""
