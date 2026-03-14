@@ -292,6 +292,49 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # ── CLI Binary (Linux, musl — fully static) ─────────────────────────────
+  cli_musl:
+    name: CLI / ${{ matrix.target }} (static)
+    needs: [create_release]
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+          - target: aarch64-unknown-linux-musl
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build static CLI
+        run: cross build --release --target ${{ matrix.target }} --bin librefang
+      - name: Verify static linking
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          file target/${{ matrix.target }}/release/librefang
+          # Must be statically linked
+          file target/${{ matrix.target }}/release/librefang | grep -q "statically linked"
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
+          cd ../../..
+          sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: librefang-${{ matrix.target }}.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # ── CLI Binary (Windows) ────────────────────────────────────────────────
   cli_windows:
     name: CLI / ${{ matrix.target }}
@@ -549,7 +592,7 @@ jobs:
   sync_installers:
     name: Sync Installers to Website
     runs-on: ubuntu-latest
-    needs: [cli_mac, cli_linux, cli_windows]
+    needs: [cli_mac, cli_linux, cli_musl, cli_windows]
     steps:
       - name: Check out source repo
         uses: actions/checkout@v6
@@ -616,6 +659,8 @@ jobs:
               assets: {
                 "x86_64-unknown-linux-gnu": artifact_for("x86_64-unknown-linux-gnu"; "tar.gz"),
                 "aarch64-unknown-linux-gnu": artifact_for("aarch64-unknown-linux-gnu"; "tar.gz"),
+                "x86_64-unknown-linux-musl": artifact_for("x86_64-unknown-linux-musl"; "tar.gz"),
+                "aarch64-unknown-linux-musl": artifact_for("aarch64-unknown-linux-musl"; "tar.gz"),
                 "x86_64-apple-darwin": artifact_for("x86_64-apple-darwin"; "tar.gz"),
                 "aarch64-apple-darwin": artifact_for("aarch64-apple-darwin"; "tar.gz"),
                 "x86_64-pc-windows-msvc": artifact_for("x86_64-pc-windows-msvc"; "zip"),
@@ -639,7 +684,7 @@ jobs:
   notify_discord:
     name: Notify Discord
     runs-on: ubuntu-latest
-    needs: [desktop, cli_mac, cli_linux, cli_windows, docker-manifest]
+    needs: [desktop, cli_mac, cli_linux, cli_musl, cli_windows, docker-manifest]
     if: always() && !cancelled()
     steps:
       - uses: actions/checkout@v6
