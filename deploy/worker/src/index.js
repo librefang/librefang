@@ -470,11 +470,11 @@ const HTML = `<!DOCTYPE html>
           <div class="platform-desc">Free forever (e2-micro), 30GB storage</div>
         </a>
 
-        <a class="platform-card accent-blue" href="https://github.com/librefang/librefang#docker" target="_blank" rel="noopener">
+        <a class="platform-card accent-blue" href="https://github.com/librefang/librefang/blob/main/docker-compose.yml" target="_blank" rel="noopener">
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12H2"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/></svg></div>
           <div class="platform-name">Docker</div>
-          <div class="platform-desc">Self-host anywhere</div>
-          <div class="platform-cmd"><code>docker compose up --build</code><button class="copy-btn" onclick="event.preventDefault();event.stopPropagation();copyText(this,'docker compose up --build')">Copy</button></div>
+          <div class="platform-desc">One command, runs anywhere</div>
+          <div class="platform-cmd"><code>docker run -p 4545:4545 ghcr.io/librefang/librefang</code><button class="copy-btn" onclick="event.preventDefault();event.stopPropagation();copyText(this,'docker run -p 4545:4545 ghcr.io/librefang/librefang')">Copy</button></div>
         </a>
       </div>
 
