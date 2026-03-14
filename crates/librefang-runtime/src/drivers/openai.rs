@@ -539,8 +539,15 @@ impl LlmDriver for OpenAIDriver {
                 .text()
                 .await
                 .map_err(|e| LlmError::Http(e.to_string()))?;
-            let oai_response: OaiResponse =
+            let raw_json: serde_json::Value =
                 serde_json::from_str(&body).map_err(|e| LlmError::Parse(e.to_string()))?;
+            let cached_prompt_tokens = raw_json
+                .get("usage")
+                .and_then(|u| u.get("prompt_tokens_details"))
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|v| v.as_u64());
+            let oai_response: OaiResponse =
+                serde_json::from_value(raw_json).map_err(|e| LlmError::Parse(e.to_string()))?;
 
             let choice = oai_response
                 .choices
@@ -665,6 +672,13 @@ impl LlmDriver for OpenAIDriver {
                 );
                 usage.output_tokens = 1;
             }
+
+            debug!(
+                prompt_tokens = usage.input_tokens,
+                completion_tokens = usage.output_tokens,
+                cached_prompt_tokens = cached_prompt_tokens.unwrap_or(0),
+                "OpenAI-compatible usage"
+            );
 
             return Ok(CompletionResponse {
                 content,
@@ -1008,6 +1022,7 @@ impl LlmDriver for OpenAIDriver {
             let mut tool_accum: Vec<(String, String, String)> = Vec::new();
             let mut finish_reason: Option<String> = None;
             let mut usage = TokenUsage::default();
+            let mut cached_prompt_tokens: u64 = 0;
             let mut chunk_count: u32 = 0;
             let mut sse_line_count: u32 = 0;
 
@@ -1048,6 +1063,13 @@ impl LlmDriver for OpenAIDriver {
                         }
                         if let Some(ct) = u["completion_tokens"].as_u64() {
                             usage.output_tokens = ct;
+                        }
+                        if let Some(cached) = u
+                            .get("prompt_tokens_details")
+                            .and_then(|d| d.get("cached_tokens"))
+                            .and_then(|v| v.as_u64())
+                        {
+                            cached_prompt_tokens = cached;
                         }
                     }
 
@@ -1288,6 +1310,13 @@ impl LlmDriver for OpenAIDriver {
                 debug!("Stream has content but no usage stats — setting synthetic output_tokens=1");
                 usage.output_tokens = 1;
             }
+
+            debug!(
+                prompt_tokens = usage.input_tokens,
+                completion_tokens = usage.output_tokens,
+                cached_prompt_tokens,
+                "OpenAI-compatible usage (stream)"
+            );
 
             let _ = tx
                 .send(StreamEvent::ContentComplete { stop_reason, usage })

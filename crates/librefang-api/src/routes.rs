@@ -5414,6 +5414,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "home_dir": config.home_dir.to_string_lossy(),
         "data_dir": config.data_dir.to_string_lossy(),
         "api_key": if config.api_key.is_empty() { "not set" } else { "***" },
+        "stable_prefix_mode": config.stable_prefix_mode,
         "default_model": {
             "provider": config.default_model.provider,
             "model": config.default_model.model,
@@ -10621,7 +10622,8 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 "fields": {
                     "api_listen": "string",
                     "api_key": "string",
-                    "log_level": "string"
+                    "log_level": "string",
+                    "stable_prefix_mode": "boolean"
                 }
             },
             "default_model": {

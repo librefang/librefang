@@ -41,6 +41,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
 
+const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
+
 /// The main LibreFang kernel — coordinates all subsystems.
 /// Stub LLM driver used when no providers are configured.
 /// Returns a helpful error so the dashboard still boots and users can configure providers.
@@ -1693,6 +1695,7 @@ impl LibreFangKernel {
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
+            let stable_prefix_mode = self.config.stable_prefix_mode;
             let user_name = self
                 .memory
                 .structured_get(shared_id, "user_name")
@@ -1739,11 +1742,14 @@ impl LibreFangKernel {
                     .workspace
                     .as_ref()
                     .and_then(|w| read_identity_file(w, "MEMORY.md")),
-                canonical_context: self
-                    .memory
-                    .canonical_context(agent_id, None)
-                    .ok()
-                    .and_then(|(s, _)| s),
+                canonical_context: if stable_prefix_mode {
+                    None
+                } else {
+                    self.memory
+                        .canonical_context(agent_id, None)
+                        .ok()
+                        .and_then(|(s, _)| s)
+                },
                 user_name,
                 channel_type: None,
                 is_subagent: manifest
@@ -1786,6 +1792,11 @@ impl LibreFangKernel {
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+            // Pass stable_prefix_mode flag to the agent loop via metadata
+            manifest.metadata.insert(
+                STABLE_PREFIX_MODE_METADATA_KEY.to_string(),
+                serde_json::json!(stable_prefix_mode),
+            );
             // Store canonical context separately for injection as user message
             // (keeps system prompt stable across turns for provider prompt caching)
             if let Some(cc_msg) =
@@ -2361,6 +2372,7 @@ impl LibreFangKernel {
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
+            let stable_prefix_mode = self.config.stable_prefix_mode;
             let user_name = self
                 .memory
                 .structured_get(shared_id, "user_name")
@@ -2407,11 +2419,14 @@ impl LibreFangKernel {
                     .workspace
                     .as_ref()
                     .and_then(|w| read_identity_file(w, "MEMORY.md")),
-                canonical_context: self
-                    .memory
-                    .canonical_context(agent_id, None)
-                    .ok()
-                    .and_then(|(s, _)| s),
+                canonical_context: if stable_prefix_mode {
+                    None
+                } else {
+                    self.memory
+                        .canonical_context(agent_id, None)
+                        .ok()
+                        .and_then(|(s, _)| s)
+                },
                 user_name,
                 channel_type: None,
                 is_subagent: manifest
@@ -2454,6 +2469,11 @@ impl LibreFangKernel {
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+            // Pass stable_prefix_mode flag to the agent loop via metadata
+            manifest.metadata.insert(
+                STABLE_PREFIX_MODE_METADATA_KEY.to_string(),
+                serde_json::json!(stable_prefix_mode),
+            );
             // Store canonical context separately for injection as user message
             // (keeps system prompt stable across turns for provider prompt caching)
             if let Some(cc_msg) =
