@@ -123,7 +123,12 @@ fi
 
 # --- Commit and tag ---
 
-git -C "$REPO_ROOT" add -A
+git -C "$REPO_ROOT" add \
+    Cargo.toml Cargo.lock \
+    agents/*/agent.toml \
+    sdk/javascript/package.json \
+    sdk/python/setup.py \
+    packages/whatsapp-gateway/package.json
 git -C "$REPO_ROOT" commit -m "chore: bump version to $TAG"
 git -C "$REPO_ROOT" tag "$TAG"
 
