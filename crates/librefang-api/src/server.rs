@@ -718,6 +718,31 @@ pub async fn build_router(
             "/api/pairing/notify",
             axum::routing::post(routes::pairing_notify),
         )
+        // OAuth/OIDC external authentication endpoints
+        .route(
+            "/api/auth/providers",
+            axum::routing::get(crate::oauth::auth_providers),
+        )
+        .route(
+            "/api/auth/login",
+            axum::routing::get(crate::oauth::auth_login),
+        )
+        .route(
+            "/api/auth/login/{provider}",
+            axum::routing::get(crate::oauth::auth_login_provider),
+        )
+        .route(
+            "/api/auth/callback",
+            axum::routing::get(crate::oauth::auth_callback).post(crate::oauth::auth_callback_post),
+        )
+        .route(
+            "/api/auth/userinfo",
+            axum::routing::get(crate::oauth::auth_userinfo),
+        )
+        .route(
+            "/api/auth/introspect",
+            axum::routing::post(crate::oauth::auth_introspect),
+        )
         // MCP HTTP endpoint (exposes MCP protocol over HTTP)
         .route("/mcp", axum::routing::post(routes::mcp_http))
         // OpenAI-compatible API
@@ -732,6 +757,10 @@ pub async fn build_router(
         .layer(axum::middleware::from_fn_with_state(
             api_key,
             middleware::auth,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::oauth::oidc_auth_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
             gcra_limiter,

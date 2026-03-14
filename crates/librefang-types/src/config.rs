@@ -1205,6 +1205,173 @@ pub struct KernelConfig {
     /// Sidecar channel adapters (external process-based).
     #[serde(default)]
     pub sidecar_channels: Vec<SidecarChannelConfig>,
+    /// External authentication provider configuration (OAuth2/OIDC).
+    #[serde(default)]
+    pub external_auth: ExternalAuthConfig,
+}
+
+/// External authentication provider configuration (OAuth2/OIDC).
+///
+/// Allows delegating user authentication to an external identity provider
+/// (Okta, Auth0, Keycloak, Google, GitHub, Microsoft, etc.).
+///
+/// Single provider (backward-compatible):
+/// ```toml
+/// [external_auth]
+/// enabled = true
+/// issuer_url = "https://accounts.google.com"
+/// client_id = "your-client-id.apps.googleusercontent.com"
+/// client_secret_env = "LIBREFANG_OAUTH_CLIENT_SECRET"
+/// redirect_url = "http://127.0.0.1:4545/api/auth/callback"
+/// scopes = ["openid", "profile", "email"]
+/// ```
+///
+/// Multiple providers:
+/// ```toml
+/// [external_auth]
+/// enabled = true
+///
+/// [[external_auth.providers]]
+/// id = "google"
+/// display_name = "Google"
+/// issuer_url = "https://accounts.google.com"
+/// client_id = "your-google-client-id"
+/// client_secret_env = "GOOGLE_OAUTH_CLIENT_SECRET"
+///
+/// [[external_auth.providers]]
+/// id = "github"
+/// display_name = "GitHub"
+/// issuer_url = "https://token.actions.githubusercontent.com"
+/// auth_url = "https://github.com/login/oauth/authorize"
+/// token_url = "https://github.com/login/oauth/access_token"
+/// userinfo_url = "https://api.github.com/user"
+/// client_id = "your-github-client-id"
+/// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"
+/// scopes = ["read:user", "user:email"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExternalAuthConfig {
+    /// Whether external auth is enabled.
+    pub enabled: bool,
+    /// OIDC issuer URL (e.g., `https://accounts.google.com`).
+    /// Used to discover the OIDC configuration at `{issuer_url}/.well-known/openid-configuration`.
+    pub issuer_url: String,
+    /// OAuth2 client ID registered with the identity provider.
+    pub client_id: String,
+    /// Environment variable holding the OAuth2 client secret.
+    /// The secret itself is never stored in config.
+    #[serde(default = "default_oauth_client_secret_env")]
+    pub client_secret_env: String,
+    /// Redirect URL for the OAuth2 authorization code flow callback.
+    /// Defaults to `http://127.0.0.1:4545/api/auth/callback`.
+    #[serde(default = "default_redirect_url")]
+    pub redirect_url: String,
+    /// OAuth2 scopes to request.
+    #[serde(default = "default_oauth_scopes")]
+    pub scopes: Vec<String>,
+    /// Allowed email domains for authorization (empty = allow all).
+    /// e.g., `["example.com", "corp.example.com"]`
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// JWT audience claim to validate (defaults to `client_id` if empty).
+    #[serde(default)]
+    pub audience: String,
+    /// Additional trusted JWKS URIs (beyond OIDC discovery).
+    #[serde(default)]
+    pub jwks_uris: Vec<String>,
+    /// Session token lifetime in seconds. Default: 86400 (24 hours).
+    #[serde(default = "default_session_ttl")]
+    pub session_ttl_secs: u64,
+    /// Multiple OIDC/OAuth2 providers.
+    /// When configured, these take precedence over the top-level single-provider fields.
+    #[serde(default)]
+    pub providers: Vec<OidcProvider>,
+}
+
+/// Configuration for a single OIDC/OAuth2 provider.
+///
+/// Supports standard OIDC providers (Google, Azure AD, Keycloak) that use
+/// `.well-known/openid-configuration` discovery, as well as non-OIDC OAuth2
+/// providers (GitHub) where explicit `auth_url`, `token_url`, and `userinfo_url`
+/// are specified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcProvider {
+    /// Unique identifier for this provider (e.g., "google", "github", "keycloak").
+    pub id: String,
+    /// Human-readable display name (e.g., "Google", "GitHub", "Corporate SSO").
+    #[serde(default)]
+    pub display_name: String,
+    /// OIDC issuer URL for discovery. Leave empty for non-OIDC providers (e.g., GitHub).
+    #[serde(default)]
+    pub issuer_url: String,
+    /// Explicit authorization endpoint (overrides OIDC discovery).
+    #[serde(default)]
+    pub auth_url: String,
+    /// Explicit token endpoint (overrides OIDC discovery).
+    #[serde(default)]
+    pub token_url: String,
+    /// Explicit userinfo endpoint (overrides OIDC discovery).
+    #[serde(default)]
+    pub userinfo_url: String,
+    /// Explicit JWKS URI (overrides OIDC discovery).
+    #[serde(default)]
+    pub jwks_uri: String,
+    /// OAuth2 client ID.
+    pub client_id: String,
+    /// Environment variable name holding the client secret.
+    #[serde(default = "default_oauth_client_secret_env")]
+    pub client_secret_env: String,
+    /// OAuth2 redirect URI. Defaults to `http://127.0.0.1:4545/api/auth/callback`.
+    #[serde(default = "default_redirect_url")]
+    pub redirect_url: String,
+    /// OAuth2 scopes to request.
+    #[serde(default = "default_oauth_scopes")]
+    pub scopes: Vec<String>,
+    /// Allowed email domains (empty = allow all).
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// JWT audience claim to validate.
+    #[serde(default)]
+    pub audience: String,
+}
+
+fn default_oauth_client_secret_env() -> String {
+    "LIBREFANG_OAUTH_CLIENT_SECRET".to_string()
+}
+
+fn default_redirect_url() -> String {
+    "http://127.0.0.1:4545/api/auth/callback".to_string()
+}
+
+fn default_oauth_scopes() -> Vec<String> {
+    vec![
+        "openid".to_string(),
+        "profile".to_string(),
+        "email".to_string(),
+    ]
+}
+
+fn default_session_ttl() -> u64 {
+    86400
+}
+
+impl Default for ExternalAuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            issuer_url: String::new(),
+            client_id: String::new(),
+            client_secret_env: default_oauth_client_secret_env(),
+            redirect_url: default_redirect_url(),
+            scopes: default_oauth_scopes(),
+            allowed_domains: Vec::new(),
+            audience: String::new(),
+            jwks_uris: Vec::new(),
+            session_ttl_secs: default_session_ttl(),
+            providers: Vec::new(),
+        }
+    }
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1453,6 +1620,7 @@ impl Default for KernelConfig {
             provider_api_keys: HashMap::new(),
             oauth: OAuthConfig::default(),
             sidecar_channels: Vec::new(),
+            external_auth: ExternalAuthConfig::default(),
         }
     }
 }
@@ -1569,6 +1737,10 @@ impl std::fmt::Debug for KernelConfig {
             .field(
                 "provider_api_keys",
                 &format!("{} mapping(s)", self.provider_api_keys.len()),
+            )
+            .field(
+                "external_auth",
+                &format!("enabled={}", self.external_auth.enabled),
             )
             .finish()
     }
