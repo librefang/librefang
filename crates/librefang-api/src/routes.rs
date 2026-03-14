@@ -7631,10 +7631,7 @@ fn validate_env_var(name: &str, value: &str) -> Result<(), String> {
             name
         ));
     }
-    if !name
-        .bytes()
-        .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    {
+    if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return Err(format!(
             "Environment variable name '{}' contains invalid characters (only A-Z, a-z, 0-9, _ allowed)",
             name
