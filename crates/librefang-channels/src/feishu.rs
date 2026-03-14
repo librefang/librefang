@@ -273,6 +273,246 @@ impl FeishuAdapter {
 
         Ok(())
     }
+
+    /// Send an interactive card message to a Feishu chat.
+    ///
+    /// Uses the Feishu IM API with `msg_type: "interactive"` to send a card
+    /// built from a `serde_json::Value` card template.
+    pub async fn send_card(
+        &self,
+        receive_id: &str,
+        receive_id_type: &str,
+        card: &serde_json::Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let token = self.get_token().await?;
+        let url = format!("{}?receive_id_type={}", FEISHU_SEND_URL, receive_id_type);
+
+        let body = serde_json::json!({
+            "receive_id": receive_id,
+            "msg_type": "interactive",
+            "content": card.to_string(),
+        });
+
+        let resp = self
+            .client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let resp_body = resp.text().await.unwrap_or_default();
+            return Err(format!("Feishu send card error {status}: {resp_body}").into());
+        }
+
+        let resp_body: serde_json::Value = resp.json().await?;
+        let code = resp_body["code"].as_i64().unwrap_or(-1);
+        if code != 0 {
+            let msg = resp_body["msg"].as_str().unwrap_or("unknown error");
+            warn!("Feishu send card API error: {msg}");
+        }
+
+        Ok(())
+    }
+
+    /// Send an approval card to a Feishu chat for an agent permission request.
+    ///
+    /// Renders an interactive card with Approve / Deny buttons. When the user
+    /// clicks a button, Feishu sends a `card.action.trigger` callback to the
+    /// webhook, which the adapter converts into a `/approve` or `/reject`
+    /// command message.
+    pub async fn send_approval_card(
+        &self,
+        chat_id: &str,
+        request_id: &str,
+        agent_id: &str,
+        tool_name: &str,
+        action_summary: &str,
+        risk_level: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let card = build_approval_card(request_id, agent_id, tool_name, action_summary, risk_level);
+        self.send_card(chat_id, "chat_id", &card).await
+    }
+}
+
+/// Build a Feishu interactive message card for an approval request.
+///
+/// The card displays the agent, tool, action summary, and risk level,
+/// with Approve and Deny action buttons. Each button carries the
+/// `request_id` and the chosen action (`approve` / `reject`) in its
+/// `value` payload so the callback handler can resolve the request.
+pub fn build_approval_card(
+    request_id: &str,
+    agent_id: &str,
+    tool_name: &str,
+    action_summary: &str,
+    risk_level: &str,
+) -> serde_json::Value {
+    // Choose header color based on risk level
+    let header_color = match risk_level {
+        "critical" => "red",
+        "high" => "orange",
+        "medium" => "yellow",
+        _ => "blue",
+    };
+
+    serde_json::json!({
+        "config": {
+            "wide_screen_mode": true
+        },
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": format!("Agent Permission Request [{risk_level}]")
+            },
+            "template": header_color
+        },
+        "elements": [
+            {
+                "tag": "div",
+                "fields": [
+                    {
+                        "is_short": true,
+                        "text": {
+                            "tag": "lark_md",
+                            "content": format!("**Agent:** {agent_id}")
+                        }
+                    },
+                    {
+                        "is_short": true,
+                        "text": {
+                            "tag": "lark_md",
+                            "content": format!("**Tool:** `{tool_name}`")
+                        }
+                    }
+                ]
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": format!("**Action:** {action_summary}")
+                }
+            },
+            {
+                "tag": "div",
+                "text": {
+                    "tag": "lark_md",
+                    "content": format!("**Request ID:** `{request_id}`")
+                }
+            },
+            {
+                "tag": "hr"
+            },
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": "Approve"
+                        },
+                        "type": "primary",
+                        "value": {
+                            "action": "approve",
+                            "request_id": request_id
+                        }
+                    },
+                    {
+                        "tag": "button",
+                        "text": {
+                            "tag": "plain_text",
+                            "content": "Deny"
+                        },
+                        "type": "danger",
+                        "value": {
+                            "action": "reject",
+                            "request_id": request_id
+                        }
+                    }
+                ]
+            }
+        ]
+    })
+}
+
+/// Parse a Feishu card action callback into a `/approve` or `/reject` command.
+///
+/// Handles `card.action.trigger` events from interactive card button clicks.
+/// Extracts the `action` and `request_id` from the button value payload and
+/// converts them into a `ChannelMessage` with a `Command` content type.
+fn parse_card_action(event: &serde_json::Value) -> Option<ChannelMessage> {
+    let event_data = event.get("event")?;
+    let action = event_data.get("action")?;
+    let value = action.get("value")?;
+
+    let action_type = value["action"].as_str()?;
+    let request_id = value["request_id"].as_str()?;
+
+    // Only handle approve / reject actions
+    let cmd_name = match action_type {
+        "approve" => "approve",
+        "reject" => "reject",
+        _ => return None,
+    };
+
+    // Extract operator info
+    let operator = event_data.get("operator")?;
+    let open_id = operator
+        .get("open_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // The chat that the card was sent to (from the token or context)
+    let open_chat_id = event_data
+        .get("open_chat_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let open_message_id = event_data
+        .get("open_message_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "chat_id".to_string(),
+        serde_json::Value::String(open_chat_id.clone()),
+    );
+    metadata.insert(
+        "message_id".to_string(),
+        serde_json::Value::String(open_message_id.clone()),
+    );
+    metadata.insert("card_action".to_string(), serde_json::Value::Bool(true));
+    metadata.insert(
+        "operator_id".to_string(),
+        serde_json::Value::String(open_id.clone()),
+    );
+
+    Some(ChannelMessage {
+        channel: ChannelType::Custom("feishu".to_string()),
+        platform_message_id: open_message_id,
+        sender: ChannelUser {
+            platform_id: open_chat_id,
+            display_name: open_id,
+            librefang_user: None,
+        },
+        content: ChannelContent::Command {
+            name: cmd_name.to_string(),
+            args: vec![request_id.to_string()],
+        },
+        target_agent: None,
+        timestamp: Utc::now(),
+        is_group: false,
+        thread_id: None,
+        metadata,
+    })
 }
 
 /// Parse a Feishu webhook event into a `ChannelMessage`.
@@ -440,8 +680,10 @@ impl ChannelAdapter for FeishuAdapter {
                             // Handle event callback
                             if let Some(schema) = body.0["schema"].as_str() {
                                 if schema == "2.0" {
-                                    // V2 event format
-                                    if let Some(mut msg) = parse_feishu_event(&body.0) {
+                                    // V2 event format — try message first, then card action
+                                    let parsed = parse_feishu_event(&body.0)
+                                        .or_else(|| parse_card_action(&body.0));
+                                    if let Some(mut msg) = parsed {
                                         // Inject account_id for multi-bot routing
                                         if let Some(ref aid) = *account_id {
                                             msg.metadata.insert(
@@ -823,5 +1065,227 @@ mod tests {
 
         let msg = parse_feishu_event(&event).unwrap();
         assert_eq!(msg.thread_id, Some("om_root1".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Interactive card tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_approval_card_structure() {
+        let card = build_approval_card(
+            "abc-123",
+            "agent-1",
+            "shell_exec",
+            "rm -rf /tmp/cache",
+            "critical",
+        );
+
+        // Header should have red template for critical risk
+        assert_eq!(card["header"]["template"], "red");
+        assert!(card["header"]["title"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("critical"));
+
+        // Should have elements array
+        let elements = card["elements"].as_array().unwrap();
+        assert!(!elements.is_empty());
+
+        // Last element should be the action buttons
+        let action_element = elements.last().unwrap();
+        assert_eq!(action_element["tag"], "action");
+
+        let actions = action_element["actions"].as_array().unwrap();
+        assert_eq!(actions.len(), 2);
+
+        // Approve button
+        assert_eq!(actions[0]["text"]["content"], "Approve");
+        assert_eq!(actions[0]["type"], "primary");
+        assert_eq!(actions[0]["value"]["action"], "approve");
+        assert_eq!(actions[0]["value"]["request_id"], "abc-123");
+
+        // Deny button
+        assert_eq!(actions[1]["text"]["content"], "Deny");
+        assert_eq!(actions[1]["type"], "danger");
+        assert_eq!(actions[1]["value"]["action"], "reject");
+        assert_eq!(actions[1]["value"]["request_id"], "abc-123");
+    }
+
+    #[test]
+    fn test_build_approval_card_risk_colors() {
+        let critical = build_approval_card("id", "a", "t", "s", "critical");
+        assert_eq!(critical["header"]["template"], "red");
+
+        let high = build_approval_card("id", "a", "t", "s", "high");
+        assert_eq!(high["header"]["template"], "orange");
+
+        let medium = build_approval_card("id", "a", "t", "s", "medium");
+        assert_eq!(medium["header"]["template"], "yellow");
+
+        let low = build_approval_card("id", "a", "t", "s", "low");
+        assert_eq!(low["header"]["template"], "blue");
+    }
+
+    #[test]
+    fn test_build_approval_card_fields_displayed() {
+        let card = build_approval_card(
+            "req-456",
+            "my-agent",
+            "file_write",
+            "write /etc/config",
+            "high",
+        );
+
+        let card_str = card.to_string();
+        assert!(card_str.contains("my-agent"));
+        assert!(card_str.contains("file_write"));
+        assert!(card_str.contains("write /etc/config"));
+        assert!(card_str.contains("req-456"));
+    }
+
+    #[test]
+    fn test_parse_card_action_approve() {
+        let event = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-card-001",
+                "event_type": "card.action.trigger"
+            },
+            "event": {
+                "operator": {
+                    "open_id": "ou_user1"
+                },
+                "open_chat_id": "oc_chat1",
+                "open_message_id": "om_card1",
+                "action": {
+                    "value": {
+                        "action": "approve",
+                        "request_id": "abc-123-def"
+                    },
+                    "tag": "button"
+                }
+            }
+        });
+
+        let msg = parse_card_action(&event).unwrap();
+        assert_eq!(msg.channel, ChannelType::Custom("feishu".to_string()));
+        match &msg.content {
+            ChannelContent::Command { name, args } => {
+                assert_eq!(name, "approve");
+                assert_eq!(args, &["abc-123-def"]);
+            }
+            other => panic!("Expected Command, got {other:?}"),
+        }
+        assert_eq!(msg.sender.display_name, "ou_user1");
+        assert_eq!(msg.sender.platform_id, "oc_chat1");
+        assert_eq!(
+            msg.metadata.get("card_action"),
+            Some(&serde_json::Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn test_parse_card_action_reject() {
+        let event = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-card-002",
+                "event_type": "card.action.trigger"
+            },
+            "event": {
+                "operator": {
+                    "open_id": "ou_admin"
+                },
+                "open_chat_id": "oc_chat2",
+                "open_message_id": "om_card2",
+                "action": {
+                    "value": {
+                        "action": "reject",
+                        "request_id": "xyz-789"
+                    },
+                    "tag": "button"
+                }
+            }
+        });
+
+        let msg = parse_card_action(&event).unwrap();
+        match &msg.content {
+            ChannelContent::Command { name, args } => {
+                assert_eq!(name, "reject");
+                assert_eq!(args, &["xyz-789"]);
+            }
+            other => panic!("Expected Command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_card_action_unknown_action_returns_none() {
+        let event = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-card-003",
+                "event_type": "card.action.trigger"
+            },
+            "event": {
+                "operator": {
+                    "open_id": "ou_user1"
+                },
+                "open_chat_id": "oc_chat1",
+                "open_message_id": "om_card3",
+                "action": {
+                    "value": {
+                        "action": "unknown_action",
+                        "request_id": "abc-123"
+                    },
+                    "tag": "button"
+                }
+            }
+        });
+
+        assert!(parse_card_action(&event).is_none());
+    }
+
+    #[test]
+    fn test_parse_card_action_missing_value_returns_none() {
+        let event = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-card-004",
+                "event_type": "card.action.trigger"
+            },
+            "event": {
+                "operator": {
+                    "open_id": "ou_user1"
+                },
+                "action": {
+                    "tag": "button"
+                }
+            }
+        });
+
+        assert!(parse_card_action(&event).is_none());
+    }
+
+    #[test]
+    fn test_parse_card_action_missing_operator_returns_none() {
+        let event = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-card-005",
+                "event_type": "card.action.trigger"
+            },
+            "event": {
+                "action": {
+                    "value": {
+                        "action": "approve",
+                        "request_id": "abc-123"
+                    },
+                    "tag": "button"
+                }
+            }
+        });
+
+        assert!(parse_card_action(&event).is_none());
     }
 }
