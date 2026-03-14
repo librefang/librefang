@@ -1,0 +1,24 @@
+# Render free tier does not support persistent disks.
+# Data (config, conversation history, local DB) will be lost on each deploy/restart.
+# For persistent storage, upgrade to a paid plan and add a disk:
+#   disk:
+#     name: librefang-data
+#     mountPath: /data
+#     sizeGB: 1
+# Then set LIBREFANG_HOME=/data in envVars.
+
+services:
+  - type: web
+    runtime: image
+    name: librefang
+    image:
+      url: ghcr.io/librefang/librefang:latest
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false

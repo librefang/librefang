@@ -1,5 +1,5 @@
 name = "router"
-version = "0.4.0"
+version = "0.4.3-beta-20260314"
 description = "Native deterministic router. Dispatches tasks to hands, specialist templates, or assistant without using shell_exec."
 author = "librefang"
 module = "builtin:router"

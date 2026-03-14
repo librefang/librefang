@@ -1,5 +1,5 @@
 name = "translator"
-version = "0.4.0"
+version = "0.4.3-beta-20260314"
 description = "Multi-language translation agent for document translation, localization, and cross-cultural communication."
 author = "librefang"
 module = "builtin:chat"

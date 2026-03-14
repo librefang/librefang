@@ -1,5 +1,5 @@
 name = "personal-finance"
-version = "0.4.0"
+version = "0.4.3-beta-20260314"
 description = "Personal finance agent for budget tracking, expense analysis, savings goals, and financial planning."
 author = "librefang"
 module = "builtin:chat"

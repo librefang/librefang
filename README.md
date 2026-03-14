@@ -85,9 +85,21 @@ librefang start
 
 </details>
 
+**Or deploy to the cloud:**
+
+[![Deploy to Fly.io](https://img.shields.io/badge/Deploy%20to-Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Deploy to Render](https://img.shields.io/badge/Deploy%20to-Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Deploy to GCP](https://img.shields.io/badge/Deploy%20to-GCP-4285F4?style=for-the-badge&logo=googlecloud)](infra/gcp/README.md)
+
+> **Fly.io** — Free forever, persistent storage, paste an API token to deploy.
+>
+> **Render** — True one-click OAuth, but free tier sleeps after 15 min and has no persistent storage (data is lost on each deploy/restart).
+>
+> **GCP** — Free forever (e2-micro), 30 GB persistent storage, requires Terraform and a GCP account. [Setup guide →](infra/gcp/README.md)
+
+<a id="docker"></a>
+
 **Or run with Docker:**
 ```bash
-docker compose up --build
+docker run -p 4545:4545 ghcr.io/librefang/librefang
 # Dashboard live at http://localhost:4545
 ```
 
@@ -408,6 +420,13 @@ librefang start
 <details>
 <summary><strong>Docker</strong></summary>
 
+**Quick start (pre-built image):**
+```bash
+docker run -p 4545:4545 ghcr.io/librefang/librefang
+# Dashboard live at http://localhost:4545
+```
+
+**Or build from source with docker-compose:**
 ```bash
 git clone https://github.com/librefang/librefang.git
 cd librefang

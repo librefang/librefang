@@ -13,11 +13,75 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ── Create GitHub Release first ─────────────────────────────────────────
+  # This job runs before everything else to ensure the release exists
+  # with the correct title, body, and changelog content.
+  # All subsequent jobs only upload assets to this existing release.
+  create_release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          # Strip date suffix (e.g. 0.4.2-20260314 → 0.4.2) to match CHANGELOG headers
+          VERSION="${VERSION%-*}"
+
+          # Extract this version's changelog section
+          CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)
+
+          if [ -z "$CHANGES" ]; then
+            CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
+          fi
+
+          # Write to file for multiline output
+          echo "$CHANGES" > /tmp/changelog.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+
+          {
+            echo "## What's New"
+            echo ""
+            cat /tmp/changelog.md
+            echo ""
+            echo "## Installation"
+            echo ""
+            echo "**Desktop App** — Download the installer for your platform below."
+            echo ""
+            echo '**CLI (Linux/macOS)**:'
+            echo '```bash'
+            echo 'curl -fsSL https://librefang.ai/install.sh | sh'
+            echo '```'
+            echo ""
+            echo '**Docker**:'
+            echo '```bash'
+            echo 'docker pull ghcr.io/librefang/librefang:latest'
+            echo '```'
+            echo ""
+            echo '**Coming from OpenClaw?**'
+            echo '```bash'
+            echo 'librefang migrate --from openclaw'
+            echo '```'
+          } > /tmp/release-body.md
+
+          gh release create "$TAG" \
+            --title "LibreFang $TAG" \
+            --notes-file /tmp/release-body.md
+
   # ── Tauri Desktop App (Windows + macOS + Linux) ───────────────────────────
   # Produces: .msi, .exe (Windows) | .dmg, .app (macOS) | .AppImage, .deb (Linux)
   # Also generates and uploads latest.json (the auto-updater manifest)
   desktop:
     name: Desktop / ${{ matrix.platform.name }}
+    needs: [create_release]
     strategy:
       fail-fast: false
       matrix:
@@ -116,30 +180,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "LibreFang ${{ github.ref_name }}"
-          releaseBody: |
-            ## What's New
-
-            See the [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for full details.
-
-            ## Installation
-
-            **Desktop App** — Download the installer for your platform below.
-
-            **CLI (Linux/macOS)**:
-            ```bash
-            curl -fsSL https://librefang.ai/install.sh | sh
-            ```
-
-            **Docker**:
-            ```bash
-            docker pull ghcr.io/librefang/librefang:latest
-            ```
-
-            **Coming from OpenClaw?**
-            ```bash
-            librefang migrate --from openclaw
-            ```
-          generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
@@ -160,30 +200,6 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "LibreFang ${{ github.ref_name }}"
-          releaseBody: |
-            ## What's New
-
-            See the [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for full details.
-
-            ## Installation
-
-            **Desktop App** — Download the installer for your platform below.
-
-            **CLI (Linux/macOS)**:
-            ```bash
-            curl -fsSL https://librefang.ai/install.sh | sh
-            ```
-
-            **Docker**:
-            ```bash
-            docker pull ghcr.io/librefang/librefang:latest
-            ```
-
-            **Coming from OpenClaw?**
-            ```bash
-            librefang migrate --from openclaw
-            ```
-          generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
           includeUpdaterJson: true
@@ -193,6 +209,7 @@ jobs:
   # ── CLI Binary (macOS) ────────────────────────────────────────────────────
   cli_mac:
     name: CLI / ${{ matrix.target }}
+    needs: [create_release]
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -231,6 +248,7 @@ jobs:
   # ── CLI Binary (Linux) ──────────────────────────────────────────────────
   cli_linux:
     name: CLI / ${{ matrix.target }}
+    needs: [create_release]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -277,6 +295,7 @@ jobs:
   # ── CLI Binary (Windows) ────────────────────────────────────────────────
   cli_windows:
     name: CLI / ${{ matrix.target }}
+    needs: [create_release]
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -311,6 +330,7 @@ jobs:
   # ── Docker (linux/amd64 + linux/arm64, native runners) ────────────────────
   docker:
     name: Docker / ${{ matrix.platform }}
+    needs: [create_release]
     strategy:
       fail-fast: false
       matrix:
@@ -623,6 +643,8 @@ jobs:
 
           TAG="${GITHUB_REF#refs/tags/}"
           VERSION="${TAG#v}"
+          # Strip date suffix (e.g. 0.4.2-20260314 → 0.4.2) to match CHANGELOG headers
+          VERSION="${VERSION%-*}"
 
           # Extract this version's changelog section
           CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md | head -30)

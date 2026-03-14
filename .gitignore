@@ -3,6 +3,9 @@
 **/*.rs.bk
 *.pdb
 
+# Cloudflare Wrangler
+.wrangler/
+
 # Environment & secrets
 .env
 .env.*

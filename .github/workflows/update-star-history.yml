@@ -3,7 +3,7 @@ name: Update Star History
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 2 * * *"
+    - cron: "17 * * * *"
 
 permissions:
   contents: write

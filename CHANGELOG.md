@@ -5,6 +5,107 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3-beta] - 2026-03-14
+
+### Added
+
+- Add copy buttons to install commands on deploy hub (#258) (@houko)
+- Add macOS, Linux, Windows install options to deploy hub (#257) (@houko)
+- Deploy hub with multi-platform support (#251) (@houko)
+- Add GCP free-tier deployment with Terraform (#249) (@houko)
+
+### Fixed
+
+- Allow multi-segment prerelease in semver validation (#263) (@houko)
+- Use docker run command on deploy hub (#262) (@houko)
+- Docker deploy card links to correct README section (#260) (@houko)
+- Add catalog directory to Dockerfile (#256) (@houko)
+- Correct Railway URL and use prebuilt image for Render (#255) (@houko)
+- Deploy page home button links to deploy.librefang.ai (#254) (@houko)
+- Replace emoji with SVG icons and add home button (#253) (@houko)
+- Prevent release notes from being lost due to race condition (#252) (@houko)
+- Remove disk config for Render free tier (#247) (@houko)
+
+### Documentation
+
+- Separate Fly.io and Render deploy descriptions (#248) (@houko)
+
+### Maintenance
+
+- Add 'release' to allowed PR title types. (#246) (@houko)
+- Update star history workflow schedule to run hourly. (#245) (@houko)
+
+### Other
+
+- V0.4.2-20260314 (#244) (@houko)
+
+## [0.4.2] - 2026-03-14
+
+### Added
+
+- Add CLI deploy command and FAQ to deploy page (#238) (@houko)
+- Auto-sync model catalog on daemon startup (#237) (@houko)
+- Add channel sidecar protocol for external adapters (#228) (@houko)
+- Integrate model-catalog sync with dashboard UI (#227) (@houko)
+- Add cargo feature flags for channel adapters (#223) (@houko)
+- Improve community organization and version governance (#212) (@houko)
+
+### Fixed
+
+- Revert file versions to 0.4.1-20260314 and fix release.sh (#243) (@houko)
+- Release script uses PR instead of direct push (#242) (@houko)
+- Daemon env vars, MCP probe, and SSE parsing (#211) (@houko)
+
+### Changed
+
+- Replace hardcoded model catalog with include_str TOML (#235) (@houko)
+- Replace provider match with static registry (#224) (@houko)
+
+### Documentation
+
+- Add integration test writing guide to CONTRIBUTING.md (#232) (@houko)
+- Add channel adapter contribution example (#231) (@houko)
+
+### Maintenance
+
+- Bump version to v0.4.2-20260314 (#241) (@houko)
+- Trigger deploy worker auto-deploy (#239) (@houko)
+- Add pre-commit hooks and i18n contribution guide (#233) (@houko)
+- Add justfile for unified dev commands (#230) (@houko)
+- Upgrade GitHub Actions for Node.js 24 compatibility (#229) (@houko)
+
+## [0.4.2] - 2026-03-14
+
+### Added
+
+- Add CLI deploy command and FAQ to deploy page (#238) (@houko)
+- Auto-sync model catalog on daemon startup (#237) (@houko)
+- Add channel sidecar protocol for external adapters (#228) (@houko)
+- Integrate model-catalog sync with dashboard UI (#227) (@houko)
+- Add cargo feature flags for channel adapters (#223) (@houko)
+- Improve community organization and version governance (#212) (@houko)
+
+### Fixed
+
+- Daemon env vars, MCP probe, and SSE parsing (#211) (@houko)
+
+### Changed
+
+- Replace hardcoded model catalog with include_str TOML (#235) (@houko)
+- Replace provider match with static registry (#224) (@houko)
+
+### Documentation
+
+- Add integration test writing guide to CONTRIBUTING.md (#232) (@houko)
+- Add channel adapter contribution example (#231) (@houko)
+
+### Maintenance
+
+- Trigger deploy worker auto-deploy (#239) (@houko)
+- Add pre-commit hooks and i18n contribution guide (#233) (@houko)
+- Add justfile for unified dev commands (#230) (@houko)
+- Upgrade GitHub Actions for Node.js 24 compatibility (#229) (@houko)
+
 ## [0.4.0] - 2026-03-14
 
 ### Added

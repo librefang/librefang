@@ -1,0 +1,23 @@
+app = "librefang"
+primary_region = "nrt"
+
+[build]
+
+[env]
+  LIBREFANG_HOME = "/data"
+
+[http_service]
+  internal_port = 4545
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 0
+
+[mounts]
+  source = "librefang_data"
+  destination = "/data"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1

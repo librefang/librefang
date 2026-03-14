@@ -1,12 +1,7 @@
-# NOTE: The GHCR image (ghcr.io/librefang/librefang) is not yet published.
-# For now, build from source using `docker compose up --build`.
-# See: https://github.com/librefang/librefang/issues
-
-version: "3.8"
 services:
   librefang:
-    build: .
-    # image: ghcr.io/librefang/librefang:latest  # Uncomment when GHCR is published
+    image: ghcr.io/librefang/librefang:latest
+    # build: .  # Uncomment to build from source
     ports:
       - "4545:4545"
     volumes:

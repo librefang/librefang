@@ -1,5 +1,5 @@
 name = "researcher"
-version = "0.4.0"
+version = "0.4.3-beta-20260314"
 description = "Research agent. Fetches web content and synthesizes information."
 author = "librefang"
 module = "builtin:chat"

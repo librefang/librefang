@@ -15,6 +15,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY xtask ./xtask
 COPY agents ./agents
+COPY catalog ./catalog
 COPY packages ./packages
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
@@ -28,8 +29,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/agents /opt/librefang/agents
 COPY --from=builder /build/packages /opt/librefang/packages
+COPY deploy/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 EXPOSE 4545
 VOLUME /data
 ENV LIBREFANG_HOME=/data
-ENTRYPOINT ["librefang"]
-CMD ["start", "--foreground"]
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["librefang", "start", "--foreground"]

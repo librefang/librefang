@@ -1,5 +1,5 @@
 name = "travel-planner"
-version = "0.4.0"
+version = "0.4.3-beta-20260314"
 description = "Trip planning agent for itinerary creation, booking research, budget estimation, and travel logistics."
 author = "librefang"
 module = "builtin:chat"

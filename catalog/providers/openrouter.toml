@@ -216,6 +216,20 @@ supports_streaming = true
 aliases = []
 
 [[models]]
+id = "openrouter/stepfun/step-3.5-flash:free"
+display_name = "Step 3.5 Flash Free (OpenRouter)"
+provider = "openrouter"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
 id = "openrouter/deepseek/deepseek-r1:free"
 display_name = "DeepSeek R1 Free (OpenRouter)"
 provider = "openrouter"

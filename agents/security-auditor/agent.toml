@@ -1,5 +1,5 @@
 name = "security-auditor"
-version = "0.4.0"
+version = "0.4.3-beta-20260314"
 description = "Security specialist. Reviews code for vulnerabilities, checks configurations, performs threat modeling."
 author = "librefang"
 module = "builtin:chat"

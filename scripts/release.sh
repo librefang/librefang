@@ -24,7 +24,7 @@ if [ ! -x "$SYNC_SCRIPT" ]; then
     exit 1
 fi
 
-# Must be on main
+# Must be on main (or we'll create a branch from it)
 BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)
 if [ "$BRANCH" != "main" ]; then
     echo "Error: must be on 'main' branch (currently on '$BRANCH')" >&2
@@ -90,10 +90,11 @@ if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; the
 fi
 
 DATE=$(date +%Y%m%d)
-TAG="v${VERSION}-${DATE}"
+FULL_VERSION="${VERSION}-${DATE}"
+TAG="v${FULL_VERSION}"
 
 echo ""
-echo "  Version: $CURRENT → $VERSION"
+echo "  Version: $CURRENT → $FULL_VERSION"
 echo "  Tag:     $TAG"
 echo ""
 read -rp "Confirm? [Y/n]: " confirm
@@ -122,7 +123,7 @@ fi
 
 echo ""
 echo "Syncing versions..."
-"$SYNC_SCRIPT" "$VERSION"
+"$SYNC_SCRIPT" "$FULL_VERSION"
 
 # --- Update lockfile if cargo is available ---
 
@@ -146,40 +147,53 @@ git -C "$REPO_ROOT" tag "$TAG"
 echo ""
 echo "Created commit and tag $TAG"
 
-# --- Push ---
+# --- Create branch and push ---
 
-read -rp "Push to origin? [Y/n]: " push_confirm
+RELEASE_BRANCH="chore/bump-version-${VERSION}"
+
+echo ""
+echo "Creating release branch '$RELEASE_BRANCH'..."
+git -C "$REPO_ROOT" checkout -b "$RELEASE_BRANCH"
+
+read -rp "Push and create PR? [Y/n]: " push_confirm
 if [[ "$push_confirm" =~ ^[Nn] ]]; then
     echo "Skipped push. Run manually:"
-    echo "  git push origin main && git push origin $TAG"
+    echo "  git push -u origin $RELEASE_BRANCH"
+    echo "  gh pr create --title 'chore: bump version to $TAG'"
     exit 0
 fi
 
-git -C "$REPO_ROOT" push origin main
+git -C "$REPO_ROOT" push -u origin "$RELEASE_BRANCH"
 git -C "$REPO_ROOT" push origin "$TAG"
 
-# --- GitHub Release ---
+# --- Create PR ---
 
 if command -v gh &>/dev/null; then
     echo ""
-    echo "Creating GitHub Release..."
-    # Extract the current version's section from CHANGELOG.md as release body
+    echo "Creating Pull Request..."
+
+    # Extract the current version's section from CHANGELOG.md as PR body
     RELEASE_BODY=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' "$REPO_ROOT/CHANGELOG.md")
+    PR_BODY="## Release $TAG"
     if [ -n "$RELEASE_BODY" ]; then
-        gh release create "$TAG" \
-            --repo librefang/librefang \
-            --title "LibreFang $VERSION" \
-            --notes "$RELEASE_BODY" \
-            || echo "Warning: gh release create failed — CI may create it"
-    else
-        gh release create "$TAG" \
-            --repo librefang/librefang \
-            --title "LibreFang $VERSION" \
-            --generate-notes \
-            || echo "Warning: gh release create failed — CI may create it"
+        PR_BODY="$PR_BODY
+
+$RELEASE_BODY"
     fi
-    echo "→ https://github.com/librefang/librefang/releases/tag/$TAG"
+
+    PR_URL=$(gh pr create \
+        --repo librefang/librefang \
+        --title "release: $TAG" \
+        --body "$PR_BODY" \
+        --base main \
+        --head "$RELEASE_BRANCH")
+
+    echo "→ $PR_URL"
+else
+    echo ""
+    echo "gh CLI not found. Create a PR manually for branch '$RELEASE_BRANCH'."
 fi
 
 echo ""
-echo "Release $TAG done!"
+echo "Tag $TAG pushed — release.yml workflow will auto-create the GitHub Release."
+echo "Merge the PR to land the version bump on main."

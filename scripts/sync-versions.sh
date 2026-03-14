@@ -40,7 +40,7 @@ fi
 if [ $# -ge 1 ]; then
     VERSION="$1"
     # Validate semver format
-    if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+    if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$'; then
         echo "Error: '$VERSION' is not a valid semver (expected: X.Y.Z or X.Y.Z-suffix)" >&2
         exit 1
     fi

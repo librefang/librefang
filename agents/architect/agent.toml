@@ -1,5 +1,5 @@
 name = "architect"
-version = "0.4.0"
+version = "0.4.3-beta-20260314"
 description = "System architect. Designs software architectures, evaluates trade-offs, creates technical specifications."
 author = "librefang"
 module = "builtin:chat"
