@@ -89,7 +89,9 @@ librefang start
 
 [![Deploy to Fly.io](https://img.shields.io/badge/Deploy%20to-Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Deploy to Render](https://img.shields.io/badge/Deploy%20to-Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang)
 
-> **Fly.io** — Free forever, persistent storage, paste an API token to deploy. **Render** — True one-click OAuth, but free tier sleeps after 15 min and has no persistent storage (data is lost on each deploy/restart).
+> **Fly.io** — Free forever, persistent storage, paste an API token to deploy.
+>
+> **Render** — True one-click OAuth, but free tier sleeps after 15 min and has no persistent storage (data is lost on each deploy/restart).
 
 **Or run with Docker:**
 ```bash
