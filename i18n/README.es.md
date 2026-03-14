@@ -261,6 +261,7 @@ Licencia MIT. Ver archivo LICENSE.
 - [Mantenedores](../MAINTAINERS.md)
 - [Política de seguridad](../SECURITY.md)
 - [Discusiones](https://github.com/librefang/librefang/discussions) — Preguntas, ideas y demos
+- [Discord](https://discord.gg/rwbCEM7h) — Chat en tiempo real con la comunidad
 
 ---
 

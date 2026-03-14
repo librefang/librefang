@@ -261,6 +261,7 @@ MITライセンス。LICENSEファイルを参照してください。
 - [メンテナー](../MAINTAINERS.md)
 - [セキュリティポリシー](../SECURITY.md)
 - [コミュニティディスカッション](https://github.com/librefang/librefang/discussions) — 質問、アイデア共有、作品紹介
+- [Discord](https://discord.gg/rwbCEM7h) — リアルタイムコミュニティチャット
 
 ---
 

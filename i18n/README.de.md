@@ -261,6 +261,7 @@ MIT-Lizenz. Siehe LICENSE-Datei.
 - [Maintainer](../MAINTAINERS.md)
 - [Sicherheitsrichtlinie](../SECURITY.md)
 - [Diskussionen](https://github.com/librefang/librefang/discussions) — Fragen, Ideen und Vorstellungen
+- [Discord](https://discord.gg/rwbCEM7h) — Echtzeit-Chat mit der Community
 
 ---
 
