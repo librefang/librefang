@@ -262,15 +262,19 @@ setup_instructions = """
 
 /// Generate scaffold files for a new skill.
 pub fn scaffold_skill(dir: &std::path::Path) -> ExtensionResult<String> {
-    let skill_toml = r#"name = "my-skill"
+    let skill_toml = format!(
+        r#"name = "my-skill"
 description = "A custom skill"
-version = "0.1.0"
+version = "{version}"
 runtime = "prompt_only"
-"#;
-    let skill_md = r#"---
+"#,
+        version = librefang_types::VERSION,
+    );
+    let skill_md = format!(
+        r#"---
 name: my-skill
 description: A custom skill
-version: 0.1.0
+version: {version}
 runtime: prompt_only
 ---
 
@@ -282,7 +286,9 @@ You are an expert at [domain]. When the user asks about [topic], provide [behavi
 
 - Be concise and accurate
 - Cite sources when possible
-"#;
+"#,
+        version = librefang_types::VERSION,
+    );
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join("skill.toml"), skill_toml)?;
     std::fs::write(dir.join("SKILL.md"), skill_md)?;

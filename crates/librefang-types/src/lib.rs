@@ -3,6 +3,9 @@
 //! This crate defines all shared data structures used across the LibreFang kernel,
 //! runtime, memory substrate, and wire protocol. It contains no business logic.
 
+/// The LibreFang version, derived from the workspace `Cargo.toml` at compile time.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod agent;
 pub mod approval;
 pub mod capability;

@@ -305,13 +305,13 @@ pub async fn refresh_access_token(refresh_token: &str) -> Result<ChatGptAuthResu
 
 /// Fetch the best available Codex model from the ChatGPT backend API.
 ///
-/// Calls `GET {base_url}/codex/models?client_version=0.1.0` with the given
+/// Calls `GET {base_url}/codex/models?client_version={VERSION}` with the given
 /// access token, sorts by priority (highest first), and returns the model slug.
 /// Falls back to `gpt-5.1-codex-mini` if the API call fails.
 pub async fn fetch_best_codex_model(access_token: &str) -> String {
     const FALLBACK_MODEL: &str = "gpt-5.1-codex-mini";
 
-    let url = format!("{CHATGPT_BASE_URL}/codex/models?client_version=0.1.0");
+    let url = format!("{CHATGPT_BASE_URL}/codex/models?client_version={}", librefang_types::VERSION);
     let client = reqwest::Client::new();
     let resp = match client.get(&url).bearer_auth(access_token).send().await {
         Ok(r) => r,

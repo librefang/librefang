@@ -844,7 +844,7 @@ impl AgentSelectState {
 
         format!(
             r#"name = "{name}"
-version = "0.1.0"
+version = "{version}"
 description = "{desc}"
 author = "user"
 module = "builtin:chat"
@@ -867,6 +867,7 @@ memory_read = ["*"]
 memory_write = ["self.*"]
 "#,
             name = self.custom_name,
+            version = librefang_types::VERSION,
             desc = self.custom_desc,
             prompt = self.custom_prompt,
         )

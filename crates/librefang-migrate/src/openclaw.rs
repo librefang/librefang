@@ -1866,7 +1866,7 @@ fn convert_agent_from_json(
         "name = \"{}\"\n",
         display_name.replace('"', "\\\"")
     ));
-    toml_str.push_str("version = \"0.1.0\"\n");
+    toml_str.push_str(&format!("version = \"{}\"\n", librefang_types::VERSION));
     toml_str.push_str(&format!(
         "description = \"Migrated from OpenClaw agent '{id}'\"\n"
     ));
@@ -2842,7 +2842,7 @@ fn convert_legacy_agent(
         oc.name
     ));
     toml_str.push_str(&format!("name = \"{}\"\n", oc.name));
-    toml_str.push_str("version = \"0.1.0\"\n");
+    toml_str.push_str(&format!("version = \"{}\"\n", librefang_types::VERSION));
     toml_str.push_str(&format!(
         "description = \"{}\"\n",
         oc.description.replace('"', "\\\"")

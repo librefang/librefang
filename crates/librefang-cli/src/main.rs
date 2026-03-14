@@ -4470,7 +4470,7 @@ fn cmd_skill_create() {
     let manifest = format!(
         r#"[skill]
 name = "{name}"
-version = "0.1.0"
+version = "{version}"
 description = "{description}"
 author = ""
 license = "MIT"
@@ -4489,6 +4489,7 @@ input_schema = {{ type = "object", properties = {{ input = {{ type = "string" }}
 tools = []
 capabilities = []
 "#,
+        version = librefang_types::VERSION,
         tool_name = name.replace('-', "_"),
     );
 

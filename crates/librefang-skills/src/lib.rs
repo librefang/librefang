@@ -146,7 +146,7 @@ pub struct SkillMeta {
 }
 
 fn default_version() -> String {
-    "0.1.0".to_string()
+    librefang_types::VERSION.to_string()
 }
 
 /// Runtime configuration section.
@@ -197,7 +197,7 @@ mod tests {
         let toml_str = r#"
 [skill]
 name = "web-summarizer"
-version = "0.1.0"
+version = "0.4.0"
 description = "Summarizes any web page into bullet points"
 author = "librefang-community"
 license = "MIT"
