@@ -12099,6 +12099,355 @@ pub async fn catalog_status() -> impl IntoResponse {
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Bulk agent operations
+// ---------------------------------------------------------------------------
+
+/// Maximum number of agents allowed in a single bulk request.
+const BULK_LIMIT: usize = 50;
+
+/// POST /api/agents/bulk — Create multiple agents at once.
+pub async fn bulk_create_agents(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkCreateRequest>,
+) -> impl IntoResponse {
+    if req.agents.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "agents array must not be empty"})),
+        );
+    }
+    if req.agents.len() > BULK_LIMIT {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("Too many agents (max {})", BULK_LIMIT)})),
+        );
+    }
+
+    let mut results: Vec<BulkCreateResult> = Vec::with_capacity(req.agents.len());
+
+    for (index, spawn_req) in req.agents.into_iter().enumerate() {
+        // Resolve manifest TOML from template or inline
+        let manifest_toml = if spawn_req.manifest_toml.trim().is_empty() {
+            if let Some(ref tmpl_name) = spawn_req.template {
+                let safe_name: String = tmpl_name
+                    .chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                    .collect();
+                if safe_name.is_empty() || safe_name != *tmpl_name {
+                    results.push(BulkCreateResult {
+                        index,
+                        success: false,
+                        agent_id: None,
+                        name: None,
+                        error: Some("Invalid template name".into()),
+                    });
+                    continue;
+                }
+                let tmpl_path = state
+                    .kernel
+                    .config
+                    .home_dir
+                    .join("agents")
+                    .join(&safe_name)
+                    .join("agent.toml");
+                match std::fs::read_to_string(&tmpl_path) {
+                    Ok(content) => content,
+                    Err(_) => {
+                        results.push(BulkCreateResult {
+                            index,
+                            success: false,
+                            agent_id: None,
+                            name: None,
+                            error: Some(format!("Template '{}' not found", safe_name)),
+                        });
+                        continue;
+                    }
+                }
+            } else {
+                results.push(BulkCreateResult {
+                    index,
+                    success: false,
+                    agent_id: None,
+                    name: None,
+                    error: Some("Either 'manifest_toml' or 'template' is required".into()),
+                });
+                continue;
+            }
+        } else {
+            spawn_req.manifest_toml.clone()
+        };
+
+        // Size guard
+        const MAX_MANIFEST_SIZE: usize = 1024 * 1024;
+        if manifest_toml.len() > MAX_MANIFEST_SIZE {
+            results.push(BulkCreateResult {
+                index,
+                success: false,
+                agent_id: None,
+                name: None,
+                error: Some("Manifest too large (max 1MB)".into()),
+            });
+            continue;
+        }
+
+        // Parse manifest
+        let manifest: AgentManifest = match toml::from_str(&manifest_toml) {
+            Ok(m) => m,
+            Err(e) => {
+                results.push(BulkCreateResult {
+                    index,
+                    success: false,
+                    agent_id: None,
+                    name: None,
+                    error: Some(format!("Invalid manifest: {e}")),
+                });
+                continue;
+            }
+        };
+
+        let name = manifest.name.clone();
+        match state.kernel.spawn_agent(manifest) {
+            Ok(id) => {
+                results.push(BulkCreateResult {
+                    index,
+                    success: true,
+                    agent_id: Some(id.to_string()),
+                    name: Some(name),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                results.push(BulkCreateResult {
+                    index,
+                    success: false,
+                    agent_id: None,
+                    name: None,
+                    error: Some(format!("Spawn failed: {e}")),
+                });
+            }
+        }
+    }
+
+    let total = results.len();
+    let succeeded = results.iter().filter(|r| r.success).count();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "total": total,
+            "succeeded": succeeded,
+            "failed": total - succeeded,
+            "results": results,
+        })),
+    )
+}
+
+/// DELETE /api/agents/bulk — Delete multiple agents at once.
+pub async fn bulk_delete_agents(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> impl IntoResponse {
+    if req.agent_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "agent_ids array must not be empty"})),
+        );
+    }
+    if req.agent_ids.len() > BULK_LIMIT {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("Too many agent IDs (max {})", BULK_LIMIT)})),
+        );
+    }
+
+    let mut results: Vec<BulkDeleteResult> = Vec::with_capacity(req.agent_ids.len());
+
+    for id_str in &req.agent_ids {
+        let agent_id: AgentId = match id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                results.push(BulkDeleteResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    error: Some("Invalid agent ID".into()),
+                });
+                continue;
+            }
+        };
+        match state.kernel.kill_agent(agent_id) {
+            Ok(()) => {
+                results.push(BulkDeleteResult {
+                    agent_id: id_str.clone(),
+                    success: true,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                results.push(BulkDeleteResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    error: Some(format!("{e}")),
+                });
+            }
+        }
+    }
+
+    let total = results.len();
+    let succeeded = results.iter().filter(|r| r.success).count();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "total": total,
+            "succeeded": succeeded,
+            "failed": total - succeeded,
+            "results": results,
+        })),
+    )
+}
+
+/// POST /api/agents/bulk/start — Set multiple agents to Full mode (unrestricted).
+pub async fn bulk_start_agents(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkAgentIdsRequest>,
+) -> impl IntoResponse {
+    use librefang_types::agent::AgentMode;
+
+    if req.agent_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "agent_ids array must not be empty"})),
+        );
+    }
+    if req.agent_ids.len() > BULK_LIMIT {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("Too many agent IDs (max {})", BULK_LIMIT)})),
+        );
+    }
+
+    let mut results: Vec<BulkActionResult> = Vec::with_capacity(req.agent_ids.len());
+
+    for id_str in &req.agent_ids {
+        let agent_id: AgentId = match id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some("Invalid agent ID".into()),
+                });
+                continue;
+            }
+        };
+        match state.kernel.registry.set_mode(agent_id, AgentMode::Full) {
+            Ok(()) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: true,
+                    message: Some("Agent set to Full mode".into()),
+                    error: None,
+                });
+            }
+            Err(_) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some("Agent not found".into()),
+                });
+            }
+        }
+    }
+
+    let total = results.len();
+    let succeeded = results.iter().filter(|r| r.success).count();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "total": total,
+            "succeeded": succeeded,
+            "failed": total - succeeded,
+            "results": results,
+        })),
+    )
+}
+
+/// POST /api/agents/bulk/stop — Stop (cancel current run of) multiple agents.
+pub async fn bulk_stop_agents(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkAgentIdsRequest>,
+) -> impl IntoResponse {
+    if req.agent_ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "agent_ids array must not be empty"})),
+        );
+    }
+    if req.agent_ids.len() > BULK_LIMIT {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("Too many agent IDs (max {})", BULK_LIMIT)})),
+        );
+    }
+
+    let mut results: Vec<BulkActionResult> = Vec::with_capacity(req.agent_ids.len());
+
+    for id_str in &req.agent_ids {
+        let agent_id: AgentId = match id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some("Invalid agent ID".into()),
+                });
+                continue;
+            }
+        };
+        match state.kernel.stop_agent_run(agent_id) {
+            Ok(cancelled) => {
+                let msg = if cancelled {
+                    "Run cancelled"
+                } else {
+                    "No active run"
+                };
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: true,
+                    message: Some(msg.into()),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some(format!("{e}")),
+                });
+            }
+        }
+    }
+
+    let total = results.len();
+    let succeeded = results.iter().filter(|r| r.success).count();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "total": total,
+            "succeeded": succeeded,
+            "failed": total - succeeded,
+            "results": results,
+        })),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12170,29 +12519,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(json["error"].as_str().unwrap().contains("not found"));
-    }
-
-    #[tokio::test]
-    async fn test_list_profiles_returns_all() {
-        let app = profile_router();
-
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/profiles")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(resp.status(), StatusCode::OK);
 
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await

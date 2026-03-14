@@ -102,6 +102,69 @@ pub struct ClawHubInstallRequest {
     pub slug: String,
 }
 
+// ---------------------------------------------------------------------------
+// Bulk operations
+// ---------------------------------------------------------------------------
+
+/// Request to create multiple agents at once.
+#[derive(Debug, Deserialize)]
+pub struct BulkCreateRequest {
+    /// List of spawn requests to execute.
+    pub agents: Vec<SpawnRequest>,
+}
+
+/// Outcome of a single bulk-create item.
+#[derive(Debug, Serialize)]
+pub struct BulkCreateResult {
+    /// Index in the request array (0-based).
+    pub index: usize,
+    /// Whether this item succeeded.
+    pub success: bool,
+    /// Agent ID on success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// Agent name on success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Error message on failure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Request to delete multiple agents at once.
+#[derive(Debug, Deserialize)]
+pub struct BulkDeleteRequest {
+    /// Agent IDs to delete.
+    pub agent_ids: Vec<String>,
+}
+
+/// Outcome of a single bulk-delete item.
+#[derive(Debug, Serialize)]
+pub struct BulkDeleteResult {
+    pub agent_id: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Request to start or stop multiple agents at once.
+#[derive(Debug, Deserialize)]
+pub struct BulkAgentIdsRequest {
+    /// Agent IDs to operate on.
+    pub agent_ids: Vec<String>,
+}
+
+/// Outcome of a single bulk start/stop item.
+#[derive(Debug, Serialize)]
+pub struct BulkActionResult {
+    pub agent_id: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Request to install an extension (integration).
 #[derive(Debug, Deserialize)]
 pub struct ExtensionInstallRequest {
