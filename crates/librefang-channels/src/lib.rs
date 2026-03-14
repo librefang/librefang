@@ -53,6 +53,8 @@ pub mod matrix;
 pub mod mattermost;
 #[cfg(feature = "channel-messenger")]
 pub mod messenger;
+#[cfg(feature = "channel-mqtt")]
+pub mod mqtt;
 #[cfg(feature = "channel-mumble")]
 pub mod mumble;
 #[cfg(feature = "channel-nextcloud")]

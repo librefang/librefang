@@ -64,6 +64,7 @@ all-channels = [
     "channel-ntfy",
     "channel-qq",
     "channel-wecom",
+    "channel-mqtt",
 ]
 
 # Individual channel features
@@ -109,6 +110,7 @@ channel-mumble = []
 channel-ntfy = []
 channel-qq = ["dep:rustls"]
 channel-wecom = ["dep:roxmltree", "dep:aes", "dep:cbc"]
+channel-mqtt = ["dep:rumqttc"]
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
@@ -141,6 +143,7 @@ cbc = { version = "0.1", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
 roxmltree = { version = "0.21", optional = true }
 
+rumqttc = { workspace = true, optional = true }
 lettre = { workspace = true, optional = true }
 imap = { workspace = true, optional = true }
 native-tls = { workspace = true, optional = true }

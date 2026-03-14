@@ -142,6 +142,9 @@ imap = "2"
 native-tls = { version = "0.2", features = ["vendored"] }
 mailparse = "0.16"
 
+# MQTT client
+rumqttc = "0.24"
+
 # Testing
 tokio-test = "0.4"
 tempfile = "3"
