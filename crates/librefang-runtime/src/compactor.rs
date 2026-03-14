@@ -468,6 +468,7 @@ async fn summarize_messages(
                 .to_string(),
         ),
         thinking: None,
+        prompt_caching: false,
     };
 
     // Retry logic for transient failures
@@ -586,6 +587,7 @@ async fn summarize_in_chunks(
                 .to_string(),
         ),
         thinking: None,
+        prompt_caching: false,
     };
 
     match driver.complete(merge_request).await {

@@ -161,6 +161,7 @@ mod tests {
             temperature: 0.0,
             system: None,
             thinking: None,
+            prompt_caching: false,
         }
     }
 

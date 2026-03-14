@@ -485,6 +485,7 @@ mod tests {
             temperature: 0.7,
             system: Some("You are helpful.".to_string()),
             thinking: None,
+            prompt_caching: false,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
