@@ -114,7 +114,11 @@ pub async fn auth(
         || (path == "/api/workflows" && is_get)
         || path == "/api/logs/stream"  // SSE stream, read-only
         || (path.starts_with("/api/cron/") && is_get)
-        || path.starts_with("/api/providers/github-copilot/oauth/");
+        || path.starts_with("/api/providers/github-copilot/oauth/")
+        // OAuth/OIDC auth flow endpoints must be accessible without auth
+        || (path == "/api/auth/providers" && is_get)
+        || (path == "/api/auth/login" && is_get)
+        || (path == "/api/auth/callback" && is_get);
 
     if is_public {
         return next.run(request).await;

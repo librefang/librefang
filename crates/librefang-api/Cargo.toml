@@ -36,6 +36,7 @@ base64 = { workspace = true }
 socket2 = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
+jsonwebtoken = { workspace = true }
 
 [features]
 default = ["librefang-channels/default"]

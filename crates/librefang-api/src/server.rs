@@ -718,6 +718,23 @@ pub async fn build_router(
             "/api/pairing/notify",
             axum::routing::post(routes::pairing_notify),
         )
+        // OAuth/OIDC external authentication endpoints
+        .route(
+            "/api/auth/providers",
+            axum::routing::get(crate::oauth::auth_providers),
+        )
+        .route(
+            "/api/auth/login",
+            axum::routing::get(crate::oauth::auth_login),
+        )
+        .route(
+            "/api/auth/callback",
+            axum::routing::get(crate::oauth::auth_callback),
+        )
+        .route(
+            "/api/auth/userinfo",
+            axum::routing::get(crate::oauth::auth_userinfo),
+        )
         // MCP HTTP endpoint (exposes MCP protocol over HTTP)
         .route("/mcp", axum::routing::post(routes::mcp_http))
         // OpenAI-compatible API

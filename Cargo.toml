@@ -113,6 +113,9 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 
+# JWT validation
+jsonwebtoken = "9"
+
 # Rate limiting
 governor = "0.10.4"
 
