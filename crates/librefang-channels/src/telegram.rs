@@ -259,6 +259,33 @@ impl TelegramAdapter {
         Ok(())
     }
 
+    /// Call `sendVideo` on the Telegram API.
+    async fn api_send_video(
+        &self,
+        chat_id: i64,
+        video_url: &str,
+        caption: Option<&str>,
+        thread_id: Option<i64>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let url = format!("{}/bot{}/sendVideo", self.api_base_url, self.token.as_str());
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "video": video_url,
+        });
+        if let Some(cap) = caption {
+            body["caption"] = serde_json::json!(cap);
+        }
+        if let Some(tid) = thread_id {
+            body["message_thread_id"] = serde_json::json!(tid);
+        }
+        let resp = self.client.post(&url).json(&body).send().await?;
+        if !resp.status().is_success() {
+            let body_text = resp.text().await.unwrap_or_default();
+            warn!("Telegram sendVideo failed: {body_text}");
+        }
+        Ok(())
+    }
+
     /// Call `sendLocation` on the Telegram API.
     async fn api_send_location(
         &self,
@@ -383,6 +410,10 @@ impl TelegramAdapter {
             }
             ChannelContent::Voice { url, .. } => {
                 self.api_send_voice(chat_id, &url, thread_id).await?;
+            }
+            ChannelContent::Video { url, caption, .. } => {
+                self.api_send_video(chat_id, &url, caption.as_deref(), thread_id)
+                    .await?;
             }
             ChannelContent::Location { lat, lon } => {
                 self.api_send_location(chat_id, lat, lon, thread_id).await?;
@@ -815,6 +846,39 @@ async fn parse_telegram_update(
                 duration_seconds: duration,
             },
             None => ChannelContent::Text(format!("[Voice message, {duration}s]")),
+        }
+    } else if message.get("video").is_some() {
+        let file_id = message["video"]["file_id"].as_str().unwrap_or("");
+        let duration = message["video"]["duration"].as_u64().unwrap_or(0) as u32;
+        let caption = message["caption"].as_str().map(String::from);
+        let filename = message["video"]["file_name"].as_str().map(String::from);
+        match telegram_get_file_url(token, client, file_id, api_base_url).await {
+            Some(url) => ChannelContent::Video {
+                url,
+                caption,
+                duration_seconds: duration,
+                filename,
+            },
+            None => ChannelContent::Text(format!(
+                "[Video received, {duration}s{}]",
+                caption
+                    .as_deref()
+                    .map(|c| format!(": {c}"))
+                    .unwrap_or_default()
+            )),
+        }
+    } else if message.get("video_note").is_some() {
+        // Video notes are round video messages (no caption/filename)
+        let file_id = message["video_note"]["file_id"].as_str().unwrap_or("");
+        let duration = message["video_note"]["duration"].as_u64().unwrap_or(0) as u32;
+        match telegram_get_file_url(token, client, file_id, api_base_url).await {
+            Some(url) => ChannelContent::Video {
+                url,
+                caption: None,
+                duration_seconds: duration,
+                filename: None,
+            },
+            None => ChannelContent::Text(format!("[Video note, {duration}s]")),
         }
     } else if message.get("location").is_some() {
         let lat = message["location"]["latitude"].as_f64().unwrap_or(0.0);
