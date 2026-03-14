@@ -9,6 +9,7 @@
 // Core infrastructure — always compiled
 pub mod bridge;
 pub mod formatter;
+pub mod rate_limiter;
 pub mod router;
 pub mod sidecar;
 pub mod types;
