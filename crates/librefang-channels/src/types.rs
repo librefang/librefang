@@ -251,6 +251,13 @@ pub trait ChannelAdapter: Send + Sync {
         Ok(())
     }
 
+    /// Whether error messages should be suppressed (logged only) instead of
+    /// posted publicly. Adapters where replies are visible to all followers
+    /// (e.g. Mastodon) should return `true` to avoid leaking internal errors.
+    fn suppress_error_responses(&self) -> bool {
+        false
+    }
+
     /// Stop the adapter and clean up resources.
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error>>;
 

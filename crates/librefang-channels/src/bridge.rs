@@ -503,7 +503,9 @@ async fn handle_send_error<F, Fut>(
                 send_lifecycle_reaction(adapter, sender, msg_id, AgentPhase::Error).await;
                 warn!("Agent error for {new_id} (after re-resolution): {e2}");
                 let err_msg = format!("Agent error: {e2}");
-                send_response(adapter, sender, err_msg.clone(), thread_id, output_format).await;
+                if !adapter.suppress_error_responses() {
+                    send_response(adapter, sender, err_msg.clone(), thread_id, output_format).await;
+                }
                 handle
                     .record_delivery(
                         new_id,
@@ -523,7 +525,9 @@ async fn handle_send_error<F, Fut>(
     send_lifecycle_reaction(adapter, sender, msg_id, AgentPhase::Error).await;
     warn!("Agent error for {agent_id}: {error}");
     let err_msg = format!("Agent error: {error}");
-    send_response(adapter, sender, err_msg.clone(), thread_id, output_format).await;
+    if !adapter.suppress_error_responses() {
+        send_response(adapter, sender, err_msg.clone(), thread_id, output_format).await;
+    }
     handle
         .record_delivery(
             agent_id,
