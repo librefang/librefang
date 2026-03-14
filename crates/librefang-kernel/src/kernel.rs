@@ -1182,6 +1182,18 @@ impl LibreFangKernel {
             }
         }
 
+        // Auto-register workflow definitions from ~/.librefang/workflows/
+        {
+            let workflows_dir = kernel.config.home_dir.join("workflows");
+            let loaded = kernel.workflows.load_from_dir_sync(&workflows_dir);
+            if loaded > 0 {
+                info!(
+                    "Auto-registered {loaded} workflow(s) from {}",
+                    workflows_dir.display()
+                );
+            }
+        }
+
         // Validate routing configs against model catalog
         for entry in kernel.registry.list() {
             if let Some(ref routing_config) = entry.manifest.routing {
