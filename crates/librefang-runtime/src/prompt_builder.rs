@@ -37,6 +37,10 @@ pub struct PromptContext {
     pub user_name: Option<String>,
     /// Channel type (telegram, discord, web, etc.).
     pub channel_type: Option<String>,
+    /// Platform-specific sender ID (e.g. Telegram user ID).
+    pub sender_id: Option<String>,
+    /// Sender display name from the channel message.
+    pub sender_name: Option<String>,
     /// Whether this agent was spawned as a subagent.
     pub is_subagent: bool,
     /// Whether this agent has autonomous config.
@@ -144,7 +148,11 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     // Section 9 — Channel Awareness (skip for subagents)
     if !ctx.is_subagent {
         if let Some(ref channel) = ctx.channel_type {
-            sections.push(build_channel_section(channel));
+            sections.push(build_channel_section(
+                channel,
+                ctx.sender_id.as_deref(),
+                ctx.sender_name.as_deref(),
+            ));
         }
     }
 
@@ -377,7 +385,11 @@ fn build_user_section(user_name: Option<&str>) -> String {
     }
 }
 
-fn build_channel_section(channel: &str) -> String {
+fn build_channel_section(
+    channel: &str,
+    sender_id: Option<&str>,
+    sender_name: Option<&str>,
+) -> String {
     let (limit, hints) = match channel {
         "telegram" => (
             "4096",
@@ -406,11 +418,28 @@ fn build_channel_section(channel: &str) -> String {
         "teams" => ("28000", "Use Teams-compatible markdown."),
         _ => ("4096", "Use markdown formatting where supported."),
     };
-    format!(
+    let mut section = format!(
         "## Channel\n\
          You are responding via {channel}. Keep messages under {limit} chars.\n\
          {hints}"
-    )
+    );
+
+    // Append sender identity if available
+    if sender_id.is_some() || sender_name.is_some() {
+        section.push_str("\n\n**Current sender:**");
+        if let Some(name) = sender_name {
+            section.push_str(&format!(" {name}"));
+        }
+        if let Some(id) = sender_id {
+            section.push_str(&format!(" (ID: {id})"));
+        }
+        section.push_str(
+            "\nAddress the sender by name when appropriate. \
+             In group chats, use the sender identity to distinguish between users.",
+        );
+    }
+
+    section
 }
 
 fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]) -> String {
@@ -817,30 +846,52 @@ mod tests {
 
     #[test]
     fn test_channel_telegram() {
-        let section = build_channel_section("telegram");
+        let section = build_channel_section("telegram", None, None);
         assert!(section.contains("4096"));
         assert!(section.contains("Telegram"));
     }
 
     #[test]
     fn test_channel_discord() {
-        let section = build_channel_section("discord");
+        let section = build_channel_section("discord", None, None);
         assert!(section.contains("2000"));
         assert!(section.contains("Discord"));
     }
 
     #[test]
     fn test_channel_irc() {
-        let section = build_channel_section("irc");
+        let section = build_channel_section("irc", None, None);
         assert!(section.contains("512"));
         assert!(section.contains("plain text"));
     }
 
     #[test]
     fn test_channel_unknown_gets_default() {
-        let section = build_channel_section("smoke_signal");
+        let section = build_channel_section("smoke_signal", None, None);
         assert!(section.contains("4096"));
         assert!(section.contains("smoke_signal"));
+    }
+
+    #[test]
+    fn test_channel_with_sender_identity() {
+        let section = build_channel_section("telegram", Some("12345"), Some("Alice"));
+        assert!(section.contains("Alice"));
+        assert!(section.contains("12345"));
+        assert!(section.contains("Current sender"));
+    }
+
+    #[test]
+    fn test_channel_with_sender_name_only() {
+        let section = build_channel_section("discord", None, Some("Bob"));
+        assert!(section.contains("Bob"));
+        assert!(section.contains("Current sender"));
+        assert!(!section.contains("ID:"));
+    }
+
+    #[test]
+    fn test_channel_without_sender() {
+        let section = build_channel_section("slack", None, None);
+        assert!(!section.contains("Current sender"));
     }
 
     #[test]
