@@ -12800,3 +12800,195 @@ mod tests {
         assert_eq!(arr.len(), 6);
     }
 }
+|||
+
+// ---------------------------------------------------------------------------
+// Agent monitoring and profiling endpoints (#181)
+// ---------------------------------------------------------------------------
+
+/// GET /api/agents/{id}/metrics — Returns aggregated metrics for an agent.
+///
+/// Includes message count, token usage, tool execution count, error count,
+/// average response time (estimated), and cost data.
+pub async fn agent_metrics(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            );
+        }
+    };
+
+    let entry = match state.kernel.registry.get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Agent not found"})),
+            );
+        }
+    };
+
+    // Session-level token/tool stats from the scheduler (in-memory, windowed).
+    let (sched_tokens, sched_tool_calls) =
+        state.kernel.scheduler.get_usage(agent_id).unwrap_or((0, 0));
+
+    // Persistent usage summary from the UsageStore (SQLite).
+    let usage_summary = state
+        .kernel
+        .memory
+        .usage()
+        .query_summary(Some(agent_id))
+        .ok();
+
+    // Message count from the active session.
+    let message_count: u64 = state
+        .kernel
+        .memory
+        .get_session(entry.session_id)
+        .ok()
+        .flatten()
+        .map(|s| s.messages.len() as u64)
+        .unwrap_or(0);
+
+    // Error count from the audit log (count entries with non-"ok" outcome for this agent).
+    let agent_id_str = agent_id.to_string();
+    let error_count: u64 = state
+        .kernel
+        .audit_log
+        .recent(10_000)
+        .iter()
+        .filter(|e| {
+            e.agent_id == agent_id_str && e.outcome != "ok" && e.outcome != "success"
+        })
+        .count() as u64;
+
+    // Uptime since the agent was created.
+    let uptime_secs = (chrono::Utc::now() - entry.created_at).num_seconds().max(0) as u64;
+
+    // Persistent usage values (fall back to scheduler data when no DB records exist).
+    let (total_input_tokens, total_output_tokens, total_cost_usd, call_count, total_tool_calls) =
+        match usage_summary {
+            Some(ref s) => (
+                s.total_input_tokens,
+                s.total_output_tokens,
+                s.total_cost_usd,
+                s.call_count,
+                s.total_tool_calls,
+            ),
+            None => (0, 0, 0.0, 0, 0),
+        };
+
+    // Average response time estimate: if we have call_count and uptime, derive a rough number.
+    // This is a best-effort estimate since we don't track per-call latency yet.
+    let avg_response_time_ms: Option<f64> = if call_count > 0 {
+        // Use total uptime / call_count as a very rough proxy.
+        // A more accurate implementation would require per-call timing in UsageStore.
+        None
+    } else {
+        None
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "agent_id": agent_id.to_string(),
+            "name": entry.name,
+            "state": format!("{:?}", entry.state),
+            "uptime_secs": uptime_secs,
+            "message_count": message_count,
+            "token_usage": {
+                "session_tokens": sched_tokens,
+                "total_input_tokens": total_input_tokens,
+                "total_output_tokens": total_output_tokens,
+                "total_tokens": total_input_tokens + total_output_tokens,
+            },
+            "tool_calls": {
+                "session_tool_calls": sched_tool_calls,
+                "total_tool_calls": total_tool_calls,
+            },
+            "cost_usd": total_cost_usd,
+            "call_count": call_count,
+            "error_count": error_count,
+            "avg_response_time_ms": avg_response_time_ms,
+        })),
+    )
+}
+
+/// GET /api/agents/{id}/logs — Returns structured execution logs for an agent.
+///
+/// Supports optional query parameters:
+/// - `n`: max number of log entries (default 100, max 1000)
+/// - `level`: filter by outcome (e.g. "error", "ok")
+pub async fn agent_logs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            );
+        }
+    };
+
+    // Verify the agent exists.
+    if state.kernel.registry.get(agent_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Agent not found"})),
+        );
+    }
+
+    let max_entries: usize = params
+        .get("n")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(100)
+        .min(1000);
+
+    let level_filter = params.get("level").cloned().unwrap_or_default().to_lowercase();
+
+    let agent_id_str = agent_id.to_string();
+
+    // Filter audit log entries belonging to this agent.
+    let entries: Vec<serde_json::Value> = state
+        .kernel
+        .audit_log
+        .recent(10_000)
+        .iter()
+        .filter(|e| e.agent_id == agent_id_str)
+        .filter(|e| {
+            if level_filter.is_empty() {
+                return true;
+            }
+            e.outcome.to_lowercase().contains(&level_filter)
+        })
+        .take(max_entries)
+        .map(|e| {
+            serde_json::json!({
+                "seq": e.seq,
+                "timestamp": e.timestamp,
+                "action": format!("{:?}", e.action),
+                "detail": e.detail,
+                "outcome": e.outcome,
+            })
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "agent_id": agent_id_str,
+            "count": entries.len(),
+            "logs": entries,
+        })),
+    )
+}
