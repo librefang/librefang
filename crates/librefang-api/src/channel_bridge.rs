@@ -1074,7 +1074,6 @@ pub async fn start_channel_bridge_with_config(
     kernel: Arc<LibreFangKernel>,
     config: &librefang_types::config::ChannelsConfig,
 ) -> (Option<BridgeManager>, Vec<String>) {
-<<<<<<< HEAD
     // Check which channels have config — only consider enabled features
     #[allow(unused_mut)]
     let mut has_any = false;
