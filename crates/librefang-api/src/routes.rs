@@ -14,6 +14,7 @@ use librefang_kernel::LibreFangKernel;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
+use librefang_types::config::DefaultModelConfig;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, LazyLock};
@@ -165,16 +166,18 @@ pub async fn spawn_agent(
 /// Enrich an `AgentEntry` into a JSON value with catalog data.
 fn enrich_agent_json(
     e: &librefang_types::agent::AgentEntry,
-    dm: &librefang_types::config::ModelConfig,
-    catalog: &Option<std::sync::RwLockReadGuard<'_, librefang_runtime::model_catalog::ModelCatalog>>,
+    dm: &DefaultModelConfig,
+    catalog: &Option<
+        std::sync::RwLockReadGuard<'_, librefang_runtime::model_catalog::ModelCatalog>,
+    >,
 ) -> serde_json::Value {
     // Resolve "default" provider/model to actual kernel defaults
-    let provider =
-        if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default" {
-            dm.provider.as_str()
-        } else {
-            e.manifest.model.provider.as_str()
-        };
+    let provider = if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default"
+    {
+        dm.provider.as_str()
+    } else {
+        e.manifest.model.provider.as_str()
+    };
     let model = if e.manifest.model.model.is_empty() || e.manifest.model.model == "default" {
         dm.model.as_str()
     } else {
@@ -237,8 +240,7 @@ pub async fn list_agents(
     let catalog = state.kernel.model_catalog.read().ok();
     let dm = &state.kernel.config.default_model;
 
-    let mut agents: Vec<librefang_types::agent::AgentEntry> =
-        state.kernel.registry.list();
+    let mut agents: Vec<librefang_types::agent::AgentEntry> = state.kernel.registry.list();
 
     // -- Filtering --
 
