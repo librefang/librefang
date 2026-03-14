@@ -1,0 +1,44 @@
+# Data Pipeline — ETL-style data processing workflow
+#
+# This template defines a three-stage pipeline: extract raw data from a
+# source, transform/clean the data, then load (summarise) the results.
+
+[template]
+id = "data-pipeline"
+name = "Data Pipeline"
+description = "ETL-style data processing workflow: extract, transform, and load/summarise data through a multi-agent pipeline."
+version = "1.0.0"
+category = "data"
+tags = ["etl", "data", "pipeline", "processing"]
+
+[template.parameters]
+source_description = { description = "Describe the data source to extract from", default = "the provided dataset" }
+transform_instructions = { description = "Specific transformation or cleaning rules", default = "Clean, normalise, and remove duplicates" }
+output_format = { description = "Desired output format", default = "structured summary" }
+
+[[steps]]
+name = "Extract"
+agent_name = "data-extractor"
+prompt = "Extract and list all relevant data from {{source_description}}. Input: {{input}}"
+mode = "sequential"
+timeout_secs = 180
+error_mode = "fail"
+output_var = "raw_data"
+
+[[steps]]
+name = "Transform"
+agent_name = "data-transformer"
+prompt = "{{transform_instructions}}. Raw data:\n{{raw_data}}"
+mode = "sequential"
+timeout_secs = 180
+error_mode = "retry"
+max_retries = 2
+output_var = "clean_data"
+
+[[steps]]
+name = "Load"
+agent_name = "data-reporter"
+prompt = "Produce a {{output_format}} from the following cleaned data:\n{{clean_data}}"
+mode = "sequential"
+timeout_secs = 120
+error_mode = "fail"

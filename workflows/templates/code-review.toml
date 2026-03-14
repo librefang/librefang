@@ -1,0 +1,51 @@
+# Code Review — Automated code review pipeline
+#
+# Code is analysed in parallel for correctness, security, and style,
+# then the results are collected into a unified review report.
+
+[template]
+id = "code-review"
+name = "Code Review"
+description = "Automated code review pipeline: parallel analysis for correctness, security, and style followed by a consolidated report."
+version = "1.0.0"
+category = "development"
+tags = ["code", "review", "security", "quality"]
+
+[template.parameters]
+language = { description = "Programming language of the code under review", default = "auto-detect" }
+severity_threshold = { description = "Minimum severity to report (info, warning, error)", default = "warning" }
+
+[[steps]]
+name = "Correctness Analysis"
+agent_name = "code-reviewer"
+prompt = "Analyse the following code for logical errors, bugs, and correctness issues. Language: {{language}}. Report issues at {{severity_threshold}} level or above.\n\nCode:\n{{input}}"
+mode = "fan_out"
+timeout_secs = 180
+error_mode = "skip"
+output_var = "correctness"
+
+[[steps]]
+name = "Security Analysis"
+agent_name = "security-reviewer"
+prompt = "Perform a security review of the following code. Check for common vulnerabilities (injection, auth issues, data leaks, etc.). Language: {{language}}.\n\nCode:\n{{input}}"
+mode = "fan_out"
+timeout_secs = 180
+error_mode = "skip"
+output_var = "security"
+
+[[steps]]
+name = "Style Analysis"
+agent_name = "style-reviewer"
+prompt = "Review the following code for style, readability, and best practices. Language: {{language}}. Suggest improvements.\n\nCode:\n{{input}}"
+mode = "fan_out"
+timeout_secs = 120
+error_mode = "skip"
+output_var = "style"
+
+[[steps]]
+name = "Consolidated Report"
+agent_name = "report-writer"
+prompt = "Produce a unified code review report from the following analyses. Prioritise by severity and provide actionable recommendations.\n\nCorrectness:\n{{correctness}}\n\nSecurity:\n{{security}}\n\nStyle:\n{{style}}"
+mode = "collect"
+timeout_secs = 120
+error_mode = "fail"

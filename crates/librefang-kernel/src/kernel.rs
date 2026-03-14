@@ -12,7 +12,9 @@ use crate::router;
 use crate::scheduler::AgentScheduler;
 use crate::supervisor::Supervisor;
 use crate::triggers::{TriggerEngine, TriggerId, TriggerPattern};
-use crate::workflow::{StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId};
+use crate::workflow::{
+    StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId, WorkflowTemplateRegistry,
+};
 
 use librefang_memory::MemorySubstrate;
 use librefang_runtime::agent_loop::{
@@ -75,6 +77,8 @@ pub struct LibreFangKernel {
     pub supervisor: Supervisor,
     /// Workflow engine.
     pub workflows: WorkflowEngine,
+    /// Workflow template registry (bundled + user-saved).
+    pub workflow_templates: WorkflowTemplateRegistry,
     /// Event-driven trigger engine.
     pub triggers: TriggerEngine,
     /// Background agent executor.
@@ -969,6 +973,7 @@ impl LibreFangKernel {
             memory: memory.clone(),
             supervisor,
             workflows: WorkflowEngine::new(),
+            workflow_templates: WorkflowTemplateRegistry::new(),
             triggers: TriggerEngine::new(),
             background,
             audit_log: Arc::new(AuditLog::with_db(memory.usage_conn())),

@@ -1,0 +1,44 @@
+# Research — Research and summarization workflow
+#
+# A topic goes through deep research, fact-checking, and finally
+# a concise summary with citations.
+
+[template]
+id = "research"
+name = "Research & Summarization"
+description = "Multi-step research workflow: deep research, fact-checking, and summarisation with citations."
+version = "1.0.0"
+category = "research"
+tags = ["research", "summarization", "analysis", "fact-check"]
+
+[template.parameters]
+depth = { description = "Research depth (brief, standard, deep)", default = "standard" }
+output_length = { description = "Desired summary length", default = "500-800 words" }
+focus_areas = { description = "Specific aspects to focus on", default = "key findings and implications" }
+
+[[steps]]
+name = "Research"
+agent_name = "researcher"
+prompt = "Conduct {{depth}} research on the following topic. Focus on {{focus_areas}}. Provide detailed findings with sources where possible.\n\nTopic: {{input}}"
+mode = "sequential"
+timeout_secs = 300
+error_mode = "retry"
+max_retries = 2
+output_var = "findings"
+
+[[steps]]
+name = "Fact Check"
+agent_name = "fact-checker"
+prompt = "Verify the accuracy of the following research findings. Flag any claims that appear unsupported or contradictory. Correct inaccuracies where possible.\n\nFindings:\n{{findings}}"
+mode = "sequential"
+timeout_secs = 180
+error_mode = "skip"
+output_var = "verified"
+
+[[steps]]
+name = "Summarise"
+agent_name = "summariser"
+prompt = "Write a clear, well-structured summary ({{output_length}}) based on the verified research below. Include key takeaways and cite sources.\n\nVerified research:\n{{verified}}"
+mode = "sequential"
+timeout_secs = 180
+error_mode = "fail"

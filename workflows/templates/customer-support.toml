@@ -1,0 +1,44 @@
+# Customer Support — Tiered customer support escalation workflow
+#
+# Incoming requests are triaged, handled by tier-1 support, and
+# conditionally escalated to tier-2 specialists when needed.
+
+[template]
+id = "customer-support"
+name = "Customer Support"
+description = "Tiered customer support escalation: triage, tier-1 response, and conditional escalation to tier-2 specialists."
+version = "1.0.0"
+category = "support"
+tags = ["support", "customer", "escalation", "triage"]
+
+[template.parameters]
+product_name = { description = "Product or service name for context", default = "our product" }
+escalation_keyword = { description = "Keyword in tier-1 response that triggers escalation", default = "ESCALATE" }
+sla_seconds = { description = "Target response time in seconds", default = "120" }
+
+[[steps]]
+name = "Triage"
+agent_name = "support-triage"
+prompt = "Classify the following customer request for {{product_name}}. Determine urgency (low/medium/high/critical) and category (billing, technical, general, account). Output a short classification summary.\n\nRequest: {{input}}"
+mode = "sequential"
+timeout_secs = 60
+error_mode = "fail"
+output_var = "triage_result"
+
+[[steps]]
+name = "Tier 1 Response"
+agent_name = "support-tier1"
+prompt = "You are a tier-1 support agent for {{product_name}}. Respond to the customer request below. If you cannot resolve the issue, begin your response with ESCALATE and explain why.\n\nTriage: {{triage_result}}\nCustomer request: {{input}}"
+mode = "sequential"
+timeout_secs = 120
+error_mode = "retry"
+max_retries = 1
+output_var = "tier1_response"
+
+[[steps]]
+name = "Tier 2 Escalation"
+agent_name = "support-tier2"
+prompt = "You are a tier-2 specialist for {{product_name}}. The tier-1 agent escalated this request. Provide a detailed resolution.\n\nTriage: {{triage_result}}\nTier-1 notes: {{tier1_response}}\nOriginal request: {{input}}"
+mode = { conditional = { condition = "ESCALATE" } }
+timeout_secs = 180
+error_mode = "fail"

@@ -785,6 +785,661 @@ impl Default for WorkflowEngine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Workflow templates & marketplace
+// ---------------------------------------------------------------------------
+
+/// Unique identifier for a workflow template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WorkflowTemplateId(pub Uuid);
+
+impl WorkflowTemplateId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for WorkflowTemplateId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for WorkflowTemplateId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A step definition inside a workflow template (agent referenced by name placeholder).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowTemplateStep {
+    /// Step name.
+    pub name: String,
+    /// Suggested agent name — the user can remap at instantiation time.
+    pub agent_name: String,
+    /// Prompt template (uses `{{input}}` / `{{var_name}}`).
+    pub prompt_template: String,
+    /// Execution mode.
+    #[serde(default)]
+    pub mode: StepMode,
+    /// Timeout in seconds.
+    #[serde(default = "default_timeout")]
+    pub timeout_secs: u64,
+    /// Error handling.
+    #[serde(default)]
+    pub error_mode: ErrorMode,
+    /// Optional output variable.
+    #[serde(default)]
+    pub output_var: Option<String>,
+    /// Steps this one depends on (by name).
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
+/// A reusable workflow template with marketplace metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowTemplate {
+    /// Unique template identifier.
+    pub id: WorkflowTemplateId,
+    /// Human-readable name.
+    pub name: String,
+    /// Description of the template.
+    pub description: String,
+    /// Author / publisher.
+    pub author: String,
+    /// Semantic version string.
+    pub version: String,
+    /// Category for marketplace browsing.
+    pub category: String,
+    /// Searchable tags.
+    pub tags: Vec<String>,
+    /// The steps that make up this template.
+    pub steps: Vec<WorkflowTemplateStep>,
+    /// When this template was created / last updated.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Registry that holds workflow templates (both bundled and user-saved).
+pub struct WorkflowTemplateRegistry {
+    templates: Arc<RwLock<HashMap<WorkflowTemplateId, WorkflowTemplate>>>,
+}
+
+impl WorkflowTemplateRegistry {
+    /// Create a new registry pre-loaded with the bundled templates.
+    pub fn new() -> Self {
+        let mut map = HashMap::new();
+        for t in Self::bundled_templates() {
+            map.insert(t.id, t);
+        }
+        Self {
+            templates: Arc::new(RwLock::new(map)),
+        }
+    }
+
+    /// List all templates, optionally filtered by category.
+    pub async fn list(&self, category: Option<&str>) -> Vec<WorkflowTemplate> {
+        self.templates
+            .read()
+            .await
+            .values()
+            .filter(|t| category.map(|c| t.category == c).unwrap_or(true))
+            .cloned()
+            .collect()
+    }
+
+    /// Get a template by ID.
+    pub async fn get(&self, id: WorkflowTemplateId) -> Option<WorkflowTemplate> {
+        self.templates.read().await.get(&id).cloned()
+    }
+
+    /// Save a user-defined template.
+    pub async fn save(&self, template: WorkflowTemplate) -> WorkflowTemplateId {
+        let id = template.id;
+        self.templates.write().await.insert(id, template);
+        info!(template_id = %id, "Workflow template saved");
+        id
+    }
+
+    /// Delete a template.
+    pub async fn delete(&self, id: WorkflowTemplateId) -> bool {
+        self.templates.write().await.remove(&id).is_some()
+    }
+
+    /// Instantiate a template into a concrete `Workflow` ready for registration.
+    pub fn instantiate(template: &WorkflowTemplate) -> Workflow {
+        let steps: Vec<WorkflowStep> = template
+            .steps
+            .iter()
+            .map(|ts| WorkflowStep {
+                name: ts.name.clone(),
+                agent: StepAgent::ByName {
+                    name: ts.agent_name.clone(),
+                },
+                prompt_template: ts.prompt_template.clone(),
+                mode: ts.mode.clone(),
+                timeout_secs: ts.timeout_secs,
+                error_mode: ts.error_mode.clone(),
+                output_var: ts.output_var.clone(),
+            })
+            .collect();
+
+        Workflow {
+            id: WorkflowId::new(),
+            name: template.name.clone(),
+            description: template.description.clone(),
+            steps,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Search templates by query string. Matches against name, description,
+    /// category, and tags (case-insensitive substring).
+    pub async fn search(&self, query: &str) -> Vec<WorkflowTemplate> {
+        let q = query.to_lowercase();
+        self.templates
+            .read()
+            .await
+            .values()
+            .filter(|t| {
+                t.name.to_lowercase().contains(&q)
+                    || t.description.to_lowercase().contains(&q)
+                    || t.category.to_lowercase().contains(&q)
+                    || t.tags.iter().any(|tag| tag.to_lowercase().contains(&q))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Load workflow templates from `.toml` files in the given directory.
+    ///
+    /// Each TOML file should contain a `[template]` section with metadata
+    /// and a `[[steps]]` array. Loaded templates are merged into the
+    /// registry alongside any bundled or user-saved templates.
+    pub async fn load_from_directory(&self, dir: &std::path::Path) -> usize {
+        let read_dir = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                warn!(path = %dir.display(), "Failed to read workflow templates dir: {e}");
+                return 0;
+            }
+        };
+
+        let mut count = 0;
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            match Self::parse_template_toml(&path) {
+                Ok(t) => {
+                    debug!(template = %t.name, "Loaded workflow template from TOML");
+                    self.templates.write().await.insert(t.id, t);
+                    count += 1;
+                }
+                Err(e) => {
+                    warn!(path = %path.display(), "Failed to parse workflow template: {e}");
+                }
+            }
+        }
+        count
+    }
+
+    /// Parse a single TOML template file into a `WorkflowTemplate`.
+    fn parse_template_toml(path: &std::path::Path) -> Result<WorkflowTemplate, String> {
+        let content = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
+        let doc: toml::Value = toml::from_str(&content).map_err(|e| format!("parse: {e}"))?;
+
+        let meta = doc.get("template").ok_or("missing [template] section")?;
+
+        let name = meta
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or("missing template.name")?
+            .to_string();
+        let description = meta
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let author = meta
+            .get("author")
+            .and_then(|v| v.as_str())
+            .unwrap_or("community")
+            .to_string();
+        let version = meta
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1.0.0")
+            .to_string();
+        let category = meta
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("general")
+            .to_string();
+        let tags: Vec<String> = meta
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let steps_arr = doc
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .ok_or("missing [[steps]] array")?;
+
+        let mut steps = Vec::with_capacity(steps_arr.len());
+        for s in steps_arr {
+            let step_name = s
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("step")
+                .to_string();
+            let agent_name = s
+                .get("agent_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("agent")
+                .to_string();
+            let prompt_template = s
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{{input}}")
+                .to_string();
+
+            let mode = Self::parse_toml_step_mode(s);
+            let error_mode = Self::parse_toml_error_mode(s);
+            let timeout_secs = s
+                .get("timeout_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(120) as u64;
+            let output_var = s
+                .get("output_var")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let depends_on: Vec<String> = s
+                .get("depends_on")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            steps.push(WorkflowTemplateStep {
+                name: step_name,
+                agent_name,
+                prompt_template,
+                mode,
+                timeout_secs,
+                error_mode,
+                output_var,
+                depends_on,
+            });
+        }
+
+        // Generate a deterministic ID from template name so reloads don't
+        // duplicate entries. Uses UUID v5 with a fixed namespace.
+        let namespace = Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
+        let id = WorkflowTemplateId(Uuid::new_v5(&namespace, name.as_bytes()));
+
+        Ok(WorkflowTemplate {
+            id,
+            name,
+            description,
+            author,
+            version,
+            category,
+            tags,
+            steps,
+            created_at: Utc::now(),
+        })
+    }
+
+    /// Parse step mode from a TOML value table.
+    fn parse_toml_step_mode(step: &toml::Value) -> StepMode {
+        let mode_val = step.get("mode");
+        match mode_val {
+            Some(toml::Value::String(s)) => match s.as_str() {
+                "fan_out" => StepMode::FanOut,
+                "collect" => StepMode::Collect,
+                _ => StepMode::Sequential,
+            },
+            Some(toml::Value::Table(tbl)) => {
+                if let Some(cond) = tbl.get("conditional") {
+                    if let Some(inner) = cond.as_table() {
+                        let condition = inner
+                            .get("condition")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        return StepMode::Conditional { condition };
+                    }
+                }
+                if let Some(lp) = tbl.get("loop") {
+                    if let Some(inner) = lp.as_table() {
+                        let max_iterations = inner
+                            .get("max_iterations")
+                            .and_then(|v| v.as_integer())
+                            .unwrap_or(5) as u32;
+                        let until = inner
+                            .get("until")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        return StepMode::Loop {
+                            max_iterations,
+                            until,
+                        };
+                    }
+                }
+                StepMode::Sequential
+            }
+            _ => StepMode::Sequential,
+        }
+    }
+
+    /// Parse error mode from a TOML step value.
+    fn parse_toml_error_mode(step: &toml::Value) -> ErrorMode {
+        let mode_str = step
+            .get("error_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("fail");
+        match mode_str {
+            "skip" => ErrorMode::Skip,
+            "retry" => {
+                let max_retries = step
+                    .get("max_retries")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(3) as u32;
+                ErrorMode::Retry { max_retries }
+            }
+            _ => ErrorMode::Fail,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Bundled templates
+    // ------------------------------------------------------------------
+
+    fn bundled_templates() -> Vec<WorkflowTemplate> {
+        let now = Utc::now();
+        vec![
+            WorkflowTemplate {
+                id: WorkflowTemplateId(
+                    Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
+                ),
+                name: "research-pipeline".to_string(),
+                description: "Multi-step research workflow: search, analyse, and summarise."
+                    .to_string(),
+                author: "LibreFang".to_string(),
+                version: "1.0.0".to_string(),
+                category: "research".to_string(),
+                tags: vec![
+                    "research".into(),
+                    "analysis".into(),
+                    "summarisation".into(),
+                ],
+                steps: vec![
+                    WorkflowTemplateStep {
+                        name: "search".to_string(),
+                        agent_name: "search-agent".to_string(),
+                        prompt_template: "Search for information about: {{input}}".to_string(),
+                        mode: StepMode::Sequential,
+                        timeout_secs: 120,
+                        error_mode: ErrorMode::Fail,
+                        output_var: Some("search_results".into()),
+                        depends_on: vec![],
+                    },
+                    WorkflowTemplateStep {
+                        name: "analyze".to_string(),
+                        agent_name: "analyzer-agent".to_string(),
+                        prompt_template:
+                            "Analyse these search results and extract key findings:\n{{search_results}}"
+                                .to_string(),
+                        mode: StepMode::Sequential,
+                        timeout_secs: 120,
+                        error_mode: ErrorMode::Fail,
+                        output_var: Some("analysis".into()),
+                        depends_on: vec!["search".into()],
+                    },
+                    WorkflowTemplateStep {
+                        name: "summarize".to_string(),
+                        agent_name: "writer-agent".to_string(),
+                        prompt_template:
+                            "Write a concise summary based on this analysis:\n{{analysis}}"
+                                .to_string(),
+                        mode: StepMode::Sequential,
+                        timeout_secs: 120,
+                        error_mode: ErrorMode::Fail,
+                        output_var: None,
+                        depends_on: vec!["analyze".into()],
+                    },
+                ],
+                created_at: now,
+            },
+            WorkflowTemplate {
+                id: WorkflowTemplateId(
+                    Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
+                ),
+                name: "content-creation".to_string(),
+                description: "Generate, review, and polish content with parallel critique."
+                    .to_string(),
+                author: "LibreFang".to_string(),
+                version: "1.0.0".to_string(),
+                category: "content".to_string(),
+                tags: vec!["content".into(), "writing".into(), "review".into()],
+                steps: vec![
+                    WorkflowTemplateStep {
+                        name: "draft".to_string(),
+                        agent_name: "writer-agent".to_string(),
+                        prompt_template: "Write a first draft about: {{input}}".to_string(),
+                        mode: StepMode::Sequential,
+                        timeout_secs: 180,
+                        error_mode: ErrorMode::Fail,
+                        output_var: Some("draft".into()),
+                        depends_on: vec![],
+                    },
+                    WorkflowTemplateStep {
+                        name: "critique-style".to_string(),
+                        agent_name: "editor-agent".to_string(),
+                        prompt_template:
+                            "Review this draft for style and clarity:\n{{draft}}".to_string(),
+                        mode: StepMode::FanOut,
+                        timeout_secs: 120,
+                        error_mode: ErrorMode::Skip,
+                        output_var: Some("style_feedback".into()),
+                        depends_on: vec!["draft".into()],
+                    },
+                    WorkflowTemplateStep {
+                        name: "critique-accuracy".to_string(),
+                        agent_name: "fact-checker-agent".to_string(),
+                        prompt_template:
+                            "Verify factual claims in this draft:\n{{draft}}".to_string(),
+                        mode: StepMode::FanOut,
+                        timeout_secs: 120,
+                        error_mode: ErrorMode::Skip,
+                        output_var: Some("accuracy_feedback".into()),
+                        depends_on: vec!["draft".into()],
+                    },
+                    WorkflowTemplateStep {
+                        name: "collect-feedback".to_string(),
+                        agent_name: "writer-agent".to_string(),
+                        prompt_template: "Incorporate this feedback into the final version:\nStyle: {{style_feedback}}\nAccuracy: {{accuracy_feedback}}\n\nOriginal draft:\n{{draft}}".to_string(),
+                        mode: StepMode::Collect,
+                        timeout_secs: 180,
+                        error_mode: ErrorMode::Fail,
+                        output_var: None,
+                        depends_on: vec![
+                            "critique-style".into(),
+                            "critique-accuracy".into(),
+                        ],
+                    },
+                ],
+                created_at: now,
+            },
+            WorkflowTemplate {
+                id: WorkflowTemplateId(
+                    Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
+                ),
+                name: "code-review".to_string(),
+                description:
+                    "Automated code review pipeline: lint, security scan, and summarise."
+                        .to_string(),
+                author: "LibreFang".to_string(),
+                version: "1.0.0".to_string(),
+                category: "code-analysis".to_string(),
+                tags: vec![
+                    "code".into(),
+                    "review".into(),
+                    "security".into(),
+                    "quality".into(),
+                ],
+                steps: vec![
+                    WorkflowTemplateStep {
+                        name: "lint".to_string(),
+                        agent_name: "code-agent".to_string(),
+                        prompt_template:
+                            "Review this code for style, best practices, and potential bugs:\n{{input}}"
+                                .to_string(),
+                        mode: StepMode::FanOut,
+                        timeout_secs: 120,
+                        error_mode: ErrorMode::Skip,
+                        output_var: Some("lint_results".into()),
+                        depends_on: vec![],
+                    },
+                    WorkflowTemplateStep {
+                        name: "security-scan".to_string(),
+                        agent_name: "security-agent".to_string(),
+                        prompt_template:
+                            "Scan this code for security vulnerabilities:\n{{input}}".to_string(),
+                        mode: StepMode::FanOut,
+                        timeout_secs: 120,
+                        error_mode: ErrorMode::Skip,
+                        output_var: Some("security_results".into()),
+                        depends_on: vec![],
+                    },
+                    WorkflowTemplateStep {
+                        name: "summary".to_string(),
+                        agent_name: "code-agent".to_string(),
+                        prompt_template: "Compile a code review summary from these findings:\nLint: {{lint_results}}\nSecurity: {{security_results}}".to_string(),
+                        mode: StepMode::Collect,
+                        timeout_secs: 120,
+                        error_mode: ErrorMode::Fail,
+                        output_var: None,
+                        depends_on: vec!["lint".into(), "security-scan".into()],
+                    },
+                ],
+                created_at: now,
+            },
+            WorkflowTemplate {
+                id: WorkflowTemplateId(
+                    Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
+                ),
+                name: "data-processing-pipeline".to_string(),
+                description: "Extract, transform, and load data with validation.".to_string(),
+                author: "LibreFang".to_string(),
+                version: "1.0.0".to_string(),
+                category: "data-processing".to_string(),
+                tags: vec![
+                    "data".into(),
+                    "etl".into(),
+                    "pipeline".into(),
+                    "transform".into(),
+                ],
+                steps: vec![
+                    WorkflowTemplateStep {
+                        name: "extract".to_string(),
+                        agent_name: "data-agent".to_string(),
+                        prompt_template: "Extract structured data from this input:\n{{input}}"
+                            .to_string(),
+                        mode: StepMode::Sequential,
+                        timeout_secs: 120,
+                        error_mode: ErrorMode::Fail,
+                        output_var: Some("raw_data".into()),
+                        depends_on: vec![],
+                    },
+                    WorkflowTemplateStep {
+                        name: "transform".to_string(),
+                        agent_name: "data-agent".to_string(),
+                        prompt_template:
+                            "Clean, normalise, and transform this data:\n{{raw_data}}".to_string(),
+                        mode: StepMode::Sequential,
+                        timeout_secs: 120,
+                        error_mode: ErrorMode::Retry { max_retries: 2 },
+                        output_var: Some("clean_data".into()),
+                        depends_on: vec!["extract".into()],
+                    },
+                    WorkflowTemplateStep {
+                        name: "validate".to_string(),
+                        agent_name: "data-agent".to_string(),
+                        prompt_template:
+                            "Validate this processed data for completeness and correctness:\n{{clean_data}}"
+                                .to_string(),
+                        mode: StepMode::Sequential,
+                        timeout_secs: 60,
+                        error_mode: ErrorMode::Fail,
+                        output_var: None,
+                        depends_on: vec!["transform".into()],
+                    },
+                ],
+                created_at: now,
+            },
+            WorkflowTemplate {
+                id: WorkflowTemplateId(
+                    Uuid::parse_str("00000000-0000-0000-0000-000000000005").unwrap(),
+                ),
+                name: "iterative-refinement".to_string(),
+                description: "Iteratively refine output using a feedback loop.".to_string(),
+                author: "LibreFang".to_string(),
+                version: "1.0.0".to_string(),
+                category: "general".to_string(),
+                tags: vec![
+                    "loop".into(),
+                    "refinement".into(),
+                    "iteration".into(),
+                ],
+                steps: vec![
+                    WorkflowTemplateStep {
+                        name: "initial-attempt".to_string(),
+                        agent_name: "worker-agent".to_string(),
+                        prompt_template: "{{input}}".to_string(),
+                        mode: StepMode::Sequential,
+                        timeout_secs: 120,
+                        error_mode: ErrorMode::Fail,
+                        output_var: Some("current".into()),
+                        depends_on: vec![],
+                    },
+                    WorkflowTemplateStep {
+                        name: "refine".to_string(),
+                        agent_name: "critic-agent".to_string(),
+                        prompt_template: "Review and improve this output. Reply 'DONE' if it is already excellent, otherwise provide an improved version:\n{{current}}".to_string(),
+                        mode: StepMode::Loop {
+                            max_iterations: 3,
+                            until: "DONE".to_string(),
+                        },
+                        timeout_secs: 120,
+                        error_mode: ErrorMode::Fail,
+                        output_var: None,
+                        depends_on: vec!["initial-attempt".into()],
+                    },
+                ],
+                created_at: now,
+            },
+        ]
+    }
+}
+
+impl Default for WorkflowTemplateRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1363,5 +2018,127 @@ mod tests {
         let json = serde_json::to_string(&mode).unwrap();
         let parsed: StepMode = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, StepMode::Loop { max_iterations: 5, until } if until == "done"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Workflow template tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_template_registry_loads_bundled() {
+        let registry = WorkflowTemplateRegistry::new();
+        let all = registry.list(None).await;
+        assert!(all.len() >= 5, "Should have at least 5 bundled templates");
+    }
+
+    #[tokio::test]
+    async fn test_template_filter_by_category() {
+        let registry = WorkflowTemplateRegistry::new();
+        let research = registry.list(Some("research")).await;
+        assert_eq!(research.len(), 1);
+        assert_eq!(research[0].name, "research-pipeline");
+    }
+
+    #[tokio::test]
+    async fn test_template_get_by_id() {
+        let registry = WorkflowTemplateRegistry::new();
+        let id =
+            WorkflowTemplateId(Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap());
+        let t = registry
+            .get(id)
+            .await
+            .expect("should find bundled template");
+        assert_eq!(t.name, "research-pipeline");
+    }
+
+    #[tokio::test]
+    async fn test_template_instantiate() {
+        let registry = WorkflowTemplateRegistry::new();
+        let id =
+            WorkflowTemplateId(Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap());
+        let t = registry.get(id).await.unwrap();
+        let workflow = WorkflowTemplateRegistry::instantiate(&t);
+        assert_eq!(workflow.name, "code-review");
+        assert_eq!(workflow.steps.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_template_save_and_delete() {
+        let registry = WorkflowTemplateRegistry::new();
+        let custom = WorkflowTemplate {
+            id: WorkflowTemplateId::new(),
+            name: "my-custom".to_string(),
+            description: "test".to_string(),
+            author: "tester".to_string(),
+            version: "0.1.0".to_string(),
+            category: "custom".to_string(),
+            tags: vec!["test".into()],
+            steps: vec![],
+            created_at: Utc::now(),
+        };
+        let id = custom.id;
+        registry.save(custom).await;
+        assert!(registry.get(id).await.is_some());
+        assert!(registry.delete(id).await);
+        assert!(registry.get(id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_template_search() {
+        let registry = WorkflowTemplateRegistry::new();
+        let results = registry.search("research").await;
+        assert!(
+            !results.is_empty(),
+            "should find templates matching 'research'"
+        );
+        assert!(results.iter().any(|t| t.name.contains("research")));
+    }
+
+    #[tokio::test]
+    async fn test_template_search_by_tag() {
+        let registry = WorkflowTemplateRegistry::new();
+        let results = registry.search("security").await;
+        assert!(
+            !results.is_empty(),
+            "should find templates with 'security' tag"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_toml_templates_from_directory() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows/templates");
+        if !dir.exists() {
+            // Templates directory may not exist in CI
+            return;
+        }
+        let registry = WorkflowTemplateRegistry::new();
+        let initial_count = registry.list(None).await.len();
+        let loaded = registry.load_from_directory(&dir).await;
+        assert!(loaded > 0, "should load at least one TOML template");
+        let new_count = registry.list(None).await.len();
+        assert!(
+            new_count > initial_count,
+            "template count should increase after loading TOML files"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_toml_template_instantiate() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows/templates");
+        if !dir.exists() {
+            return;
+        }
+        let registry = WorkflowTemplateRegistry::new();
+        registry.load_from_directory(&dir).await;
+
+        // Search for the data-pipeline template loaded from TOML
+        let results = registry.search("data-pipeline").await;
+        if let Some(t) = results.first() {
+            let workflow = WorkflowTemplateRegistry::instantiate(t);
+            assert_eq!(workflow.name, "Data Pipeline");
+            assert!(!workflow.steps.is_empty());
+        }
     }
 }

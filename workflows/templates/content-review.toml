@@ -1,0 +1,44 @@
+# Content Review — Multi-agent content review and approval workflow
+#
+# Content passes through a drafter, reviewer, and final approver.
+# The reviewer may request revisions (loop) before the piece reaches approval.
+
+[template]
+id = "content-review"
+name = "Content Review"
+description = "Multi-agent content review and approval pipeline: draft, review with revision loop, and final approval."
+version = "1.0.0"
+category = "content"
+tags = ["review", "approval", "content", "editing"]
+
+[template.parameters]
+content_type = { description = "Type of content to produce", default = "blog post" }
+guidelines = { description = "Style or brand guidelines to follow", default = "professional tone, clear structure, concise language" }
+max_revisions = { description = "Maximum revision rounds", default = "3" }
+
+[[steps]]
+name = "Draft"
+agent_name = "content-writer"
+prompt = "Write a {{content_type}} about the following topic. Follow these guidelines: {{guidelines}}.\n\nTopic: {{input}}"
+mode = "sequential"
+timeout_secs = 180
+error_mode = "fail"
+output_var = "draft"
+
+[[steps]]
+name = "Review"
+agent_name = "content-reviewer"
+prompt = "Review the following {{content_type}} for clarity, accuracy, and adherence to guidelines ({{guidelines}}). If revisions are needed, rewrite the content with fixes applied. If the content is ready, respond with APPROVED followed by the final text.\n\nContent:\n{{draft}}"
+mode = { loop = { max_iterations = 3, until = "APPROVED" } }
+timeout_secs = 180
+error_mode = "retry"
+max_retries = 1
+output_var = "reviewed"
+
+[[steps]]
+name = "Final Approval"
+agent_name = "content-approver"
+prompt = "Give final approval for publishing. Provide a short summary of the content and confirm it is ready.\n\nContent:\n{{reviewed}}"
+mode = "sequential"
+timeout_secs = 120
+error_mode = "fail"
