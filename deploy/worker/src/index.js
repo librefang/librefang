@@ -248,6 +248,9 @@ const HTML = `<!DOCTYPE html>
     .platform-icon { font-size: 1.6rem; margin-bottom: 10px; }
     .platform-name { font-weight: 600; font-size: 1rem; margin-bottom: 6px; }
     .platform-desc { color: var(--dim); font-size: 0.83rem; line-height: 1.4; }
+    .platform-demo { margin-top: 8px; }
+    .platform-demo a { color: var(--accent); font-size: 0.8rem; text-decoration: none; font-weight: 500; }
+    .platform-demo a:hover { text-decoration: underline; }
     .platform-badge {
       position: absolute;
       top: 12px;
@@ -286,6 +289,9 @@ const HTML = `<!DOCTYPE html>
     .platform-cmd code::-webkit-scrollbar { height: 3px; }
     .platform-cmd code::-webkit-scrollbar-track { background: transparent; }
     .platform-cmd code::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    .platform-demo { margin-top: 8px; }
+    .platform-demo a { color: var(--accent); font-size: 0.8rem; text-decoration: none; font-weight: 500; }
+    .platform-demo a:hover { text-decoration: underline; }
     .copy-btn {
       background: var(--surface2);
       border: 1px solid var(--border);
@@ -447,6 +453,7 @@ const HTML = `<!DOCTYPE html>
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.3c.4-.2.6-.6.5-1.1z"/></svg></div>
           <div class="platform-name">Fly.io</div>
           <div class="platform-desc">Free forever, persistent storage</div>
+          <div class="platform-demo"><a href="https://flyio.librefang.ai" target="_blank" rel="noopener" onclick="event.stopPropagation()">Live Demo →</a></div>
         </div>
 
         <a class="platform-card accent-green" href="https://render.com/deploy?repo=https://github.com/librefang/librefang" target="_blank" rel="noopener">
@@ -454,6 +461,7 @@ const HTML = `<!DOCTYPE html>
           <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/></svg></div>
           <div class="platform-name">Render</div>
           <div class="platform-desc">One-click OAuth deploy</div>
+          <div class="platform-demo"><a href="https://render.librefang.ai" target="_blank" rel="noopener" onclick="event.stopPropagation()">Live Demo →</a></div>
           <div class="platform-warning">Free tier: sleeps after 15 min, no persistent storage</div>
         </a>
 
