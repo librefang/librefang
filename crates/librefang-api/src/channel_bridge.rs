@@ -8,38 +8,38 @@ use librefang_channels::router::AgentRouter;
 use librefang_channels::types::ChannelAdapter;
 
 // Feature-gated adapter imports
-#[cfg(feature = "channel-telegram")]
-use librefang_channels::telegram::TelegramAdapter;
 #[cfg(feature = "channel-discord")]
 use librefang_channels::discord::DiscordAdapter;
-#[cfg(feature = "channel-slack")]
-use librefang_channels::slack::SlackAdapter;
-#[cfg(feature = "channel-matrix")]
-use librefang_channels::matrix::MatrixAdapter;
 #[cfg(feature = "channel-email")]
 use librefang_channels::email::EmailAdapter;
+#[cfg(feature = "channel-google-chat")]
+use librefang_channels::google_chat::GoogleChatAdapter;
+#[cfg(feature = "channel-irc")]
+use librefang_channels::irc::IrcAdapter;
+#[cfg(feature = "channel-matrix")]
+use librefang_channels::matrix::MatrixAdapter;
+#[cfg(feature = "channel-mattermost")]
+use librefang_channels::mattermost::MattermostAdapter;
+#[cfg(feature = "channel-rocketchat")]
+use librefang_channels::rocketchat::RocketChatAdapter;
+#[cfg(feature = "channel-signal")]
+use librefang_channels::signal::SignalAdapter;
+#[cfg(feature = "channel-slack")]
+use librefang_channels::slack::SlackAdapter;
+#[cfg(feature = "channel-teams")]
+use librefang_channels::teams::TeamsAdapter;
+#[cfg(feature = "channel-telegram")]
+use librefang_channels::telegram::TelegramAdapter;
+#[cfg(feature = "channel-twitch")]
+use librefang_channels::twitch::TwitchAdapter;
 #[cfg(feature = "channel-webhook")]
 use librefang_channels::webhook::WebhookAdapter;
 #[cfg(feature = "channel-whatsapp")]
 use librefang_channels::whatsapp::WhatsAppAdapter;
-#[cfg(feature = "channel-signal")]
-use librefang_channels::signal::SignalAdapter;
-#[cfg(feature = "channel-teams")]
-use librefang_channels::teams::TeamsAdapter;
-#[cfg(feature = "channel-mattermost")]
-use librefang_channels::mattermost::MattermostAdapter;
-#[cfg(feature = "channel-irc")]
-use librefang_channels::irc::IrcAdapter;
-#[cfg(feature = "channel-google-chat")]
-use librefang_channels::google_chat::GoogleChatAdapter;
-#[cfg(feature = "channel-twitch")]
-use librefang_channels::twitch::TwitchAdapter;
-#[cfg(feature = "channel-rocketchat")]
-use librefang_channels::rocketchat::RocketChatAdapter;
-#[cfg(feature = "channel-zulip")]
-use librefang_channels::zulip::ZulipAdapter;
 #[cfg(feature = "channel-xmpp")]
 use librefang_channels::xmpp::XmppAdapter;
+#[cfg(feature = "channel-zulip")]
+use librefang_channels::zulip::ZulipAdapter;
 // Wave 3
 #[cfg(feature = "channel-bluesky")]
 use librefang_channels::bluesky::BlueskyAdapter;
