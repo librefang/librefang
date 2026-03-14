@@ -86,12 +86,32 @@ pub enum CommsEventKind {
     TaskCompleted,
 }
 
+/// An attachment in a comms send request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    /// URL of the attachment (image, file, etc.).
+    pub url: String,
+    /// MIME type hint (e.g., "image/png", "application/pdf").
+    #[serde(default)]
+    pub mime_type: Option<String>,
+    /// Display filename for the attachment.
+    #[serde(default)]
+    pub filename: Option<String>,
+}
+
 /// Request body for POST /api/comms/send.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommsSendRequest {
     pub from_agent_id: String,
     pub to_agent_id: String,
     pub message: String,
+    /// Optional thread/topic ID for cross-channel threading.
+    /// Platform-specific: Slack thread_ts, Telegram message_thread_id, Discord thread ID, etc.
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    /// Optional file/media attachments.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
 }
 
 /// Request body for POST /api/comms/task.
@@ -151,6 +171,26 @@ mod tests {
         let req: CommsSendRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.from_agent_id, "a");
         assert_eq!(req.message, "hello");
+        assert!(req.thread_id.is_none());
+        assert!(req.attachments.is_empty());
+    }
+
+    #[test]
+    fn comms_send_request_with_thread_id() {
+        let json =
+            r#"{"from_agent_id":"a","to_agent_id":"b","message":"reply","thread_id":"t123"}"#;
+        let req: CommsSendRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.thread_id.as_deref(), Some("t123"));
+    }
+
+    #[test]
+    fn comms_send_request_with_attachments() {
+        let json = r#"{"from_agent_id":"a","to_agent_id":"b","message":"see attached","attachments":[{"url":"https://example.com/file.png","mime_type":"image/png","filename":"file.png"}]}"#;
+        let req: CommsSendRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.attachments.len(), 1);
+        assert_eq!(req.attachments[0].url, "https://example.com/file.png");
+        assert_eq!(req.attachments[0].mime_type.as_deref(), Some("image/png"));
+        assert_eq!(req.attachments[0].filename.as_deref(), Some("file.png"));
     }
 
     #[test]
