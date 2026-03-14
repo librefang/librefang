@@ -95,6 +95,8 @@ librefang start
 >
 > **GCP** — Free forever (e2-micro), 30 GB persistent storage, requires Terraform and a GCP account. [Setup guide →](infra/gcp/README.md)
 
+<a id="docker"></a>
+
 **Or run with Docker:**
 ```bash
 docker compose up --build
