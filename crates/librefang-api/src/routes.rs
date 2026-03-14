@@ -2909,15 +2909,19 @@ pub async fn get_template(Path(name): Path<String>) -> impl IntoResponse {
 // ---------------------------------------------------------------------------
 
 /// GET /api/memory/agents/:id/kv — List KV pairs for an agent.
-///
-/// Note: memory_store tool writes to a shared namespace, so we read from that
-/// same namespace regardless of which agent ID is in the URL.
 pub async fn get_agent_kv(
     State(state): State<Arc<AppState>>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let agent_id = librefang_kernel::kernel::shared_memory_agent_id();
-
+    let agent_id: AgentId = match id.parse() {
+        Ok(aid) => aid,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            );
+        }
+    };
     match state.kernel.memory.list_kv(agent_id) {
         Ok(pairs) => {
             let kv: Vec<serde_json::Value> = pairs
@@ -2939,10 +2943,17 @@ pub async fn get_agent_kv(
 /// GET /api/memory/agents/:id/kv/:key — Get a specific KV value.
 pub async fn get_agent_kv_key(
     State(state): State<Arc<AppState>>,
-    Path((_id, key)): Path<(String, String)>,
+    Path((id, key)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let agent_id = librefang_kernel::kernel::shared_memory_agent_id();
-
+    let agent_id: AgentId = match id.parse() {
+        Ok(aid) => aid,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            );
+        }
+    };
     match state.kernel.memory.structured_get(agent_id, &key) {
         Ok(Some(val)) => (
             StatusCode::OK,
@@ -2965,11 +2976,18 @@ pub async fn get_agent_kv_key(
 /// PUT /api/memory/agents/:id/kv/:key — Set a KV value.
 pub async fn set_agent_kv_key(
     State(state): State<Arc<AppState>>,
-    Path((_id, key)): Path<(String, String)>,
+    Path((id, key)): Path<(String, String)>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let agent_id = librefang_kernel::kernel::shared_memory_agent_id();
-
+    let agent_id: AgentId = match id.parse() {
+        Ok(aid) => aid,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            );
+        }
+    };
     let value = body.get("value").cloned().unwrap_or(body);
 
     match state.kernel.memory.structured_set(agent_id, &key, value) {
@@ -2990,10 +3008,17 @@ pub async fn set_agent_kv_key(
 /// DELETE /api/memory/agents/:id/kv/:key — Delete a KV value.
 pub async fn delete_agent_kv_key(
     State(state): State<Arc<AppState>>,
-    Path((_id, key)): Path<(String, String)>,
+    Path((id, key)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let agent_id = librefang_kernel::kernel::shared_memory_agent_id();
-
+    let agent_id: AgentId = match id.parse() {
+        Ok(aid) => aid,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            );
+        }
+    };
     match state.kernel.memory.structured_delete(agent_id, &key) {
         Ok(()) => (
             StatusCode::OK,
