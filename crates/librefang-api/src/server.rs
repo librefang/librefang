@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::trace::TraceLayer;
 use tracing::info;
 
@@ -700,6 +701,9 @@ pub async fn build_router(
         ))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
+        .layer(RequestBodyLimitLayer::new(
+            crate::validation::MAX_REQUEST_BODY_BYTES,
+        ))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
         .layer(cors)
