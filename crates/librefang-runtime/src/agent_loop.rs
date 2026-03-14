@@ -23,11 +23,11 @@ use librefang_types::memory::{Memory, MemoryFilter, MemorySource};
 use librefang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
 };
-use librefang_types::tool::{ToolCall, ToolDefinition};
+use librefang_types::tool::{DecisionTrace, ToolCall, ToolDefinition};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
@@ -105,6 +105,9 @@ pub struct AgentLoopResult {
     pub silent: bool,
     /// Reply directives extracted from the agent's response.
     pub directives: librefang_types::message::ReplyDirectives,
+    /// Structured decision traces for each tool call made during the loop.
+    /// Captures reasoning, inputs, timing, and outcomes for debugging and auditing.
+    pub decision_traces: Vec<DecisionTrace>,
 }
 
 /// Run the agent execution loop for a single user message.
@@ -294,6 +297,7 @@ pub async fn run_agent_loop(
     let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
     let context_budget = ContextBudget::new(ctx_window);
     let mut any_tools_executed = false;
+    let mut decision_traces: Vec<DecisionTrace> = Vec::new();
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
@@ -341,6 +345,7 @@ pub async fn run_agent_loop(
 
         // Recover tool calls output as text by models that don't use the tool_calls API field
         // (e.g. Groq/Llama, DeepSeek emit `<function=name>{json}</function>` in text)
+        let mut tools_recovered_from_text = false;
         if matches!(
             response.stop_reason,
             StopReason::EndTurn | StopReason::StopSequence
@@ -354,6 +359,7 @@ pub async fn run_agent_loop(
                 );
                 response.tool_calls = recovered;
                 response.stop_reason = StopReason::ToolUse;
+                tools_recovered_from_text = true;
                 // Build ToolUse content blocks from recovered calls
                 let mut new_blocks: Vec<ContentBlock> = Vec::new();
                 for tc in &response.tool_calls {
@@ -399,6 +405,7 @@ pub async fn run_agent_loop(
                             current_thread: parsed_directives.current_thread,
                             silent: true,
                         },
+                        decision_traces,
                     });
                 }
 
@@ -535,12 +542,24 @@ pub async fn run_agent_loop(
                     cost_usd: None,
                     silent: false,
                     directives: Default::default(),
+                    decision_traces,
                 });
             }
             StopReason::ToolUse => {
                 // Reset MaxTokens continuation counter on tool use
                 consecutive_max_tokens = 0;
                 any_tools_executed = true;
+
+                // Extract the assistant's reasoning text that accompanied the tool calls.
+                // This is the rationale for why the LLM selected these tools.
+                let rationale_text = {
+                    let text = response.text();
+                    if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    }
+                };
 
                 // Execute tool calls
                 let assistant_blocks = response.content.clone();
@@ -643,7 +662,9 @@ pub async fn run_agent_loop(
                     // Resolve effective exec policy (per-agent override or global)
                     let effective_exec_policy = manifest.exec_policy.as_ref();
 
-                    // Timeout-wrapped execution
+                    // Timeout-wrapped execution with timing for decision trace
+                    let trace_start = Instant::now();
+                    let trace_timestamp = chrono::Utc::now();
                     let result = match tokio::time::timeout(
                         Duration::from_secs(TOOL_TIMEOUT_SECS),
                         tool_runner::execute_tool(
@@ -685,6 +706,23 @@ pub async fn run_agent_loop(
                             }
                         }
                     };
+                    let execution_ms = trace_start.elapsed().as_millis() as u64;
+
+                    // Record decision trace for this tool call
+                    let output_summary =
+                        librefang_types::truncate_str(&result.content, 200).to_string();
+                    decision_traces.push(DecisionTrace {
+                        tool_use_id: tool_call.id.clone(),
+                        tool_name: tool_call.name.clone(),
+                        input: tool_call.input.clone(),
+                        rationale: rationale_text.clone(),
+                        recovered_from_text: tools_recovered_from_text,
+                        execution_ms,
+                        is_error: result.is_error,
+                        output_summary,
+                        iteration,
+                        timestamp: trace_timestamp,
+                    });
 
                     // Fire AfterToolCall hook
                     if let Some(hook_reg) = hooks {
@@ -810,6 +848,7 @@ pub async fn run_agent_loop(
                         cost_usd: None,
                         silent: false,
                         directives: Default::default(),
+                        decision_traces,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -1256,6 +1295,7 @@ pub async fn run_agent_loop_streaming(
     let ctx_window = context_window_tokens.unwrap_or(DEFAULT_CONTEXT_WINDOW);
     let context_budget = ContextBudget::new(ctx_window);
     let mut any_tools_executed = false;
+    let mut decision_traces: Vec<DecisionTrace> = Vec::new();
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
@@ -1325,6 +1365,7 @@ pub async fn run_agent_loop_streaming(
         total_usage.output_tokens += response.usage.output_tokens;
 
         // Recover tool calls output as text (streaming path)
+        let mut tools_recovered_from_text = false;
         if matches!(
             response.stop_reason,
             StopReason::EndTurn | StopReason::StopSequence
@@ -1338,6 +1379,7 @@ pub async fn run_agent_loop_streaming(
                 );
                 response.tool_calls = recovered;
                 response.stop_reason = StopReason::ToolUse;
+                tools_recovered_from_text = true;
                 let mut new_blocks: Vec<ContentBlock> = Vec::new();
                 for tc in &response.tool_calls {
                     new_blocks.push(ContentBlock::ToolUse {
@@ -1381,6 +1423,7 @@ pub async fn run_agent_loop_streaming(
                             current_thread: parsed_directives_s.current_thread,
                             silent: true,
                         },
+                        decision_traces,
                     });
                 }
 
@@ -1516,12 +1559,23 @@ pub async fn run_agent_loop_streaming(
                     cost_usd: None,
                     silent: false,
                     directives: Default::default(),
+                    decision_traces,
                 });
             }
             StopReason::ToolUse => {
                 // Reset MaxTokens continuation counter on tool use
                 consecutive_max_tokens = 0;
                 any_tools_executed = true;
+
+                // Extract the assistant's reasoning text that accompanied the tool calls.
+                let rationale_text = {
+                    let text = response.text();
+                    if text.trim().is_empty() {
+                        None
+                    } else {
+                        Some(text)
+                    }
+                };
 
                 let assistant_blocks = response.content.clone();
 
@@ -1620,7 +1674,9 @@ pub async fn run_agent_loop_streaming(
                     // Resolve effective exec policy (per-agent override or global)
                     let effective_exec_policy = manifest.exec_policy.as_ref();
 
-                    // Timeout-wrapped execution
+                    // Timeout-wrapped execution with timing for decision trace
+                    let trace_start = Instant::now();
+                    let trace_timestamp = chrono::Utc::now();
                     let result = match tokio::time::timeout(
                         Duration::from_secs(TOOL_TIMEOUT_SECS),
                         tool_runner::execute_tool(
@@ -1662,6 +1718,23 @@ pub async fn run_agent_loop_streaming(
                             }
                         }
                     };
+                    let execution_ms = trace_start.elapsed().as_millis() as u64;
+
+                    // Record decision trace for this tool call
+                    let output_summary =
+                        librefang_types::truncate_str(&result.content, 200).to_string();
+                    decision_traces.push(DecisionTrace {
+                        tool_use_id: tool_call.id.clone(),
+                        tool_name: tool_call.name.clone(),
+                        input: tool_call.input.clone(),
+                        rationale: rationale_text.clone(),
+                        recovered_from_text: tools_recovered_from_text,
+                        execution_ms,
+                        is_error: result.is_error,
+                        output_summary,
+                        iteration,
+                        timestamp: trace_timestamp,
+                    });
 
                     // Fire AfterToolCall hook
                     if let Some(hook_reg) = hooks {
@@ -1798,6 +1871,7 @@ pub async fn run_agent_loop_streaming(
                         cost_usd: None,
                         silent: false,
                         directives: Default::default(),
+                        decision_traces,
                     });
                 }
                 let text = response.text();

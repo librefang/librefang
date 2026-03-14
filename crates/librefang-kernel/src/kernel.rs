@@ -159,6 +159,9 @@ pub struct LibreFangKernel {
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
     agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// Per-agent decision traces from the most recent message exchange.
+    /// Stored for retrieval via `/api/agents/{id}/traces`.
+    pub decision_traces: dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
 }
@@ -1008,6 +1011,7 @@ impl LibreFangKernel {
             channel_adapters: dashmap::DashMap::new(),
             default_model_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
+            decision_traces: dashmap::DashMap::new(),
             self_handle: OnceLock::new(),
         };
 
@@ -1514,6 +1518,12 @@ impl LibreFangKernel {
 
                 // Update last active time
                 let _ = self.registry.set_state(agent_id, AgentState::Running);
+
+                // Store decision traces for API retrieval
+                if !result.decision_traces.is_empty() {
+                    self.decision_traces
+                        .insert(agent_id, result.decision_traces.clone());
+                }
 
                 // SECURITY: Record successful message in audit trail
                 self.audit_log.record(
@@ -2045,6 +2055,7 @@ impl LibreFangKernel {
             cost_usd: None,
             silent: false,
             directives: Default::default(),
+            decision_traces: Vec::new(),
         })
     }
 
@@ -2105,6 +2116,7 @@ impl LibreFangKernel {
             iterations: 1,
             silent: false,
             directives: Default::default(),
+            decision_traces: Vec::new(),
         })
     }
 
@@ -2298,6 +2310,7 @@ impl LibreFangKernel {
             cost_usd: None,
             silent: result.silent,
             directives: result.directives,
+            decision_traces: result.decision_traces,
         }
     }
 

@@ -53,6 +53,10 @@ pub struct MessageResponse {
     pub iterations: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// Decision traces from tool calls made during the agent loop.
+    /// Empty if no tools were called.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub decision_traces: Vec<librefang_types::tool::DecisionTrace>,
 }
 
 /// Request to install a skill from the marketplace.

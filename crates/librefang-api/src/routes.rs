@@ -390,6 +390,7 @@ pub async fn send_message(
                     output_tokens: result.total_usage.output_tokens,
                     iterations: result.iterations,
                     cost_usd: result.cost_usd,
+                    decision_traces: result.decision_traces,
                 })),
             )
         }
@@ -7470,6 +7471,45 @@ pub async fn set_model(
             Json(serde_json::json!({"error": format!("{e}")})),
         ),
     }
+}
+
+/// GET /api/agents/{id}/traces — Get decision traces from the agent's most recent message.
+///
+/// Returns structured traces showing why each tool was selected during the last
+/// agent loop execution. Useful for debugging, auditing, and optimization.
+pub async fn get_agent_traces(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            )
+        }
+    };
+
+    // Check agent exists
+    if state.kernel.registry.get(agent_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Agent not found"})),
+        );
+    }
+
+    let traces = state
+        .kernel
+        .decision_traces
+        .get(&agent_id)
+        .map(|entry| entry.value().clone())
+        .unwrap_or_default();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "traces": traces })),
+    )
 }
 
 /// GET /api/agents/{id}/tools — Get an agent's tool allowlist/blocklist.
