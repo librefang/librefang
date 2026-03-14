@@ -114,6 +114,11 @@ taskkill //PID <pid> //F
 - Dashboard is Alpine.js SPA in `static/index_body.html` — new tabs need both HTML and JS data/methods
 - Config fields need: struct field + `#[serde(default)]` + Default impl entry + Serialize/Deserialize derives
 
+## Git Conventions
+- **Author**: `Evan <suzukaze.haduki@gmail.com>`
+- **Commit messages**: Do NOT include `Co-Authored-By` lines, "Generated with Claude Code" footers, or any AI attribution in commit messages or PR descriptions
+- **Format**: Use conventional commits (`feat:`, `fix:`, `docs:`, `refactor:`, `chore:`, `ci:`, `perf:`, `test:`)
+
 ## Common Gotchas
 - `librefang.exe` may be locked if daemon is running — use `--lib` flag or kill daemon first
 - `PeerRegistry` is `Option<PeerRegistry>` on kernel but `Option<Arc<PeerRegistry>>` on `AppState` — wrap with `.as_ref().map(|r| Arc::new(r.clone()))`

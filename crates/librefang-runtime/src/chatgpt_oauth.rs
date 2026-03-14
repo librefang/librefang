@@ -311,7 +311,10 @@ pub async fn refresh_access_token(refresh_token: &str) -> Result<ChatGptAuthResu
 pub async fn fetch_best_codex_model(access_token: &str) -> String {
     const FALLBACK_MODEL: &str = "gpt-5.1-codex-mini";
 
-    let url = format!("{CHATGPT_BASE_URL}/codex/models?client_version={}", librefang_types::VERSION);
+    let url = format!(
+        "{CHATGPT_BASE_URL}/codex/models?client_version={}",
+        librefang_types::VERSION
+    );
     let client = reqwest::Client::new();
     let resp = match client.get(&url).bearer_auth(access_token).send().await {
         Ok(r) => r,

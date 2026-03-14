@@ -372,7 +372,10 @@ pub fn convert_openclaw_skill(dir: &Path) -> Result<SkillManifest, SkillError> {
         .map_err(|e| SkillError::InvalidManifest(format!("Invalid package.json: {e}")))?;
 
     let name = pkg["name"].as_str().unwrap_or("unnamed-skill").to_string();
-    let version = pkg["version"].as_str().unwrap_or(librefang_types::VERSION).to_string();
+    let version = pkg["version"]
+        .as_str()
+        .unwrap_or(librefang_types::VERSION)
+        .to_string();
     let description = pkg["description"].as_str().unwrap_or("").to_string();
     let author = pkg["author"].as_str().unwrap_or("").to_string();
 
