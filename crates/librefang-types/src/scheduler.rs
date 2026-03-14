@@ -104,6 +104,9 @@ pub enum CronSchedule {
 // CronAction
 // ---------------------------------------------------------------------------
 
+/// Maximum length of workflow_id field.
+const MAX_WORKFLOW_ID_LEN: usize = 256;
+
 /// What a scheduled job does when it fires.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -121,6 +124,14 @@ pub enum CronAction {
         model_override: Option<String>,
         /// Timeout in seconds (10..=600).
         timeout_secs: Option<u64>,
+    },
+    /// Trigger a workflow execution by ID or name.
+    Workflow {
+        /// Workflow UUID or human-readable name.
+        workflow_id: String,
+        /// Optional input text passed to the first workflow step.
+        #[serde(default)]
+        input: Option<String>,
     },
 }
 
@@ -297,6 +308,17 @@ impl CronJob {
                             "timeout_secs too large ({t}, max {MAX_TIMEOUT_SECS})"
                         ));
                     }
+                }
+            }
+            CronAction::Workflow { workflow_id, .. } => {
+                if workflow_id.is_empty() {
+                    return Err("workflow_id must not be empty".into());
+                }
+                if workflow_id.len() > MAX_WORKFLOW_ID_LEN {
+                    return Err(format!(
+                        "workflow_id too long ({} chars, max {MAX_WORKFLOW_ID_LEN})",
+                        workflow_id.len()
+                    ));
                 }
             }
         }
@@ -863,5 +885,77 @@ mod tests {
             tz: None,
         };
         assert!(job.validate(0).is_ok());
+    }
+
+    // -- Action: Workflow --
+
+    #[test]
+    fn workflow_action_valid_uuid() {
+        let mut job = valid_job();
+        job.action = CronAction::Workflow {
+            workflow_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            input: None,
+        };
+        assert!(job.validate(0).is_ok());
+    }
+
+    #[test]
+    fn workflow_action_valid_name() {
+        let mut job = valid_job();
+        job.action = CronAction::Workflow {
+            workflow_id: "daily-report-pipeline".into(),
+            input: Some("generate report".into()),
+        };
+        assert!(job.validate(0).is_ok());
+    }
+
+    #[test]
+    fn workflow_action_empty_id() {
+        let mut job = valid_job();
+        job.action = CronAction::Workflow {
+            workflow_id: String::new(),
+            input: None,
+        };
+        let err = job.validate(0).unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn workflow_action_id_too_long() {
+        let mut job = valid_job();
+        job.action = CronAction::Workflow {
+            workflow_id: "x".repeat(257),
+            input: None,
+        };
+        let err = job.validate(0).unwrap_err();
+        assert!(err.contains("too long"), "{err}");
+    }
+
+    #[test]
+    fn serde_workflow_action_tag() {
+        let action = CronAction::Workflow {
+            workflow_id: "my-workflow".into(),
+            input: Some("hello".into()),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert!(json.contains("\"kind\":\"workflow\""));
+        assert!(json.contains("\"workflow_id\":\"my-workflow\""));
+        assert!(json.contains("\"input\":\"hello\""));
+    }
+
+    #[test]
+    fn serde_workflow_action_roundtrip() {
+        let action = CronAction::Workflow {
+            workflow_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            input: None,
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        let back: CronAction = serde_json::from_str(&json).unwrap();
+        if let CronAction::Workflow { workflow_id, input } = back {
+            assert_eq!(workflow_id, "550e8400-e29b-41d4-a716-446655440000");
+            assert!(input.is_none());
+        } else {
+            panic!("expected Workflow variant");
+        }
     }
 }
