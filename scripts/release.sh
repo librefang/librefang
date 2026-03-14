@@ -109,6 +109,15 @@ if git -C "$REPO_ROOT" rev-parse "$TAG" &>/dev/null; then
     exit 1
 fi
 
+# --- Generate changelog ---
+
+CHANGELOG_SCRIPT="$REPO_ROOT/scripts/generate-changelog.sh"
+if [ -x "$CHANGELOG_SCRIPT" ]; then
+    echo ""
+    echo "Generating changelog..."
+    "$CHANGELOG_SCRIPT" "$VERSION" "${PREV_TAG:-}"
+fi
+
 # --- Bump all versions ---
 
 echo ""
@@ -126,6 +135,7 @@ fi
 
 git -C "$REPO_ROOT" add \
     Cargo.toml Cargo.lock \
+    CHANGELOG.md \
     agents/*/agent.toml \
     sdk/javascript/package.json \
     sdk/python/setup.py \
