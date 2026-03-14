@@ -1205,6 +1205,67 @@ pub struct KernelConfig {
     /// Sidecar channel adapters (external process-based).
     #[serde(default)]
     pub sidecar_channels: Vec<SidecarChannelConfig>,
+    /// Topic isolation configuration — automatically detect topic shifts
+    /// and only send relevant history to the LLM.
+    #[serde(default)]
+    pub topic_isolation: TopicIsolationConfig,
+}
+
+/// Topic isolation configuration.
+///
+/// When enabled, detects topic shifts in conversation history and only sends
+/// the messages from the current topic to the LLM. This reduces token usage
+/// on long conversations and improves response quality by removing irrelevant
+/// context from previous topics.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [topic_isolation]
+/// enabled = true
+/// max_topic_messages = 10
+/// topic_change_phrases = ["new topic", "different question", "changing subject"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TopicIsolationConfig {
+    /// Whether topic isolation is enabled. Default: false.
+    pub enabled: bool,
+    /// Maximum number of recent messages to keep when a topic shift is detected.
+    /// The last N user/assistant exchanges from the current topic are sent.
+    /// Default: 10.
+    pub max_topic_messages: usize,
+    /// Phrases that explicitly signal a topic change. Case-insensitive matching.
+    /// Default: common topic-change phrases.
+    #[serde(default = "default_topic_change_phrases")]
+    pub topic_change_phrases: Vec<String>,
+    /// Minimum word overlap ratio (0.0-1.0) between consecutive user messages
+    /// to consider them the same topic. Below this threshold, a topic shift is
+    /// detected. Default: 0.15.
+    pub similarity_threshold: f64,
+}
+
+impl Default for TopicIsolationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_topic_messages: 10,
+            topic_change_phrases: default_topic_change_phrases(),
+            similarity_threshold: 0.15,
+        }
+    }
+}
+
+fn default_topic_change_phrases() -> Vec<String> {
+    vec![
+        "new topic".to_string(),
+        "different question".to_string(),
+        "changing subject".to_string(),
+        "switch topic".to_string(),
+        "unrelated question".to_string(),
+        "another thing".to_string(),
+        "by the way".to_string(),
+        "on a different note".to_string(),
+    ]
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1453,6 +1514,7 @@ impl Default for KernelConfig {
             provider_api_keys: HashMap::new(),
             oauth: OAuthConfig::default(),
             sidecar_channels: Vec::new(),
+            topic_isolation: TopicIsolationConfig::default(),
         }
     }
 }
