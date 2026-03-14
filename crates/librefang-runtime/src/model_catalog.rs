@@ -616,6 +616,7 @@ const BUILTIN_MINIMAX: &str = include_str!("../../../catalog/providers/minimax.t
 const BUILTIN_MINIMAX_CN: &str = include_str!("../../../catalog/providers/minimax-cn.toml");
 const BUILTIN_MISTRAL: &str = include_str!("../../../catalog/providers/mistral.toml");
 const BUILTIN_MOONSHOT: &str = include_str!("../../../catalog/providers/moonshot.toml");
+const BUILTIN_NVIDIA_NIM: &str = include_str!("../../../catalog/providers/nvidia-nim.toml");
 const BUILTIN_OLLAMA: &str = include_str!("../../../catalog/providers/ollama.toml");
 const BUILTIN_OPENAI: &str = include_str!("../../../catalog/providers/openai.toml");
 const BUILTIN_OPENROUTER: &str = include_str!("../../../catalog/providers/openrouter.toml");
@@ -661,6 +662,7 @@ const BUILTIN_PROVIDER_SOURCES: &[&str] = &[
     BUILTIN_MINIMAX_CN,
     BUILTIN_MISTRAL,
     BUILTIN_MOONSHOT,
+    BUILTIN_NVIDIA_NIM,
     BUILTIN_OLLAMA,
     BUILTIN_OPENAI,
     BUILTIN_OPENROUTER,
