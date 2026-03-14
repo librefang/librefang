@@ -629,6 +629,7 @@ const BUILTIN_REPLICATE: &str = include_str!("../../../catalog/providers/replica
 const BUILTIN_SAMBANOVA: &str = include_str!("../../../catalog/providers/sambanova.toml");
 const BUILTIN_TOGETHER: &str = include_str!("../../../catalog/providers/together.toml");
 const BUILTIN_VENICE: &str = include_str!("../../../catalog/providers/venice.toml");
+const BUILTIN_VERTEX_AI: &str = include_str!("../../../catalog/providers/vertex-ai.toml");
 const BUILTIN_VLLM: &str = include_str!("../../../catalog/providers/vllm.toml");
 const BUILTIN_VOLCENGINE_CODING: &str =
     include_str!("../../../catalog/providers/volcengine-coding.toml");
@@ -675,6 +676,7 @@ const BUILTIN_PROVIDER_SOURCES: &[&str] = &[
     BUILTIN_SAMBANOVA,
     BUILTIN_TOGETHER,
     BUILTIN_VENICE,
+    BUILTIN_VERTEX_AI,
     BUILTIN_VLLM,
     BUILTIN_VOLCENGINE_CODING,
     BUILTIN_VOLCENGINE,
