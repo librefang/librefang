@@ -444,7 +444,7 @@ Most new providers don't need a new driver — just add an entry to the model ca
 
 1. Create `crates/librefang-runtime/src/my_provider.rs`.
 2. Implement the `LlmDriver` trait (see `anthropic.rs` for reference).
-3. Register it in the driver factory in `crates/librefang-runtime/src/llm.rs`.
+3. Register it in the driver factory in `crates/librefang-runtime/src/llm_driver.rs`.
 4. Add config types in `crates/librefang-types/src/config.rs`.
 5. Write integration tests (they should skip gracefully if the API key env var is absent).
 
