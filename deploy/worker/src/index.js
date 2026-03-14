@@ -282,7 +282,10 @@ const HTML = `<!DOCTYPE html>
       max-width: 100%;
       overflow: hidden;
     }
-    .platform-cmd code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .platform-cmd code { overflow-x: auto; white-space: nowrap; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
+    .platform-cmd code::-webkit-scrollbar { height: 3px; }
+    .platform-cmd code::-webkit-scrollbar-track { background: transparent; }
+    .platform-cmd code::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     .copy-btn {
       background: var(--surface2);
       border: 1px solid var(--border);
