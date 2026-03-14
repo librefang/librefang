@@ -13,4 +13,5 @@ pub mod stream_chunker;
 pub mod stream_dedup;
 pub mod types;
 pub mod webchat;
+pub mod webhook_store;
 pub mod ws;

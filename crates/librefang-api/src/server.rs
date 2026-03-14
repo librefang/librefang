@@ -52,6 +52,9 @@ pub async fn build_router(
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: crate::webhook_store::WebhookStore::load(
+            kernel.config.home_dir.join("webhooks.json"),
+        ),
     });
 
     // CORS: allow localhost origins by default. If API key is set, the API
@@ -572,6 +575,19 @@ pub async fn build_router(
         .route(
             "/api/cron/jobs/{id}/status",
             axum::routing::get(routes::cron_job_status),
+        )
+        // Webhook management endpoints (outbound subscriptions)
+        .route(
+            "/api/webhooks",
+            axum::routing::get(routes::list_webhooks).post(routes::create_webhook),
+        )
+        .route(
+            "/api/webhooks/{id}",
+            axum::routing::put(routes::update_webhook).delete(routes::delete_webhook),
+        )
+        .route(
+            "/api/webhooks/{id}/test",
+            axum::routing::post(routes::test_webhook),
         )
         // Webhook trigger endpoints (external event injection)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
