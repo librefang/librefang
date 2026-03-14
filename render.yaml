@@ -1,3 +1,12 @@
+# Render free tier does not support persistent disks.
+# Data (config, conversation history, local DB) will be lost on each deploy/restart.
+# For persistent storage, upgrade to a paid plan and add a disk:
+#   disk:
+#     name: librefang-data
+#     mountPath: /data
+#     sizeGB: 1
+# Then set LIBREFANG_HOME=/data in envVars.
+
 services:
   - type: web
     runtime: docker
