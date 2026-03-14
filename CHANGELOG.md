@@ -5,6 +5,40 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3-beta] - 2026-03-14
+
+### Added
+
+- Add copy buttons to install commands on deploy hub (#258) (@houko)
+- Add macOS, Linux, Windows install options to deploy hub (#257) (@houko)
+- Deploy hub with multi-platform support (#251) (@houko)
+- Add GCP free-tier deployment with Terraform (#249) (@houko)
+
+### Fixed
+
+- Allow multi-segment prerelease in semver validation (#263) (@houko)
+- Use docker run command on deploy hub (#262) (@houko)
+- Docker deploy card links to correct README section (#260) (@houko)
+- Add catalog directory to Dockerfile (#256) (@houko)
+- Correct Railway URL and use prebuilt image for Render (#255) (@houko)
+- Deploy page home button links to deploy.librefang.ai (#254) (@houko)
+- Replace emoji with SVG icons and add home button (#253) (@houko)
+- Prevent release notes from being lost due to race condition (#252) (@houko)
+- Remove disk config for Render free tier (#247) (@houko)
+
+### Documentation
+
+- Separate Fly.io and Render deploy descriptions (#248) (@houko)
+
+### Maintenance
+
+- Add 'release' to allowed PR title types. (#246) (@houko)
+- Update star history workflow schedule to run hourly. (#245) (@houko)
+
+### Other
+
+- V0.4.2-20260314 (#244) (@houko)
+
 ## [0.4.2] - 2026-03-14
 
 ### Added

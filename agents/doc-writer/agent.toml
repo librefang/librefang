@@ -1,5 +1,5 @@
 name = "doc-writer"
-version = "0.4.2-20260314"
+version = "0.4.3-beta-20260314"
 description = "Technical writer. Creates documentation, README files, API docs, tutorials, and architecture guides."
 author = "librefang"
 module = "builtin:chat"

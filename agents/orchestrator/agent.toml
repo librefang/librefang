@@ -1,5 +1,5 @@
 name = "orchestrator"
-version = "0.4.2-20260314"
+version = "0.4.3-beta-20260314"
 description = "Meta-agent that decomposes complex tasks, delegates to specialist agents, and synthesizes results."
 author = "librefang"
 module = "builtin:chat"

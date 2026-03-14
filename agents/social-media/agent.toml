@@ -1,5 +1,5 @@
 name = "social-media"
-version = "0.4.2-20260314"
+version = "0.4.3-beta-20260314"
 description = "Social media content creation, scheduling, and engagement strategy agent."
 author = "librefang"
 module = "builtin:chat"

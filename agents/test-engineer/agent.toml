@@ -1,5 +1,5 @@
 name = "test-engineer"
-version = "0.4.2-20260314"
+version = "0.4.3-beta-20260314"
 description = "Quality assurance engineer. Designs test strategies, writes tests, validates correctness."
 author = "librefang"
 module = "builtin:chat"

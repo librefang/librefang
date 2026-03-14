@@ -95,9 +95,11 @@ brew tap librefang/tap
 brew install librefang
 ```
 
+<a id="docker"></a>
+
 **Oder mit Docker ausführen:**
 ```bash
-docker compose up --build
+docker run -p 4545:4545 ghcr.io/librefang/librefang
 # Dashboard: http://localhost:4545
 ```
 
