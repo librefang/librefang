@@ -8040,6 +8040,37 @@ pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResp
     }
 }
 
+/// GET /api/schedules/{id} — Get a specific schedule by ID.
+pub async fn get_schedule(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_id = schedule_shared_agent_id();
+    match state.kernel.memory.structured_get(agent_id, SCHEDULES_KEY) {
+        Ok(Some(serde_json::Value::Array(arr))) => {
+            if let Some(schedule) = arr.iter().find(|s| s["id"].as_str() == Some(&id)) {
+                (StatusCode::OK, Json(schedule.clone()))
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": format!("Schedule '{}' not found", id)})),
+                )
+            }
+        }
+        Ok(_) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("Schedule '{}' not found", id)})),
+        ),
+        Err(e) => {
+            tracing::warn!("Failed to load schedules: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Failed to load schedules: {e}")})),
+            )
+        }
+    }
+}
+
 /// POST /api/schedules — Create a new cron-based scheduled job.
 pub async fn create_schedule(
     State(state): State<Arc<AppState>>,
