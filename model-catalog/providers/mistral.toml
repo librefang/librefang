@@ -1,0 +1,87 @@
+# Mistral AI — https://mistral.ai
+# Models: 6
+
+[provider]
+id = "mistral"
+display_name = "Mistral AI"
+api_key_env = "MISTRAL_API_KEY"
+base_url = "https://api.mistral.ai/v1"
+key_required = true
+
+[[models]]
+id = "mistral-large-latest"
+display_name = "Mistral Large"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 2.00
+output_cost_per_m = 6.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["mistral"]
+
+[[models]]
+id = "mistral-medium-latest"
+display_name = "Mistral Medium"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 2.70
+output_cost_per_m = 8.10
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "mistral-small-latest"
+display_name = "Mistral Small"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.10
+output_cost_per_m = 0.30
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "codestral-latest"
+display_name = "Codestral"
+tier = "smart"
+context_window = 32000
+max_output_tokens = 8192
+input_cost_per_m = 0.30
+output_cost_per_m = 0.90
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["codestral"]
+
+[[models]]
+id = "open-mistral-nemo"
+display_name = "Mistral Nemo"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.15
+output_cost_per_m = 0.15
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["mistral-nemo"]
+
+[[models]]
+id = "pixtral-large-latest"
+display_name = "Pixtral Large"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 2.00
+output_cost_per_m = 6.00
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["pixtral"]

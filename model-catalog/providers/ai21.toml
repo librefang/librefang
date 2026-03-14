@@ -1,0 +1,48 @@
+# AI21 Labs — https://ai21.com
+# Models: 3
+
+[provider]
+id = "ai21"
+display_name = "AI21 Labs"
+api_key_env = "AI21_API_KEY"
+base_url = "https://api.ai21.com/studio/v1"
+key_required = true
+
+[[models]]
+id = "jamba-1.5-large"
+display_name = "Jamba 1.5 Large"
+tier = "smart"
+context_window = 256000
+max_output_tokens = 4096
+input_cost_per_m = 2.0
+output_cost_per_m = 8.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["jamba"]
+
+[[models]]
+id = "jamba-1.5-mini"
+display_name = "Jamba 1.5 Mini"
+tier = "fast"
+context_window = 256000
+max_output_tokens = 4096
+input_cost_per_m = 0.20
+output_cost_per_m = 0.40
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "jamba-instruct"
+display_name = "Jamba Instruct"
+tier = "balanced"
+context_window = 256000
+max_output_tokens = 4096
+input_cost_per_m = 0.50
+output_cost_per_m = 0.70
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []

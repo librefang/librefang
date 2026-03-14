@@ -1,0 +1,74 @@
+# Fireworks AI — https://fireworks.ai
+# Models: 5
+
+[provider]
+id = "fireworks"
+display_name = "Fireworks AI"
+api_key_env = "FIREWORKS_API_KEY"
+base_url = "https://api.fireworks.ai/inference/v1"
+key_required = true
+
+[[models]]
+id = "accounts/fireworks/models/llama-v3p1-405b-instruct"
+display_name = "Llama 3.1 405B (Fireworks)"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 3.00
+output_cost_per_m = 3.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "accounts/fireworks/models/llama-v3p3-70b-instruct"
+display_name = "Llama 3.3 70B (Fireworks)"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.90
+output_cost_per_m = 0.90
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "accounts/fireworks/models/deepseek-r1"
+display_name = "DeepSeek R1 (Fireworks)"
+tier = "frontier"
+context_window = 64000
+max_output_tokens = 8192
+input_cost_per_m = 3.00
+output_cost_per_m = 8.00
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "accounts/fireworks/models/deepseek-v3"
+display_name = "DeepSeek V3 (Fireworks)"
+tier = "smart"
+context_window = 64000
+max_output_tokens = 8192
+input_cost_per_m = 0.90
+output_cost_per_m = 0.90
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "accounts/fireworks/models/mixtral-8x22b-instruct"
+display_name = "Mixtral 8x22B (Fireworks)"
+tier = "balanced"
+context_window = 65536
+max_output_tokens = 4096
+input_cost_per_m = 0.90
+output_cost_per_m = 0.90
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []

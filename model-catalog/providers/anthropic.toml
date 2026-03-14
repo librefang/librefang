@@ -1,0 +1,100 @@
+# Anthropic — https://anthropic.com
+# Models: 7
+
+[provider]
+id = "anthropic"
+display_name = "Anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+key_required = true
+
+[[models]]
+id = "claude-opus-4-6"
+display_name = "Claude Opus 4.6"
+tier = "frontier"
+context_window = 200000
+max_output_tokens = 128000
+input_cost_per_m = 5.0
+output_cost_per_m = 25.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["opus", "claude-opus"]
+
+[[models]]
+id = "claude-sonnet-4-6"
+display_name = "Claude Sonnet 4.6"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 64000
+input_cost_per_m = 3.0
+output_cost_per_m = 15.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["sonnet", "claude-sonnet"]
+
+[[models]]
+id = "claude-opus-4-20250514"
+display_name = "Claude Opus 4"
+tier = "frontier"
+context_window = 200000
+max_output_tokens = 32000
+input_cost_per_m = 15.0
+output_cost_per_m = 75.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "claude-sonnet-4-20250514"
+display_name = "Claude Sonnet 4"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 64000
+input_cost_per_m = 3.0
+output_cost_per_m = 15.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "claude-haiku-4-5-20251001"
+display_name = "Claude Haiku 4.5"
+tier = "fast"
+context_window = 200000
+max_output_tokens = 8192
+input_cost_per_m = 0.25
+output_cost_per_m = 1.25
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["haiku", "claude-haiku"]
+
+[[models]]
+id = "claude-sonnet-4-5-20250514"
+display_name = "Claude Sonnet 4.5"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 64000
+input_cost_per_m = 3.0
+output_cost_per_m = 15.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "claude-3-5-sonnet-20241022"
+display_name = "Claude 3.5 Sonnet"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 8192
+input_cost_per_m = 3.0
+output_cost_per_m = 15.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []

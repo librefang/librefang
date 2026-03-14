@@ -1,0 +1,152 @@
+# Qwen / Alibaba — https://dashscope.aliyuncs.com
+# Models: 11
+
+[provider]
+id = "qwen"
+display_name = "Qwen (Alibaba)"
+api_key_env = "DASHSCOPE_API_KEY"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+key_required = true
+
+[[models]]
+id = "qwen-max"
+display_name = "Qwen Max"
+tier = "frontier"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 4.00
+output_cost_per_m = 12.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "qwen-plus"
+display_name = "Qwen Plus"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.80
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["qwen"]
+
+[[models]]
+id = "qwen-turbo"
+display_name = "Qwen Turbo"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.30
+output_cost_per_m = 0.60
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "qwen-vl-plus"
+display_name = "Qwen VL Plus"
+tier = "smart"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 1.50
+output_cost_per_m = 4.50
+supports_tools = false
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "qwen-coder-plus"
+display_name = "Qwen Coder Plus"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.80
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "qwen-long"
+display_name = "Qwen Long"
+tier = "balanced"
+context_window = 1000000
+max_output_tokens = 8192
+input_cost_per_m = 0.50
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "qwen3-235b-a22b"
+display_name = "Qwen3 235B"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 4.00
+output_cost_per_m = 12.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["qwen3"]
+
+[[models]]
+id = "qwen3-30b-a3b"
+display_name = "Qwen3 30B"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.30
+output_cost_per_m = 0.60
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "qwen-coder-plus-latest"
+display_name = "Qwen Coder Plus (Latest)"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.80
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["qwen-coder"]
+
+[[models]]
+id = "qwen2.5-coder-32b-instruct"
+display_name = "Qwen 2.5 Coder 32B"
+tier = "balanced"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.80
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "qwen-vl-max"
+display_name = "Qwen VL Max"
+tier = "frontier"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 3.00
+output_cost_per_m = 9.00
+supports_tools = false
+supports_vision = true
+supports_streaming = true
+aliases = []

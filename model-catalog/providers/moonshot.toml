@@ -1,0 +1,74 @@
+# Moonshot / Kimi — https://moonshot.ai
+# Models: 5
+
+[provider]
+id = "moonshot"
+display_name = "Moonshot (Kimi)"
+api_key_env = "MOONSHOT_API_KEY"
+base_url = "https://api.moonshot.ai/v1"
+key_required = true
+
+[[models]]
+id = "moonshot-v1-128k"
+display_name = "Moonshot V1 128K"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 0.80
+output_cost_per_m = 0.80
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["moonshot"]
+
+[[models]]
+id = "moonshot-v1-32k"
+display_name = "Moonshot V1 32K"
+tier = "balanced"
+context_window = 32768
+max_output_tokens = 8192
+input_cost_per_m = 0.30
+output_cost_per_m = 0.30
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "moonshot-v1-8k"
+display_name = "Moonshot V1 8K"
+tier = "fast"
+context_window = 8192
+max_output_tokens = 4096
+input_cost_per_m = 0.10
+output_cost_per_m = 0.10
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "kimi-k2"
+display_name = "Kimi K2"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 2.00
+output_cost_per_m = 8.00
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["kimi"]
+
+[[models]]
+id = "kimi-k2.5"
+display_name = "Kimi K2.5"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 2.00
+output_cost_per_m = 8.00
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = ["kimi-k2.5-0711"]

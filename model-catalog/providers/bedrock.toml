@@ -1,0 +1,113 @@
+# AWS Bedrock — https://aws.amazon.com/bedrock
+# Models: 8
+
+[provider]
+id = "bedrock"
+display_name = "AWS Bedrock"
+api_key_env = "AWS_ACCESS_KEY_ID"
+base_url = "https://bedrock-runtime.us-east-1.amazonaws.com"
+key_required = true
+
+[[models]]
+id = "bedrock/anthropic.claude-opus-4-6"
+display_name = "Claude Opus 4.6 (Bedrock)"
+tier = "frontier"
+context_window = 200000
+max_output_tokens = 128000
+input_cost_per_m = 5.00
+output_cost_per_m = 25.00
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "bedrock/anthropic.claude-sonnet-4-6"
+display_name = "Claude Sonnet 4.6 (Bedrock)"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 64000
+input_cost_per_m = 3.00
+output_cost_per_m = 15.00
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "bedrock/anthropic.claude-opus-4-20250514"
+display_name = "Claude Opus 4 (Bedrock)"
+tier = "frontier"
+context_window = 200000
+max_output_tokens = 32000
+input_cost_per_m = 15.00
+output_cost_per_m = 75.00
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "bedrock/anthropic.claude-sonnet-4-20250514"
+display_name = "Claude Sonnet 4 (Bedrock)"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 64000
+input_cost_per_m = 3.00
+output_cost_per_m = 15.00
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "bedrock/anthropic.claude-haiku-4-5-20251001"
+display_name = "Claude Haiku 4.5 (Bedrock)"
+tier = "fast"
+context_window = 200000
+max_output_tokens = 8192
+input_cost_per_m = 0.25
+output_cost_per_m = 1.25
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "bedrock/amazon.nova-pro-v1:0"
+display_name = "Amazon Nova Pro (Bedrock)"
+tier = "smart"
+context_window = 300000
+max_output_tokens = 5120
+input_cost_per_m = 0.80
+output_cost_per_m = 3.20
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "bedrock/amazon.nova-lite-v1:0"
+display_name = "Amazon Nova Lite (Bedrock)"
+tier = "fast"
+context_window = 300000
+max_output_tokens = 5120
+input_cost_per_m = 0.06
+output_cost_per_m = 0.24
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "bedrock/meta.llama3-3-70b-instruct-v1:0"
+display_name = "Llama 3.3 70B (Bedrock)"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.72
+output_cost_per_m = 0.72
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []

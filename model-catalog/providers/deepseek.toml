@@ -1,0 +1,61 @@
+# DeepSeek — https://deepseek.com
+# Models: 4
+
+[provider]
+id = "deepseek"
+display_name = "DeepSeek"
+api_key_env = "DEEPSEEK_API_KEY"
+base_url = "https://api.deepseek.com/v1"
+key_required = true
+
+[[models]]
+id = "deepseek-chat"
+display_name = "DeepSeek V3"
+tier = "smart"
+context_window = 64000
+max_output_tokens = 8192
+input_cost_per_m = 0.27
+output_cost_per_m = 1.10
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["deepseek", "deepseek-v3"]
+
+[[models]]
+id = "deepseek-reasoner"
+display_name = "DeepSeek R1"
+tier = "frontier"
+context_window = 64000
+max_output_tokens = 8192
+input_cost_per_m = 0.55
+output_cost_per_m = 2.19
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = ["deepseek-r1"]
+
+[[models]]
+id = "deepseek-coder"
+display_name = "DeepSeek Coder V2"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.14
+output_cost_per_m = 0.28
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "deepseek-chat-v3-0324"
+display_name = "DeepSeek V3 0324"
+tier = "smart"
+context_window = 64000
+max_output_tokens = 8192
+input_cost_per_m = 0.27
+output_cost_per_m = 1.10
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []

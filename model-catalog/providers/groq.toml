@@ -1,0 +1,140 @@
+# Groq — https://groq.com
+# Models: 10
+
+[provider]
+id = "groq"
+display_name = "Groq"
+api_key_env = "GROQ_API_KEY"
+base_url = "https://api.groq.com/openai/v1"
+key_required = true
+
+[[models]]
+id = "llama-3.3-70b-versatile"
+display_name = "Llama 3.3 70B"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 32768
+input_cost_per_m = 0.059
+output_cost_per_m = 0.079
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["llama", "llama-70b"]
+
+[[models]]
+id = "llama-3.1-8b-instant"
+display_name = "Llama 3.1 8B"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.05
+output_cost_per_m = 0.08
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "llama-3.2-90b-vision-preview"
+display_name = "Llama 3.2 90B Vision"
+tier = "smart"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.90
+output_cost_per_m = 0.90
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "llama-3.2-11b-vision-preview"
+display_name = "Llama 3.2 11B Vision"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.18
+output_cost_per_m = 0.18
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "llama-3.2-3b-preview"
+display_name = "Llama 3.2 3B"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.06
+output_cost_per_m = 0.06
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "llama-3.2-1b-preview"
+display_name = "Llama 3.2 1B"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.04
+output_cost_per_m = 0.04
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "mixtral-8x7b-32768"
+display_name = "Mixtral 8x7B"
+tier = "balanced"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.024
+output_cost_per_m = 0.024
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["mixtral"]
+
+[[models]]
+id = "gemma2-9b-it"
+display_name = "Gemma 2 9B"
+tier = "fast"
+context_window = 8192
+max_output_tokens = 4096
+input_cost_per_m = 0.02
+output_cost_per_m = 0.02
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "qwen-qwq-32b"
+display_name = "Qwen QWQ 32B"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 16384
+input_cost_per_m = 0.20
+output_cost_per_m = 0.20
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "meta-llama/llama-4-scout-17b-16e-instruct"
+display_name = "Llama 4 Scout 17B"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 0.11
+output_cost_per_m = 0.34
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+

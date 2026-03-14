@@ -1,0 +1,61 @@
+# Volcano Engine / Doubao — https://volcengine.com
+# Models: 4
+
+[provider]
+id = "volcengine"
+display_name = "Volcano Engine (Doubao)"
+api_key_env = "VOLCENGINE_API_KEY"
+base_url = "https://ark.cn-beijing.volces.com/api/v3"
+key_required = true
+
+[[models]]
+id = "doubao-seed-1-6-251015"
+display_name = "Doubao Seed 1.6 Pro"
+tier = "smart"
+context_window = 262144
+max_output_tokens = 16384
+input_cost_per_m = 0.80
+output_cost_per_m = 2.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["doubao", "doubao-pro"]
+
+[[models]]
+id = "doubao-seed-2-0-lite"
+display_name = "Doubao Seed 2.0 Lite"
+tier = "balanced"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.30
+output_cost_per_m = 0.60
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["doubao-lite"]
+
+[[models]]
+id = "doubao-seed-2-0-mini"
+display_name = "Doubao Seed 2.0 Mini"
+tier = "fast"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.10
+output_cost_per_m = 0.10
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["doubao-mini"]
+
+[[models]]
+id = "doubao-seed-code"
+display_name = "Doubao Seed Code"
+tier = "smart"
+context_window = 131072
+max_output_tokens = 16384
+input_cost_per_m = 0.50
+output_cost_per_m = 1.00
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = ["doubao-code"]

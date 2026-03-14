@@ -1,0 +1,48 @@
+# Replicate — https://replicate.com
+# Models: 3
+
+[provider]
+id = "replicate"
+display_name = "Replicate"
+api_key_env = "REPLICATE_API_TOKEN"
+base_url = "https://api.replicate.com/v1"
+key_required = true
+
+[[models]]
+id = "replicate/meta-llama-3.3-70b-instruct"
+display_name = "Llama 3.3 70B (Replicate)"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 4096
+input_cost_per_m = 0.40
+output_cost_per_m = 0.40
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "replicate/deepseek-r1"
+display_name = "DeepSeek R1 (Replicate)"
+tier = "smart"
+context_window = 64000
+max_output_tokens = 4096
+input_cost_per_m = 0.40
+output_cost_per_m = 0.40
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "replicate/mistral-7b-instruct"
+display_name = "Mistral 7B (Replicate)"
+tier = "fast"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.05
+output_cost_per_m = 0.25
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []

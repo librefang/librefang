@@ -1,0 +1,31 @@
+# Model Catalog Schema Reference
+# ================================
+# This file documents all available fields and their types.
+# It is NOT a real provider file — it exists purely as documentation.
+#
+# Required fields are marked. All other fields are optional.
+
+[provider]
+id = "provider-id"                     # Required: unique provider identifier (lowercase, hyphenated)
+display_name = "Provider Name"         # Required: human-readable display name
+api_key_env = "PROVIDER_API_KEY"       # Required: environment variable name for the API key
+base_url = "https://api.example.com"   # Required: default API base URL
+key_required = true                    # Required: whether an API key is needed (false for local providers)
+
+[[models]]
+id = "model-id"                        # Required: unique model identifier
+display_name = "Human Name"            # Required: human-readable display name
+tier = "smart"                         # Required: one of "frontier", "smart", "balanced", "fast", "local"
+                                       #   frontier — cutting-edge, most capable (e.g. Claude Opus, GPT-4.1)
+                                       #   smart    — smart, cost-effective (e.g. Claude Sonnet, Gemini 2.5 Flash)
+                                       #   balanced — balanced speed/cost
+                                       #   fast     — fastest, cheapest for simple tasks
+                                       #   local    — local models (Ollama, vLLM, LM Studio)
+context_window = 128000                # Required: maximum input tokens
+max_output_tokens = 16384              # Required: maximum output tokens
+input_cost_per_m = 2.50                # Required: USD per million input tokens (0.0 for free/local)
+output_cost_per_m = 10.0               # Required: USD per million output tokens (0.0 for free/local)
+supports_tools = true                  # Optional: tool/function calling support (default: false)
+supports_vision = true                 # Optional: vision/image input support (default: false)
+supports_streaming = true              # Optional: streaming response support (default: true)
+aliases = ["alias1", "alias2"]         # Optional: alternative names for this model

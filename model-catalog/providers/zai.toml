@@ -1,0 +1,9 @@
+# Z.AI — https://api.z.ai (Zhipu domain alias)
+# Models: 0 (uses same models as zhipu, different domain)
+
+[provider]
+id = "zai"
+display_name = "Z.AI"
+api_key_env = "ZHIPU_API_KEY"
+base_url = "https://api.z.ai/api/paas/v4"
+key_required = true

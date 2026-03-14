@@ -1,0 +1,22 @@
+# LM Studio — https://lmstudio.ai
+# Models: 1 (generic entry; additional models discovered dynamically at runtime)
+
+[provider]
+id = "lmstudio"
+display_name = "LM Studio"
+api_key_env = "LMSTUDIO_API_KEY"
+base_url = "http://localhost:1234/v1"
+key_required = false
+
+[[models]]
+id = "lmstudio-local"
+display_name = "LM Studio Local Model"
+tier = "local"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []

@@ -1,0 +1,61 @@
+# Perplexity AI — https://perplexity.ai
+# Models: 4
+
+[provider]
+id = "perplexity"
+display_name = "Perplexity AI"
+api_key_env = "PERPLEXITY_API_KEY"
+base_url = "https://api.perplexity.ai"
+key_required = true
+
+[[models]]
+id = "sonar-pro"
+display_name = "Sonar Pro"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 8192
+input_cost_per_m = 3.0
+output_cost_per_m = 15.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = ["sonar"]
+
+[[models]]
+id = "sonar-reasoning-pro"
+display_name = "Sonar Reasoning Pro"
+tier = "frontier"
+context_window = 200000
+max_output_tokens = 8192
+input_cost_per_m = 2.0
+output_cost_per_m = 8.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "sonar-reasoning"
+display_name = "Sonar Reasoning"
+tier = "balanced"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 1.0
+output_cost_per_m = 5.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "sonar-basic"
+display_name = "Sonar"
+tier = "fast"
+context_window = 128000
+max_output_tokens = 8192
+input_cost_per_m = 1.0
+output_cost_per_m = 5.0
+supports_tools = false
+supports_vision = false
+supports_streaming = true
+aliases = []
