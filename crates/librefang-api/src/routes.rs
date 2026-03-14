@@ -11973,15 +11973,21 @@ pub async fn comms_send(
     }
 
     match state.kernel.send_message(to_id, &req.message).await {
-        Ok(result) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
+        Ok(result) => {
+            let mut body = serde_json::json!({
                 "ok": true,
                 "response": result.response,
                 "input_tokens": result.total_usage.input_tokens,
                 "output_tokens": result.total_usage.output_tokens,
-            })),
-        ),
+            });
+            if let Some(tid) = &req.thread_id {
+                body["thread_id"] = serde_json::json!(tid);
+            }
+            if !req.attachments.is_empty() {
+                body["attachments_count"] = serde_json::json!(req.attachments.len());
+            }
+            (StatusCode::OK, Json(body))
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Message delivery failed: {e}")})),
