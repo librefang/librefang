@@ -1,9 +1,10 @@
 ---
 title: "Hello, LibreFang! — The Open-Source Agent Operating System"
-emoji: "🦊"
-type: "tech"
-topics: ["rust", "ai", "agent", "opensource", "librefang"]
 published: true
+description: "Introducing LibreFang: a community-governed Agent OS built in Rust with 14 crates, 40 channels, 60 skills, and 16 security layers."
+tags: rust, ai, opensource, agents
+canonical_url: https://github.com/librefang/librefang
+cover_image: https://raw.githubusercontent.com/librefang/librefang/main/public/assets/logo.png
 ---
 
 # Hello, LibreFang!
