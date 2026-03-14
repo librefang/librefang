@@ -32,9 +32,16 @@ jobs:
         run: python3 scripts/generate_star_history.py librefang/librefang public/assets/star-history.svg
 
       - name: Create PR with updated SVG
+        id: cpr
         uses: peter-evans/create-pull-request@v7
         with:
           branch: chore/update-star-history
           commit-message: "docs: update star history"
           title: "docs: update star history"
           delete-branch: true
+
+      - name: Auto-merge PR
+        if: steps.cpr.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch
