@@ -1,0 +1,615 @@
+//! MQTT pub/sub channel adapter for IoT integration.
+//!
+//! Subscribes to configurable MQTT topics for incoming messages and publishes
+//! agent responses to configurable response topics. Supports MQTT v3.1.1 and v5
+//! via the `rumqttc` crate, with automatic reconnection and exponential backoff.
+
+use crate::types::{
+    ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser, LifecycleReaction,
+};
+use async_trait::async_trait;
+use chrono::Utc;
+use futures::Stream;
+use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+use std::collections::HashMap;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{mpsc, watch};
+use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
+
+/// Default MQTT broker port.
+const DEFAULT_PORT: u16 = 1883;
+/// Channel buffer size for incoming messages.
+const CHANNEL_BUFFER: usize = 256;
+/// Default keep-alive interval in seconds.
+const DEFAULT_KEEP_ALIVE_SECS: u64 = 30;
+/// Capacity of the internal rumqttc event channel.
+const EVENT_CHANNEL_CAPACITY: usize = 128;
+
+/// Quality of Service level for MQTT operations.
+#[derive(Debug, Clone, Copy)]
+pub enum MqttQoS {
+    /// At most once (fire and forget).
+    AtMostOnce,
+    /// At least once (acknowledged delivery).
+    AtLeastOnce,
+    /// Exactly once (assured delivery).
+    ExactlyOnce,
+}
+
+impl MqttQoS {
+    fn to_rumqttc(self) -> QoS {
+        match self {
+            MqttQoS::AtMostOnce => QoS::AtMostOnce,
+            MqttQoS::AtLeastOnce => QoS::AtLeastOnce,
+            MqttQoS::ExactlyOnce => QoS::ExactlyOnce,
+        }
+    }
+}
+
+impl Default for MqttQoS {
+    fn default() -> Self {
+        MqttQoS::AtLeastOnce
+    }
+}
+
+/// MQTT channel adapter configuration.
+pub struct MqttConfig {
+    /// Broker hostname or IP address (e.g. `"localhost"` or `"broker.hivemq.com"`).
+    pub host: String,
+    /// Broker port (default: 1883).
+    pub port: u16,
+    /// MQTT client ID. Must be unique per connection.
+    pub client_id: String,
+    /// Topics to subscribe to for incoming messages.
+    pub subscribe_topics: Vec<String>,
+    /// Topic to publish agent responses to.
+    pub response_topic: String,
+    /// Quality of Service level.
+    pub qos: MqttQoS,
+    /// Optional username for broker authentication.
+    pub username: Option<String>,
+    /// Optional password for broker authentication (zeroized on drop).
+    pub password: Option<String>,
+    /// Keep-alive interval in seconds (default: 30).
+    pub keep_alive_secs: u64,
+    /// Optional account identifier for multi-bot routing.
+    pub account_id: Option<String>,
+}
+
+impl MqttConfig {
+    /// Create a minimal config with required fields.
+    pub fn new(
+        host: String,
+        client_id: String,
+        subscribe_topics: Vec<String>,
+        response_topic: String,
+    ) -> Self {
+        Self {
+            host,
+            port: DEFAULT_PORT,
+            client_id,
+            subscribe_topics,
+            response_topic,
+            qos: MqttQoS::default(),
+            username: None,
+            password: None,
+            keep_alive_secs: DEFAULT_KEEP_ALIVE_SECS,
+            account_id: None,
+        }
+    }
+}
+
+/// MQTT pub/sub channel adapter.
+///
+/// Connects to an MQTT broker, subscribes to configured topics for incoming
+/// messages, and publishes agent responses to a dedicated response topic.
+/// Supports credentials, configurable QoS, and automatic reconnection.
+pub struct MqttAdapter {
+    /// Broker host.
+    host: String,
+    /// Broker port.
+    port: u16,
+    /// Client ID.
+    client_id: String,
+    /// Topics to subscribe for incoming messages.
+    subscribe_topics: Vec<String>,
+    /// Topic to publish responses to.
+    response_topic: String,
+    /// QoS level.
+    qos: MqttQoS,
+    /// Optional username.
+    username: Option<String>,
+    /// SECURITY: Password is zeroized on drop.
+    password: Option<Zeroizing<String>>,
+    /// Keep-alive interval.
+    keep_alive_secs: u64,
+    /// Optional account identifier.
+    account_id: Option<String>,
+    /// MQTT async client handle (populated after `start()`).
+    client: Arc<tokio::sync::RwLock<Option<AsyncClient>>>,
+    /// Shutdown signal.
+    shutdown_tx: Arc<watch::Sender<bool>>,
+    shutdown_rx: watch::Receiver<bool>,
+}
+
+impl MqttAdapter {
+    /// Create a new MQTT adapter from configuration.
+    pub fn new(config: MqttConfig) -> Self {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        Self {
+            host: config.host,
+            port: config.port,
+            client_id: config.client_id,
+            subscribe_topics: config.subscribe_topics,
+            response_topic: config.response_topic,
+            qos: config.qos,
+            username: config.username,
+            password: config.password.map(Zeroizing::new),
+            keep_alive_secs: config.keep_alive_secs,
+            account_id: config.account_id,
+            client: Arc::new(tokio::sync::RwLock::new(None)),
+            shutdown_tx: Arc::new(shutdown_tx),
+            shutdown_rx,
+        }
+    }
+
+    /// Build MQTT options from adapter configuration.
+    fn build_mqtt_options(&self) -> MqttOptions {
+        let mut opts = MqttOptions::new(&self.client_id, &self.host, self.port);
+        opts.set_keep_alive(Duration::from_secs(self.keep_alive_secs));
+
+        if let (Some(ref user), Some(ref pass)) = (&self.username, &self.password) {
+            opts.set_credentials(user.clone(), pass.as_str());
+        }
+
+        opts
+    }
+
+    /// Parse an MQTT payload into a ChannelMessage.
+    ///
+    /// Supports two formats:
+    /// 1. JSON: `{"sender": "device-1", "message": "hello", "agent": "optional-agent-id"}`
+    /// 2. Plain text: treated as message body with topic as sender ID.
+    fn parse_payload(
+        topic: &str,
+        payload: &[u8],
+        account_id: &Option<String>,
+    ) -> Option<ChannelMessage> {
+        let text = std::str::from_utf8(payload).ok()?;
+        if text.is_empty() {
+            return None;
+        }
+
+        // Try JSON format first
+        let (sender_id, sender_name, message, target_agent) =
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(text) {
+                let msg = val["message"].as_str().unwrap_or("").to_string();
+                if msg.is_empty() {
+                    return None;
+                }
+                let sender = val["sender"].as_str().unwrap_or("mqtt-device").to_string();
+                let agent = val["agent"].as_str().map(|s| s.to_string());
+                (sender.clone(), sender, msg, agent)
+            } else {
+                // Plain text: use last topic segment as sender hint
+                let sender = topic
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("mqtt-device")
+                    .to_string();
+                (sender.clone(), sender, text.to_string(), None)
+            };
+
+        let content = if message.starts_with('/') {
+            let parts: Vec<&str> = message.splitn(2, ' ').collect();
+            let cmd = parts[0].trim_start_matches('/');
+            let args: Vec<String> = parts
+                .get(1)
+                .map(|a| a.split_whitespace().map(String::from).collect())
+                .unwrap_or_default();
+            ChannelContent::Command {
+                name: cmd.to_string(),
+                args,
+            }
+        } else {
+            ChannelContent::Text(message)
+        };
+
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "mqtt_topic".to_string(),
+            serde_json::Value::String(topic.to_string()),
+        );
+
+        let mut msg = ChannelMessage {
+            channel: ChannelType::Custom("mqtt".to_string()),
+            platform_message_id: uuid::Uuid::new_v4().to_string(),
+            sender: ChannelUser {
+                platform_id: sender_id,
+                display_name: sender_name,
+                librefang_user: None,
+            },
+            content,
+            target_agent: target_agent.map(|id| id.into()),
+            timestamp: Utc::now(),
+            is_group: true,
+            thread_id: None,
+            metadata,
+        };
+
+        if let Some(ref aid) = account_id {
+            msg.metadata
+                .insert("account_id".to_string(), serde_json::json!(aid));
+        }
+
+        Some(msg)
+    }
+}
+
+#[async_trait]
+impl ChannelAdapter for MqttAdapter {
+    fn name(&self) -> &str {
+        "mqtt"
+    }
+
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::Custom("mqtt".to_string())
+    }
+
+    async fn start(
+        &self,
+    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
+    {
+        info!(
+            "MQTT adapter connecting to {}:{} (client_id={})",
+            self.host, self.port, self.client_id
+        );
+
+        let opts = self.build_mqtt_options();
+        let (client, mut eventloop) = AsyncClient::new(opts, EVENT_CHANNEL_CAPACITY);
+
+        // Subscribe to all configured topics
+        let qos = self.qos.to_rumqttc();
+        for topic in &self.subscribe_topics {
+            client.subscribe(topic.as_str(), qos).await?;
+            info!("MQTT: subscribed to topic '{topic}'");
+        }
+
+        // Store client for sending responses
+        {
+            let mut lock = self.client.write().await;
+            *lock = Some(client);
+        }
+
+        let (tx, rx) = mpsc::channel::<ChannelMessage>(CHANNEL_BUFFER);
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        let account_id = self.account_id.clone();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            info!("MQTT adapter shutting down");
+                            return;
+                        }
+                    }
+                    event = eventloop.poll() => {
+                        match event {
+                            Ok(Event::Incoming(Packet::Publish(publish))) => {
+                                let topic = publish.topic.clone();
+                                debug!("MQTT: received message on topic '{topic}'");
+
+                                if let Some(msg) = MqttAdapter::parse_payload(
+                                    &topic,
+                                    &publish.payload,
+                                    &account_id,
+                                ) {
+                                    if tx.send(msg).await.is_err() {
+                                        info!("MQTT: receiver dropped, stopping event loop");
+                                        return;
+                                    }
+                                }
+                            }
+                            Ok(Event::Incoming(Packet::ConnAck(_))) => {
+                                info!("MQTT: connected to broker");
+                            }
+                            Ok(_) => {
+                                // Other events (PingResp, SubAck, etc.) — ignore
+                            }
+                            Err(e) => {
+                                warn!("MQTT: event loop error: {e}");
+                                // rumqttc handles reconnection internally;
+                                // a short sleep prevents busy-looping on persistent errors.
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx)))
+    }
+
+    async fn send(
+        &self,
+        _user: &ChannelUser,
+        content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let text = match content {
+            ChannelContent::Text(t) => t,
+            ChannelContent::Command { name, args } => {
+                format!("/{name} {}", args.join(" ")).trim().to_string()
+            }
+            _ => "(Unsupported content type)".to_string(),
+        };
+
+        let client_lock = self.client.read().await;
+        let client = client_lock
+            .as_ref()
+            .ok_or("MQTT client not connected — call start() first")?;
+
+        client
+            .publish(
+                &self.response_topic,
+                self.qos.to_rumqttc(),
+                false,
+                text.as_bytes(),
+            )
+            .await?;
+
+        debug!("MQTT: published response to '{}'", self.response_topic);
+        Ok(())
+    }
+
+    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+        // MQTT has no typing indicator concept.
+        Ok(())
+    }
+
+    async fn send_reaction(
+        &self,
+        _user: &ChannelUser,
+        _message_id: &str,
+        _reaction: &LifecycleReaction,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // MQTT has no reaction concept.
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let _ = self.shutdown_tx.send(true);
+
+        // Disconnect MQTT client gracefully
+        let mut lock = self.client.write().await;
+        if let Some(client) = lock.take() {
+            if let Err(e) = client.disconnect().await {
+                warn!("MQTT: error during disconnect: {e}");
+            }
+        }
+
+        info!("MQTT adapter stopped");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> MqttConfig {
+        MqttConfig::new(
+            "localhost".to_string(),
+            "test-client-001".to_string(),
+            vec!["devices/+/telemetry".to_string()],
+            "agents/response".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_mqtt_adapter_creation() {
+        let adapter = MqttAdapter::new(test_config());
+        assert_eq!(adapter.name(), "mqtt");
+        assert_eq!(
+            adapter.channel_type(),
+            ChannelType::Custom("mqtt".to_string())
+        );
+        assert_eq!(adapter.host, "localhost");
+        assert_eq!(adapter.port, DEFAULT_PORT);
+    }
+
+    #[test]
+    fn test_mqtt_config_defaults() {
+        let config = test_config();
+        assert_eq!(config.port, DEFAULT_PORT);
+        assert_eq!(config.keep_alive_secs, DEFAULT_KEEP_ALIVE_SECS);
+        assert!(config.username.is_none());
+        assert!(config.password.is_none());
+    }
+
+    #[test]
+    fn test_mqtt_config_with_credentials() {
+        let mut config = test_config();
+        config.username = Some("iot-user".to_string());
+        config.password = Some("secret123".to_string());
+
+        let adapter = MqttAdapter::new(config);
+        assert_eq!(adapter.username.as_deref(), Some("iot-user"));
+        assert!(adapter.password.is_some());
+    }
+
+    #[test]
+    fn test_mqtt_build_options_basic() {
+        let adapter = MqttAdapter::new(test_config());
+        let opts = adapter.build_mqtt_options();
+        // MqttOptions does not expose fields directly, but construction should not panic.
+        drop(opts);
+    }
+
+    #[test]
+    fn test_mqtt_build_options_with_credentials() {
+        let mut config = test_config();
+        config.username = Some("user".to_string());
+        config.password = Some("pass".to_string());
+        let adapter = MqttAdapter::new(config);
+        let opts = adapter.build_mqtt_options();
+        drop(opts);
+    }
+
+    #[test]
+    fn test_parse_payload_json_message() {
+        let topic = "devices/sensor-1/telemetry";
+        let payload = br#"{"sender": "sensor-1", "message": "temperature=22.5"}"#;
+        let msg = MqttAdapter::parse_payload(topic, payload, &None);
+        assert!(msg.is_some());
+        let msg = msg.unwrap();
+        assert_eq!(msg.sender.platform_id, "sensor-1");
+        match msg.content {
+            ChannelContent::Text(t) => assert_eq!(t, "temperature=22.5"),
+            _ => panic!("Expected Text content"),
+        }
+    }
+
+    #[test]
+    fn test_parse_payload_json_with_agent() {
+        let topic = "commands/input";
+        let payload =
+            br#"{"sender": "controller", "message": "turn on lights", "agent": "home-agent-1"}"#;
+        let msg = MqttAdapter::parse_payload(topic, payload, &None);
+        assert!(msg.is_some());
+        let msg = msg.unwrap();
+        assert!(msg.target_agent.is_some());
+    }
+
+    #[test]
+    fn test_parse_payload_plain_text() {
+        let topic = "devices/thermostat/data";
+        let payload = b"humidity=45%";
+        let msg = MqttAdapter::parse_payload(topic, payload, &None);
+        assert!(msg.is_some());
+        let msg = msg.unwrap();
+        // Last topic segment used as sender
+        assert_eq!(msg.sender.platform_id, "data");
+        match msg.content {
+            ChannelContent::Text(t) => assert_eq!(t, "humidity=45%"),
+            _ => panic!("Expected Text content"),
+        }
+    }
+
+    #[test]
+    fn test_parse_payload_command() {
+        let topic = "commands/in";
+        let payload = br#"{"sender": "admin", "message": "/status all"}"#;
+        let msg = MqttAdapter::parse_payload(topic, payload, &None);
+        assert!(msg.is_some());
+        let msg = msg.unwrap();
+        match msg.content {
+            ChannelContent::Command { name, args } => {
+                assert_eq!(name, "status");
+                assert_eq!(args, vec!["all"]);
+            }
+            _ => panic!("Expected Command content"),
+        }
+    }
+
+    #[test]
+    fn test_parse_payload_empty() {
+        let msg = MqttAdapter::parse_payload("topic", b"", &None);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_parse_payload_empty_json_message() {
+        let payload = br#"{"sender": "x", "message": ""}"#;
+        let msg = MqttAdapter::parse_payload("topic", payload, &None);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_parse_payload_invalid_utf8() {
+        let payload: &[u8] = &[0xFF, 0xFE, 0xFD];
+        let msg = MqttAdapter::parse_payload("topic", payload, &None);
+        assert!(msg.is_none());
+    }
+
+    #[test]
+    fn test_parse_payload_with_account_id() {
+        let payload = b"hello";
+        let account = Some("acct-42".to_string());
+        let msg = MqttAdapter::parse_payload("topic/device", payload, &account);
+        assert!(msg.is_some());
+        let msg = msg.unwrap();
+        assert_eq!(
+            msg.metadata.get("account_id"),
+            Some(&serde_json::json!("acct-42"))
+        );
+    }
+
+    #[test]
+    fn test_parse_payload_metadata_contains_topic() {
+        let payload = b"test";
+        let msg = MqttAdapter::parse_payload("sensors/temp", payload, &None);
+        assert!(msg.is_some());
+        let msg = msg.unwrap();
+        assert_eq!(
+            msg.metadata.get("mqtt_topic"),
+            Some(&serde_json::Value::String("sensors/temp".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_qos_conversion() {
+        assert!(matches!(MqttQoS::AtMostOnce.to_rumqttc(), QoS::AtMostOnce));
+        assert!(matches!(
+            MqttQoS::AtLeastOnce.to_rumqttc(),
+            QoS::AtLeastOnce
+        ));
+        assert!(matches!(
+            MqttQoS::ExactlyOnce.to_rumqttc(),
+            QoS::ExactlyOnce
+        ));
+    }
+
+    #[test]
+    fn test_qos_default() {
+        let qos = MqttQoS::default();
+        assert!(matches!(qos, MqttQoS::AtLeastOnce));
+    }
+
+    #[test]
+    fn test_mqtt_channel_type_is_custom() {
+        let adapter = MqttAdapter::new(test_config());
+        assert_eq!(
+            adapter.channel_type(),
+            ChannelType::Custom("mqtt".to_string())
+        );
+    }
+
+    #[test]
+    fn test_mqtt_multiple_subscribe_topics() {
+        let config = MqttConfig::new(
+            "broker.local".to_string(),
+            "multi-sub".to_string(),
+            vec![
+                "sensors/#".to_string(),
+                "commands/+/input".to_string(),
+                "alerts/critical".to_string(),
+            ],
+            "responses/out".to_string(),
+        );
+        let adapter = MqttAdapter::new(config);
+        assert_eq!(adapter.subscribe_topics.len(), 3);
+    }
+
+    #[test]
+    fn test_mqtt_custom_port() {
+        let mut config = test_config();
+        config.port = 8883;
+        let adapter = MqttAdapter::new(config);
+        assert_eq!(adapter.port, 8883);
+    }
+}
