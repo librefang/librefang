@@ -1,0 +1,40 @@
+{
+  "name": "LibreFang Development",
+  "image": "mcr.microsoft.com/devcontainers/rust:1-bullseye",
+  "features": {
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.11"
+    },
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "20"
+    }
+  },
+  "postCreateCommand": "cargo build --workspace 2>&1 | tail -5 && echo '✅ Build complete!'",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates",
+        "vadimcn.vscode-lldb"
+      ],
+      "settings": {
+        "rust-analyzer.cargo.allTargets": true,
+        "rust-analyzer.check.command": "clippy",
+        "rust-analyzer.check.extraArgs": ["--", "-D", "warnings"],
+        "editor.formatOnSave": true
+      }
+    }
+  },
+  "forwardPorts": [4545],
+  "portsAttributes": {
+    "4545": {
+      "label": "LibreFang Dashboard",
+      "onAutoForward": "notify"
+    }
+  },
+  "remoteEnv": {
+    "RUST_LOG": "info",
+    "RUST_BACKTRACE": "1"
+  }
+}

@@ -1,0 +1,30 @@
+## Custom Agent Example
+##
+## This is a minimal agent template that you can copy and customize.
+## To use: librefang agent spawn examples/custom-agent/agent.toml
+##
+## For the full reference, see: docs/agent-templates.md
+
+name = "my-custom-agent"
+version = "0.4.0"
+description = "A friendly assistant that helps with daily tasks."
+author = "your-name"
+module = "builtin:chat"
+tags = ["assistant", "example"]
+
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+system_prompt = """
+You are a helpful assistant. You are friendly, concise, and always try to provide actionable answers.
+When you don't know something, you say so honestly.
+"""
+
+[resources]
+max_llm_tokens_per_hour = 50000
+
+[capabilities]
+tools = ["web_fetch", "file_read", "file_list"]
+memory_read = ["self.*"]
+memory_write = ["self.*"]
+agent_spawn = false

@@ -1,3 +1,19 @@
+## Type
+
+<!-- Check one: -->
+
+- [ ] Agent template (TOML)
+- [ ] Skill (Python/JS/Prompt)
+- [ ] Channel adapter
+- [ ] LLM provider
+- [ ] Built-in tool
+- [ ] Bug fix
+- [ ] Feature (Rust)
+- [ ] Documentation / Translation
+- [ ] Refactor / Performance
+- [ ] CI / Tooling
+- [ ] Other
+
 ## Summary
 
 <!-- What does this PR do? Link related issues with "Fixes #123". -->
