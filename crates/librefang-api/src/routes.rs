@@ -1173,6 +1173,34 @@ pub async fn version() -> impl IntoResponse {
 }
 
 // ---------------------------------------------------------------------------
+// API versioning
+// ---------------------------------------------------------------------------
+
+/// GET /api/versions — List available API versions and their status.
+pub async fn api_versions() -> impl IntoResponse {
+    let versions: Vec<serde_json::Value> = crate::server::API_VERSIONS
+        .iter()
+        .map(|(ver, status)| {
+            serde_json::json!({
+                "version": ver,
+                "status": status,
+                "url_prefix": format!("/api/{ver}"),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "latest": crate::server::API_VERSION_LATEST,
+        "versions": versions,
+        "negotiation": {
+            "header": "Accept",
+            "media_type_pattern": "application/vnd.librefang.<version>+json",
+            "example": "application/vnd.librefang.v1+json",
+        },
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Single agent detail + SSE streaming
 // ---------------------------------------------------------------------------
 
