@@ -14,18 +14,456 @@ pub mod openai;
 
 use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};
 use librefang_types::model_catalog::{
-    AI21_BASE_URL, ANTHROPIC_BASE_URL, CEREBRAS_BASE_URL, CHUTES_BASE_URL, COHERE_BASE_URL,
-    DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL,
-    KIMI_CODING_BASE_URL, LEMONADE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_CN_BASE_URL,
-    MINIMAX_INTL_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL,
-    OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL,
-    SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VENICE_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
+    AI21_BASE_URL, ANTHROPIC_BASE_URL, CEREBRAS_BASE_URL, CHATGPT_BASE_URL, CHUTES_BASE_URL,
+    COHERE_BASE_URL, DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL,
+    GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL, KIMI_CODING_BASE_URL,
+    LEMONADE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_CN_BASE_URL, MINIMAX_INTL_BASE_URL,
+    MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL,
+    PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL, SAMBANOVA_BASE_URL,
+    TOGETHER_BASE_URL, VENICE_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
     VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL,
     ZHIPU_CODING_BASE_URL,
 };
 use std::sync::Arc;
 
+// ── Registry Types ───────────────────────────────────────────────
+
+/// API format determines which driver implementation to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApiFormat {
+    /// OpenAI-compatible chat completions API (used by 90%+ of providers).
+    OpenAI,
+    /// Anthropic Messages API.
+    Anthropic,
+    /// Google Gemini generateContent API.
+    Gemini,
+    /// Claude Code CLI subprocess.
+    ClaudeCode,
+    /// ChatGPT with session token authentication.
+    ChatGpt,
+    /// GitHub Copilot with automatic token exchange.
+    Copilot,
+}
+
+/// A provider entry in the static registry.
+#[derive(Debug)]
+struct ProviderEntry {
+    /// Canonical provider name.
+    name: &'static str,
+    /// Alternative names that resolve to this provider.
+    aliases: &'static [&'static str],
+    /// Default base URL for the API.
+    base_url: &'static str,
+    /// Environment variable name for the API key.
+    api_key_env: &'static str,
+    /// Whether an API key is required (false for local providers like Ollama).
+    key_required: bool,
+    /// Which API format/driver to use.
+    api_format: ApiFormat,
+    /// Optional secondary env var for API key (e.g., GOOGLE_API_KEY for Gemini).
+    alt_api_key_env: Option<&'static str>,
+    /// Whether this provider is hidden from `known_providers()` output.
+    hidden: bool,
+}
+
+// ── Static Provider Registry ─────────────────────────────────────
+
+static PROVIDER_REGISTRY: &[ProviderEntry] = &[
+    ProviderEntry {
+        name: "anthropic",
+        aliases: &[],
+        base_url: ANTHROPIC_BASE_URL,
+        api_key_env: "ANTHROPIC_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::Anthropic,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "chatgpt",
+        aliases: &[],
+        base_url: CHATGPT_BASE_URL,
+        api_key_env: "CHATGPT_SESSION_TOKEN",
+        key_required: true,
+        api_format: ApiFormat::ChatGpt,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "gemini",
+        aliases: &["google"],
+        base_url: GEMINI_BASE_URL,
+        api_key_env: "GEMINI_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::Gemini,
+        alt_api_key_env: Some("GOOGLE_API_KEY"),
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "openai",
+        aliases: &["codex", "openai-codex"],
+        base_url: OPENAI_BASE_URL,
+        api_key_env: "OPENAI_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "groq",
+        aliases: &[],
+        base_url: GROQ_BASE_URL,
+        api_key_env: "GROQ_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "openrouter",
+        aliases: &[],
+        base_url: OPENROUTER_BASE_URL,
+        api_key_env: "OPENROUTER_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "deepseek",
+        aliases: &[],
+        base_url: DEEPSEEK_BASE_URL,
+        api_key_env: "DEEPSEEK_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "together",
+        aliases: &[],
+        base_url: TOGETHER_BASE_URL,
+        api_key_env: "TOGETHER_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "mistral",
+        aliases: &[],
+        base_url: MISTRAL_BASE_URL,
+        api_key_env: "MISTRAL_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "fireworks",
+        aliases: &[],
+        base_url: FIREWORKS_BASE_URL,
+        api_key_env: "FIREWORKS_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "ollama",
+        aliases: &[],
+        base_url: OLLAMA_BASE_URL,
+        api_key_env: "OLLAMA_API_KEY",
+        key_required: false,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "vllm",
+        aliases: &[],
+        base_url: VLLM_BASE_URL,
+        api_key_env: "VLLM_API_KEY",
+        key_required: false,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "lmstudio",
+        aliases: &[],
+        base_url: LMSTUDIO_BASE_URL,
+        api_key_env: "LMSTUDIO_API_KEY",
+        key_required: false,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "lemonade",
+        aliases: &[],
+        base_url: LEMONADE_BASE_URL,
+        api_key_env: "LEMONADE_API_KEY",
+        key_required: false,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: true,
+    },
+    ProviderEntry {
+        name: "perplexity",
+        aliases: &[],
+        base_url: PERPLEXITY_BASE_URL,
+        api_key_env: "PERPLEXITY_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "cohere",
+        aliases: &[],
+        base_url: COHERE_BASE_URL,
+        api_key_env: "COHERE_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "ai21",
+        aliases: &[],
+        base_url: AI21_BASE_URL,
+        api_key_env: "AI21_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "cerebras",
+        aliases: &[],
+        base_url: CEREBRAS_BASE_URL,
+        api_key_env: "CEREBRAS_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "sambanova",
+        aliases: &[],
+        base_url: SAMBANOVA_BASE_URL,
+        api_key_env: "SAMBANOVA_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "huggingface",
+        aliases: &[],
+        base_url: HUGGINGFACE_BASE_URL,
+        api_key_env: "HF_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "xai",
+        aliases: &[],
+        base_url: XAI_BASE_URL,
+        api_key_env: "XAI_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "replicate",
+        aliases: &[],
+        base_url: REPLICATE_BASE_URL,
+        api_key_env: "REPLICATE_API_TOKEN",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "github-copilot",
+        aliases: &["copilot"],
+        base_url: GITHUB_COPILOT_BASE_URL,
+        api_key_env: "GITHUB_TOKEN",
+        key_required: true,
+        api_format: ApiFormat::Copilot,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "claude-code",
+        aliases: &[],
+        base_url: "",
+        api_key_env: "",
+        key_required: false,
+        api_format: ApiFormat::ClaudeCode,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "moonshot",
+        aliases: &["kimi", "kimi2"],
+        base_url: MOONSHOT_BASE_URL,
+        api_key_env: "MOONSHOT_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "kimi_coding",
+        aliases: &[],
+        base_url: KIMI_CODING_BASE_URL,
+        api_key_env: "KIMI_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::Anthropic,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "qwen",
+        aliases: &["dashscope", "model_studio"],
+        base_url: QWEN_BASE_URL,
+        api_key_env: "DASHSCOPE_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "minimax",
+        aliases: &[],
+        base_url: MINIMAX_INTL_BASE_URL,
+        api_key_env: "MINIMAX_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "minimax-cn",
+        aliases: &[],
+        base_url: MINIMAX_CN_BASE_URL,
+        api_key_env: "MINIMAX_CN_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "zhipu",
+        aliases: &["glm"],
+        base_url: ZHIPU_BASE_URL,
+        api_key_env: "ZHIPU_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "zhipu_coding",
+        aliases: &["codegeex"],
+        base_url: ZHIPU_CODING_BASE_URL,
+        api_key_env: "ZHIPU_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "zai",
+        aliases: &["z.ai"],
+        base_url: ZAI_BASE_URL,
+        api_key_env: "ZHIPU_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "zai_coding",
+        aliases: &[],
+        base_url: ZAI_CODING_BASE_URL,
+        api_key_env: "ZHIPU_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: true,
+    },
+    ProviderEntry {
+        name: "qianfan",
+        aliases: &["baidu"],
+        base_url: QIANFAN_BASE_URL,
+        api_key_env: "QIANFAN_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "volcengine",
+        aliases: &["doubao"],
+        base_url: VOLCENGINE_BASE_URL,
+        api_key_env: "VOLCENGINE_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "volcengine_coding",
+        aliases: &[],
+        base_url: VOLCENGINE_CODING_BASE_URL,
+        api_key_env: "VOLCENGINE_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: true,
+    },
+    ProviderEntry {
+        name: "chutes",
+        aliases: &[],
+        base_url: CHUTES_BASE_URL,
+        api_key_env: "CHUTES_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "venice",
+        aliases: &[],
+        base_url: VENICE_BASE_URL,
+        api_key_env: "VENICE_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+];
+
+// ── Registry Lookup ──────────────────────────────────────────────
+
+/// Find a provider by name or alias.
+fn find_provider(name: &str) -> Option<&'static ProviderEntry> {
+    PROVIDER_REGISTRY
+        .iter()
+        .find(|p| p.name == name || p.aliases.contains(&name))
+}
+
+// ── Provider Defaults (registry-backed, used by tests) ───────────
+
 /// Provider metadata: base URL and env var name for the API key.
+#[cfg(test)]
 struct ProviderDefaults {
     base_url: &'static str,
     api_key_env: &'static str,
@@ -34,194 +472,63 @@ struct ProviderDefaults {
 }
 
 /// Get defaults for known providers.
+#[cfg(test)]
 fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
-    match provider {
-        "groq" => Some(ProviderDefaults {
-            base_url: GROQ_BASE_URL,
-            api_key_env: "GROQ_API_KEY",
-            key_required: true,
-        }),
-        "openrouter" => Some(ProviderDefaults {
-            base_url: OPENROUTER_BASE_URL,
-            api_key_env: "OPENROUTER_API_KEY",
-            key_required: true,
-        }),
-        "deepseek" => Some(ProviderDefaults {
-            base_url: DEEPSEEK_BASE_URL,
-            api_key_env: "DEEPSEEK_API_KEY",
-            key_required: true,
-        }),
-        "together" => Some(ProviderDefaults {
-            base_url: TOGETHER_BASE_URL,
-            api_key_env: "TOGETHER_API_KEY",
-            key_required: true,
-        }),
-        "mistral" => Some(ProviderDefaults {
-            base_url: MISTRAL_BASE_URL,
-            api_key_env: "MISTRAL_API_KEY",
-            key_required: true,
-        }),
-        "fireworks" => Some(ProviderDefaults {
-            base_url: FIREWORKS_BASE_URL,
-            api_key_env: "FIREWORKS_API_KEY",
-            key_required: true,
-        }),
-        "openai" | "codex" | "openai-codex" => Some(ProviderDefaults {
-            base_url: OPENAI_BASE_URL,
-            api_key_env: "OPENAI_API_KEY",
-            key_required: true,
-        }),
-        "gemini" | "google" => Some(ProviderDefaults {
-            base_url: GEMINI_BASE_URL,
-            api_key_env: "GEMINI_API_KEY",
-            key_required: true,
-        }),
-        "ollama" => Some(ProviderDefaults {
-            base_url: OLLAMA_BASE_URL,
-            api_key_env: "OLLAMA_API_KEY",
-            key_required: false,
-        }),
-        "vllm" => Some(ProviderDefaults {
-            base_url: VLLM_BASE_URL,
-            api_key_env: "VLLM_API_KEY",
-            key_required: false,
-        }),
-        "lmstudio" => Some(ProviderDefaults {
-            base_url: LMSTUDIO_BASE_URL,
-            api_key_env: "LMSTUDIO_API_KEY",
-            key_required: false,
-        }),
-        "lemonade" => Some(ProviderDefaults {
-            base_url: LEMONADE_BASE_URL,
-            api_key_env: "LEMONADE_API_KEY",
-            key_required: false,
-        }),
-        "perplexity" => Some(ProviderDefaults {
-            base_url: PERPLEXITY_BASE_URL,
-            api_key_env: "PERPLEXITY_API_KEY",
-            key_required: true,
-        }),
-        "cohere" => Some(ProviderDefaults {
-            base_url: COHERE_BASE_URL,
-            api_key_env: "COHERE_API_KEY",
-            key_required: true,
-        }),
-        "ai21" => Some(ProviderDefaults {
-            base_url: AI21_BASE_URL,
-            api_key_env: "AI21_API_KEY",
-            key_required: true,
-        }),
-        "cerebras" => Some(ProviderDefaults {
-            base_url: CEREBRAS_BASE_URL,
-            api_key_env: "CEREBRAS_API_KEY",
-            key_required: true,
-        }),
-        "sambanova" => Some(ProviderDefaults {
-            base_url: SAMBANOVA_BASE_URL,
-            api_key_env: "SAMBANOVA_API_KEY",
-            key_required: true,
-        }),
-        "huggingface" => Some(ProviderDefaults {
-            base_url: HUGGINGFACE_BASE_URL,
-            api_key_env: "HF_API_KEY",
-            key_required: true,
-        }),
-        "xai" => Some(ProviderDefaults {
-            base_url: XAI_BASE_URL,
-            api_key_env: "XAI_API_KEY",
-            key_required: true,
-        }),
-        "replicate" => Some(ProviderDefaults {
-            base_url: REPLICATE_BASE_URL,
-            api_key_env: "REPLICATE_API_TOKEN",
-            key_required: true,
-        }),
-        "chatgpt" => Some(ProviderDefaults {
-            base_url: crate::chatgpt_oauth::CHATGPT_BASE_URL,
-            api_key_env: "CHATGPT_SESSION_TOKEN",
-            key_required: true,
-        }),
-        "github-copilot" | "copilot" => Some(ProviderDefaults {
-            base_url: copilot::GITHUB_COPILOT_BASE_URL,
-            api_key_env: "GITHUB_TOKEN",
-            key_required: true,
-        }),
-        "claude-code" => Some(ProviderDefaults {
-            base_url: "",
-            api_key_env: "",
-            key_required: false,
-        }),
-        "moonshot" | "kimi" | "kimi2" => Some(ProviderDefaults {
-            base_url: MOONSHOT_BASE_URL,
-            api_key_env: "MOONSHOT_API_KEY",
-            key_required: true,
-        }),
-        "kimi_coding" => Some(ProviderDefaults {
-            base_url: KIMI_CODING_BASE_URL,
-            api_key_env: "KIMI_API_KEY",
-            key_required: true,
-        }),
-        "qwen" | "dashscope" | "model_studio" => Some(ProviderDefaults {
-            base_url: QWEN_BASE_URL,
-            api_key_env: "DASHSCOPE_API_KEY",
-            key_required: true,
-        }),
-        "minimax" => Some(ProviderDefaults {
-            base_url: MINIMAX_INTL_BASE_URL,
-            api_key_env: "MINIMAX_API_KEY",
-            key_required: true,
-        }),
-        "minimax-cn" => Some(ProviderDefaults {
-            base_url: MINIMAX_CN_BASE_URL,
-            api_key_env: "MINIMAX_CN_API_KEY",
-            key_required: true,
-        }),
-        "zhipu" | "glm" => Some(ProviderDefaults {
-            base_url: ZHIPU_BASE_URL,
-            api_key_env: "ZHIPU_API_KEY",
-            key_required: true,
-        }),
-        "zhipu_coding" | "codegeex" => Some(ProviderDefaults {
-            base_url: ZHIPU_CODING_BASE_URL,
-            api_key_env: "ZHIPU_API_KEY",
-            key_required: true,
-        }),
-        "zai" | "z.ai" => Some(ProviderDefaults {
-            base_url: ZAI_BASE_URL,
-            api_key_env: "ZHIPU_API_KEY",
-            key_required: true,
-        }),
-        "zai_coding" => Some(ProviderDefaults {
-            base_url: ZAI_CODING_BASE_URL,
-            api_key_env: "ZHIPU_API_KEY",
-            key_required: true,
-        }),
-        "qianfan" | "baidu" => Some(ProviderDefaults {
-            base_url: QIANFAN_BASE_URL,
-            api_key_env: "QIANFAN_API_KEY",
-            key_required: true,
-        }),
-        "volcengine" | "doubao" => Some(ProviderDefaults {
-            base_url: VOLCENGINE_BASE_URL,
-            api_key_env: "VOLCENGINE_API_KEY",
-            key_required: true,
-        }),
-        "volcengine_coding" => Some(ProviderDefaults {
-            base_url: VOLCENGINE_CODING_BASE_URL,
-            api_key_env: "VOLCENGINE_API_KEY",
-            key_required: true,
-        }),
-        "chutes" => Some(ProviderDefaults {
-            base_url: CHUTES_BASE_URL,
-            api_key_env: "CHUTES_API_KEY",
-            key_required: true,
-        }),
-        "venice" => Some(ProviderDefaults {
-            base_url: VENICE_BASE_URL,
-            api_key_env: "VENICE_API_KEY",
-            key_required: true,
-        }),
-        _ => None,
+    find_provider(provider).map(|entry| ProviderDefaults {
+        base_url: entry.base_url,
+        api_key_env: entry.api_key_env,
+        key_required: entry.key_required,
+    })
+}
+
+// ── Driver Creation ──────────────────────────────────────────────
+
+/// Create a driver from a registry entry and configuration.
+fn create_driver_from_entry(
+    entry: &ProviderEntry,
+    config: &DriverConfig,
+) -> Result<Arc<dyn LlmDriver>, LlmError> {
+    let base_url = config
+        .base_url
+        .clone()
+        .unwrap_or_else(|| entry.base_url.to_string());
+
+    // Resolve API key: explicit config > primary env var > alt env var
+    let mut api_key = config
+        .api_key
+        .clone()
+        .or_else(|| std::env::var(entry.api_key_env).ok())
+        .or_else(|| {
+            entry
+                .alt_api_key_env
+                .and_then(|v| std::env::var(v).ok())
+        })
+        .unwrap_or_default();
+
+    // Special: OpenAI also checks Codex credential
+    if api_key.is_empty() && entry.api_format == ApiFormat::OpenAI && entry.name == "openai" {
+        if let Some(codex_key) = crate::model_catalog::read_codex_credential() {
+            api_key = codex_key;
+        }
+    }
+
+    if entry.key_required && api_key.is_empty() {
+        return Err(LlmError::MissingApiKey(format!(
+            "Set {} environment variable for provider '{}'",
+            entry.api_key_env, config.provider
+        )));
+    }
+
+    match entry.api_format {
+        ApiFormat::OpenAI => Ok(Arc::new(openai::OpenAIDriver::new(api_key, base_url))),
+        ApiFormat::Anthropic => Ok(Arc::new(anthropic::AnthropicDriver::new(api_key, base_url))),
+        ApiFormat::Gemini => Ok(Arc::new(gemini::GeminiDriver::new(api_key, base_url))),
+        ApiFormat::ClaudeCode => Ok(Arc::new(claude_code::ClaudeCodeDriver::new(
+            config.base_url.clone(),
+            config.skip_permissions,
+        ))),
+        ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::new(api_key, base_url))),
+        ApiFormat::Copilot => Ok(Arc::new(copilot::CopilotDriver::new(api_key, base_url))),
     }
 }
 
@@ -252,140 +559,9 @@ fn provider_defaults(provider: &str) -> Option<ProviderDefaults> {
 pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmError> {
     let provider = config.provider.as_str();
 
-    // Anthropic uses a different API format — special case
-    if provider == "anthropic" {
-        let api_key = config
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
-            .ok_or_else(|| {
-                LlmError::MissingApiKey("Set ANTHROPIC_API_KEY environment variable".to_string())
-            })?;
-        let base_url = config
-            .base_url
-            .clone()
-            .unwrap_or_else(|| ANTHROPIC_BASE_URL.to_string());
-        return Ok(Arc::new(anthropic::AnthropicDriver::new(api_key, base_url)));
-    }
-
-    // Gemini uses a different API format — special case
-    if provider == "gemini" || provider == "google" {
-        let api_key = config
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("GEMINI_API_KEY").ok())
-            .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
-            .ok_or_else(|| {
-                LlmError::MissingApiKey(
-                    "Set GEMINI_API_KEY or GOOGLE_API_KEY environment variable".to_string(),
-                )
-            })?;
-        let base_url = config
-            .base_url
-            .clone()
-            .unwrap_or_else(|| GEMINI_BASE_URL.to_string());
-        return Ok(Arc::new(gemini::GeminiDriver::new(api_key, base_url)));
-    }
-
-    // Claude Code CLI — subprocess-based, no API key needed
-    if provider == "claude-code" {
-        let cli_path = config.base_url.clone();
-        return Ok(Arc::new(claude_code::ClaudeCodeDriver::new(
-            cli_path,
-            config.skip_permissions,
-        )));
-    }
-
-    // ChatGPT — wraps OpenAI-compatible driver with session token from browser auth.
-    // The ChatGptDriver caches the session token and delegates to an OpenAI-compatible driver.
-    if provider == "chatgpt" {
-        let session_token = config
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("CHATGPT_SESSION_TOKEN").ok())
-            .ok_or_else(|| {
-                LlmError::MissingApiKey(
-                    "Set CHATGPT_SESSION_TOKEN or run `librefang auth chatgpt` to authenticate"
-                        .to_string(),
-                )
-            })?;
-        let base_url = config
-            .base_url
-            .clone()
-            .unwrap_or_else(|| crate::chatgpt_oauth::CHATGPT_BASE_URL.to_string());
-        return Ok(Arc::new(chatgpt::ChatGptDriver::new(
-            session_token,
-            base_url,
-        )));
-    }
-
-    // GitHub Copilot — wraps OpenAI-compatible driver with automatic token exchange.
-    // The CopilotDriver exchanges the GitHub PAT for a Copilot API token on demand,
-    // caches it, and refreshes when expired.
-    if provider == "github-copilot" || provider == "copilot" {
-        let github_token = config
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("GITHUB_TOKEN").ok())
-            .ok_or_else(|| {
-                LlmError::MissingApiKey(
-                    "Set GITHUB_TOKEN environment variable for GitHub Copilot".to_string(),
-                )
-            })?;
-        let base_url = config
-            .base_url
-            .clone()
-            .unwrap_or_else(|| copilot::GITHUB_COPILOT_BASE_URL.to_string());
-        return Ok(Arc::new(copilot::CopilotDriver::new(
-            github_token,
-            base_url,
-        )));
-    }
-
-    // Kimi for Code — Anthropic-compatible endpoint
-    if provider == "kimi_coding" {
-        let api_key = config
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("KIMI_API_KEY").ok())
-            .ok_or_else(|| {
-                LlmError::MissingApiKey("Set KIMI_API_KEY environment variable".to_string())
-            })?;
-        let base_url = config
-            .base_url
-            .clone()
-            .unwrap_or_else(|| KIMI_CODING_BASE_URL.to_string());
-        return Ok(Arc::new(anthropic::AnthropicDriver::new(api_key, base_url)));
-    }
-
-    // All other providers use OpenAI-compatible format
-    if let Some(defaults) = provider_defaults(provider) {
-        let mut api_key = config
-            .api_key
-            .clone()
-            .or_else(|| std::env::var(defaults.api_key_env).ok())
-            .unwrap_or_default();
-
-        // For OpenAI-compatible providers, also try Codex CLI credential as fallback
-        if api_key.is_empty() && matches!(provider, "openai" | "codex" | "openai-codex") {
-            if let Some(codex_key) = crate::model_catalog::read_codex_credential() {
-                api_key = codex_key;
-            }
-        }
-
-        if defaults.key_required && api_key.is_empty() {
-            return Err(LlmError::MissingApiKey(format!(
-                "Set {} environment variable for provider '{}'",
-                defaults.api_key_env, provider
-            )));
-        }
-
-        let base_url = config
-            .base_url
-            .clone()
-            .unwrap_or_else(|| defaults.base_url.to_string());
-
-        return Ok(Arc::new(openai::OpenAIDriver::new(api_key, base_url)));
+    // Look up in the registry first
+    if let Some(entry) = find_provider(provider) {
+        return create_driver_from_entry(entry, config);
     }
 
     // Unknown provider — if base_url is set, treat as custom OpenAI-compatible.
@@ -491,44 +667,15 @@ pub fn detect_available_provider() -> Option<(&'static str, &'static str, &'stat
 }
 
 /// List all known provider names.
-pub fn known_providers() -> &'static [&'static str] {
-    &[
-        "anthropic",
-        "chatgpt",
-        "gemini",
-        "openai",
-        "groq",
-        "openrouter",
-        "deepseek",
-        "together",
-        "mistral",
-        "fireworks",
-        "ollama",
-        "vllm",
-        "lmstudio",
-        "perplexity",
-        "cohere",
-        "ai21",
-        "cerebras",
-        "sambanova",
-        "huggingface",
-        "xai",
-        "replicate",
-        "github-copilot",
-        "moonshot",
-        "qwen",
-        "minimax",
-        "minimax-cn",
-        "zhipu",
-        "zhipu_coding",
-        "zai",
-        "kimi_coding",
-        "qianfan",
-        "volcengine",
-        "chutes",
-        "venice",
-        "claude-code",
-    ]
+///
+/// Returns canonical names from the provider registry, excluding hidden
+/// internal providers (e.g. `volcengine_coding`, `zai_coding`, `lemonade`).
+pub fn known_providers() -> Vec<&'static str> {
+    PROVIDER_REGISTRY
+        .iter()
+        .filter(|p| !p.hidden)
+        .map(|p| p.name)
+        .collect()
 }
 
 #[cfg(test)]
