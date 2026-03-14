@@ -278,6 +278,19 @@ const HTML = `<!DOCTYPE html>
       display: inline-block;
     }
 
+    /* Home button */
+    .home-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: var(--dim);
+      text-decoration: none;
+      font-size: 0.85rem;
+      margin-bottom: 20px;
+      transition: color 0.15s;
+    }
+    .home-btn:hover { color: var(--accent); }
+
     /* Back button */
     .back-btn {
       background: none;
@@ -397,6 +410,8 @@ const HTML = `<!DOCTYPE html>
 </head>
 <body>
   <div class="container">
+    <a href="https://librefang.ai" class="home-btn">&larr; librefang.ai</a>
+
     <div class="header">
       <img src="https://raw.githubusercontent.com/librefang/librefang/main/public/assets/logo.png" alt="LibreFang" class="logo">
       <h1>Deploy LibreFang</h1>
@@ -413,34 +428,34 @@ const HTML = `<!DOCTYPE html>
       <div class="platform-grid">
         <div class="platform-card accent-purple" onclick="showFlyDeploy()">
           <span class="platform-badge badge-recommended">Recommended</span>
-          <div class="platform-icon">&#9992;&#65039;</div>
+          <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 19.2L16 11l3.5-3.5C21 6 21.5 4 21 3c-1-.5-3 0-4.5 1.5L13 8 4.8 6.2c-.5-.1-.9.1-1.1.5l-.3.5c-.2.5-.1 1 .3 1.3L9 12l-2 3H4l-1 1 3 2 2 3 1-1v-3l3-2 3.5 5.3c.3.4.8.5 1.3.3l.5-.3c.4-.2.6-.6.5-1.1z"/></svg></div>
           <div class="platform-name">Fly.io</div>
           <div class="platform-desc">Free forever, persistent storage</div>
         </div>
 
         <a class="platform-card accent-green" href="https://render.com/deploy?repo=https://github.com/librefang/librefang" target="_blank" rel="noopener">
           <span class="platform-badge badge-easiest">Easiest</span>
-          <div class="platform-icon">&#9881;&#65039;</div>
+          <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><circle cx="6" cy="6" r="1" fill="currentColor"/><circle cx="6" cy="18" r="1" fill="currentColor"/></svg></div>
           <div class="platform-name">Render</div>
           <div class="platform-desc">One-click OAuth deploy</div>
           <div class="platform-warning">Free tier: sleeps after 15 min, no persistent storage</div>
         </a>
 
         <a class="platform-card accent-blue" href="https://railway.com/template?template=https://github.com/librefang/librefang" target="_blank" rel="noopener">
-          <div class="platform-icon">&#128646;</div>
+          <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15s1-1 4-1 5 2 8 2 4-1 4-1V3s-1 1-4 1-5-2-8-2-4 1-4 1z"/><line x1="4" y1="22" x2="4" y2="15"/></svg></div>
           <div class="platform-name">Railway</div>
           <div class="platform-desc">Simple deploy with $5 free credit</div>
         </a>
 
         <a class="platform-card accent-blue" href="https://github.com/librefang/librefang/tree/main/infra/gcp" target="_blank" rel="noopener">
           <span class="platform-badge badge-terraform">Terraform</span>
-          <div class="platform-icon">&#9729;&#65039;</div>
+          <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg></div>
           <div class="platform-name">GCP</div>
           <div class="platform-desc">Free forever (e2-micro), 30GB storage</div>
         </a>
 
         <a class="platform-card accent-blue" href="https://github.com/librefang/librefang#quick-start" target="_blank" rel="noopener">
-          <div class="platform-icon">&#128051;</div>
+          <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12H2"/><path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><line x1="6" y1="16" x2="6.01" y2="16"/><line x1="10" y1="16" x2="10.01" y2="16"/></svg></div>
           <div class="platform-name">Docker</div>
           <div class="platform-desc">Self-host anywhere</div>
           <div class="platform-cmd">docker compose up --build</div>
