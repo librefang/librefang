@@ -45,6 +45,36 @@ pub fn bundled_hands() -> Vec<(&'static str, &'static str, &'static str)> {
             include_str!("../bundled/trader/HAND.toml"),
             include_str!("../bundled/trader/SKILL.md"),
         ),
+        (
+            "reddit",
+            include_str!("../bundled/reddit/HAND.toml"),
+            include_str!("../bundled/reddit/SKILL.md"),
+        ),
+        (
+            "linkedin",
+            include_str!("../bundled/linkedin/HAND.toml"),
+            include_str!("../bundled/linkedin/SKILL.md"),
+        ),
+        (
+            "strategist",
+            include_str!("../bundled/strategist/HAND.toml"),
+            include_str!("../bundled/strategist/SKILL.md"),
+        ),
+        (
+            "apitester",
+            include_str!("../bundled/apitester/HAND.toml"),
+            include_str!("../bundled/apitester/SKILL.md"),
+        ),
+        (
+            "devops",
+            include_str!("../bundled/devops/HAND.toml"),
+            include_str!("../bundled/devops/SKILL.md"),
+        ),
+        (
+            "analytics",
+            include_str!("../bundled/analytics/HAND.toml"),
+            include_str!("../bundled/analytics/SKILL.md"),
+        ),
     ]
 }
 
@@ -76,7 +106,7 @@ mod tests {
     #[test]
     fn bundled_hands_count() {
         let hands = bundled_hands();
-        assert_eq!(hands.len(), 8);
+        assert_eq!(hands.len(), 14);
     }
 
     #[test]
