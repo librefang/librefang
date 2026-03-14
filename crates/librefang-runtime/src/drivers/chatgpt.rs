@@ -310,18 +310,21 @@ impl ChatGptDriver {
             .map_err(|e| LlmError::Http(format!("Failed to read SSE response: {e}")))?;
 
         // Find the last `response.completed` event which has the full response
+        // Handle both "data:" and "data: " formats for SSE compatibility
         let mut final_response: Option<ResponsesApiResponse> = None;
         for line in body.lines() {
-            if let Some(data) = line.strip_prefix("data: ") {
-                // Parse each SSE data line looking for response.completed
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                    if event.get("type").and_then(|t| t.as_str()) == Some("response.completed") {
-                        if let Some(resp_obj) = event.get("response") {
-                            if let Ok(parsed) =
-                                serde_json::from_value::<ResponsesApiResponse>(resp_obj.clone())
-                            {
-                                final_response = Some(parsed);
-                            }
+            let data = match line.strip_prefix("data:") {
+                Some(d) => d.trim_start(),
+                None => continue,
+            };
+            // Parse each SSE data line looking for response.completed
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                if event.get("type").and_then(|t| t.as_str()) == Some("response.completed") {
+                    if let Some(resp_obj) = event.get("response") {
+                        if let Ok(parsed) =
+                            serde_json::from_value::<ResponsesApiResponse>(resp_obj.clone())
+                        {
+                            final_response = Some(parsed);
                         }
                     }
                 }
@@ -345,30 +348,33 @@ impl ChatGptDriver {
 
         let mut final_response: Option<ResponsesApiResponse> = None;
         for line in body.lines() {
-            if let Some(data) = line.strip_prefix("data: ") {
-                if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                    match event_type {
-                        "response.output_text.delta" => {
-                            if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
-                                let _ = tx
-                                    .send(StreamEvent::TextDelta {
-                                        text: delta.to_string(),
-                                    })
-                                    .await;
-                            }
+            // Handle both "data:" and "data: " formats for SSE compatibility
+            let data = match line.strip_prefix("data:") {
+                Some(d) => d.trim_start(),
+                None => continue,
+            };
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
+                let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match event_type {
+                    "response.output_text.delta" => {
+                        if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
+                            let _ = tx
+                                .send(StreamEvent::TextDelta {
+                                    text: delta.to_string(),
+                                })
+                                .await;
                         }
-                        "response.completed" => {
-                            if let Some(resp_obj) = event.get("response") {
-                                if let Ok(parsed) =
-                                    serde_json::from_value::<ResponsesApiResponse>(resp_obj.clone())
-                                {
-                                    final_response = Some(parsed);
-                                }
-                            }
-                        }
-                        _ => {}
                     }
+                    "response.completed" => {
+                        if let Some(resp_obj) = event.get("response") {
+                            if let Ok(parsed) =
+                                serde_json::from_value::<ResponsesApiResponse>(resp_obj.clone())
+                            {
+                                final_response = Some(parsed);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
