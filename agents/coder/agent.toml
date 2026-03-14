@@ -1,5 +1,5 @@
 name = "coder"
-version = "0.4.3-beta4-20260314"
+version = "0.4.3-beta3-20260314"
 description = "Expert software engineer. Reads, writes, and analyzes code."
 author = "librefang"
 module = "builtin:chat"
