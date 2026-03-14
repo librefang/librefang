@@ -1,0 +1,42 @@
+# Auto-label PRs based on changed file paths
+# Used by: .github/workflows/auto-label.yml
+
+area/kernel:
+  - changed-files:
+    - any-glob-to-any-file: 'crates/librefang-kernel/**'
+
+area/runtime:
+  - changed-files:
+    - any-glob-to-any-file: 'crates/librefang-runtime/**'
+
+area/skills:
+  - changed-files:
+    - any-glob-to-any-file: 'crates/librefang-skills/**'
+
+area/channels:
+  - changed-files:
+    - any-glob-to-any-file: 'crates/librefang-channels/**'
+
+area/docs:
+  - changed-files:
+    - any-glob-to-any-file: ['docs/**', 'i18n/**', '*.md']
+
+area/ci:
+  - changed-files:
+    - any-glob-to-any-file: ['.github/**', 'scripts/**']
+
+area/sdk:
+  - changed-files:
+    - any-glob-to-any-file: ['sdk/**', 'packages/**']
+
+area/security:
+  - changed-files:
+    - any-glob-to-any-file: ['crates/librefang-wire/**', 'crates/librefang-extensions/**', 'SECURITY.md']
+
+type/agent-template:
+  - changed-files:
+    - any-glob-to-any-file: 'agents/**'
+
+type/skill:
+  - changed-files:
+    - any-glob-to-any-file: ['skills/**', 'examples/custom-skill-*/**']

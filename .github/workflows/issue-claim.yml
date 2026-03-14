@@ -1,0 +1,35 @@
+name: Issue Claim
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  issues: write
+
+jobs:
+  claim:
+    if: >
+      !github.event.issue.pull_request &&
+      contains(github.event.comment.body, '/claim')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assign issue to commenter
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          USER="${{ github.event.comment.user.login }}"
+          ISSUE="${{ github.event.issue.number }}"
+          REPO="${{ github.repository }}"
+
+          # Check if already assigned
+          ASSIGNEES=$(gh api repos/$REPO/issues/$ISSUE --jq '.assignees | length')
+          if [ "$ASSIGNEES" -gt 0 ]; then
+            gh issue comment $ISSUE --repo $REPO \
+              --body "@$USER This issue is already assigned. Please check other [good first issues](https://github.com/$REPO/labels/good%20first%20issue)."
+            exit 0
+          fi
+
+          gh issue edit $ISSUE --repo $REPO --add-assignee "$USER"
+          gh issue comment $ISSUE --repo $REPO \
+            --body "Assigned to @$USER. Welcome! Feel free to ask questions here or in [Discord](https://discord.gg/DzTYqAZZmc). If you can't finish within 14 days, just leave a comment so others can pick it up."
