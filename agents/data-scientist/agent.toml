@@ -1,5 +1,5 @@
 name = "data-scientist"
-version = "0.1.0"
+version = "0.4.0"
 description = "Data scientist. Analyzes datasets, builds models, creates visualizations, performs statistical analysis."
 author = "librefang"
 module = "builtin:chat"

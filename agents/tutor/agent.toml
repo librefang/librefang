@@ -1,5 +1,5 @@
 name = "tutor"
-version = "0.1.0"
+version = "0.4.0"
 description = "Teaching and explanation agent for learning, tutoring, and educational content creation."
 author = "librefang"
 module = "builtin:chat"

@@ -1,5 +1,5 @@
 name = "email-assistant"
-version = "0.1.0"
+version = "0.4.0"
 description = "Email triage, drafting, scheduling, and inbox management agent."
 author = "librefang"
 module = "builtin:chat"

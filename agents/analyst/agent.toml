@@ -1,5 +1,5 @@
 name = "analyst"
-version = "0.1.0"
+version = "0.4.0"
 description = "Data analyst. Processes data, generates insights, creates reports."
 author = "librefang"
 module = "builtin:chat"
