@@ -905,11 +905,11 @@ enum SystemCommands {
     },
 }
 
-fn init_tracing_stderr() {
+fn init_tracing_stderr(log_level: &str) {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
         )
         .init();
 }
@@ -947,7 +947,7 @@ fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContex
 }
 
 /// Redirect tracing to a log file so it doesn't corrupt the ratatui TUI.
-fn init_tracing_file() {
+fn init_tracing_file(log_level: &str) {
     let log_dir = cli_librefang_home();
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("tui.log");
@@ -957,7 +957,7 @@ fn init_tracing_file() {
             tracing_subscriber::fmt()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
                 )
                 .with_writer(std::sync::Mutex::new(file))
                 .with_ansi(false)
@@ -978,6 +978,18 @@ fn load_language_from_config() -> Option<String> {
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: toml::Value = toml::from_str(&content).ok()?;
     config.get("language")?.as_str().map(|s| s.to_string())
+}
+
+/// Load just the `log_level` field from config.toml without fully deserializing.
+/// Returns the configured level (e.g. "debug", "warn") or falls back to "info".
+fn load_log_level_from_config() -> String {
+    let level = (|| -> Option<String> {
+        let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+        let content = std::fs::read_to_string(&config_path).ok()?;
+        let config: toml::Value = toml::from_str(&content).ok()?;
+        config.get("log_level")?.as_str().map(|s| s.to_string())
+    })();
+    level.unwrap_or_else(|| "info".to_string())
 }
 
 fn main() {
@@ -1002,13 +1014,15 @@ fn main() {
             Some(Commands::Agent(AgentCommands::Chat { .. }))
         );
 
+    let log_level = load_log_level_from_config();
+
     if is_tui_mode {
-        init_tracing_file();
+        init_tracing_file(&log_level);
     } else {
         // CLI subcommands: install Ctrl+C handler for clean interrupt of
         // blocking read_line calls, and trace to stderr.
         install_ctrlc_handler();
-        init_tracing_stderr();
+        init_tracing_stderr(&log_level);
     }
 
     match cli.command {
