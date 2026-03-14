@@ -149,6 +149,9 @@ mailparse = "0.16"
 fluent = "0.17"
 unic-langid = "0.9"
 
+# MQTT client
+rumqttc = "0.24"
+
 # Testing
 tokio-test = "0.4"
 tempfile = "3"
