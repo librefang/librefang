@@ -8,6 +8,9 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
 
+permissions:
+  pull-requests: write
+
 jobs:
   size:
     runs-on: ubuntu-latest
