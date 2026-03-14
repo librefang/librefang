@@ -619,18 +619,22 @@ impl McpConnection {
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
 
         let probe = base_url.trim_end_matches('/').to_string();
-        let response = client
+        // Probe is optional - just log a warning if it fails, don't block connection
+        let probe_result = client
             .get(probe.as_str())
             .timeout(std::time::Duration::from_secs(10))
             .send()
-            .await
-            .map_err(|e| format!("HTTP compatibility backend probe failed: {e}"))?;
+            .await;
 
-        debug!(
-            base_url = %probe,
-            status = %response.status(),
-            "HTTP compatibility backend reachable"
-        );
+        if let Err(e) = &probe_result {
+            debug!(base_url = %probe, error = %e, "HTTP compatibility backend probe failed, continuing anyway");
+        } else if let Ok(response) = &probe_result {
+            debug!(
+                base_url = %probe,
+                status = %response.status(),
+                "HTTP compatibility backend reachable"
+            );
+        }
 
         Ok(McpTransportHandle::HttpCompat { client })
     }
