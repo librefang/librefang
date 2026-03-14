@@ -410,7 +410,7 @@ const HTML = `<!DOCTYPE html>
 </head>
 <body>
   <div class="container">
-    <a href="https://librefang.ai" class="home-btn">&larr; librefang.ai</a>
+    <a href="/" class="home-btn">&larr; deploy.librefang.ai</a>
 
     <div class="header">
       <img src="https://raw.githubusercontent.com/librefang/librefang/main/public/assets/logo.png" alt="LibreFang" class="logo">
