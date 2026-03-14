@@ -826,6 +826,37 @@ async fn parse_telegram_update(
         return None;
     };
 
+    // Extract reply-to-message context when the user is quoting a previous message.
+    // This gives the agent awareness of what the user is replying to.
+    let content = if let Some(reply_msg) = message.get("reply_to_message") {
+        let reply_text = reply_msg["text"]
+            .as_str()
+            .or_else(|| reply_msg["caption"].as_str());
+        let reply_sender = reply_msg
+            .get("from")
+            .and_then(|f| f["first_name"].as_str())
+            .unwrap_or("Unknown");
+
+        if let Some(quoted) = reply_text {
+            // Truncate long quoted text to keep context concise
+            let truncated = if quoted.len() > 200 {
+                format!("{}...", &quoted[..quoted.floor_char_boundary(200)])
+            } else {
+                quoted.to_string()
+            };
+            match content {
+                ChannelContent::Text(text) => ChannelContent::Text(format!(
+                    "[Replying to @{reply_sender}: \"{truncated}\"]\n{text}"
+                )),
+                other => other,
+            }
+        } else {
+            content
+        }
+    } else {
+        content
+    };
+
     // Extract forum topic thread_id (Telegram sends this as `message_thread_id`
     // for messages inside forum topics / reply threads).
     let thread_id = message["message_thread_id"]
@@ -834,6 +865,28 @@ async fn parse_telegram_update(
 
     // Detect @mention of the bot in entities / caption_entities for MentionOnly group policy.
     let mut metadata = HashMap::new();
+
+    // Store reply-to-message metadata for downstream consumers.
+    if let Some(reply_msg) = message.get("reply_to_message") {
+        let reply_message_id = reply_msg["message_id"].as_i64().unwrap_or(0);
+        let reply_text = reply_msg["text"]
+            .as_str()
+            .or_else(|| reply_msg["caption"].as_str())
+            .unwrap_or("");
+        let reply_sender = reply_msg
+            .get("from")
+            .and_then(|f| f["first_name"].as_str())
+            .unwrap_or("Unknown");
+        metadata.insert(
+            "reply_to".to_string(),
+            serde_json::json!({
+                "message_id": reply_message_id,
+                "sender": reply_sender,
+                "text": reply_text,
+            }),
+        );
+    }
+
     if is_group {
         if let Some(bot_uname) = bot_username {
             let was_mentioned = check_mention_entities(message, bot_uname);
