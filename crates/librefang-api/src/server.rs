@@ -29,7 +29,7 @@ pub struct DaemonInfo {
 }
 
 /// Current API version. Bump when introducing a new version.
-pub const API_VERSION_LATEST: &str = "v1";
+pub const API_VERSION_LATEST: &str = crate::versioning::CURRENT_VERSION;
 
 /// All available API versions with their status.
 pub const API_VERSIONS: &[(&str, &str)] = &[("v1", "stable")];
