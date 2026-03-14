@@ -36,6 +36,8 @@ base64 = { workspace = true }
 socket2 = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
+zip = { workspace = true }
+walkdir = { workspace = true }
 
 [features]
 default = ["librefang-channels/default"]

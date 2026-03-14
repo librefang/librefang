@@ -612,6 +612,14 @@ pub async fn build_router(
             "/api/cron/jobs/{id}/status",
             axum::routing::get(routes::cron_job_status),
         )
+        // Backup / Restore endpoints
+        .route("/api/backup", axum::routing::post(routes::create_backup))
+        .route("/api/backups", axum::routing::get(routes::list_backups))
+        .route(
+            "/api/backups/{filename}",
+            axum::routing::delete(routes::delete_backup),
+        )
+        .route("/api/restore", axum::routing::post(routes::restore_backup))
         // Webhook trigger endpoints (external event injection)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
