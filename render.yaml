@@ -7,15 +7,9 @@ services:
     plan: free
     healthCheckPath: /api/health
     envVars:
-      - key: LIBREFANG_HOME
-        value: /data
       - key: GROQ_API_KEY
         sync: false
       - key: OPENAI_API_KEY
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
-    disk:
-      name: librefang-data
-      mountPath: /data
-      sizeGB: 1
