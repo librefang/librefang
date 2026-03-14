@@ -1,0 +1,41 @@
+# LibreFang Code Owners
+# These owners are automatically requested for review on PRs.
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default — catch-all
+* @librefang/maintainers
+
+# Core crates
+crates/librefang-kernel/ @librefang/maintainers
+crates/librefang-runtime/ @librefang/maintainers
+crates/librefang-types/ @librefang/maintainers
+crates/librefang-memory/ @librefang/maintainers
+crates/librefang-api/ @librefang/maintainers
+
+# Security-sensitive
+crates/librefang-wire/ @librefang/maintainers
+crates/librefang-extensions/ @librefang/maintainers
+SECURITY.md @librefang/maintainers
+
+# Community-contributed (broader review)
+crates/librefang-channels/ @librefang/maintainers
+crates/librefang-skills/ @librefang/maintainers
+crates/librefang-migrate/ @librefang/maintainers
+agents/ @librefang/maintainers
+examples/ @librefang/maintainers
+
+# Desktop app
+crates/librefang-desktop/ @librefang/maintainers
+
+# SDKs
+sdk/javascript/ @librefang/maintainers
+sdk/python/ @librefang/maintainers
+
+# CI & Release
+.github/ @librefang/maintainers
+scripts/ @librefang/maintainers
+
+# Docs — lower barrier, any maintainer can approve
+docs/ @librefang/maintainers
+CONTRIBUTING.md @librefang/maintainers
+GOVERNANCE.md @librefang/maintainers
