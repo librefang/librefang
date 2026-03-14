@@ -11351,9 +11351,7 @@ pub async fn agent_metrics(
         .audit_log
         .recent(10_000)
         .iter()
-        .filter(|e| {
-            e.agent_id == agent_id_str && e.outcome != "ok" && e.outcome != "success"
-        })
+        .filter(|e| e.agent_id == agent_id_str && e.outcome != "ok" && e.outcome != "success")
         .count() as u64;
 
     // Uptime since the agent was created.
@@ -11442,7 +11440,11 @@ pub async fn agent_logs(
         .unwrap_or(100)
         .min(1000);
 
-    let level_filter = params.get("level").cloned().unwrap_or_default().to_lowercase();
+    let level_filter = params
+        .get("level")
+        .cloned()
+        .unwrap_or_default()
+        .to_lowercase();
 
     let agent_id_str = agent_id.to_string();
 
