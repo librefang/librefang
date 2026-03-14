@@ -791,50 +791,50 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     ) -> Option<librefang_types::config::ChannelOverrides> {
         let channels = &self.kernel.config.channels;
         match channel_type {
-            "telegram" => channels.telegram.as_ref().map(|c| c.overrides.clone()),
-            "discord" => channels.discord.as_ref().map(|c| c.overrides.clone()),
-            "slack" => channels.slack.as_ref().map(|c| c.overrides.clone()),
-            "whatsapp" => channels.whatsapp.as_ref().map(|c| c.overrides.clone()),
-            "signal" => channels.signal.as_ref().map(|c| c.overrides.clone()),
-            "matrix" => channels.matrix.as_ref().map(|c| c.overrides.clone()),
-            "email" => channels.email.as_ref().map(|c| c.overrides.clone()),
-            "teams" => channels.teams.as_ref().map(|c| c.overrides.clone()),
-            "mattermost" => channels.mattermost.as_ref().map(|c| c.overrides.clone()),
-            "irc" => channels.irc.as_ref().map(|c| c.overrides.clone()),
-            "google_chat" => channels.google_chat.as_ref().map(|c| c.overrides.clone()),
-            "twitch" => channels.twitch.as_ref().map(|c| c.overrides.clone()),
-            "rocketchat" => channels.rocketchat.as_ref().map(|c| c.overrides.clone()),
-            "zulip" => channels.zulip.as_ref().map(|c| c.overrides.clone()),
-            "xmpp" => channels.xmpp.as_ref().map(|c| c.overrides.clone()),
+            "telegram" => channels.telegram.first().map(|c| c.overrides.clone()),
+            "discord" => channels.discord.first().map(|c| c.overrides.clone()),
+            "slack" => channels.slack.first().map(|c| c.overrides.clone()),
+            "whatsapp" => channels.whatsapp.first().map(|c| c.overrides.clone()),
+            "signal" => channels.signal.first().map(|c| c.overrides.clone()),
+            "matrix" => channels.matrix.first().map(|c| c.overrides.clone()),
+            "email" => channels.email.first().map(|c| c.overrides.clone()),
+            "teams" => channels.teams.first().map(|c| c.overrides.clone()),
+            "mattermost" => channels.mattermost.first().map(|c| c.overrides.clone()),
+            "irc" => channels.irc.first().map(|c| c.overrides.clone()),
+            "google_chat" => channels.google_chat.first().map(|c| c.overrides.clone()),
+            "twitch" => channels.twitch.first().map(|c| c.overrides.clone()),
+            "rocketchat" => channels.rocketchat.first().map(|c| c.overrides.clone()),
+            "zulip" => channels.zulip.first().map(|c| c.overrides.clone()),
+            "xmpp" => channels.xmpp.first().map(|c| c.overrides.clone()),
             // Wave 3
-            "line" => channels.line.as_ref().map(|c| c.overrides.clone()),
-            "viber" => channels.viber.as_ref().map(|c| c.overrides.clone()),
-            "messenger" => channels.messenger.as_ref().map(|c| c.overrides.clone()),
-            "reddit" => channels.reddit.as_ref().map(|c| c.overrides.clone()),
-            "mastodon" => channels.mastodon.as_ref().map(|c| c.overrides.clone()),
-            "bluesky" => channels.bluesky.as_ref().map(|c| c.overrides.clone()),
-            "feishu" => channels.feishu.as_ref().map(|c| c.overrides.clone()),
-            "revolt" => channels.revolt.as_ref().map(|c| c.overrides.clone()),
+            "line" => channels.line.first().map(|c| c.overrides.clone()),
+            "viber" => channels.viber.first().map(|c| c.overrides.clone()),
+            "messenger" => channels.messenger.first().map(|c| c.overrides.clone()),
+            "reddit" => channels.reddit.first().map(|c| c.overrides.clone()),
+            "mastodon" => channels.mastodon.first().map(|c| c.overrides.clone()),
+            "bluesky" => channels.bluesky.first().map(|c| c.overrides.clone()),
+            "feishu" => channels.feishu.first().map(|c| c.overrides.clone()),
+            "revolt" => channels.revolt.first().map(|c| c.overrides.clone()),
             // Wave 4
-            "nextcloud" => channels.nextcloud.as_ref().map(|c| c.overrides.clone()),
-            "guilded" => channels.guilded.as_ref().map(|c| c.overrides.clone()),
-            "keybase" => channels.keybase.as_ref().map(|c| c.overrides.clone()),
-            "threema" => channels.threema.as_ref().map(|c| c.overrides.clone()),
-            "nostr" => channels.nostr.as_ref().map(|c| c.overrides.clone()),
-            "webex" => channels.webex.as_ref().map(|c| c.overrides.clone()),
-            "pumble" => channels.pumble.as_ref().map(|c| c.overrides.clone()),
-            "flock" => channels.flock.as_ref().map(|c| c.overrides.clone()),
-            "twist" => channels.twist.as_ref().map(|c| c.overrides.clone()),
+            "nextcloud" => channels.nextcloud.first().map(|c| c.overrides.clone()),
+            "guilded" => channels.guilded.first().map(|c| c.overrides.clone()),
+            "keybase" => channels.keybase.first().map(|c| c.overrides.clone()),
+            "threema" => channels.threema.first().map(|c| c.overrides.clone()),
+            "nostr" => channels.nostr.first().map(|c| c.overrides.clone()),
+            "webex" => channels.webex.first().map(|c| c.overrides.clone()),
+            "pumble" => channels.pumble.first().map(|c| c.overrides.clone()),
+            "flock" => channels.flock.first().map(|c| c.overrides.clone()),
+            "twist" => channels.twist.first().map(|c| c.overrides.clone()),
             // Wave 5
-            "mumble" => channels.mumble.as_ref().map(|c| c.overrides.clone()),
-            "dingtalk" => channels.dingtalk.as_ref().map(|c| c.overrides.clone()),
-            "discourse" => channels.discourse.as_ref().map(|c| c.overrides.clone()),
-            "gitter" => channels.gitter.as_ref().map(|c| c.overrides.clone()),
-            "ntfy" => channels.ntfy.as_ref().map(|c| c.overrides.clone()),
-            "gotify" => channels.gotify.as_ref().map(|c| c.overrides.clone()),
-            "webhook" => channels.webhook.as_ref().map(|c| c.overrides.clone()),
-            "linkedin" => channels.linkedin.as_ref().map(|c| c.overrides.clone()),
-            "wecom" => channels.wecom.as_ref().map(|c| c.overrides.clone()),
+            "mumble" => channels.mumble.first().map(|c| c.overrides.clone()),
+            "dingtalk" => channels.dingtalk.first().map(|c| c.overrides.clone()),
+            "discourse" => channels.discourse.first().map(|c| c.overrides.clone()),
+            "gitter" => channels.gitter.first().map(|c| c.overrides.clone()),
+            "ntfy" => channels.ntfy.first().map(|c| c.overrides.clone()),
+            "gotify" => channels.gotify.first().map(|c| c.overrides.clone()),
+            "webhook" => channels.webhook.first().map(|c| c.overrides.clone()),
+            "linkedin" => channels.linkedin.first().map(|c| c.overrides.clone()),
+            "wecom" => channels.wecom.first().map(|c| c.overrides.clone()),
             _ => None,
         }
     }
@@ -1152,28 +1152,31 @@ pub async fn start_channel_bridge_with_config(
         started_at: Instant::now(),
     };
 
-    // Collect all adapters to start
-    #[allow(unused_mut)]
-    let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>)> = Vec::new();
+    // Collect all adapters to start: (adapter, default_agent_name, account_id)
+    #[allow(unused_mut, clippy::type_complexity)]
+    let mut adapters: Vec<(Arc<dyn ChannelAdapter>, Option<String>, Option<String>)> = Vec::new();
 
     // Telegram
     #[cfg(feature = "channel-telegram")]
-    if let Some(ref tg_config) = config.telegram {
+    for tg_config in config.telegram.iter() {
         if let Some(token) = read_token(&tg_config.bot_token_env, "Telegram") {
             let poll_interval = Duration::from_secs(tg_config.poll_interval_secs);
-            let adapter = Arc::new(TelegramAdapter::new(
-                token,
-                tg_config.allowed_users.clone(),
-                poll_interval,
-                tg_config.api_url.clone(),
-            ));
-            adapters.push((adapter, tg_config.default_agent.clone()));
+            let adapter = Arc::new(
+                TelegramAdapter::new(
+                    token,
+                    tg_config.allowed_users.clone(),
+                    poll_interval,
+                    tg_config.api_url.clone(),
+                )
+                .with_account_id(tg_config.account_id.clone()),
+            );
+            adapters.push((adapter, tg_config.default_agent.clone(), tg_config.account_id.clone()));
         }
     }
 
     // Discord
     #[cfg(feature = "channel-discord")]
-    if let Some(ref dc_config) = config.discord {
+    for dc_config in config.discord.iter() {
         if let Some(token) = read_token(&dc_config.bot_token_env, "Discord") {
             let adapter = Arc::new(DiscordAdapter::new(
                 token,
@@ -1182,28 +1185,31 @@ pub async fn start_channel_bridge_with_config(
                 dc_config.ignore_bots,
                 dc_config.intents,
             ));
-            adapters.push((adapter, dc_config.default_agent.clone()));
+            adapters.push((adapter, dc_config.default_agent.clone(), dc_config.account_id.clone()));
         }
     }
 
     // Slack
     #[cfg(feature = "channel-slack")]
-    if let Some(ref sl_config) = config.slack {
+    for sl_config in config.slack.iter() {
         if let Some(app_token) = read_token(&sl_config.app_token_env, "Slack (app)") {
             if let Some(bot_token) = read_token(&sl_config.bot_token_env, "Slack (bot)") {
-                let adapter = Arc::new(SlackAdapter::new(
-                    app_token,
-                    bot_token,
-                    sl_config.allowed_channels.clone(),
-                ));
-                adapters.push((adapter, sl_config.default_agent.clone()));
+                let adapter = Arc::new(
+                    SlackAdapter::new(
+                        app_token,
+                        bot_token,
+                        sl_config.allowed_channels.clone(),
+                    )
+                    .with_account_id(sl_config.account_id.clone()),
+                );
+                adapters.push((adapter, sl_config.default_agent.clone(), sl_config.account_id.clone()));
             }
         }
     }
 
     // WhatsApp — supports Cloud API mode (access token) or Web/QR mode (gateway URL)
     #[cfg(feature = "channel-whatsapp")]
-    if let Some(ref wa_config) = config.whatsapp {
+    for wa_config in config.whatsapp.iter() {
         let cloud_token = read_token(&wa_config.access_token_env, "WhatsApp");
         let gateway_url = std::env::var(&wa_config.gateway_url_env)
             .ok()
@@ -1223,20 +1229,20 @@ pub async fn start_channel_bridge_with_config(
                 )
                 .with_gateway(gateway_url),
             );
-            adapters.push((adapter, wa_config.default_agent.clone()));
+            adapters.push((adapter, wa_config.default_agent.clone(), wa_config.account_id.clone()));
         }
     }
 
     // Signal
     #[cfg(feature = "channel-signal")]
-    if let Some(ref sig_config) = config.signal {
+    for sig_config in config.signal.iter() {
         if !sig_config.phone_number.is_empty() {
             let adapter = Arc::new(SignalAdapter::new(
                 sig_config.api_url.clone(),
                 sig_config.phone_number.clone(),
                 sig_config.allowed_users.clone(),
             ));
-            adapters.push((adapter, sig_config.default_agent.clone()));
+            adapters.push((adapter, sig_config.default_agent.clone(), sig_config.account_id.clone()));
         } else {
             warn!("Signal configured but phone_number is empty, skipping");
         }
@@ -1244,7 +1250,7 @@ pub async fn start_channel_bridge_with_config(
 
     // Matrix
     #[cfg(feature = "channel-matrix")]
-    if let Some(ref mx_config) = config.matrix {
+    for mx_config in config.matrix.iter() {
         if let Some(token) = read_token(&mx_config.access_token_env, "Matrix") {
             let adapter = Arc::new(MatrixAdapter::new(
                 mx_config.homeserver_url.clone(),
@@ -1252,13 +1258,13 @@ pub async fn start_channel_bridge_with_config(
                 token,
                 mx_config.allowed_rooms.clone(),
             ));
-            adapters.push((adapter, mx_config.default_agent.clone()));
+            adapters.push((adapter, mx_config.default_agent.clone(), mx_config.account_id.clone()));
         }
     }
 
     // Email
     #[cfg(feature = "channel-email")]
-    if let Some(ref em_config) = config.email {
+    for em_config in config.email.iter() {
         if let Some(password) = read_token(&em_config.password_env, "Email") {
             let adapter = Arc::new(EmailAdapter::new(
                 em_config.imap_host.clone(),
@@ -1271,13 +1277,13 @@ pub async fn start_channel_bridge_with_config(
                 em_config.folders.clone(),
                 em_config.allowed_senders.clone(),
             ));
-            adapters.push((adapter, em_config.default_agent.clone()));
+            adapters.push((adapter, em_config.default_agent.clone(), em_config.account_id.clone()));
         }
     }
 
     // Teams
     #[cfg(feature = "channel-teams")]
-    if let Some(ref tm_config) = config.teams {
+    for tm_config in config.teams.iter() {
         if let Some(password) = read_token(&tm_config.app_password_env, "Teams") {
             let adapter = Arc::new(TeamsAdapter::new(
                 tm_config.app_id.clone(),
@@ -1285,26 +1291,26 @@ pub async fn start_channel_bridge_with_config(
                 tm_config.webhook_port,
                 tm_config.allowed_tenants.clone(),
             ));
-            adapters.push((adapter, tm_config.default_agent.clone()));
+            adapters.push((adapter, tm_config.default_agent.clone(), tm_config.account_id.clone()));
         }
     }
 
     // Mattermost
     #[cfg(feature = "channel-mattermost")]
-    if let Some(ref mm_config) = config.mattermost {
+    for mm_config in config.mattermost.iter() {
         if let Some(token) = read_token(&mm_config.token_env, "Mattermost") {
             let adapter = Arc::new(MattermostAdapter::new(
                 mm_config.server_url.clone(),
                 token,
                 mm_config.allowed_channels.clone(),
             ));
-            adapters.push((adapter, mm_config.default_agent.clone()));
+            adapters.push((adapter, mm_config.default_agent.clone(), mm_config.account_id.clone()));
         }
     }
 
     // IRC
     #[cfg(feature = "channel-irc")]
-    if let Some(ref irc_config) = config.irc {
+    for irc_config in config.irc.iter() {
         if !irc_config.server.is_empty() {
             let password = irc_config
                 .password_env
@@ -1318,7 +1324,7 @@ pub async fn start_channel_bridge_with_config(
                 irc_config.channels.clone(),
                 irc_config.use_tls,
             ));
-            adapters.push((adapter, irc_config.default_agent.clone()));
+            adapters.push((adapter, irc_config.default_agent.clone(), irc_config.account_id.clone()));
         } else {
             warn!("IRC configured but server is empty, skipping");
         }
@@ -1326,33 +1332,33 @@ pub async fn start_channel_bridge_with_config(
 
     // Google Chat
     #[cfg(feature = "channel-google-chat")]
-    if let Some(ref gc_config) = config.google_chat {
+    for gc_config in config.google_chat.iter() {
         if let Some(key) = read_token(&gc_config.service_account_env, "Google Chat") {
             let adapter = Arc::new(GoogleChatAdapter::new(
                 key,
                 gc_config.space_ids.clone(),
                 gc_config.webhook_port,
             ));
-            adapters.push((adapter, gc_config.default_agent.clone()));
+            adapters.push((adapter, gc_config.default_agent.clone(), gc_config.account_id.clone()));
         }
     }
 
     // Twitch
     #[cfg(feature = "channel-twitch")]
-    if let Some(ref tw_config) = config.twitch {
+    for tw_config in config.twitch.iter() {
         if let Some(token) = read_token(&tw_config.oauth_token_env, "Twitch") {
             let adapter = Arc::new(TwitchAdapter::new(
                 token,
                 tw_config.channels.clone(),
                 tw_config.nick.clone(),
             ));
-            adapters.push((adapter, tw_config.default_agent.clone()));
+            adapters.push((adapter, tw_config.default_agent.clone(), tw_config.account_id.clone()));
         }
     }
 
     // Rocket.Chat
     #[cfg(feature = "channel-rocketchat")]
-    if let Some(ref rc_config) = config.rocketchat {
+    for rc_config in config.rocketchat.iter() {
         if let Some(token) = read_token(&rc_config.token_env, "Rocket.Chat") {
             let adapter = Arc::new(RocketChatAdapter::new(
                 rc_config.server_url.clone(),
@@ -1360,13 +1366,13 @@ pub async fn start_channel_bridge_with_config(
                 rc_config.user_id.clone(),
                 rc_config.allowed_channels.clone(),
             ));
-            adapters.push((adapter, rc_config.default_agent.clone()));
+            adapters.push((adapter, rc_config.default_agent.clone(), rc_config.account_id.clone()));
         }
     }
 
     // Zulip
     #[cfg(feature = "channel-zulip")]
-    if let Some(ref z_config) = config.zulip {
+    for z_config in config.zulip.iter() {
         if let Some(api_key) = read_token(&z_config.api_key_env, "Zulip") {
             let adapter = Arc::new(ZulipAdapter::new(
                 z_config.server_url.clone(),
@@ -1374,13 +1380,13 @@ pub async fn start_channel_bridge_with_config(
                 api_key,
                 z_config.streams.clone(),
             ));
-            adapters.push((adapter, z_config.default_agent.clone()));
+            adapters.push((adapter, z_config.default_agent.clone(), z_config.account_id.clone()));
         }
     }
 
     // XMPP
     #[cfg(feature = "channel-xmpp")]
-    if let Some(ref x_config) = config.xmpp {
+    for x_config in config.xmpp.iter() {
         if let Some(password) = read_token(&x_config.password_env, "XMPP") {
             let adapter = Arc::new(XmppAdapter::new(
                 x_config.jid.clone(),
@@ -1389,7 +1395,7 @@ pub async fn start_channel_bridge_with_config(
                 x_config.port,
                 x_config.rooms.clone(),
             ));
-            adapters.push((adapter, x_config.default_agent.clone()));
+            adapters.push((adapter, x_config.default_agent.clone(), x_config.account_id.clone()));
         }
     }
 
@@ -1397,31 +1403,31 @@ pub async fn start_channel_bridge_with_config(
 
     // LINE
     #[cfg(feature = "channel-line")]
-    if let Some(ref ln_config) = config.line {
+    for ln_config in config.line.iter() {
         if let Some(secret) = read_token(&ln_config.channel_secret_env, "LINE (secret)") {
             if let Some(token) = read_token(&ln_config.access_token_env, "LINE (token)") {
                 let adapter = Arc::new(LineAdapter::new(secret, token, ln_config.webhook_port));
-                adapters.push((adapter, ln_config.default_agent.clone()));
+                adapters.push((adapter, ln_config.default_agent.clone(), ln_config.account_id.clone()));
             }
         }
     }
 
     // Viber
     #[cfg(feature = "channel-viber")]
-    if let Some(ref vb_config) = config.viber {
+    for vb_config in config.viber.iter() {
         if let Some(token) = read_token(&vb_config.auth_token_env, "Viber") {
             let adapter = Arc::new(ViberAdapter::new(
                 token,
                 vb_config.webhook_url.clone(),
                 vb_config.webhook_port,
             ));
-            adapters.push((adapter, vb_config.default_agent.clone()));
+            adapters.push((adapter, vb_config.default_agent.clone(), vb_config.account_id.clone()));
         }
     }
 
     // Facebook Messenger
     #[cfg(feature = "channel-messenger")]
-    if let Some(ref ms_config) = config.messenger {
+    for ms_config in config.messenger.iter() {
         if let Some(page_token) = read_token(&ms_config.page_token_env, "Messenger (page)") {
             let verify_token =
                 read_token(&ms_config.verify_token_env, "Messenger (verify)").unwrap_or_default();
@@ -1430,13 +1436,13 @@ pub async fn start_channel_bridge_with_config(
                 verify_token,
                 ms_config.webhook_port,
             ));
-            adapters.push((adapter, ms_config.default_agent.clone()));
+            adapters.push((adapter, ms_config.default_agent.clone(), ms_config.account_id.clone()));
         }
     }
 
     // Reddit
     #[cfg(feature = "channel-reddit")]
-    if let Some(ref rd_config) = config.reddit {
+    for rd_config in config.reddit.iter() {
         if let Some(secret) = read_token(&rd_config.client_secret_env, "Reddit (secret)") {
             if let Some(password) = read_token(&rd_config.password_env, "Reddit (password)") {
                 let adapter = Arc::new(RedditAdapter::new(
@@ -1446,54 +1452,54 @@ pub async fn start_channel_bridge_with_config(
                     password,
                     rd_config.subreddits.clone(),
                 ));
-                adapters.push((adapter, rd_config.default_agent.clone()));
+                adapters.push((adapter, rd_config.default_agent.clone(), rd_config.account_id.clone()));
             }
         }
     }
 
     // Mastodon
     #[cfg(feature = "channel-mastodon")]
-    if let Some(ref md_config) = config.mastodon {
+    for md_config in config.mastodon.iter() {
         if let Some(token) = read_token(&md_config.access_token_env, "Mastodon") {
             let adapter = Arc::new(MastodonAdapter::new(md_config.instance_url.clone(), token));
-            adapters.push((adapter, md_config.default_agent.clone()));
+            adapters.push((adapter, md_config.default_agent.clone(), md_config.account_id.clone()));
         }
     }
 
     // Bluesky
     #[cfg(feature = "channel-bluesky")]
-    if let Some(ref bs_config) = config.bluesky {
+    for bs_config in config.bluesky.iter() {
         if let Some(password) = read_token(&bs_config.app_password_env, "Bluesky") {
             let adapter = Arc::new(BlueskyAdapter::new(bs_config.identifier.clone(), password));
-            adapters.push((adapter, bs_config.default_agent.clone()));
+            adapters.push((adapter, bs_config.default_agent.clone(), bs_config.account_id.clone()));
         }
     }
 
     // Feishu/Lark
     #[cfg(feature = "channel-feishu")]
-    if let Some(ref fs_config) = config.feishu {
+    for fs_config in config.feishu.iter() {
         if let Some(secret) = read_token(&fs_config.app_secret_env, "Feishu") {
             let adapter = Arc::new(FeishuAdapter::new(
                 fs_config.app_id.clone(),
                 secret,
                 fs_config.webhook_port,
             ));
-            adapters.push((adapter, fs_config.default_agent.clone()));
+            adapters.push((adapter, fs_config.default_agent.clone(), fs_config.account_id.clone()));
         }
     }
 
     // Revolt
     #[cfg(feature = "channel-revolt")]
-    if let Some(ref rv_config) = config.revolt {
+    for rv_config in config.revolt.iter() {
         if let Some(token) = read_token(&rv_config.bot_token_env, "Revolt") {
             let adapter = Arc::new(RevoltAdapter::new(token));
-            adapters.push((adapter, rv_config.default_agent.clone()));
+            adapters.push((adapter, rv_config.default_agent.clone(), rv_config.account_id.clone()));
         }
     }
 
     // WeCom/WeChat Work
     #[cfg(feature = "channel-wecom")]
-    if let Some(ref wc_config) = config.wecom {
+    for wc_config in config.wecom.iter() {
         if let Some(secret) = read_token(&wc_config.secret_env, "WeCom") {
             let adapter = Arc::new(WeComAdapter::with_verification(
                 wc_config.corp_id.clone(),
@@ -1503,7 +1509,7 @@ pub async fn start_channel_bridge_with_config(
                 wc_config.encoding_aes_key.clone(),
                 wc_config.token.clone(),
             ));
-            adapters.push((adapter, wc_config.default_agent.clone()));
+            adapters.push((adapter, wc_config.default_agent.clone(), wc_config.account_id.clone()));
         }
     }
 
@@ -1511,98 +1517,98 @@ pub async fn start_channel_bridge_with_config(
 
     // Nextcloud Talk
     #[cfg(feature = "channel-nextcloud")]
-    if let Some(ref nc_config) = config.nextcloud {
+    for nc_config in config.nextcloud.iter() {
         if let Some(token) = read_token(&nc_config.token_env, "Nextcloud") {
             let adapter = Arc::new(NextcloudAdapter::new(
                 nc_config.server_url.clone(),
                 token,
                 nc_config.allowed_rooms.clone(),
             ));
-            adapters.push((adapter, nc_config.default_agent.clone()));
+            adapters.push((adapter, nc_config.default_agent.clone(), nc_config.account_id.clone()));
         }
     }
 
     // Guilded
     #[cfg(feature = "channel-guilded")]
-    if let Some(ref gd_config) = config.guilded {
+    for gd_config in config.guilded.iter() {
         if let Some(token) = read_token(&gd_config.bot_token_env, "Guilded") {
             let adapter = Arc::new(GuildedAdapter::new(token, gd_config.server_ids.clone()));
-            adapters.push((adapter, gd_config.default_agent.clone()));
+            adapters.push((adapter, gd_config.default_agent.clone(), gd_config.account_id.clone()));
         }
     }
 
     // Keybase
     #[cfg(feature = "channel-keybase")]
-    if let Some(ref kb_config) = config.keybase {
+    for kb_config in config.keybase.iter() {
         if let Some(paperkey) = read_token(&kb_config.paperkey_env, "Keybase") {
             let adapter = Arc::new(KeybaseAdapter::new(
                 kb_config.username.clone(),
                 paperkey,
                 kb_config.allowed_teams.clone(),
             ));
-            adapters.push((adapter, kb_config.default_agent.clone()));
+            adapters.push((adapter, kb_config.default_agent.clone(), kb_config.account_id.clone()));
         }
     }
 
     // Threema
     #[cfg(feature = "channel-threema")]
-    if let Some(ref tm_config) = config.threema {
+    for tm_config in config.threema.iter() {
         if let Some(secret) = read_token(&tm_config.secret_env, "Threema") {
             let adapter = Arc::new(ThreemaAdapter::new(
                 tm_config.threema_id.clone(),
                 secret,
                 tm_config.webhook_port,
             ));
-            adapters.push((adapter, tm_config.default_agent.clone()));
+            adapters.push((adapter, tm_config.default_agent.clone(), tm_config.account_id.clone()));
         }
     }
 
     // Nostr
     #[cfg(feature = "channel-nostr")]
-    if let Some(ref ns_config) = config.nostr {
+    for ns_config in config.nostr.iter() {
         if let Some(key) = read_token(&ns_config.private_key_env, "Nostr") {
             let adapter = Arc::new(NostrAdapter::new(key, ns_config.relays.clone()));
-            adapters.push((adapter, ns_config.default_agent.clone()));
+            adapters.push((adapter, ns_config.default_agent.clone(), ns_config.account_id.clone()));
         }
     }
 
     // Webex
     #[cfg(feature = "channel-webex")]
-    if let Some(ref wx_config) = config.webex {
+    for wx_config in config.webex.iter() {
         if let Some(token) = read_token(&wx_config.bot_token_env, "Webex") {
             let adapter = Arc::new(WebexAdapter::new(token, wx_config.allowed_rooms.clone()));
-            adapters.push((adapter, wx_config.default_agent.clone()));
+            adapters.push((adapter, wx_config.default_agent.clone(), wx_config.account_id.clone()));
         }
     }
 
     // Pumble
     #[cfg(feature = "channel-pumble")]
-    if let Some(ref pb_config) = config.pumble {
+    for pb_config in config.pumble.iter() {
         if let Some(token) = read_token(&pb_config.bot_token_env, "Pumble") {
             let adapter = Arc::new(PumbleAdapter::new(token, pb_config.webhook_port));
-            adapters.push((adapter, pb_config.default_agent.clone()));
+            adapters.push((adapter, pb_config.default_agent.clone(), pb_config.account_id.clone()));
         }
     }
 
     // Flock
     #[cfg(feature = "channel-flock")]
-    if let Some(ref fl_config) = config.flock {
+    for fl_config in config.flock.iter() {
         if let Some(token) = read_token(&fl_config.bot_token_env, "Flock") {
             let adapter = Arc::new(FlockAdapter::new(token, fl_config.webhook_port));
-            adapters.push((adapter, fl_config.default_agent.clone()));
+            adapters.push((adapter, fl_config.default_agent.clone(), fl_config.account_id.clone()));
         }
     }
 
     // Twist
     #[cfg(feature = "channel-twist")]
-    if let Some(ref tw_config) = config.twist {
+    for tw_config in config.twist.iter() {
         if let Some(token) = read_token(&tw_config.token_env, "Twist") {
             let adapter = Arc::new(TwistAdapter::new(
                 token,
                 tw_config.workspace_id.clone(),
                 tw_config.allowed_channels.clone(),
             ));
-            adapters.push((adapter, tw_config.default_agent.clone()));
+            adapters.push((adapter, tw_config.default_agent.clone(), tw_config.account_id.clone()));
         }
     }
 
@@ -1610,7 +1616,7 @@ pub async fn start_channel_bridge_with_config(
 
     // Mumble
     #[cfg(feature = "channel-mumble")]
-    if let Some(ref mb_config) = config.mumble {
+    for mb_config in config.mumble.iter() {
         if let Some(password) = read_token(&mb_config.password_env, "Mumble") {
             let adapter = Arc::new(MumbleAdapter::new(
                 mb_config.host.clone(),
@@ -1619,36 +1625,36 @@ pub async fn start_channel_bridge_with_config(
                 mb_config.username.clone(),
                 mb_config.channel.clone(),
             ));
-            adapters.push((adapter, mb_config.default_agent.clone()));
+            adapters.push((adapter, mb_config.default_agent.clone(), mb_config.account_id.clone()));
         }
     }
 
     // DingTalk
     #[cfg(feature = "channel-dingtalk")]
-    if let Some(ref dt_config) = config.dingtalk {
+    for dt_config in config.dingtalk.iter() {
         if let Some(token) = read_token(&dt_config.access_token_env, "DingTalk") {
             let secret = read_token(&dt_config.secret_env, "DingTalk (secret)").unwrap_or_default();
             let adapter = Arc::new(DingTalkAdapter::new(token, secret, dt_config.webhook_port));
-            adapters.push((adapter, dt_config.default_agent.clone()));
+            adapters.push((adapter, dt_config.default_agent.clone(), dt_config.account_id.clone()));
         }
     }
 
     // QQ
     #[cfg(feature = "channel-qq")]
-    if let Some(ref qq_config) = config.qq {
+    for qq_config in config.qq.iter() {
         if let Some(secret) = read_token(&qq_config.app_secret_env, "QQ") {
             let adapter = Arc::new(QqAdapter::new(
                 qq_config.app_id.clone(),
                 secret,
                 qq_config.allowed_users.clone(),
             ));
-            adapters.push((adapter, qq_config.default_agent.clone()));
+            adapters.push((adapter, qq_config.default_agent.clone(), qq_config.account_id.clone()));
         }
     }
 
     // Discourse
     #[cfg(feature = "channel-discourse")]
-    if let Some(ref dc_config) = config.discourse {
+    for dc_config in config.discourse.iter() {
         if let Some(api_key) = read_token(&dc_config.api_key_env, "Discourse") {
             let adapter = Arc::new(DiscourseAdapter::new(
                 dc_config.base_url.clone(),
@@ -1656,22 +1662,22 @@ pub async fn start_channel_bridge_with_config(
                 dc_config.api_username.clone(),
                 dc_config.categories.clone(),
             ));
-            adapters.push((adapter, dc_config.default_agent.clone()));
+            adapters.push((adapter, dc_config.default_agent.clone(), dc_config.account_id.clone()));
         }
     }
 
     // Gitter
     #[cfg(feature = "channel-gitter")]
-    if let Some(ref gt_config) = config.gitter {
+    for gt_config in config.gitter.iter() {
         if let Some(token) = read_token(&gt_config.token_env, "Gitter") {
             let adapter = Arc::new(GitterAdapter::new(token, gt_config.room_id.clone()));
-            adapters.push((adapter, gt_config.default_agent.clone()));
+            adapters.push((adapter, gt_config.default_agent.clone(), gt_config.account_id.clone()));
         }
     }
 
     // ntfy
     #[cfg(feature = "channel-ntfy")]
-    if let Some(ref nf_config) = config.ntfy {
+    for nf_config in config.ntfy.iter() {
         let token = if nf_config.token_env.is_empty() {
             String::new()
         } else {
@@ -1682,12 +1688,12 @@ pub async fn start_channel_bridge_with_config(
             nf_config.topic.clone(),
             token,
         ));
-        adapters.push((adapter, nf_config.default_agent.clone()));
+        adapters.push((adapter, nf_config.default_agent.clone(), nf_config.account_id.clone()));
     }
 
     // Gotify
     #[cfg(feature = "channel-gotify")]
-    if let Some(ref gf_config) = config.gotify {
+    for gf_config in config.gotify.iter() {
         if let Some(app_token) = read_token(&gf_config.app_token_env, "Gotify (app)") {
             let client_token =
                 read_token(&gf_config.client_token_env, "Gotify (client)").unwrap_or_default();
@@ -1696,32 +1702,32 @@ pub async fn start_channel_bridge_with_config(
                 app_token,
                 client_token,
             ));
-            adapters.push((adapter, gf_config.default_agent.clone()));
+            adapters.push((adapter, gf_config.default_agent.clone(), gf_config.account_id.clone()));
         }
     }
 
     // Webhook
     #[cfg(feature = "channel-webhook")]
-    if let Some(ref wh_config) = config.webhook {
+    for wh_config in config.webhook.iter() {
         if let Some(secret) = read_token(&wh_config.secret_env, "Webhook") {
             let adapter = Arc::new(WebhookAdapter::new(
                 secret,
                 wh_config.listen_port,
                 wh_config.callback_url.clone(),
             ));
-            adapters.push((adapter, wh_config.default_agent.clone()));
+            adapters.push((adapter, wh_config.default_agent.clone(), wh_config.account_id.clone()));
         }
     }
 
     // LinkedIn
     #[cfg(feature = "channel-linkedin")]
-    if let Some(ref li_config) = config.linkedin {
+    for li_config in config.linkedin.iter() {
         if let Some(token) = read_token(&li_config.access_token_env, "LinkedIn") {
             let adapter = Arc::new(LinkedInAdapter::new(
                 token,
                 li_config.organization_id.clone(),
             ));
-            adapters.push((adapter, li_config.default_agent.clone()));
+            adapters.push((adapter, li_config.default_agent.clone(), li_config.account_id.clone()));
         }
     }
 
@@ -1733,7 +1739,7 @@ pub async fn start_channel_bridge_with_config(
             "Registering sidecar channel adapter"
         );
         let adapter = Arc::new(SidecarAdapter::new(sidecar_config));
-        adapters.push((adapter, None));
+        adapters.push((adapter, None, None));
     }
 
     if adapters.is_empty() {
@@ -1743,7 +1749,7 @@ pub async fn start_channel_bridge_with_config(
     // Resolve per-channel default agents AND set the first one as system-wide fallback
     let mut router = AgentRouter::new();
     let mut system_default_set = false;
-    for (adapter, default_agent) in &adapters {
+    for (adapter, default_agent, account_id) in &adapters {
         if let Some(ref name) = default_agent {
             // Resolve agent name to ID
             let agent_id = match handle.find_agent_by_name(name).await {
@@ -1761,8 +1767,11 @@ pub async fn start_channel_bridge_with_config(
                 },
             };
             if let Some(agent_id) = agent_id {
-                // Register per-channel default
-                let channel_key = format!("{:?}", adapter.channel_type());
+                // Use account_id-qualified channel key for multi-bot routing
+                let channel_key = match account_id {
+                    Some(aid) => format!("{:?}:{}", adapter.channel_type(), aid),
+                    None => format!("{:?}", adapter.channel_type()),
+                };
                 info!(
                     "{} default agent: {name} ({agent_id}) [channel: {channel_key}]",
                     adapter.name()
@@ -1797,7 +1806,7 @@ pub async fn start_channel_bridge_with_config(
     let mut manager = BridgeManager::new(bridge_handle, router);
 
     let mut started_names = Vec::new();
-    for (adapter, _) in adapters {
+    for (adapter, _, _account_id) in adapters {
         let name = adapter.name().to_string();
         // Register adapter in kernel so agents can use `channel_send` tool
         kernel

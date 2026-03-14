@@ -348,7 +348,7 @@ impl AgentRouter {
 }
 
 /// Convert ChannelType to lowercase string for binding matching.
-fn channel_type_to_str(ct: &ChannelType) -> &str {
+pub fn channel_type_to_str(ct: &ChannelType) -> &str {
     match ct {
         ChannelType::Telegram => "telegram",
         ChannelType::Discord => "discord",
