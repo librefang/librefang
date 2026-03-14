@@ -46,6 +46,8 @@ pub mod line;
 pub mod linkedin;
 #[cfg(feature = "channel-mastodon")]
 pub mod mastodon;
+#[cfg(feature = "channel-matrix")]
+pub mod matrix;
 #[cfg(feature = "channel-mattermost")]
 pub mod mattermost;
 #[cfg(feature = "channel-messenger")]
