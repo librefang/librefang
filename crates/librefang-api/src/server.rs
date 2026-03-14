@@ -733,6 +733,7 @@ pub async fn build_router(
             api_key,
             middleware::auth,
         ))
+        .layer(axum::middleware::from_fn(middleware::accept_language))
         .layer(axum::middleware::from_fn_with_state(
             gcra_limiter,
             rate_limiter::gcra_rate_limit,

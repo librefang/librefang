@@ -3558,6 +3558,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -3846,6 +3847,7 @@ dependencies = [
  "chrono",
  "dirs 6.0.0",
  "ed25519-dalek",
+ "fluent",
  "hex",
  "rand 0.8.5",
  "rmp-serde",
@@ -3854,6 +3856,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "toml 1.0.6+spec-1.1.0",
+ "unic-langid",
  "uuid",
 ]
 

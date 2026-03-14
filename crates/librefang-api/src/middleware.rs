@@ -4,15 +4,50 @@
 //! - Request ID generation and propagation
 //! - Per-endpoint structured request logging
 //! - In-memory rate limiting (per IP)
+//! - Accept-Language header parsing for i18n error responses
 
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
+use librefang_types::i18n;
 use std::time::Instant;
 use tracing::info;
 
 /// Request ID header name (standard).
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// Resolved language code extracted from the `Accept-Language` header.
+///
+/// Inserted into request extensions by the [`accept_language`] middleware so
+/// that downstream route handlers can produce localized error messages.
+#[derive(Clone, Debug)]
+pub struct RequestLanguage(pub &'static str);
+
+/// Middleware: parse `Accept-Language` header and store the resolved language
+/// in request extensions for downstream handlers.
+///
+/// Also sets the `Content-Language` response header to indicate which language
+/// was used.
+pub async fn accept_language(mut request: Request<Body>, next: Next) -> Response<Body> {
+    let lang = request
+        .headers()
+        .get("accept-language")
+        .and_then(|v| v.to_str().ok())
+        .map(i18n::parse_accept_language)
+        .unwrap_or(i18n::DEFAULT_LANGUAGE);
+
+    request.extensions_mut().insert(RequestLanguage(lang));
+
+    let mut response = next.run(request).await;
+
+    if let Ok(header_val) = lang.parse() {
+        response
+            .headers_mut()
+            .insert("content-language", header_val);
+    }
+
+    response
+}
 
 /// Middleware: inject a unique request ID and log the request/response.
 pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Body> {
@@ -173,16 +208,25 @@ pub async fn auth(
     }
 
     // Determine error message: was a credential provided but wrong, or missing entirely?
+    // Use the request language (set by accept_language middleware) for i18n.
+    let lang = request
+        .extensions()
+        .get::<RequestLanguage>()
+        .map(|rl| rl.0)
+        .unwrap_or(i18n::DEFAULT_LANGUAGE);
+    let translator = i18n::ErrorTranslator::new(lang);
+
     let credential_provided = header_auth.is_some() || query_auth.is_some();
     let error_msg = if credential_provided {
-        "Invalid API key"
+        translator.t("api-error-auth-invalid-key")
     } else {
-        "Missing Authorization: Bearer <api_key> header"
+        translator.t("api-error-auth-missing-header")
     };
 
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header("www-authenticate", "Bearer")
+        .header("content-language", lang)
         .body(Body::from(
             serde_json::json!({"error": error_msg}).to_string(),
         ))
