@@ -4893,6 +4893,48 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse
     Json(serde_json::json!({"tools": tools, "total": tools.len()}))
 }
 
+/// GET /api/tools/:name — Get a single tool definition by name.
+pub async fn get_tool(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    // Search built-in tools first
+    for t in builtin_tool_definitions() {
+        if t.name == name {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                })),
+            );
+        }
+    }
+
+    // Search MCP tools
+    if let Ok(mcp_tools) = state.kernel.mcp_tools.lock() {
+        for t in mcp_tools.iter() {
+            if t.name == name {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.input_schema,
+                        "source": "mcp",
+                    })),
+                );
+            }
+        }
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": format!("Tool '{}' not found", name)})),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Config endpoint
 // ---------------------------------------------------------------------------
