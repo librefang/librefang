@@ -1,5 +1,5 @@
 name = "debugger"
-version = "0.4.1-20260314"
+version = "0.4.2-20260314"
 description = "Expert debugger. Traces bugs, analyzes stack traces, performs root cause analysis."
 author = "librefang"
 module = "builtin:chat"

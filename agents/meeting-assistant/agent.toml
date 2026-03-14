@@ -1,5 +1,5 @@
 name = "meeting-assistant"
-version = "0.4.1-20260314"
+version = "0.4.2-20260314"
 description = "Meeting notes, action items, agenda preparation, and follow-up tracking agent."
 author = "librefang"
 module = "builtin:chat"

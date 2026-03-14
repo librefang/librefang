@@ -1,5 +1,5 @@
 name = "ops"
-version = "0.4.1-20260314"
+version = "0.4.2-20260314"
 description = "DevOps agent. Monitors systems, runs diagnostics, manages deployments."
 author = "librefang"
 module = "builtin:chat"

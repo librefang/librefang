@@ -1,5 +1,5 @@
 name = "devops-lead"
-version = "0.4.1-20260314"
+version = "0.4.2-20260314"
 description = "DevOps lead. Manages CI/CD, infrastructure, deployments, monitoring, and incident response."
 author = "librefang"
 module = "builtin:chat"

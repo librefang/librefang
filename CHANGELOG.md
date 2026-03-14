@@ -18,6 +18,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Revert file versions to 0.4.1-20260314 and fix release.sh (#243) (@houko)
+- Release script uses PR instead of direct push (#242) (@houko)
+- Daemon env vars, MCP probe, and SSE parsing (#211) (@houko)
+
+### Changed
+
+- Replace hardcoded model catalog with include_str TOML (#235) (@houko)
+- Replace provider match with static registry (#224) (@houko)
+
+### Documentation
+
+- Add integration test writing guide to CONTRIBUTING.md (#232) (@houko)
+- Add channel adapter contribution example (#231) (@houko)
+
+### Maintenance
+
+- Bump version to v0.4.2-20260314 (#241) (@houko)
+- Trigger deploy worker auto-deploy (#239) (@houko)
+- Add pre-commit hooks and i18n contribution guide (#233) (@houko)
+- Add justfile for unified dev commands (#230) (@houko)
+- Upgrade GitHub Actions for Node.js 24 compatibility (#229) (@houko)
+
+## [0.4.2] - 2026-03-14
+
+### Added
+
+- Add CLI deploy command and FAQ to deploy page (#238) (@houko)
+- Auto-sync model catalog on daemon startup (#237) (@houko)
+- Add channel sidecar protocol for external adapters (#228) (@houko)
+- Integrate model-catalog sync with dashboard UI (#227) (@houko)
+- Add cargo feature flags for channel adapters (#223) (@houko)
+- Improve community organization and version governance (#212) (@houko)
+
+### Fixed
+
 - Daemon env vars, MCP probe, and SSE parsing (#211) (@houko)
 
 ### Changed
