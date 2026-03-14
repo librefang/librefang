@@ -27,6 +27,7 @@ jobs:
             ci
             chore
             revert
+            release
           # Allow scope like feat(cli): or fix(kernel):
           requireScope: false
           # Enforce lowercase after prefix
@@ -42,4 +43,4 @@ jobs:
               docs: update CONTRIBUTING.md
               chore(deps): bump clap to 4.6.0
 
-            Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert
+            Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert, release
