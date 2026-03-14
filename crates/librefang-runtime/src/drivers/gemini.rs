@@ -45,7 +45,7 @@ impl GeminiDriver {
 /// Top-level Gemini API request body.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiRequest {
+pub(crate) struct GeminiRequest {
     contents: Vec<GeminiContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     system_instruction: Option<GeminiContent>,
@@ -57,7 +57,7 @@ struct GeminiRequest {
 
 /// A content entry (user/model turn).
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct GeminiContent {
+pub(crate) struct GeminiContent {
     #[serde(skip_serializing_if = "Option::is_none")]
     role: Option<String>,
     parts: Vec<GeminiPart>,
@@ -128,7 +128,7 @@ struct GeminiFunctionResponseData {
 /// Tool configuration containing function declarations.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GeminiToolConfig {
+pub(crate) struct GeminiToolConfig {
     function_declarations: Vec<GeminiFunctionDeclaration>,
 }
 
@@ -143,7 +143,7 @@ struct GeminiFunctionDeclaration {
 /// Generation configuration (temperature, max tokens, etc.).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct GenerationConfig {
+pub(crate) struct GenerationConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -196,7 +196,7 @@ struct GeminiErrorDetail {
 }
 
 /// Parse a Gemini error response body, handling multiple Google API error formats.
-fn parse_gemini_error(body: &str) -> String {
+pub(crate) fn parse_gemini_error(body: &str) -> String {
     if let Ok(e) = serde_json::from_str::<GeminiErrorResponse>(body) {
         let mut msg = e.error.message;
         if let Some(status) = e.error.status {
@@ -215,7 +215,7 @@ fn parse_gemini_error(body: &str) -> String {
 // ── Message conversion ─────────────────────────────────────────────────
 
 /// Convert LibreFang messages into Gemini content entries.
-fn convert_messages(
+pub(crate) fn convert_messages(
     messages: &[Message],
     system: &Option<String>,
 ) -> (Vec<GeminiContent>, Option<GeminiContent>) {
@@ -351,7 +351,7 @@ fn extract_system(messages: &[Message], system: &Option<String>) -> Option<Gemin
 }
 
 /// Convert tool definitions to Gemini function declarations.
-fn convert_tools(request: &CompletionRequest) -> Vec<GeminiToolConfig> {
+pub(crate) fn convert_tools(request: &CompletionRequest) -> Vec<GeminiToolConfig> {
     if request.tools.is_empty() {
         return Vec::new();
     }
@@ -464,6 +464,193 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
             output_tokens: u.candidates_token_count,
         })
         .unwrap_or_default();
+
+    Ok(CompletionResponse {
+        content,
+        stop_reason,
+        tool_calls,
+        usage,
+    })
+}
+
+// ── Shared helpers (used by both Gemini and Vertex AI drivers) ────────
+
+/// Build a Gemini API request body.
+pub(crate) fn build_request(
+    contents: Vec<GeminiContent>,
+    system_instruction: Option<GeminiContent>,
+    tools: Vec<GeminiToolConfig>,
+    temperature: Option<f32>,
+    max_output_tokens: Option<u32>,
+) -> GeminiRequest {
+    GeminiRequest {
+        contents,
+        system_instruction,
+        tools,
+        generation_config: Some(GenerationConfig {
+            temperature,
+            max_output_tokens,
+        }),
+    }
+}
+
+/// Parse a JSON response body and convert to CompletionResponse.
+pub(crate) fn parse_and_convert_response(body: &str) -> Result<CompletionResponse, LlmError> {
+    let gemini_response: GeminiResponse =
+        serde_json::from_str(body).map_err(|e| LlmError::Parse(e.to_string()))?;
+    convert_response(gemini_response)
+}
+
+/// Stream a Gemini-format SSE response, sending events to the channel.
+pub(crate) async fn stream_gemini_sse(
+    resp: reqwest::Response,
+    tx: tokio::sync::mpsc::Sender<StreamEvent>,
+) -> Result<CompletionResponse, LlmError> {
+    use futures::StreamExt;
+    use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
+
+    let mut buffer = String::new();
+    let mut text_content = String::new();
+    let mut text_thought_sig: Option<String> = None;
+    let mut fn_calls: Vec<(String, serde_json::Value, Option<String>)> = Vec::new();
+    let mut finish_reason: Option<String> = None;
+    let mut usage = TokenUsage::default();
+
+    let mut byte_stream = resp.bytes_stream();
+    while let Some(chunk_result) = byte_stream.next().await {
+        let chunk = chunk_result.map_err(|e| LlmError::Http(e.to_string()))?;
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        while let Some(pos) = buffer.find("\n\n") {
+            let event_text = buffer[..pos].to_string();
+            buffer = buffer[pos + 2..].to_string();
+
+            let data = event_text
+                .lines()
+                .find_map(|line| line.strip_prefix("data:").map(|d| d.trim_start()))
+                .unwrap_or("");
+
+            if data.is_empty() {
+                continue;
+            }
+
+            let json: GeminiResponse = match serde_json::from_str(data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if let Some(ref u) = json.usage_metadata {
+                usage.input_tokens = u.prompt_token_count;
+                usage.output_tokens = u.candidates_token_count;
+            }
+
+            for candidate in &json.candidates {
+                if let Some(fr) = &candidate.finish_reason {
+                    finish_reason = Some(fr.clone());
+                }
+
+                if let Some(ref content) = candidate.content {
+                    for part in &content.parts {
+                        match part {
+                            GeminiPart::Text {
+                                text,
+                                thought_signature,
+                            } => {
+                                if !text.is_empty() {
+                                    text_content.push_str(text);
+                                    let _ = tx
+                                        .send(StreamEvent::TextDelta { text: text.clone() })
+                                        .await;
+                                }
+                                if thought_signature.is_some() {
+                                    text_thought_sig = thought_signature.clone();
+                                }
+                            }
+                            GeminiPart::FunctionCall {
+                                function_call,
+                                thought_signature,
+                            } => {
+                                let id = format!("call_{}", uuid::Uuid::new_v4().simple());
+                                let _ = tx
+                                    .send(StreamEvent::ToolUseStart {
+                                        id: id.clone(),
+                                        name: function_call.name.clone(),
+                                    })
+                                    .await;
+                                let args_str =
+                                    serde_json::to_string(&function_call.args).unwrap_or_default();
+                                let _ = tx
+                                    .send(StreamEvent::ToolInputDelta { text: args_str })
+                                    .await;
+                                let _ = tx
+                                    .send(StreamEvent::ToolUseEnd {
+                                        id,
+                                        name: function_call.name.clone(),
+                                        input: function_call.args.clone(),
+                                    })
+                                    .await;
+                                fn_calls.push((
+                                    function_call.name.clone(),
+                                    function_call.args.clone(),
+                                    thought_signature.clone(),
+                                ));
+                            }
+                            GeminiPart::InlineData { .. } | GeminiPart::FunctionResponse { .. } => {
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build final response
+    let mut content = Vec::new();
+    let mut tool_calls = Vec::new();
+
+    if !text_content.is_empty() {
+        let provider_metadata =
+            text_thought_sig.map(|sig| serde_json::json!({ "thought_signature": sig }));
+        content.push(ContentBlock::Text {
+            text: text_content,
+            provider_metadata,
+        });
+    }
+
+    for (name, args, thought_sig) in fn_calls {
+        let id = format!("call_{}", uuid::Uuid::new_v4().simple());
+        let provider_metadata = thought_sig
+            .as_ref()
+            .map(|sig| serde_json::json!({ "thought_signature": sig }));
+        content.push(ContentBlock::ToolUse {
+            id: id.clone(),
+            name: name.clone(),
+            input: args.clone(),
+            provider_metadata,
+        });
+        tool_calls.push(librefang_types::tool::ToolCall {
+            id,
+            name,
+            input: args,
+        });
+    }
+
+    let stop_reason = match finish_reason.as_deref() {
+        Some("STOP") => StopReason::EndTurn,
+        Some("MAX_TOKENS") => StopReason::MaxTokens,
+        Some("SAFETY") => StopReason::EndTurn,
+        _ => {
+            if !tool_calls.is_empty() {
+                StopReason::ToolUse
+            } else {
+                StopReason::EndTurn
+            }
+        }
+    };
+
+    let _ = tx
+        .send(StreamEvent::ContentComplete { stop_reason, usage })
+        .await;
 
     Ok(CompletionResponse {
         content,

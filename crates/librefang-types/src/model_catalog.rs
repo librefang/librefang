@@ -60,6 +60,9 @@ pub const CHATGPT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 // ── AWS Bedrock ───────────────────────────────────────────────────
 pub const BEDROCK_BASE_URL: &str = "https://bedrock-runtime.us-east-1.amazonaws.com";
 
+// ── Google Cloud Vertex AI ───────────────────────────────────────
+pub const VERTEX_AI_BASE_URL: &str = "https://us-central1-aiplatform.googleapis.com";
+
 /// A model's capability tier.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
