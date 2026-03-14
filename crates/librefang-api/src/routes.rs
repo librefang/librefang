@@ -1159,7 +1159,7 @@ pub async fn set_agent_mode(
 // Version endpoint
 // ---------------------------------------------------------------------------
 
-/// GET /api/version — Build & version info.
+/// GET /api/version — Build & version info (includes API versioning).
 pub async fn version() -> impl IntoResponse {
     Json(serde_json::json!({
         "name": "librefang",
@@ -1169,6 +1169,11 @@ pub async fn version() -> impl IntoResponse {
         "rust_version": option_env!("RUSTC_VERSION").unwrap_or("unknown"),
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
+        "api": {
+            "current": crate::versioning::CURRENT_VERSION,
+            "supported": crate::versioning::SUPPORTED_VERSIONS,
+            "deprecated": crate::versioning::DEPRECATED_VERSIONS,
+        },
     }))
 }
 
@@ -1176,9 +1181,15 @@ pub async fn version() -> impl IntoResponse {
 // API versioning
 // ---------------------------------------------------------------------------
 
-/// GET /api/versions — List available API versions and their status.
+/// GET /api/versions — API version discovery endpoint.
+///
+/// Returns the current version, all supported versions, deprecated versions,
+/// and content-negotiation hints so clients can adapt automatically.
 pub async fn api_versions() -> impl IntoResponse {
-    let versions: Vec<serde_json::Value> = crate::server::API_VERSIONS
+    let supported: Vec<&str> = crate::versioning::SUPPORTED_VERSIONS.to_vec();
+    let deprecated: Vec<&str> = crate::versioning::DEPRECATED_VERSIONS.to_vec();
+
+    let details: Vec<serde_json::Value> = crate::server::API_VERSIONS
         .iter()
         .map(|(ver, status)| {
             serde_json::json!({
@@ -1190,8 +1201,10 @@ pub async fn api_versions() -> impl IntoResponse {
         .collect();
 
     Json(serde_json::json!({
-        "latest": crate::server::API_VERSION_LATEST,
-        "versions": versions,
+        "current": crate::versioning::CURRENT_VERSION,
+        "supported": supported,
+        "deprecated": deprecated,
+        "details": details,
         "negotiation": {
             "header": "Accept",
             "media_type_pattern": "application/vnd.librefang.<version>+json",
@@ -1200,7 +1213,6 @@ pub async fn api_versions() -> impl IntoResponse {
     }))
 }
 
-// ---------------------------------------------------------------------------
 // Single agent detail + SSE streaming
 // ---------------------------------------------------------------------------
 
@@ -7088,6 +7100,7 @@ pub async fn a2a_get_external_agent(
         Json(serde_json::json!({"error": format!("A2A agent '{}' not found", id)})),
     )
 }
+
 /// POST /api/a2a/discover — Discover a new external A2A agent by URL.
 pub async fn a2a_discover_external(
     State(state): State<Arc<AppState>>,
