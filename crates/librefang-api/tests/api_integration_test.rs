@@ -78,6 +78,9 @@ async fn start_test_server_with_provider(
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(
+            std::env::temp_dir().join("test_webhooks.json"),
+        ),
     });
 
     let app = Router::new()
@@ -709,6 +712,9 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(
+            std::env::temp_dir().join("test_webhooks.json"),
+        ),
     });
 
     let api_key_state = state.kernel.config.api_key.clone();

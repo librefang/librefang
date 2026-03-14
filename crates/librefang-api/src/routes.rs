@@ -41,6 +41,8 @@ pub struct AppState {
     /// Avoids blocking the `/api/providers` endpoint on TCP timeouts to
     /// unreachable local services. 60-second TTL.
     pub provider_probe_cache: librefang_runtime::provider_health::ProbeCache,
+    /// Webhook subscription store for outbound event notifications.
+    pub webhook_store: crate::webhook_store::WebhookStore,
 }
 
 /// POST /api/agents — Spawn a new agent.
@@ -11330,4 +11332,154 @@ pub async fn catalog_status() -> impl IntoResponse {
     Json(serde_json::json!({
         "last_sync": last_sync,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Webhook management endpoints (outbound subscriptions)
+// ---------------------------------------------------------------------------
+
+/// GET /api/webhooks — List all webhook subscriptions.
+pub async fn list_webhooks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let webhooks = state.webhook_store.list();
+    let total = webhooks.len();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"webhooks": webhooks, "total": total})),
+    )
+}
+
+/// POST /api/webhooks — Create a new webhook subscription.
+pub async fn create_webhook(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::webhook_store::CreateWebhookRequest>,
+) -> impl IntoResponse {
+    match state.webhook_store.create(req) {
+        Ok(webhook) => (
+            StatusCode::CREATED,
+            Json(serde_json::to_value(&webhook).unwrap_or_default()),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// PUT /api/webhooks/{id} — Update a webhook subscription.
+pub async fn update_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::webhook_store::UpdateWebhookRequest>,
+) -> impl IntoResponse {
+    match uuid::Uuid::parse_str(&id) {
+        Ok(uuid) => {
+            let wh_id = crate::webhook_store::WebhookId(uuid);
+            match state.webhook_store.update(wh_id, req) {
+                Ok(webhook) => (
+                    StatusCode::OK,
+                    Json(serde_json::to_value(&webhook).unwrap_or_default()),
+                ),
+                Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))),
+            }
+        }
+        Err(_) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid webhook ID"})),
+        ),
+    }
+}
+
+/// DELETE /api/webhooks/{id} — Delete a webhook subscription.
+pub async fn delete_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match uuid::Uuid::parse_str(&id) {
+        Ok(uuid) => {
+            let wh_id = crate::webhook_store::WebhookId(uuid);
+            if state.webhook_store.delete(wh_id) {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"status": "deleted"})),
+                )
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "Webhook not found"})),
+                )
+            }
+        }
+        Err(_) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid webhook ID"})),
+        ),
+    }
+}
+
+/// POST /api/webhooks/{id}/test — Send a test event to a webhook.
+pub async fn test_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let wh_id = match uuid::Uuid::parse_str(&id) {
+        Ok(uuid) => crate::webhook_store::WebhookId(uuid),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid webhook ID"})),
+            );
+        }
+    };
+
+    let webhook = match state.webhook_store.get(wh_id) {
+        Some(w) => w,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Webhook not found"})),
+            );
+        }
+    };
+
+    // Send a test payload to the webhook URL
+    let test_payload = serde_json::json!({
+        "event": "test",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "webhook_id": webhook.id.to_string(),
+        "message": "This is a test event from LibreFang.",
+    });
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+
+    match client
+        .post(&webhook.url)
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "LibreFang-Webhook/1.0")
+        .json(&test_payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "sent",
+                    "response_status": status,
+                    "webhook_id": id,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!("Failed to reach webhook URL: {e}"),
+                "webhook_id": id,
+            })),
+        ),
+    }
 }

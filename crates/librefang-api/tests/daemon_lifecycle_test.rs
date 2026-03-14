@@ -115,6 +115,9 @@ async fn test_full_daemon_lifecycle() {
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(
+            std::env::temp_dir().join("test_webhooks.json"),
+        ),
     });
 
     let app = Router::new()
@@ -240,6 +243,9 @@ async fn test_server_immediate_responsiveness() {
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(
+            std::env::temp_dir().join("test_webhooks.json"),
+        ),
     });
 
     let app = Router::new()
