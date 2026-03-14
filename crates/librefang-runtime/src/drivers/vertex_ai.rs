@@ -2,23 +2,24 @@
 //!
 //! Uses the same Gemini generateContent API format but authenticates via
 //! Google Cloud OAuth2 (service account JSON key or Application Default
-//! Credentials) instead of API keys.
+//! Credentials via gcloud CLI) instead of API keys.
+//!
+//! Endpoint format:
+//! ```text
+//! https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google/models/{model}:generateContent
+//! ```
+//!
+//! Token acquisition supports two methods:
+//! 1. **Service account JSON** — reads the key file and exchanges a JWT for a token
+//! 2. **gcloud CLI** — runs `gcloud auth print-access-token` (fallback default)
+//!
+//! Tokens are cached with a ~50 minute TTL and auto-refreshed before expiry.
 
+use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-
-use crate::llm_driver::{
-    CompletionRequest, CompletionResponse, DriverConfig, LlmDriver, LlmError, StreamEvent,
-};
-
-/// Vertex AI LLM driver.
-pub struct VertexAiDriver {
-    project_id: String,
-    region: String,
-    token_manager: Arc<RwLock<TokenManager>>,
-    client: reqwest::Client,
-}
+use tracing::debug;
 
 // ─── OAuth2 token management ────────────────────────────────────────
 
@@ -296,7 +297,6 @@ fn asn1_read_content(data: &[u8]) -> Result<(&[u8], &[u8]), String> {
         }
         (len, 1 + num_bytes)
     };
-
     if data.len() < offset + len {
         return Err("ASN.1 content exceeds available data".into());
     }
@@ -543,20 +543,44 @@ impl BigUint {
     }
 }
 
-// ─── Driver construction ────────────────────────────────────────────
+// ─── Vertex AI driver ───────────────────────────────────────────────
+
+/// Vertex AI LLM driver.
+pub struct VertexAiDriver {
+    project_id: String,
+    region: String,
+    token_manager: Arc<RwLock<TokenManager>>,
+    client: reqwest::Client,
+}
 
 impl VertexAiDriver {
     /// Create a new Vertex AI driver.
-    pub fn new(config: &DriverConfig) -> Result<Self, LlmError> {
-        let credential_source = resolve_credentials(config)?;
-        let project_id = resolve_project_id(config, &credential_source)?;
-        let region = resolve_region(config);
+    ///
+    /// - `project_id` — GCP project ID.  Falls back to `VERTEX_AI_PROJECT_ID`,
+    ///   `GOOGLE_CLOUD_PROJECT`, `GCLOUD_PROJECT`, or the service account's
+    ///   `project_id` field.
+    /// - `region` — GCP region.  Falls back to `VERTEX_AI_REGION`,
+    ///   `GOOGLE_CLOUD_REGION`, or `"us-central1"`.
+    /// - `credentials` — Either inline service account JSON, a file path to
+    ///   one, or `None` to fall back to `GOOGLE_APPLICATION_CREDENTIALS` env
+    ///   var or gcloud CLI.
+    pub fn new(
+        project_id: Option<String>,
+        region: Option<String>,
+        credentials: Option<String>,
+    ) -> Result<Self, String> {
+        let credential_source = resolve_credentials(credentials)?;
+        let project_id = resolve_project_id(project_id, &credential_source)?;
+        let region = resolve_region(region);
 
         Ok(Self {
             project_id,
             region,
             token_manager: Arc::new(RwLock::new(TokenManager::new(credential_source))),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .user_agent(crate::USER_AGENT)
+                .build()
+                .unwrap_or_default(),
         })
     }
 
@@ -579,18 +603,18 @@ impl VertexAiDriver {
     }
 }
 
-fn resolve_credentials(config: &DriverConfig) -> Result<CredentialSource, LlmError> {
-    // 1. Explicit API key field (may contain JSON or path).
-    if let Some(ref key) = config.api_key {
-        if !key.is_empty() {
+fn resolve_credentials(credentials: Option<String>) -> Result<CredentialSource, String> {
+    // 1. Explicit credentials argument (may contain JSON or path).
+    if let Some(ref cred) = credentials {
+        if !cred.is_empty() {
             // Try parsing as JSON directly.
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(key) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(cred) {
                 if json.get("type").and_then(|t| t.as_str()) == Some("service_account") {
                     return Ok(CredentialSource::ServiceAccountJson(json));
                 }
             }
             // Try as a file path.
-            if let Ok(contents) = std::fs::read_to_string(key) {
+            if let Ok(contents) = std::fs::read_to_string(cred) {
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&contents) {
                     if json.get("type").and_then(|t| t.as_str()) == Some("service_account") {
                         return Ok(CredentialSource::ServiceAccountJson(json));
@@ -621,9 +645,16 @@ fn resolve_credentials(config: &DriverConfig) -> Result<CredentialSource, LlmErr
 }
 
 fn resolve_project_id(
-    config: &DriverConfig,
+    explicit: Option<String>,
     credential_source: &CredentialSource,
-) -> Result<String, LlmError> {
+) -> Result<String, String> {
+    // Explicit argument.
+    if let Some(ref id) = explicit {
+        if !id.is_empty() {
+            return Ok(id.clone());
+        }
+    }
+
     // Check env vars.
     for var in [
         "VERTEX_AI_PROJECT_ID",
@@ -637,20 +668,6 @@ fn resolve_project_id(
         }
     }
 
-    // Extract from base_url if it contains a project.
-    if let Some(ref url) = config.base_url {
-        // e.g., https://us-central1-aiplatform.googleapis.com/v1/projects/my-project/...
-        if let Some(idx) = url.find("/projects/") {
-            let after = &url[idx + 10..];
-            if let Some(end) = after.find('/') {
-                let project = &after[..end];
-                if !project.is_empty() {
-                    return Ok(project.to_string());
-                }
-            }
-        }
-    }
-
     // Extract from service account JSON.
     if let CredentialSource::ServiceAccountJson(ref json) = credential_source {
         if let Some(project) = json["project_id"].as_str() {
@@ -660,34 +677,23 @@ fn resolve_project_id(
         }
     }
 
-    Err(LlmError::MissingApiKey(
-        "Vertex AI project ID not found. Set VERTEX_AI_PROJECT_ID, \
+    Err("Vertex AI project ID not found. Set VERTEX_AI_PROJECT_ID, \
          GOOGLE_CLOUD_PROJECT, or provide a service account key with project_id."
-            .into(),
-    ))
+        .to_string())
 }
 
-fn resolve_region(config: &DriverConfig) -> String {
+fn resolve_region(explicit: Option<String>) -> String {
+    if let Some(ref r) = explicit {
+        if !r.is_empty() {
+            return r.clone();
+        }
+    }
+
     // Check env vars.
     for var in ["VERTEX_AI_REGION", "GOOGLE_CLOUD_REGION"] {
         if let Ok(val) = std::env::var(var) {
             if !val.is_empty() {
                 return val;
-            }
-        }
-    }
-
-    // Extract from base_url if provided.
-    if let Some(ref url) = config.base_url {
-        // e.g., https://us-central1-aiplatform.googleapis.com/...
-        if let Some(region) = url.strip_prefix("https://").and_then(|s| {
-            s.strip_suffix("-aiplatform.googleapis.com")
-                .or_else(|| s.split("-aiplatform.googleapis.com").next())
-        }) {
-            // Only take the region part (before any path).
-            let region = region.split('/').next().unwrap_or(region);
-            if !region.is_empty() && region.contains('-') {
-                return region.to_string();
             }
         }
     }
@@ -702,17 +708,8 @@ impl LlmDriver for VertexAiDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let url = self.endpoint_url(&request.model, false);
 
-        let contents = super::gemini::convert_messages(&request);
-        let system_instruction = request
-            .system
-            .as_ref()
-            .map(|s| super::gemini::GeminiContent {
-                role: "user".to_string(),
-                parts: vec![super::gemini::GeminiPart::Text {
-                    text: s.clone(),
-                    thought_signature: None,
-                }],
-            });
+        let (contents, system_instruction) =
+            super::gemini::convert_messages(&request.messages, &request.system);
         let tools = super::gemini::convert_tools(&request);
         let body = super::gemini::build_request(
             contents,
@@ -723,12 +720,13 @@ impl LlmDriver for VertexAiDriver {
         );
 
         let mut last_error = None;
-        for attempt in 0..3 {
+        for attempt in 0..3u64 {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(500 * (1 << attempt))).await;
             }
 
             let token = self.token_manager.write().await.get_token().await?;
+            debug!(url = %url, attempt, "Sending Vertex AI request");
 
             let resp = self
                 .client
@@ -791,17 +789,8 @@ impl LlmDriver for VertexAiDriver {
     ) -> Result<CompletionResponse, LlmError> {
         let url = self.endpoint_url(&request.model, true);
 
-        let contents = super::gemini::convert_messages(&request);
-        let system_instruction = request
-            .system
-            .as_ref()
-            .map(|s| super::gemini::GeminiContent {
-                role: "user".to_string(),
-                parts: vec![super::gemini::GeminiPart::Text {
-                    text: s.clone(),
-                    thought_signature: None,
-                }],
-            });
+        let (contents, system_instruction) =
+            super::gemini::convert_messages(&request.messages, &request.system);
         let tools = super::gemini::convert_tools(&request);
         let body = super::gemini::build_request(
             contents,
@@ -812,12 +801,13 @@ impl LlmDriver for VertexAiDriver {
         );
 
         let mut last_error = None;
-        for attempt in 0..3 {
+        for attempt in 0..3u64 {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(500 * (1 << attempt))).await;
             }
 
             let token = self.token_manager.write().await.get_token().await?;
+            debug!(url = %url, attempt, "Sending Vertex AI streaming request");
 
             let resp = self
                 .client
@@ -929,15 +919,14 @@ mod tests {
 
     #[test]
     fn test_resolve_region_default() {
-        // With no env vars set, should default to us-central1.
-        let config = DriverConfig {
-            provider: "vertex-ai".to_string(),
-            api_key: None,
-            base_url: None,
-            skip_permissions: true,
-        };
-        let region = resolve_region(&config);
+        let region = resolve_region(None);
         assert_eq!(region, "us-central1");
+    }
+
+    #[test]
+    fn test_resolve_region_explicit() {
+        let region = resolve_region(Some("europe-west4".to_string()));
+        assert_eq!(region, "europe-west4");
     }
 
     #[test]
