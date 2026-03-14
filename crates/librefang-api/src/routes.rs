@@ -8978,6 +8978,16 @@ pub async fn patch_agent_config(
 #[derive(serde::Deserialize)]
 pub struct CloneAgentRequest {
     pub new_name: String,
+    /// Whether to copy skills from the source agent (default: true).
+    #[serde(default = "default_clone_true")]
+    pub include_skills: bool,
+    /// Whether to copy tools from the source agent (default: true).
+    #[serde(default = "default_clone_true")]
+    pub include_tools: bool,
+}
+
+fn default_clone_true() -> bool {
+    true
 }
 
 /// POST /api/agents/{id}/clone — Clone an agent with its workspace files.
@@ -9024,6 +9034,16 @@ pub async fn clone_agent(
     let mut cloned_manifest = source.manifest.clone();
     cloned_manifest.name = req.new_name.clone();
     cloned_manifest.workspace = None; // Let kernel assign a new workspace
+
+    // Conditionally strip skills and tools based on request flags
+    if !req.include_skills {
+        cloned_manifest.skills.clear();
+    }
+    if !req.include_tools {
+        cloned_manifest.tools.clear();
+        cloned_manifest.tool_allowlist.clear();
+        cloned_manifest.tool_blocklist.clear();
+    }
 
     // Spawn the cloned agent
     let new_id = match state.kernel.spawn_agent(cloned_manifest) {
@@ -11288,4 +11308,97 @@ pub async fn catalog_status() -> impl IntoResponse {
     Json(serde_json::json!({
         "last_sync": last_sync,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clone_request_defaults() {
+        // When include_skills/include_tools are omitted, they default to true
+        let json = r#"{"new_name": "clone-1"}"#;
+        let req: CloneAgentRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.new_name, "clone-1");
+        assert!(req.include_skills);
+        assert!(req.include_tools);
+    }
+
+    #[test]
+    fn test_clone_request_explicit_false() {
+        let json = r#"{"new_name": "clone-2", "include_skills": false, "include_tools": false}"#;
+        let req: CloneAgentRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.new_name, "clone-2");
+        assert!(!req.include_skills);
+        assert!(!req.include_tools);
+    }
+
+    #[test]
+    fn test_clone_request_partial_flags() {
+        let json = r#"{"new_name": "clone-3", "include_skills": false}"#;
+        let req: CloneAgentRequest = serde_json::from_str(json).unwrap();
+        assert!(!req.include_skills);
+        assert!(req.include_tools); // defaults to true
+
+        let json = r#"{"new_name": "clone-4", "include_tools": false}"#;
+        let req: CloneAgentRequest = serde_json::from_str(json).unwrap();
+        assert!(req.include_skills); // defaults to true
+        assert!(!req.include_tools);
+    }
+
+    #[test]
+    fn test_clone_manifest_strips_skills_when_excluded() {
+        let manifest = librefang_types::agent::AgentManifest {
+            skills: vec!["skill-a".to_string(), "skill-b".to_string()],
+            tools: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "tool-a".to_string(),
+                    librefang_types::agent::ToolConfig {
+                        params: std::collections::HashMap::new(),
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        };
+
+        // Simulate include_skills=false
+        let mut cloned = manifest.clone();
+        cloned.skills.clear();
+        assert!(cloned.skills.is_empty());
+        assert!(!cloned.tools.is_empty()); // tools untouched
+    }
+
+    #[test]
+    fn test_clone_manifest_strips_tools_when_excluded() {
+        let manifest = librefang_types::agent::AgentManifest {
+            tools: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "tool-a".to_string(),
+                    librefang_types::agent::ToolConfig {
+                        params: std::collections::HashMap::new(),
+                    },
+                );
+                m
+            },
+            tool_allowlist: vec!["allowed-tool".to_string()],
+            tool_blocklist: vec!["blocked-tool".to_string()],
+            ..Default::default()
+        };
+
+        // Simulate include_tools=false
+        let mut cloned = manifest.clone();
+        cloned.tools.clear();
+        cloned.tool_allowlist.clear();
+        cloned.tool_blocklist.clear();
+        assert!(cloned.tools.is_empty());
+        assert!(cloned.tool_allowlist.is_empty());
+        assert!(cloned.tool_blocklist.is_empty());
+    }
 }
