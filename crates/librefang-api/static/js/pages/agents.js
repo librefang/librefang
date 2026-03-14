@@ -45,6 +45,9 @@ function agentsPage() {
     filterState: 'all',
     loading: true,
     loadError: '',
+    // Default model from config (fetched in init, fallback to groq/llama)
+    _defaultProvider: 'groq',
+    _defaultModel: 'llama-3.3-70b-versatile',
     spawnForm: {
       name: '',
       provider: 'groq',
@@ -346,6 +349,22 @@ function agentsPage() {
 
     async init() {
       var self = this;
+      // Fetch default model from config so we don't hardcode it
+      try {
+        var config = await LibreFangAPI.get('/api/config');
+        if (config && config.default_model) {
+          if (config.default_model.provider) self._defaultProvider = config.default_model.provider;
+          if (config.default_model.model) self._defaultModel = config.default_model.model;
+          // Update spawnForm defaults
+          self.spawnForm.provider = self._defaultProvider;
+          self.spawnForm.model = self._defaultModel;
+          // Update builtin templates to use configured default
+          self.builtinTemplates.forEach(function(t) {
+            t.provider = self._defaultProvider;
+            t.model = self._defaultModel;
+          });
+        }
+      } catch(e) { /* use hardcoded fallbacks */ }
       window.addEventListener('i18n-changed', function(event) {
         self._currentLang = event.detail.language;
       });
@@ -491,6 +510,8 @@ function agentsPage() {
       this.selectedPreset = '';
       this.soulContent = '';
       this.spawnForm.name = '';
+      this.spawnForm.provider = this._defaultProvider;
+      this.spawnForm.model = this._defaultModel;
       this.spawnForm.systemPrompt = 'You are a helpful assistant.';
       this.spawnForm.profile = 'full';
     },
