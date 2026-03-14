@@ -264,6 +264,18 @@ MIT-Lizenz. Siehe LICENSE-Datei.
 
 ---
 
+## Mitwirkende
+
+Danke an alle, die zu LibreFang beigetragen haben!
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>
+
+> Möchtest du mitmachen? Schau dir unseren [Beitragsleitfaden](../CONTRIBUTING.md) an — für viele Aufgaben ist keine Rust-Erfahrung nötig.
+
+---
+
 <p align="center">
   <strong>In Rust gebaut. 16 Schichten Sicherheit. Agenten, die wirklich für dich arbeiten.</strong>
 </p>

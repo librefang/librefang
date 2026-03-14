@@ -264,6 +264,18 @@ MIT 许可证。详见 LICENSE 文件。
 
 ---
 
+## 贡献者
+
+感谢所有为 LibreFang 做出贡献的人！
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>
+
+> 想加入吗？查看我们的[贡献指南](../CONTRIBUTING.md) — 许多任务不需要 Rust 经验。
+
+---
+
 <p align="center">
   <strong>使用 Rust 构建。16 层安全保障。真正为你工作的智能体。</strong>
 </p>

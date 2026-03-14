@@ -264,6 +264,18 @@ MIT 라이선스. LICENSE 파일을 참조하세요.
 
 ---
 
+## 기여자
+
+LibreFang에 기여해 주신 모든 분들께 감사드립니다!
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>
+
+> 참여하고 싶으신가요? [기여 가이드](../CONTRIBUTING.md)를 확인하세요 — 많은 작업이 Rust 경험 없이도 가능합니다.
+
+---
+
 <p align="center">
   <strong>Rust로 구축. 16단계 보안. 실제로 당신을 위해 일하는 에이전트.</strong>
 </p>

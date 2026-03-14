@@ -264,6 +264,18 @@ MITライセンス。LICENSEファイルを参照してください。
 
 ---
 
+## コントリビューター
+
+LibreFangに貢献してくださった皆様に感謝します！
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>
+
+> 参加しませんか？[コントリビューションガイド](../CONTRIBUTING.md)をご覧ください — 多くのタスクはRustの経験不要です。
+
+---
+
 <p align="center">
   <strong>Rustで構築。16層セキュリティ。実際にあなたのために働くエージェント。</strong>
 </p>

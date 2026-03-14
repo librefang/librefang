@@ -264,6 +264,18 @@ Licencia MIT. Ver archivo LICENSE.
 
 ---
 
+## Contribuidores
+
+¡Gracias a todos los que han contribuido a LibreFang!
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>
+
+> ¿Quieres unirte? Consulta nuestra [Guía de contribuciones](../CONTRIBUTING.md) — muchas tareas no requieren experiencia en Rust.
+
+---
+
 <p align="center">
   <strong>Construido en Rust. 16 capas de seguridad. Agentes que realmente trabajan para ti.</strong>
 </p>

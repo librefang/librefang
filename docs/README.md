@@ -104,3 +104,11 @@ librefang init && librefang start
 | `XAI_API_KEY` | xAI (Grok) |
 
 Only one provider key is needed to get started. Groq offers a free tier.
+
+---
+
+## Contributors
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>
