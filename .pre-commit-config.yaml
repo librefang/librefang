@@ -1,0 +1,22 @@
+# Pre-commit hooks for LibreFang
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+# Docs: https://pre-commit.com
+
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt-check
+        name: cargo fmt check
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+      - id: cargo-clippy
+        name: cargo clippy (warnings as errors)
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+        stages: [pre-push]

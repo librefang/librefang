@@ -20,6 +20,7 @@ This guide covers everything you need to get started, from setting up your devel
 - [How to Add a New Channel Adapter](#how-to-add-a-new-channel-adapter)
 - [How to Add a New LLM Provider](#how-to-add-a-new-llm-provider)
 - [How to Add a New Tool](#how-to-add-a-new-tool)
+- [How to Write Integration Tests](#how-to-write-integration-tests)
 - [Pull Request Process](#pull-request-process)
 - [Code of Conduct](#code-of-conduct)
 
@@ -504,6 +505,86 @@ tools = ["my_tool"]
 5. Write tests for the tool function.
 
 6. If the tool requires kernel access (e.g., inter-agent communication), accept `Option<&Arc<dyn KernelHandle>>` and handle the `None` case gracefully.
+
+---
+
+## How to Write Integration Tests
+
+Integration tests verify that crates work correctly with their dependencies and real I/O. They live alongside unit tests but in dedicated directories.
+
+### Where Integration Tests Live
+
+```
+crates/librefang-kernel/tests/   # Kernel integration tests
+crates/librefang-runtime/tests/  # Runtime integration tests
+crates/librefang-memory/tests/   # Memory/SQLite integration tests
+crates/librefang-channels/tests/ # Channel adapter tests
+```
+
+Each crate can have a `tests/` directory at its root. Cargo automatically treats `.rs` files in `tests/` as integration test binaries.
+
+### How to Structure a Test
+
+```rust
+// crates/librefang-memory/tests/session_store.rs
+
+use librefang_memory::MemoryStore;
+use tempfile::TempDir;
+
+#[tokio::test]
+async fn test_session_roundtrip() {
+    // 1. Set up isolated test fixtures
+    let tmp = TempDir::new().unwrap();
+    let store = MemoryStore::open(tmp.path().join("test.db")).await.unwrap();
+
+    // 2. Exercise the feature
+    store.save_session("agent-1", "Hello!").await.unwrap();
+    let sessions = store.list_sessions("agent-1").await.unwrap();
+
+    // 3. Assert expected outcomes
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].content, "Hello!");
+
+    // 4. Cleanup is automatic (TempDir drops)
+}
+```
+
+### Key Patterns
+
+- **Filesystem isolation**: Always use `tempfile::TempDir` for tests that touch the filesystem.
+- **Network isolation**: Use `0` as the port (OS assigns a random free port) for tests that bind a socket.
+- **Skip when no API key**: For tests that need a real LLM, check the env var and skip gracefully:
+
+```rust
+#[tokio::test]
+async fn test_groq_completion() {
+    let api_key = match std::env::var("GROQ_API_KEY") {
+        Ok(k) => k,
+        Err(_) => {
+            eprintln!("Skipping: GROQ_API_KEY not set");
+            return;
+        }
+    };
+    // ... test with real API
+}
+```
+
+### Running Tests
+
+```bash
+# Run all tests across the workspace
+cargo test --workspace
+
+# Run tests for a specific crate
+cargo test -p librefang-kernel
+cargo test -p librefang-memory
+
+# Run a single test by name
+cargo test -p librefang-memory test_session_roundtrip
+
+# Run with output (useful for debugging skipped tests)
+cargo test -p librefang-runtime -- --nocapture
+```
 
 ---
 
