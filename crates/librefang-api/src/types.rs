@@ -101,3 +101,39 @@ pub struct ClawHubInstallRequest {
     /// ClawHub skill slug (e.g., "github-helper").
     pub slug: String,
 }
+
+/// Query parameters for `GET /api/agents` with filtering, pagination, and sorting.
+///
+/// All fields are optional. When omitted, the endpoint returns all agents
+/// (backwards-compatible with the original behavior).
+#[derive(Debug, Default, Deserialize)]
+pub struct AgentListQuery {
+    /// Free-text search — matches against agent name and description (case-insensitive).
+    pub q: Option<String>,
+    /// Filter by agent lifecycle state (e.g., "running", "suspended", "terminated").
+    pub status: Option<String>,
+    /// Maximum number of agents to return (pagination).
+    pub limit: Option<usize>,
+    /// Number of agents to skip (pagination).
+    pub offset: Option<usize>,
+    /// Field to sort by: "name", "created_at", "last_active", "state" (default: "name").
+    pub sort: Option<String>,
+    /// Sort direction: "asc" or "desc" (default: "asc").
+    pub order: Option<String>,
+}
+
+/// Paginated list response wrapper.
+///
+/// Wraps a collection with pagination metadata so clients can implement
+/// paging UIs without separate count requests.
+#[derive(Debug, Serialize)]
+pub struct PaginatedResponse<T: Serialize> {
+    /// The items in the current page.
+    pub items: Vec<T>,
+    /// Total number of items matching the filter (before pagination).
+    pub total: usize,
+    /// Number of items skipped.
+    pub offset: usize,
+    /// Maximum number of items requested.
+    pub limit: Option<usize>,
+}

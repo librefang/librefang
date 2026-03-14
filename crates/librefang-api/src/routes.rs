@@ -162,74 +162,146 @@ pub async fn spawn_agent(
     }
 }
 
-/// GET /api/agents — List all agents.
-pub async fn list_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// Enrich an `AgentEntry` into a JSON value with catalog data.
+fn enrich_agent_json(
+    e: &librefang_types::agent::AgentEntry,
+    dm: &librefang_types::config::ModelConfig,
+    catalog: &Option<std::sync::RwLockReadGuard<'_, librefang_runtime::model_catalog::ModelCatalog>>,
+) -> serde_json::Value {
+    // Resolve "default" provider/model to actual kernel defaults
+    let provider =
+        if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default" {
+            dm.provider.as_str()
+        } else {
+            e.manifest.model.provider.as_str()
+        };
+    let model = if e.manifest.model.model.is_empty() || e.manifest.model.model == "default" {
+        dm.model.as_str()
+    } else {
+        e.manifest.model.model.as_str()
+    };
+
+    // Enrich from catalog
+    let (tier, auth_status) = catalog
+        .as_ref()
+        .map(|cat| {
+            let tier = cat
+                .find_model(model)
+                .map(|m| format!("{:?}", m.tier).to_lowercase())
+                .unwrap_or_else(|| "unknown".to_string());
+            let auth = cat
+                .get_provider(provider)
+                .map(|p| format!("{:?}", p.auth_status).to_lowercase())
+                .unwrap_or_else(|| "unknown".to_string());
+            (tier, auth)
+        })
+        .unwrap_or(("unknown".to_string(), "unknown".to_string()));
+
+    let ready =
+        matches!(e.state, librefang_types::agent::AgentState::Running) && auth_status != "missing";
+
+    serde_json::json!({
+        "id": e.id.to_string(),
+        "name": e.name,
+        "state": format!("{:?}", e.state),
+        "mode": e.mode,
+        "created_at": e.created_at.to_rfc3339(),
+        "last_active": e.last_active.to_rfc3339(),
+        "model_provider": provider,
+        "model_name": model,
+        "model_tier": tier,
+        "auth_status": auth_status,
+        "ready": ready,
+        "profile": e.manifest.profile,
+        "identity": {
+            "emoji": e.identity.emoji,
+            "avatar_url": e.identity.avatar_url,
+            "color": e.identity.color,
+        },
+    })
+}
+
+/// GET /api/agents — List agents with optional filtering, pagination, and sorting.
+///
+/// Query parameters (all optional — omitting them returns all agents):
+///   - `q`: free-text search across name and description (case-insensitive)
+///   - `status`: filter by lifecycle state (e.g. "running", "suspended")
+///   - `limit` / `offset`: pagination
+///   - `sort`: field to sort by — "name", "created_at", "last_active", "state"
+///   - `order`: "asc" (default) or "desc"
+pub async fn list_agents(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<AgentListQuery>,
+) -> impl IntoResponse {
     // Snapshot catalog once for enrichment
     let catalog = state.kernel.model_catalog.read().ok();
     let dm = &state.kernel.config.default_model;
 
-    let agents: Vec<serde_json::Value> = state
-        .kernel
-        .registry
-        .list()
-        .into_iter()
-        .map(|e| {
-            // Resolve "default" provider/model to actual kernel defaults
-            let provider =
-                if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default" {
-                    dm.provider.as_str()
-                } else {
-                    e.manifest.model.provider.as_str()
-                };
-            let model = if e.manifest.model.model.is_empty() || e.manifest.model.model == "default"
-            {
-                dm.model.as_str()
-            } else {
-                e.manifest.model.model.as_str()
-            };
+    let mut agents: Vec<librefang_types::agent::AgentEntry> =
+        state.kernel.registry.list();
 
-            // Enrich from catalog
-            let (tier, auth_status) = catalog
-                .as_ref()
-                .map(|cat| {
-                    let tier = cat
-                        .find_model(model)
-                        .map(|m| format!("{:?}", m.tier).to_lowercase())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    let auth = cat
-                        .get_provider(provider)
-                        .map(|p| format!("{:?}", p.auth_status).to_lowercase())
-                        .unwrap_or_else(|| "unknown".to_string());
-                    (tier, auth)
-                })
-                .unwrap_or(("unknown".to_string(), "unknown".to_string()));
+    // -- Filtering --
 
-            let ready = matches!(e.state, librefang_types::agent::AgentState::Running)
-                && auth_status != "missing";
+    // Free-text search on name + description
+    if let Some(ref q) = params.q {
+        let q_lower = q.to_lowercase();
+        agents.retain(|e| {
+            e.name.to_lowercase().contains(&q_lower)
+                || e.manifest.description.to_lowercase().contains(&q_lower)
+        });
+    }
 
-            serde_json::json!({
-                "id": e.id.to_string(),
-                "name": e.name,
-                "state": format!("{:?}", e.state),
-                "mode": e.mode,
-                "created_at": e.created_at.to_rfc3339(),
-                "last_active": e.last_active.to_rfc3339(),
-                "model_provider": provider,
-                "model_name": model,
-                "model_tier": tier,
-                "auth_status": auth_status,
-                "ready": ready,
-                "profile": e.manifest.profile,
-                "identity": {
-                    "emoji": e.identity.emoji,
-                    "avatar_url": e.identity.avatar_url,
-                    "color": e.identity.color,
-                },
-            })
-        })
+    // Filter by lifecycle state
+    if let Some(ref status) = params.status {
+        let status_lower = status.to_lowercase();
+        agents.retain(|e| format!("{:?}", e.state).to_lowercase() == status_lower);
+    }
+
+    // Total count after filtering but before pagination
+    let total = agents.len();
+
+    // -- Sorting --
+    let sort_field = params.sort.as_deref().unwrap_or("name");
+    let descending = params
+        .order
+        .as_deref()
+        .map(|o| o.eq_ignore_ascii_case("desc"))
+        .unwrap_or(false);
+
+    agents.sort_by(|a, b| {
+        let cmp = match sort_field {
+            "created_at" => a.created_at.cmp(&b.created_at),
+            "last_active" => a.last_active.cmp(&b.last_active),
+            "state" => format!("{:?}", a.state).cmp(&format!("{:?}", b.state)),
+            // Default: sort by name (case-insensitive)
+            _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+        };
+        if descending {
+            cmp.reverse()
+        } else {
+            cmp
+        }
+    });
+
+    // -- Pagination --
+    let offset = params.offset.unwrap_or(0);
+    let agents: Vec<librefang_types::agent::AgentEntry> = if let Some(limit) = params.limit {
+        agents.into_iter().skip(offset).take(limit).collect()
+    } else {
+        agents.into_iter().skip(offset).collect()
+    };
+
+    let items: Vec<serde_json::Value> = agents
+        .iter()
+        .map(|e| enrich_agent_json(e, dm, &catalog))
         .collect();
 
-    Json(agents)
+    Json(PaginatedResponse {
+        items,
+        total,
+        offset,
+        limit: params.limit,
+    })
 }
 
 /// Resolve uploaded file attachments into ContentBlock::Image blocks.
