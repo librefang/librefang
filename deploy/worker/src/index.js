@@ -461,6 +461,30 @@ const HTML = `<!DOCTYPE html>
           <div class="platform-cmd">docker compose up --build</div>
         </a>
       </div>
+
+      <div style="margin-top:24px;margin-bottom:16px;font-weight:600;font-size:1rem;color:var(--dim);">Install locally</div>
+      <div class="platform-grid">
+        <a class="platform-card accent-blue" href="https://github.com/librefang/librefang/releases/latest" target="_blank" rel="noopener">
+          <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg></div>
+          <div class="platform-name">macOS</div>
+          <div class="platform-desc">Homebrew or download binary</div>
+          <div class="platform-cmd">brew install librefang/tap/librefang</div>
+        </a>
+
+        <a class="platform-card accent-blue" href="https://github.com/librefang/librefang/releases/latest" target="_blank" rel="noopener">
+          <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></div>
+          <div class="platform-name">Linux</div>
+          <div class="platform-desc">Install script or download binary</div>
+          <div class="platform-cmd">curl -fsSL https://librefang.ai/install.sh | sh</div>
+        </a>
+
+        <a class="platform-card accent-blue" href="https://github.com/librefang/librefang/releases/latest" target="_blank" rel="noopener">
+          <div class="platform-icon"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/><path d="M7.5 10l2 2 4-4"/></svg></div>
+          <div class="platform-name">Windows</div>
+          <div class="platform-desc">PowerShell installer or .msi</div>
+          <div class="platform-cmd">irm https://librefang.ai/install.ps1 | iex</div>
+        </a>
+      </div>
     </div>
 
     <!-- Fly.io deploy form (hidden until selected) -->
