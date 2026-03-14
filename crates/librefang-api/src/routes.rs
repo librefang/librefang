@@ -1019,6 +1019,34 @@ pub async fn list_profiles() -> impl IntoResponse {
     Json(result)
 }
 
+/// GET /api/profiles/:name — Get a single profile by name.
+pub async fn get_profile(Path(name): Path<String>) -> impl IntoResponse {
+    use librefang_types::agent::ToolProfile;
+
+    let profiles: &[(&str, ToolProfile)] = &[
+        ("minimal", ToolProfile::Minimal),
+        ("coding", ToolProfile::Coding),
+        ("research", ToolProfile::Research),
+        ("messaging", ToolProfile::Messaging),
+        ("automation", ToolProfile::Automation),
+        ("full", ToolProfile::Full),
+    ];
+
+    match profiles.iter().find(|(n, _)| *n == name) {
+        Some((n, profile)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "name": n,
+                "tools": profile.tools(),
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("Profile '{}' not found", name)})),
+        ),
+    }
+}
+
 /// PUT /api/agents/:id/mode — Change an agent's operational mode.
 pub async fn set_agent_mode(
     State(state): State<Arc<AppState>>,
@@ -11288,4 +11316,108 @@ pub async fn catalog_status() -> impl IntoResponse {
     Json(serde_json::json!({
         "last_sync": last_sync,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt;
+
+    fn profile_router() -> Router {
+        Router::new()
+            .route("/api/profiles", get(list_profiles))
+            .route("/api/profiles/{name}", get(get_profile))
+    }
+
+    #[tokio::test]
+    async fn test_get_profile_found() {
+        let app = profile_router();
+
+        for name in &[
+            "minimal",
+            "coding",
+            "research",
+            "messaging",
+            "automation",
+            "full",
+        ] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/profiles/{name}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "profile '{name}' should exist"
+            );
+
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["name"], *name);
+            assert!(
+                json["tools"].is_array(),
+                "tools should be an array for '{name}'"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_profile_not_found() {
+        let app = profile_router();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/profiles/nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_list_profiles_returns_all() {
+        let app = profile_router();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/profiles")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let arr = json.as_array().unwrap();
+        assert_eq!(arr.len(), 6);
+    }
 }

@@ -148,6 +148,10 @@ pub async fn build_router(
         )
         .route("/api/profiles", axum::routing::get(routes::list_profiles))
         .route(
+            "/api/profiles/{name}",
+            axum::routing::get(routes::get_profile),
+        )
+        .route(
             "/api/agents/{id}/message",
             axum::routing::post(routes::send_message),
         )
