@@ -570,12 +570,20 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::get(crate::oauth::auth_login),
         )
         .route(
+            "/auth/login/{provider}",
+            axum::routing::get(crate::oauth::auth_login_provider),
+        )
+        .route(
             "/auth/callback",
-            axum::routing::get(crate::oauth::auth_callback),
+            axum::routing::get(crate::oauth::auth_callback).post(crate::oauth::auth_callback_post),
         )
         .route(
             "/auth/userinfo",
             axum::routing::get(crate::oauth::auth_userinfo),
+        )
+        .route(
+            "/auth/introspect",
+            axum::routing::post(crate::oauth::auth_introspect),
         )
 }
 
@@ -608,7 +616,7 @@ pub async fn build_router(
     // CORS: allow localhost origins by default. If API key is set, the API
     // is protected anyway. For development, permissive CORS is convenient.
     let cors = if state.kernel.config.api_key.trim().is_empty() {
-        // No auth → restrict CORS to localhost origins (include both 127.0.0.1 and localhost)
+        // No auth -> restrict CORS to localhost origins (include both 127.0.0.1 and localhost)
         let port = listen_addr.port();
         let mut origins: Vec<axum::http::HeaderValue> = vec![
             format!("http://{listen_addr}").parse().unwrap(),
@@ -630,8 +638,8 @@ pub async fn build_router(
             .allow_methods(tower_http::cors::Any)
             .allow_headers(tower_http::cors::Any)
     } else {
-        // Auth enabled → restrict CORS to localhost + configured origins.
-        // SECURITY: CorsLayer::permissive() is dangerous — any website could
+        // Auth enabled -> restrict CORS to localhost + configured origins.
+        // SECURITY: CorsLayer::permissive() is dangerous - any website could
         // make cross-origin requests. Restrict to known origins instead.
         let mut origins: Vec<axum::http::HeaderValue> = vec![
             format!("http://{listen_addr}").parse().unwrap(),
@@ -683,7 +691,7 @@ pub async fn build_router(
         .nest("/api/v1", v1_routes.clone())
         // Mount the same routes at /api (latest version alias for backward compat)
         .nest("/api", v1_routes)
-        // Webhook trigger endpoints (not versioned — external callers use fixed URLs)
+        // Webhook trigger endpoints (not versioned - external callers use fixed URLs)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
         // A2A (Agent-to-Agent) Protocol endpoints (protocol-level, not versioned)
@@ -715,6 +723,10 @@ pub async fn build_router(
         .layer(axum::middleware::from_fn_with_state(
             api_key,
             middleware::auth,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::oauth::oidc_auth_middleware,
         ))
         .layer(axum::middleware::from_fn_with_state(
             gcra_limiter,
