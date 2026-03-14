@@ -792,7 +792,7 @@ mod tests {
                 "slug": "test",
                 "displayName": "Test",
                 "summary": "A test",
-                "version": librefang_types::VERSION,
+                "version": "1.0.0",
                 "updatedAt": 0
             }]
         }"#;
