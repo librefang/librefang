@@ -23,8 +23,14 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --bin librefang \
     && cp target/release/librefang /usr/local/bin/librefang
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+FROM rust:1-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    python3 \
+    python3-pip \
+    python3-venv \
+    nodejs \
+    npm \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/agents /opt/librefang/agents
