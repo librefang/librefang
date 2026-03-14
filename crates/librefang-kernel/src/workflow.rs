@@ -1158,6 +1158,235 @@ impl WorkflowTemplateRegistry {
         }
     }
 
+    /// Search templates by query string. Matches against name, description,
+    /// category, and tags (case-insensitive substring).
+    pub async fn search(&self, query: &str) -> Vec<WorkflowTemplate> {
+        let q = query.to_lowercase();
+        self.templates
+            .read()
+            .await
+            .values()
+            .filter(|t| {
+                t.name.to_lowercase().contains(&q)
+                    || t.description.to_lowercase().contains(&q)
+                    || t.category.to_lowercase().contains(&q)
+                    || t.tags.iter().any(|tag| tag.to_lowercase().contains(&q))
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Load workflow templates from `.toml` files in the given directory.
+    ///
+    /// Each TOML file should contain a `[template]` section with metadata
+    /// and a `[[steps]]` array. Loaded templates are merged into the
+    /// registry alongside any bundled or user-saved templates.
+    pub async fn load_from_directory(&self, dir: &std::path::Path) -> usize {
+        let read_dir = match std::fs::read_dir(dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                warn!(path = %dir.display(), "Failed to read workflow templates dir: {e}");
+                return 0;
+            }
+        };
+
+        let mut count = 0;
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+                continue;
+            }
+            match Self::parse_template_toml(&path) {
+                Ok(t) => {
+                    debug!(template = %t.name, "Loaded workflow template from TOML");
+                    self.templates.write().await.insert(t.id, t);
+                    count += 1;
+                }
+                Err(e) => {
+                    warn!(path = %path.display(), "Failed to parse workflow template: {e}");
+                }
+            }
+        }
+        count
+    }
+
+    /// Parse a single TOML template file into a `WorkflowTemplate`.
+    fn parse_template_toml(path: &std::path::Path) -> Result<WorkflowTemplate, String> {
+        let content = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
+        let doc: toml::Value = toml::from_str(&content).map_err(|e| format!("parse: {e}"))?;
+
+        let meta = doc.get("template").ok_or("missing [template] section")?;
+
+        let name = meta
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or("missing template.name")?
+            .to_string();
+        let description = meta
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let author = meta
+            .get("author")
+            .and_then(|v| v.as_str())
+            .unwrap_or("community")
+            .to_string();
+        let version = meta
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("1.0.0")
+            .to_string();
+        let category = meta
+            .get("category")
+            .and_then(|v| v.as_str())
+            .unwrap_or("general")
+            .to_string();
+        let tags: Vec<String> = meta
+            .get("tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let steps_arr = doc
+            .get("steps")
+            .and_then(|v| v.as_array())
+            .ok_or("missing [[steps]] array")?;
+
+        let mut steps = Vec::with_capacity(steps_arr.len());
+        for s in steps_arr {
+            let step_name = s
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("step")
+                .to_string();
+            let agent_name = s
+                .get("agent_name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("agent")
+                .to_string();
+            let prompt_template = s
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{{input}}")
+                .to_string();
+
+            let mode = Self::parse_toml_step_mode(s);
+            let error_mode = Self::parse_toml_error_mode(s);
+            let timeout_secs = s
+                .get("timeout_secs")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(120) as u64;
+            let output_var = s
+                .get("output_var")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let depends_on: Vec<String> = s
+                .get("depends_on")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            steps.push(WorkflowTemplateStep {
+                name: step_name,
+                agent_name,
+                prompt_template,
+                mode,
+                timeout_secs,
+                error_mode,
+                output_var,
+                depends_on,
+            });
+        }
+
+        // Generate a deterministic ID from template name so reloads don't
+        // duplicate entries. Uses UUID v5 with a fixed namespace.
+        let namespace = Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
+        let id = WorkflowTemplateId(Uuid::new_v5(&namespace, name.as_bytes()));
+
+        Ok(WorkflowTemplate {
+            id,
+            name,
+            description,
+            author,
+            version,
+            category,
+            tags,
+            steps,
+            created_at: Utc::now(),
+        })
+    }
+
+    /// Parse step mode from a TOML value table.
+    fn parse_toml_step_mode(step: &toml::Value) -> StepMode {
+        let mode_val = step.get("mode");
+        match mode_val {
+            Some(toml::Value::String(s)) => match s.as_str() {
+                "fan_out" => StepMode::FanOut,
+                "collect" => StepMode::Collect,
+                _ => StepMode::Sequential,
+            },
+            Some(toml::Value::Table(tbl)) => {
+                if let Some(cond) = tbl.get("conditional") {
+                    if let Some(inner) = cond.as_table() {
+                        let condition = inner
+                            .get("condition")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        return StepMode::Conditional { condition };
+                    }
+                }
+                if let Some(lp) = tbl.get("loop") {
+                    if let Some(inner) = lp.as_table() {
+                        let max_iterations = inner
+                            .get("max_iterations")
+                            .and_then(|v| v.as_integer())
+                            .unwrap_or(5) as u32;
+                        let until = inner
+                            .get("until")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        return StepMode::Loop {
+                            max_iterations,
+                            until,
+                        };
+                    }
+                }
+                StepMode::Sequential
+            }
+            _ => StepMode::Sequential,
+        }
+    }
+
+    /// Parse error mode from a TOML step value.
+    fn parse_toml_error_mode(step: &toml::Value) -> ErrorMode {
+        let mode_str = step
+            .get("error_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("fail");
+        match mode_str {
+            "skip" => ErrorMode::Skip,
+            "retry" => {
+                let max_retries = step
+                    .get("max_retries")
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(3) as u32;
+                ErrorMode::Retry { max_retries }
+            }
+            _ => ErrorMode::Fail,
+        }
+    }
+
     // ------------------------------------------------------------------
     // Bundled templates
     // ------------------------------------------------------------------
@@ -2253,5 +2482,64 @@ id = "{id}"
         assert!(registry.get(id).await.is_some());
         assert!(registry.delete(id).await);
         assert!(registry.get(id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_template_search() {
+        let registry = WorkflowTemplateRegistry::new();
+        let results = registry.search("research").await;
+        assert!(
+            !results.is_empty(),
+            "should find templates matching 'research'"
+        );
+        assert!(results.iter().any(|t| t.name.contains("research")));
+    }
+
+    #[tokio::test]
+    async fn test_template_search_by_tag() {
+        let registry = WorkflowTemplateRegistry::new();
+        let results = registry.search("security").await;
+        assert!(
+            !results.is_empty(),
+            "should find templates with 'security' tag"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_toml_templates_from_directory() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows/templates");
+        if !dir.exists() {
+            // Templates directory may not exist in CI
+            return;
+        }
+        let registry = WorkflowTemplateRegistry::new();
+        let initial_count = registry.list(None).await.len();
+        let loaded = registry.load_from_directory(&dir).await;
+        assert!(loaded > 0, "should load at least one TOML template");
+        let new_count = registry.list(None).await.len();
+        assert!(
+            new_count > initial_count,
+            "template count should increase after loading TOML files"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_toml_template_instantiate() {
+        let dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../workflows/templates");
+        if !dir.exists() {
+            return;
+        }
+        let registry = WorkflowTemplateRegistry::new();
+        registry.load_from_directory(&dir).await;
+
+        // Search for the data-pipeline template loaded from TOML
+        let results = registry.search("data-pipeline").await;
+        if let Some(t) = results.first() {
+            let workflow = WorkflowTemplateRegistry::instantiate(t);
+            assert_eq!(workflow.name, "Data Pipeline");
+            assert!(!workflow.steps.is_empty());
+        }
     }
 }
