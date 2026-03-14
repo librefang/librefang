@@ -2,10 +2,18 @@
 //!
 //! Uses a simple timestamp-based approach: each bucket stores recent message
 //! timestamps and evicts entries older than the 1-minute window on every check.
+//!
+//! Buckets use `SmallVec<[Instant; 8]>` to keep small bursts on the stack,
+//! avoiding heap allocation for typical rate limits (e.g., 5/min).
 
 use dashmap::DashMap;
+use smallvec::SmallVec;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Stack-allocated capacity for rate-limiter timestamp buckets.
+/// Covers typical per-user limits without heap allocation.
+type TimestampBucket = SmallVec<[Instant; 8]>;
 
 /// Sliding-window rate limiter for channel messages.
 ///
@@ -13,13 +21,14 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, Default)]
 pub struct ChannelRateLimiter {
     /// Recent message timestamps per user key.
-    buckets: Arc<DashMap<String, Vec<Instant>>>,
+    buckets: Arc<DashMap<String, TimestampBucket>>,
 }
 
 impl ChannelRateLimiter {
     /// Check if a user is rate-limited. Returns `Ok(())` if allowed, `Err(msg)` if blocked.
     ///
     /// `max_per_minute`: 0 means unlimited.
+    #[inline]
     pub fn check(
         &self,
         channel_type: &str,

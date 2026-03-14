@@ -134,6 +134,7 @@ base64 = { workspace = true }
 hex = { workspace = true }
 html-escape = { workspace = true }
 regex-lite = { workspace = true }
+smallvec = { workspace = true }
 
 # Channel-specific optional dependencies
 aes = { version = "0.8", optional = true }
@@ -148,3 +149,8 @@ mailparse = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "dispatch"
+harness = false
