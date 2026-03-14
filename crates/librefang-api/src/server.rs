@@ -546,6 +546,23 @@ pub async fn build_router(
             "/api/skills/create",
             axum::routing::post(routes::create_skill),
         )
+        // Extension management endpoints
+        .route(
+            "/api/extensions",
+            axum::routing::get(routes::list_extensions),
+        )
+        .route(
+            "/api/extensions/install",
+            axum::routing::post(routes::install_extension),
+        )
+        .route(
+            "/api/extensions/uninstall",
+            axum::routing::post(routes::uninstall_extension),
+        )
+        .route(
+            "/api/extensions/{name}",
+            axum::routing::get(routes::get_extension),
+        )
         // Migration endpoints
         .route(
             "/api/migrate/detect",

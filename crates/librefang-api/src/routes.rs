@@ -8247,6 +8247,228 @@ pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl Int
 }
 
 // ---------------------------------------------------------------------------
+// Extension management endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/extensions — List all installed extensions (integrations) with status.
+pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let registry = state
+        .kernel
+        .extension_registry
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let health = &state.kernel.extension_health;
+
+    let mut extensions = Vec::new();
+    for info in registry.list_all_info() {
+        let h = health.get_health(&info.template.id);
+        let status = match &info.installed {
+            Some(inst) if !inst.enabled => "disabled",
+            Some(_) => match h.as_ref().map(|h| &h.status) {
+                Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
+                Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
+                _ => "installed",
+            },
+            None => "available",
+        };
+        extensions.push(serde_json::json!({
+            "name": info.template.id,
+            "display_name": info.template.name,
+            "description": info.template.description,
+            "icon": info.template.icon,
+            "category": info.template.category.to_string(),
+            "status": status,
+            "tags": info.template.tags,
+            "installed": info.installed.is_some(),
+            "tool_count": h.as_ref().map(|h| h.tool_count).unwrap_or(0),
+            "installed_at": info.installed.as_ref().map(|i| i.installed_at.to_rfc3339()),
+        }));
+    }
+
+    Json(serde_json::json!({
+        "extensions": extensions,
+        "total": extensions.len(),
+    }))
+}
+
+/// GET /api/extensions/:name — Get details for a single extension by name.
+pub async fn get_extension(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let registry = state
+        .kernel
+        .extension_registry
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let template = match registry.get_template(&name) {
+        Some(t) => t.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Extension '{}' not found", name)})),
+            );
+        }
+    };
+
+    let installed = registry.get_installed(&name).cloned();
+    let health = state.kernel.extension_health.get_health(&name);
+
+    let status = match &installed {
+        Some(inst) if !inst.enabled => "disabled",
+        Some(_) => match health.as_ref().map(|h| &h.status) {
+            Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
+            Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
+            _ => "installed",
+        },
+        None => "available",
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "name": template.id,
+            "display_name": template.name,
+            "description": template.description,
+            "icon": template.icon,
+            "category": template.category.to_string(),
+            "status": status,
+            "tags": template.tags,
+            "installed": installed.is_some(),
+            "tool_count": health.as_ref().map(|h| h.tool_count).unwrap_or(0),
+            "installed_at": installed.as_ref().map(|i| i.installed_at.to_rfc3339()),
+            "required_env": template.required_env.iter().map(|e| serde_json::json!({
+                "name": e.name,
+                "label": e.label,
+                "help": e.help,
+                "is_secret": e.is_secret,
+                "get_url": e.get_url,
+            })).collect::<Vec<_>>(),
+            "has_oauth": template.oauth.is_some(),
+            "setup_instructions": template.setup_instructions,
+            "health": health.as_ref().map(|h| serde_json::json!({
+                "last_ok": h.last_ok.map(|t| t.to_rfc3339()),
+                "last_error": h.last_error,
+                "consecutive_failures": h.consecutive_failures,
+                "reconnecting": h.reconnecting,
+            })),
+        })),
+    )
+}
+
+/// POST /api/extensions/install — Install an extension by name.
+pub async fn install_extension(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExtensionInstallRequest>,
+) -> impl IntoResponse {
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing or empty 'name' field"})),
+        );
+    }
+
+    // Scope the write lock so it's dropped before any .await
+    let install_err = {
+        let mut registry = state
+            .kernel
+            .extension_registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+
+        if registry.is_installed(&name) {
+            Some((
+                StatusCode::CONFLICT,
+                format!("Extension '{}' already installed", name),
+            ))
+        } else if registry.get_template(&name).is_none() {
+            Some((
+                StatusCode::NOT_FOUND,
+                format!("Unknown extension: '{}'", name),
+            ))
+        } else {
+            let entry = librefang_extensions::InstalledIntegration {
+                id: name.clone(),
+                installed_at: chrono::Utc::now(),
+                enabled: true,
+                oauth_provider: None,
+                config: std::collections::HashMap::new(),
+            };
+            match registry.install(entry) {
+                Ok(_) => None,
+                Err(e) => Some((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+            }
+        }
+    }; // write lock dropped here
+
+    if let Some((status, error)) = install_err {
+        return (status, Json(serde_json::json!({"error": error})));
+    }
+
+    state.kernel.extension_health.register(&name);
+
+    // Hot-connect the new MCP server
+    let connected = state.kernel.reload_extension_mcps().await.unwrap_or(0);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "installed",
+            "name": name,
+            "connected": connected > 0,
+        })),
+    )
+}
+
+/// POST /api/extensions/uninstall — Uninstall an extension by name.
+pub async fn uninstall_extension(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExtensionUninstallRequest>,
+) -> impl IntoResponse {
+    let name = req.name.trim().to_string();
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing or empty 'name' field"})),
+        );
+    }
+
+    // Scope the write lock
+    let uninstall_err = {
+        let mut registry = state
+            .kernel
+            .extension_registry
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        registry.uninstall(&name).err()
+    };
+
+    if let Some(e) = uninstall_err {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": e.to_string()})),
+        );
+    }
+
+    state.kernel.extension_health.unregister(&name);
+
+    // Hot-disconnect the removed MCP server
+    if let Err(e) = state.kernel.reload_extension_mcps().await {
+        tracing::warn!("Failed to reload MCP extensions after uninstall: {e}");
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "uninstalled",
+            "name": name,
+        })),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Scheduled Jobs (cron) endpoints
 // ---------------------------------------------------------------------------
 
