@@ -8,7 +8,21 @@
 //! on TCP connect timeouts to unreachable local services.
 
 use dashmap::DashMap;
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
+
+/// Metadata discovered for a single model from the Ollama `/api/tags` endpoint.
+#[derive(Debug, Clone, Default)]
+pub struct DiscoveredModelMeta {
+    /// Model size on disk in bytes.
+    pub size_bytes: Option<u64>,
+    /// Parameter count string (e.g. "7B", "13B").
+    pub parameter_size: Option<String>,
+    /// Quantization level (e.g. "Q4_K_M", "Q8_0").
+    pub quantization_level: Option<String>,
+    /// Model family (e.g. "llama", "gemma").
+    pub family: Option<String>,
+}
 
 /// Result of probing a provider endpoint.
 #[derive(Debug, Clone, Default)]
@@ -19,6 +33,8 @@ pub struct ProbeResult {
     pub latency_ms: u64,
     /// Model IDs discovered from the provider's listing endpoint.
     pub discovered_models: Vec<String>,
+    /// Per-model metadata discovered during probing (keyed by model name).
+    pub model_metadata: HashMap<String, DiscoveredModelMeta>,
     /// Error message if the probe failed.
     pub error: Option<String>,
 }
@@ -162,37 +178,65 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
 
     let latency_ms = start.elapsed().as_millis() as u64;
 
-    // Parse model names
-    let models = if is_ollama {
-        // Ollama: { "models": [ { "name": "llama3.2:latest", ... }, ... ] }
-        body.get("models")
+    // Parse model names and metadata
+    let (models, metadata) = if is_ollama {
+        // Ollama: { "models": [ { "name": "llama3.2:latest", "size": 123456,
+        //   "details": { "parameter_size": "7B", "quantization_level": "Q4_K_M",
+        //                "family": "llama" } }, ... ] }
+        let arr = body
+            .get("models")
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| {
-                        m.get("name")
-                            .and_then(|n| n.as_str())
-                            .map(|s| s.to_string())
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+            .cloned()
+            .unwrap_or_default();
+
+        let mut names = Vec::with_capacity(arr.len());
+        let mut meta_map = HashMap::with_capacity(arr.len());
+
+        for m in &arr {
+            if let Some(name) = m.get("name").and_then(|n| n.as_str()) {
+                names.push(name.to_string());
+
+                let details = m.get("details");
+                let meta = DiscoveredModelMeta {
+                    size_bytes: m.get("size").and_then(|v| v.as_u64()),
+                    parameter_size: details
+                        .and_then(|d| d.get("parameter_size"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    quantization_level: details
+                        .and_then(|d| d.get("quantization_level"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    family: details
+                        .and_then(|d| d.get("family"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                };
+
+                meta_map.insert(name.to_string(), meta);
+            }
+        }
+
+        (names, meta_map)
     } else {
         // OpenAI-compatible: { "data": [ { "id": "model-name", ... }, ... ] }
-        body.get("data")
+        let names = body
+            .get("data")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
                     .filter_map(|m| m.get("id").and_then(|n| n.as_str()).map(|s| s.to_string()))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        (names, HashMap::new())
     };
 
     ProbeResult {
         reachable: true,
         latency_ms,
         discovered_models: models,
+        model_metadata: metadata,
         error: None,
     }
 }
@@ -348,6 +392,7 @@ mod tests {
             reachable: true,
             latency_ms: 42,
             discovered_models: vec!["llama3".into()],
+            model_metadata: HashMap::new(),
             error: None,
         };
         cache.insert("ollama", result.clone());
@@ -362,5 +407,20 @@ mod tests {
         let cache = ProbeCache::default();
         assert!(cache.get("anything").is_none());
         assert_eq!(cache.ttl, Duration::from_secs(PROBE_CACHE_TTL_SECS));
+    }
+
+    #[test]
+    fn test_discovered_model_meta_default() {
+        let meta = DiscoveredModelMeta::default();
+        assert!(meta.size_bytes.is_none());
+        assert!(meta.parameter_size.is_none());
+        assert!(meta.quantization_level.is_none());
+        assert!(meta.family.is_none());
+    }
+
+    #[test]
+    fn test_probe_result_default_has_empty_metadata() {
+        let result = ProbeResult::default();
+        assert!(result.model_metadata.is_empty());
     }
 }

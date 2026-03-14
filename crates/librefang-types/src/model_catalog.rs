@@ -147,6 +147,23 @@ pub struct ModelCatalogEntry {
     /// Aliases for this model (e.g. ["sonnet", "claude-sonnet"]).
     #[serde(default)]
     pub aliases: Vec<String>,
+
+    // ── Ollama-specific metadata (populated during model discovery) ──
+    /// Model size on disk in bytes (from Ollama `/api/tags`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+
+    /// Parameter count string (e.g. "7B", "13B") from Ollama model details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameter_size: Option<String>,
+
+    /// Quantization level (e.g. "Q4_K_M", "Q8_0") from Ollama model details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantization_level: Option<String>,
+
+    /// Model family (e.g. "llama", "gemma") from Ollama model details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
 }
 
 impl Default for ModelCatalogEntry {
@@ -164,6 +181,10 @@ impl Default for ModelCatalogEntry {
             supports_vision: false,
             supports_streaming: false,
             aliases: Vec::new(),
+            size_bytes: None,
+            parameter_size: None,
+            quantization_level: None,
+            family: None,
         }
     }
 }
@@ -373,6 +394,10 @@ mod tests {
             supports_vision: true,
             supports_streaming: true,
             aliases: vec!["sonnet".to_string(), "claude-sonnet".to_string()],
+            size_bytes: None,
+            parameter_size: None,
+            quantization_level: None,
+            family: None,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: ModelCatalogEntry = serde_json::from_str(&json).unwrap();

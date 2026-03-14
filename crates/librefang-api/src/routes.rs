@@ -6511,7 +6511,11 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
                 entry["discovered_models"] = serde_json::json!(probe.discovered_models);
                 // Merge discovered models into the catalog so agents can use them
                 if let Ok(mut catalog) = state.kernel.model_catalog.write() {
-                    catalog.merge_discovered_models(&p.id, &probe.discovered_models);
+                    catalog.merge_discovered_models_with_meta(
+                        &p.id,
+                        &probe.discovered_models,
+                        &probe.model_metadata,
+                    );
                 }
             }
             if let Some(err) = &probe.error {
@@ -6603,6 +6607,10 @@ pub async fn add_custom_model(
             .and_then(|v| v.as_bool())
             .unwrap_or(true),
         aliases: vec![],
+        size_bytes: None,
+        parameter_size: None,
+        quantization_level: None,
+        family: None,
     };
 
     let mut catalog = state
@@ -8201,7 +8209,11 @@ pub async fn set_provider_url(
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {
         if let Ok(mut catalog) = state.kernel.model_catalog.write() {
-            catalog.merge_discovered_models(&name, &probe.discovered_models);
+            catalog.merge_discovered_models_with_meta(
+                &name,
+                &probe.discovered_models,
+                &probe.model_metadata,
+            );
         }
     }
 

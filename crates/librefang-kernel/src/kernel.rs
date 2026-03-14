@@ -3919,9 +3919,10 @@ impl LibreFangKernel {
                         );
                         if !result.discovered_models.is_empty() {
                             if let Ok(mut catalog) = kernel.model_catalog.write() {
-                                catalog.merge_discovered_models(
+                                catalog.merge_discovered_models_with_meta(
                                     provider_id,
                                     &result.discovered_models,
+                                    &result.model_metadata,
                                 );
                             }
                         }

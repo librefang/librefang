@@ -239,6 +239,22 @@ impl ModelCatalog {
     /// Adds models not already in the catalog with `Local` tier and zero cost.
     /// Also updates the provider's `model_count`.
     pub fn merge_discovered_models(&mut self, provider: &str, model_ids: &[String]) {
+        self.merge_discovered_models_with_meta(provider, model_ids, &Default::default());
+    }
+
+    /// Merge dynamically discovered models with optional per-model metadata.
+    ///
+    /// Adds models not already in the catalog with `Local` tier and zero cost.
+    /// If metadata is provided (e.g. from Ollama's `/api/tags`), the new entries
+    /// are enriched with size, parameter count, quantization, and family info.
+    /// For models that already exist in the catalog, metadata fields are back-filled
+    /// if the existing entry has `None` for those fields.
+    pub fn merge_discovered_models_with_meta(
+        &mut self,
+        provider: &str,
+        model_ids: &[String],
+        metadata: &std::collections::HashMap<String, crate::provider_health::DiscoveredModelMeta>,
+    ) {
         let existing_ids: std::collections::HashSet<String> = self
             .models
             .iter()
@@ -248,9 +264,33 @@ impl ModelCatalog {
 
         let mut added = 0usize;
         for id in model_ids {
+            let meta = metadata.get(id);
+
             if existing_ids.contains(&id.to_lowercase()) {
+                // Back-fill metadata on existing entries if available
+                if let Some(meta) = meta {
+                    if let Some(entry) = self
+                        .models
+                        .iter_mut()
+                        .find(|m| m.id.eq_ignore_ascii_case(id) && m.provider == provider)
+                    {
+                        if entry.size_bytes.is_none() {
+                            entry.size_bytes = meta.size_bytes;
+                        }
+                        if entry.parameter_size.is_none() {
+                            entry.parameter_size = meta.parameter_size.clone();
+                        }
+                        if entry.quantization_level.is_none() {
+                            entry.quantization_level = meta.quantization_level.clone();
+                        }
+                        if entry.family.is_none() {
+                            entry.family = meta.family.clone();
+                        }
+                    }
+                }
                 continue;
             }
+
             // Generate a human-friendly display name
             let display = format!("{} ({})", id, provider);
             self.models.push(ModelCatalogEntry {
@@ -266,6 +306,10 @@ impl ModelCatalog {
                 supports_vision: false,
                 supports_streaming: true,
                 aliases: Vec::new(),
+                size_bytes: meta.and_then(|m| m.size_bytes),
+                parameter_size: meta.and_then(|m| m.parameter_size.clone()),
+                quantization_level: meta.and_then(|m| m.quantization_level.clone()),
+                family: meta.and_then(|m| m.family.clone()),
             });
             added += 1;
         }
@@ -1327,5 +1371,91 @@ aliases = ["trm1"]
 
         let model = catalog.find_model("test-remote-model-1").unwrap();
         assert_eq!(model.provider, "test-remote");
+    }
+
+    #[test]
+    fn test_merge_with_meta_adds_metadata_to_new_models() {
+        use crate::provider_health::DiscoveredModelMeta;
+
+        let mut catalog = ModelCatalog::new();
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "my-custom-model:7b".to_string(),
+            DiscoveredModelMeta {
+                size_bytes: Some(4_000_000_000),
+                parameter_size: Some("7B".to_string()),
+                quantization_level: Some("Q4_K_M".to_string()),
+                family: Some("llama".to_string()),
+            },
+        );
+
+        catalog.merge_discovered_models_with_meta(
+            "ollama",
+            &["my-custom-model:7b".to_string()],
+            &metadata,
+        );
+
+        let model = catalog.find_model("my-custom-model:7b").unwrap();
+        assert_eq!(model.tier, ModelTier::Local);
+        assert_eq!(model.size_bytes, Some(4_000_000_000));
+        assert_eq!(model.parameter_size.as_deref(), Some("7B"));
+        assert_eq!(model.quantization_level.as_deref(), Some("Q4_K_M"));
+        assert_eq!(model.family.as_deref(), Some("llama"));
+    }
+
+    #[test]
+    fn test_merge_with_meta_backfills_existing_models() {
+        use crate::provider_health::DiscoveredModelMeta;
+
+        let mut catalog = ModelCatalog::new();
+
+        // First, add a model without metadata
+        catalog.merge_discovered_models("ollama", &["backfill-test:latest".to_string()]);
+        let model = catalog.find_model("backfill-test:latest").unwrap();
+        assert!(model.size_bytes.is_none());
+        assert!(model.parameter_size.is_none());
+
+        // Now merge again with metadata — should back-fill
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "backfill-test:latest".to_string(),
+            DiscoveredModelMeta {
+                size_bytes: Some(2_000_000_000),
+                parameter_size: Some("3B".to_string()),
+                quantization_level: Some("Q8_0".to_string()),
+                family: Some("gemma".to_string()),
+            },
+        );
+
+        catalog.merge_discovered_models_with_meta(
+            "ollama",
+            &["backfill-test:latest".to_string()],
+            &metadata,
+        );
+
+        let model = catalog.find_model("backfill-test:latest").unwrap();
+        assert_eq!(model.size_bytes, Some(2_000_000_000));
+        assert_eq!(model.parameter_size.as_deref(), Some("3B"));
+        assert_eq!(model.quantization_level.as_deref(), Some("Q8_0"));
+        assert_eq!(model.family.as_deref(), Some("gemma"));
+    }
+
+    #[test]
+    fn test_merge_with_empty_meta_behaves_like_original() {
+        let mut catalog = ModelCatalog::new();
+        let before = catalog.models_by_provider("ollama").len();
+        catalog.merge_discovered_models_with_meta(
+            "ollama",
+            &["meta-empty-test:latest".to_string()],
+            &Default::default(),
+        );
+        let after = catalog.models_by_provider("ollama").len();
+        assert_eq!(after, before + 1);
+
+        let model = catalog.find_model("meta-empty-test:latest").unwrap();
+        assert!(model.size_bytes.is_none());
+        assert!(model.parameter_size.is_none());
+        assert!(model.quantization_level.is_none());
+        assert!(model.family.is_none());
     }
 }
