@@ -31,6 +31,7 @@
   <img src="https://img.shields.io/github/forks/librefang/librefang?style=flat-square" alt="Forks" />
   <img src="https://img.shields.io/github/issues-raw/librefang/librefang?style=flat-square" alt="Issues" />
   <img src="https://img.shields.io/github/v/release/librefang/librefang?style=flat-square" alt="Latest Release" />
+  <a href="https://discord.gg/DzTYqAZZmc"><img src="https://img.shields.io/discord/1481633471507071129?style=flat-square&logo=discord&label=Discord" alt="Discord" /></a>
 </p>
 
 <p align="center">
@@ -477,7 +478,7 @@ MIT License. See the LICENSE file for details.
 - [Maintainers](MAINTAINERS.md)
 - [Security Policy](SECURITY.md)
 - [Discussions](https://github.com/librefang/librefang/discussions) — Questions, ideas, show & tell
-- [Discord](https://discord.gg/rwbCEM7h) — Real-time chat with the community
+- [Discord](https://discord.gg/DzTYqAZZmc) — Real-time chat with the community
 
 ---
 

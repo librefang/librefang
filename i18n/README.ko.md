@@ -261,7 +261,7 @@ MIT 라이선스. LICENSE 파일을 참조하세요.
 - [메인테이너](../MAINTAINERS.md)
 - [보안 정책](../SECURITY.md)
 - [커뮤니티 토론](https://github.com/librefang/librefang/discussions) — 질문, 아이디어, 작품 공유
-- [Discord](https://discord.gg/rwbCEM7h) — 실시간 커뮤니티 채팅
+- [Discord](https://discord.gg/DzTYqAZZmc) — 실시간 커뮤니티 채팅
 
 ---
 

@@ -1,0 +1,35 @@
+name: Contributor Role
+
+on:
+  pull_request_target:
+    types: [closed]
+
+jobs:
+  assign-role:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Announce in Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then exit 0; fi
+
+          AUTHOR="${{ github.event.pull_request.user.login }}"
+          TITLE="${{ github.event.pull_request.title }}"
+          NUMBER="${{ github.event.pull_request.number }}"
+          URL="${{ github.event.pull_request.html_url }}"
+
+          # Check if this is the author's first merged PR
+          MERGED_COUNT=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/search/issues?q=repo:librefang/librefang+author:${AUTHOR}+is:pr+is:merged" \
+            | jq '.total_count')
+
+          if [ "$MERGED_COUNT" -le 1 ]; then
+            CONTENT="🎉 **Welcome our newest contributor!** @${AUTHOR} just merged their first PR!\n\n**${TITLE}** ([#${NUMBER}](${URL}))\n\nThank you for contributing to LibreFang! 🦊"
+          else
+            CONTENT="✅ **PR Merged:** ${TITLE} ([#${NUMBER}](${URL})) by @${AUTHOR}"
+          fi
+
+          printf '%s' "$CONTENT" | jq -Rs '{content: .}' | \
+            curl -s -X POST -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK_URL"

@@ -261,7 +261,7 @@ MIT 许可证。详见 LICENSE 文件。
 - [维护者](../MAINTAINERS.md)
 - [安全策略](../SECURITY.md)
 - [社区讨论](https://github.com/librefang/librefang/discussions) — 提问、分享想法、展示作品
-- [Discord](https://discord.gg/rwbCEM7h) — 实时社区交流
+- [Discord](https://discord.gg/DzTYqAZZmc) — 实时社区交流
 
 ---
 
