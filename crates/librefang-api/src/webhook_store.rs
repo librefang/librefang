@@ -201,7 +201,11 @@ impl WebhookStore {
 
     /// List all webhook subscriptions.
     pub fn list(&self) -> Vec<WebhookSubscription> {
-        self.data.read().unwrap_or_else(|e| e.into_inner()).webhooks.clone()
+        self.data
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .webhooks
+            .clone()
     }
 
     /// Get a single webhook by ID.

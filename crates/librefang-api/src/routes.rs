@@ -11337,10 +11337,7 @@ pub async fn update_webhook(
                     StatusCode::OK,
                     Json(serde_json::to_value(&webhook).unwrap_or_default()),
                 ),
-                Err(e) => (
-                    StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": e})),
-                ),
+                Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))),
             }
         }
         Err(_) => (
