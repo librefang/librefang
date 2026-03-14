@@ -14,23 +14,45 @@ jobs:
   welcome:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/first-interaction@v1
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
-          issue-message: |
-            Thanks for opening your first issue! 🎉
+      - name: Welcome first-time contributors
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          AUTHOR="${{ github.event.sender.login }}"
 
-            A maintainer will take a look soon. In the meantime:
-            - Check [Discussions](https://github.com/librefang/librefang/discussions) for Q&A
-            - Read our [Contributing Guide](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md) if you'd like to submit a fix
+          if [ "${{ github.event_name }}" = "issues" ]; then
+            NUMBER="${{ github.event.issue.number }}"
+            # Check if this is the author's first issue
+            COUNT=$(gh api "search/issues?q=repo:${REPO}+author:${AUTHOR}+is:issue" --jq '.total_count')
+            if [ "$COUNT" -le 1 ]; then
+              gh issue comment "$NUMBER" --repo "$REPO" --body "$(cat <<'MSG'
+          Thanks for opening your first issue! 🎉
 
-            We aim to respond within 7 days.
-          pr-message: |
-            Thanks for your first pull request! 🎉
+          A maintainer will take a look soon. In the meantime:
+          - Check [Discussions](https://github.com/librefang/librefang/discussions) for Q&A
+          - Read our [Contributing Guide](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md) if you'd like to submit a fix
 
-            A maintainer will review it soon. While you wait, please make sure:
-            - [ ] PR title follows conventional format (`feat:`, `fix:`, `docs:`, etc.)
-            - [ ] `cargo test --workspace` passes
-            - [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean
+          We aim to respond within 7 days.
+          MSG
+              )"
+            fi
 
-            We aim to provide initial feedback within 7 days. See [CONTRIBUTING.md](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md) for details.
+          elif [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            NUMBER="${{ github.event.pull_request.number }}"
+            # Check if this is the author's first PR
+            COUNT=$(gh api "search/issues?q=repo:${REPO}+author:${AUTHOR}+is:pr" --jq '.total_count')
+            if [ "$COUNT" -le 1 ]; then
+              gh pr comment "$NUMBER" --repo "$REPO" --body "$(cat <<'MSG'
+          Thanks for your first pull request! 🎉
+
+          A maintainer will review it soon. While you wait, please make sure:
+          - [ ] PR title follows conventional format (`feat:`, `fix:`, `docs:`, etc.)
+          - [ ] `cargo test --workspace` passes
+          - [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean
+
+          We aim to provide initial feedback within 7 days. See [CONTRIBUTING.md](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md) for details.
+          MSG
+              )"
+            fi
+          fi
