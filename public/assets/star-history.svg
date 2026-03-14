@@ -23,19 +23,19 @@
   <rect x="12" y="12" width="776" height="296" rx="14" class="panel" />
   <text x="30" y="52" class="title">Star History</text>
   <text x="30" y="74" class="subtitle">librefang/librefang</text>
-  <text x="770" y="52" class="value" text-anchor="end">9</text>
-  <text x="770" y="74" class="subtitle" text-anchor="end">Updated 2026-03-14 12:02 UTC</text>
+  <text x="770" y="52" class="value" text-anchor="end">10</text>
+  <text x="770" y="74" class="subtitle" text-anchor="end">Updated 2026-03-14 15:59 UTC</text>
   <line x1="68" y1="274.00" x2="772" y2="274.00" class="grid" />
-<line x1="68" y1="198.44" x2="772" y2="198.44" class="grid" />
+<line x1="68" y1="189.00" x2="772" y2="189.00" class="grid" />
 <line x1="68" y1="104.00" x2="772" y2="104.00" class="grid" />
   <line x1="68" y1="274" x2="772" y2="274" class="axis" />
   <line x1="68" y1="104" x2="68" y2="274" class="axis" />
-  <path d="M 84,274 L 84.00,274.00 L 313.33,198.44 L 542.67,141.78 L 772.00,104.00 L 772,274 Z" class="area" />
-  <polyline points="84.00,274.00 313.33,198.44 542.67,141.78 772.00,104.00" class="line" />
+  <path d="M 84,274 L 84.00,274.00 L 313.33,206.00 L 542.67,155.00 L 772.00,104.00 L 772,274 Z" class="area" />
+  <polyline points="84.00,274.00 313.33,206.00 542.67,155.00 772.00,104.00" class="line" />
   <text x="84.00" y="306" class="axis-label" text-anchor="start">2026-03-11</text>
 <text x="313.33" y="306" class="axis-label" text-anchor="middle">2026-03-12</text>
 <text x="772.00" y="306" class="axis-label" text-anchor="end">2026-03-14</text>
   <text x="58" y="278.00" class="axis-label" text-anchor="end">0</text>
-<text x="58" y="202.44" class="axis-label" text-anchor="end">4</text>
-<text x="58" y="108.00" class="axis-label" text-anchor="end">9</text>
+<text x="58" y="193.00" class="axis-label" text-anchor="end">5</text>
+<text x="58" y="108.00" class="axis-label" text-anchor="end">10</text>
 </svg>

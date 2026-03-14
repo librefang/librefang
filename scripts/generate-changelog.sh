@@ -22,7 +22,7 @@ DATE=$(date +%Y-%m-%d)
 if [ $# -ge 2 ]; then
     BASE_TAG="$2"
 else
-    BASE_TAG=$(git -C "$REPO_ROOT" tag --sort=-creatordate | grep -E '^v[0-9]' | head -1 || true)
+    BASE_TAG=$(git -C "$REPO_ROOT" tag --sort=-creatordate | grep -E '^v[0-9]' | grep -vE '(alpha|beta|rc)' | head -1 || true)
 fi
 
 echo "Generating changelog: $VERSION (since ${BASE_TAG:-beginning})"
