@@ -621,21 +621,56 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     0 => format!("No job found matching '{prefix}'."),
                     1 => {
                         let j = matched[0];
-                        let message = match &j.action {
+                        let id_str = j.id.0.to_string();
+                        let id_short = safe_truncate_str(&id_str, 8);
+                        match &j.action {
                             librefang_types::scheduler::CronAction::AgentTurn {
                                 message, ..
-                            } => message.clone(),
+                            } => match self.kernel.send_message(j.agent_id, message).await {
+                                Ok(result) => {
+                                    format!("Job [{id_short}] ran:\n{}", result.response)
+                                }
+                                Err(e) => format!("Failed to run job: {e}"),
+                            },
                             librefang_types::scheduler::CronAction::SystemEvent { text } => {
-                                text.clone()
+                                match self.kernel.send_message(j.agent_id, text).await {
+                                    Ok(result) => {
+                                        format!("Job [{id_short}] ran:\n{}", result.response)
+                                    }
+                                    Err(e) => format!("Failed to run job: {e}"),
+                                }
                             }
-                        };
-                        match self.kernel.send_message(j.agent_id, &message).await {
-                            Ok(result) => {
-                                let id_str = j.id.0.to_string();
-                                let id_short = safe_truncate_str(&id_str, 8);
-                                format!("Job [{id_short}] ran:\n{}", result.response)
+                            librefang_types::scheduler::CronAction::Workflow {
+                                workflow_id,
+                                input,
+                            } => {
+                                // Resolve workflow by UUID or name
+                                let resolved = if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id)
+                                {
+                                    Some(librefang_kernel::workflow::WorkflowId(uuid))
+                                } else {
+                                    let workflows = self.kernel.workflows.list_workflows().await;
+                                    workflows
+                                        .iter()
+                                        .find(|w| w.name == *workflow_id)
+                                        .map(|w| w.id)
+                                };
+                                match resolved {
+                                    Some(wf_id) => {
+                                        let input_text = input.clone().unwrap_or_default();
+                                        match self.kernel.run_workflow(wf_id, input_text).await {
+                                            Ok((_run_id, output)) => {
+                                                format!(
+                                                    "Job [{id_short}] workflow ran:\n{}",
+                                                    output
+                                                )
+                                            }
+                                            Err(e) => format!("Failed to run workflow: {e}"),
+                                        }
+                                    }
+                                    None => format!("Workflow not found: {workflow_id}"),
+                                }
                             }
-                            Err(e) => format!("Failed to run job: {e}"),
                         }
                     }
                     n => format!("{n} jobs match '{prefix}'. Be more specific."),
