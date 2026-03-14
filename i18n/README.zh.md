@@ -260,6 +260,7 @@ MIT 许可证。详见 LICENSE 文件。
 - [治理](../GOVERNANCE.md)
 - [维护者](../MAINTAINERS.md)
 - [安全策略](../SECURITY.md)
+- [社区讨论](https://github.com/librefang/librefang/discussions) — 提问、分享想法、展示作品
 
 ---
 

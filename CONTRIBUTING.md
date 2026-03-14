@@ -548,6 +548,7 @@ Please report unacceptable behavior to the maintainers.
 
 ## Questions?
 
-- Open a [GitHub Issue](https://github.com/librefang/librefang/issues) for bugs, feature requests, or contributor questions.
+- Ask in [GitHub Discussions](https://github.com/librefang/librefang/discussions) for questions or ideas.
+- Open a [GitHub Issue](https://github.com/librefang/librefang/issues) for bugs or feature requests.
 - Check the [docs/](docs/) directory for detailed guides on specific topics.
 - Read [GOVERNANCE.md](GOVERNANCE.md) for decision-making, maintainer expectations, and attribution rules.

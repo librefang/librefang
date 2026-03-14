@@ -52,6 +52,7 @@ Welcome to the LibreFang documentation. LibreFang is the open-source Agent Opera
 | [MIGRATION.md](../MIGRATION.md) | Migrating from OpenClaw, LangChain, or AutoGPT |
 | [SECURITY.md](../SECURITY.md) | Security policy and vulnerability reporting |
 | [CHANGELOG.md](../CHANGELOG.md) | Release notes and version history |
+| [Discussions](https://github.com/librefang/librefang/discussions) | Questions, ideas, and show & tell |
 
 ---
 

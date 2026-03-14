@@ -260,6 +260,7 @@ Licencia MIT. Ver archivo LICENSE.
 - [Gobernanza](../GOVERNANCE.md)
 - [Mantenedores](../MAINTAINERS.md)
 - [Política de seguridad](../SECURITY.md)
+- [Discusiones](https://github.com/librefang/librefang/discussions) — Preguntas, ideas y demos
 
 ---
 

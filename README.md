@@ -476,6 +476,7 @@ MIT License. See the LICENSE file for details.
 - [Governance](GOVERNANCE.md)
 - [Maintainers](MAINTAINERS.md)
 - [Security Policy](SECURITY.md)
+- [Discussions](https://github.com/librefang/librefang/discussions) — Questions, ideas, show & tell
 
 ---
 

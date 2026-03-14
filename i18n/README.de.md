@@ -260,6 +260,7 @@ MIT-Lizenz. Siehe LICENSE-Datei.
 - [Governance](../GOVERNANCE.md)
 - [Maintainer](../MAINTAINERS.md)
 - [Sicherheitsrichtlinie](../SECURITY.md)
+- [Diskussionen](https://github.com/librefang/librefang/discussions) — Fragen, Ideen und Vorstellungen
 
 ---
 

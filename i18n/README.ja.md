@@ -260,6 +260,7 @@ MITライセンス。LICENSEファイルを参照してください。
 - [ガバナンス](../GOVERNANCE.md)
 - [メンテナー](../MAINTAINERS.md)
 - [セキュリティポリシー](../SECURITY.md)
+- [コミュニティディスカッション](https://github.com/librefang/librefang/discussions) — 質問、アイデア共有、作品紹介
 
 ---
 
