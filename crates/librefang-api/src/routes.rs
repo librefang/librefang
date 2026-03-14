@@ -11056,6 +11056,108 @@ pub async fn cron_job_status(
 }
 
 // ---------------------------------------------------------------------------
+// Task queue management endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/queue/status — Summary counts of tasks by status.
+pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.kernel.task_list(None).await {
+        Ok(tasks) => {
+            let mut pending = 0u64;
+            let mut in_progress = 0u64;
+            let mut completed = 0u64;
+            let mut failed = 0u64;
+            for t in &tasks {
+                match t["status"].as_str().unwrap_or("") {
+                    "pending" => pending += 1,
+                    "in_progress" => in_progress += 1,
+                    "completed" => completed += 1,
+                    "failed" => failed += 1,
+                    _ => {}
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "total": tasks.len(),
+                    "pending": pending,
+                    "in_progress": in_progress,
+                    "completed": completed,
+                    "failed": failed,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// GET /api/queue/list — List tasks, optionally filtered by ?status=pending|in_progress|completed|failed.
+pub async fn queue_list(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let status_filter = params.get("status").map(|s| s.as_str());
+    match state.kernel.task_list(status_filter).await {
+        Ok(tasks) => {
+            let total = tasks.len();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"tasks": tasks, "total": total})),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// DELETE /api/queue/{id} — Remove a task from the queue.
+pub async fn queue_delete(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.kernel.task_delete(&id).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "deleted", "id": id})),
+        ),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Task not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// POST /api/queue/{id}/retry — Re-queue a completed/failed/in_progress task back to pending.
+pub async fn queue_retry(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.kernel.task_retry(&id).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "retried", "id": id})),
+        ),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Task not found or already pending"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Webhook trigger endpoints
 // ---------------------------------------------------------------------------
 

@@ -612,6 +612,20 @@ pub async fn build_router(
             "/api/cron/jobs/{id}/status",
             axum::routing::get(routes::cron_job_status),
         )
+        // Task queue management endpoints
+        .route(
+            "/api/queue/status",
+            axum::routing::get(routes::queue_status),
+        )
+        .route("/api/queue/list", axum::routing::get(routes::queue_list))
+        .route(
+            "/api/queue/{id}",
+            axum::routing::delete(routes::queue_delete),
+        )
+        .route(
+            "/api/queue/{id}/retry",
+            axum::routing::post(routes::queue_retry),
+        )
         // Webhook trigger endpoints (external event injection)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))

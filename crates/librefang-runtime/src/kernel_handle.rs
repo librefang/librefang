@@ -69,6 +69,12 @@ pub trait KernelHandle: Send + Sync {
     /// List tasks, optionally filtered by status.
     async fn task_list(&self, status: Option<&str>) -> Result<Vec<serde_json::Value>, String>;
 
+    /// Delete a task by ID. Returns true if deleted.
+    async fn task_delete(&self, task_id: &str) -> Result<bool, String>;
+
+    /// Retry a task by resetting it to pending. Returns true if reset.
+    async fn task_retry(&self, task_id: &str) -> Result<bool, String>;
+
     /// Publish a custom event that can trigger proactive agents.
     async fn publish_event(
         &self,

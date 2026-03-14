@@ -525,6 +525,49 @@ impl MemorySubstrate {
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
+    /// Delete a task by ID. Returns true if a row was deleted.
+    pub async fn task_delete(&self, task_id: &str) -> LibreFangResult<bool> {
+        let conn = Arc::clone(&self.conn);
+        let task_id = task_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            let rows = db
+                .execute(
+                    "DELETE FROM task_queue WHERE id = ?1",
+                    rusqlite::params![task_id],
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            Ok(rows > 0)
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Retry a failed or completed task by resetting it to pending.
+    /// Returns true if the task was found and reset.
+    pub async fn task_retry(&self, task_id: &str) -> LibreFangResult<bool> {
+        let conn = Arc::clone(&self.conn);
+        let task_id = task_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            let rows = db
+                .execute(
+                    "UPDATE task_queue SET status = 'pending', result = NULL, completed_at = NULL WHERE id = ?1 AND status IN ('completed', 'failed', 'in_progress')",
+                    rusqlite::params![task_id],
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            Ok(rows > 0)
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
     /// List tasks, optionally filtered by status.
     pub async fn task_list(&self, status: Option<&str>) -> LibreFangResult<Vec<serde_json::Value>> {
         let conn = Arc::clone(&self.conn);

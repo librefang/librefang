@@ -5669,6 +5669,20 @@ impl KernelHandle for LibreFangKernel {
             .map_err(|e| format!("Task list failed: {e}"))
     }
 
+    async fn task_delete(&self, task_id: &str) -> Result<bool, String> {
+        self.memory
+            .task_delete(task_id)
+            .await
+            .map_err(|e| format!("Task delete failed: {e}"))
+    }
+
+    async fn task_retry(&self, task_id: &str) -> Result<bool, String> {
+        self.memory
+            .task_retry(task_id)
+            .await
+            .map_err(|e| format!("Task retry failed: {e}"))
+    }
+
     async fn publish_event(
         &self,
         event_type: &str,
