@@ -1,0 +1,63 @@
+# LibreFang Code Owners
+# These owners are automatically requested for review on PRs.
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Teams:
+#   @librefang/core          — Kernel, runtime, types, memory, security
+#   @librefang/integrations  — Channels, skills, migrate, SDKs
+#   @librefang/community     — Docs, agents, examples, i18n
+#   @librefang/devops        — CI/CD, scripts, release
+
+# ── Default (catch-all) ──────────────────────────────────────────────
+* @librefang/core
+
+# ── Core (kernel, runtime, types, memory) ────────────────────────────
+crates/librefang-kernel/ @librefang/core
+crates/librefang-runtime/ @librefang/core
+crates/librefang-types/ @librefang/core
+crates/librefang-memory/ @librefang/core
+crates/librefang-api/ @librefang/core
+
+# ── Security-sensitive ───────────────────────────────────────────────
+crates/librefang-wire/ @librefang/core
+crates/librefang-extensions/ @librefang/core
+SECURITY.md @librefang/core
+
+# ── Desktop & CLI ────────────────────────────────────────────────────
+crates/librefang-desktop/ @librefang/core
+crates/librefang-cli/ @librefang/core
+
+# ── Integrations (channels, skills, migrate, SDKs) ───────────────────
+crates/librefang-channels/ @librefang/integrations
+crates/librefang-skills/ @librefang/integrations
+crates/librefang-migrate/ @librefang/integrations
+crates/librefang-hands/ @librefang/integrations
+sdk/javascript/ @librefang/integrations
+sdk/python/ @librefang/integrations
+packages/ @librefang/integrations
+
+# ── Community (docs, agents, examples, i18n) ─────────────────────────
+agents/ @librefang/community
+examples/ @librefang/community
+docs/ @librefang/community
+i18n/ @librefang/community
+CONTRIBUTING.md @librefang/community
+README.md @librefang/community
+
+# ── DevOps (CI, scripts, release, build tooling) ─────────────────────
+.github/ @librefang/devops
+scripts/ @librefang/devops
+deploy/ @librefang/devops
+xtask/ @librefang/devops
+Cargo.toml @librefang/devops @librefang/core
+Cargo.lock @librefang/devops
+Cross.toml @librefang/devops
+rust-toolchain.toml @librefang/devops
+CHANGELOG.md @librefang/devops
+MIGRATION.md @librefang/integrations
+
+# ── Governance (owner only) ──────────────────────────────────────────
+GOVERNANCE.md @houko
+MAINTAINERS.md @houko
+CODE_OF_CONDUCT.md @houko
+LICENSE @houko

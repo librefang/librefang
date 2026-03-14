@@ -494,7 +494,7 @@ impl Default for AgentManifest {
     fn default() -> Self {
         Self {
             name: "unnamed".to_string(),
-            version: "0.1.0".to_string(),
+            version: crate::VERSION.to_string(),
             description: String::new(),
             author: String::new(),
             module: "builtin:chat".to_string(),
@@ -754,30 +754,11 @@ mod tests {
     fn test_agent_manifest_serialization() {
         let manifest = AgentManifest {
             name: "test-agent".to_string(),
-            version: "0.1.0".to_string(),
             description: "A test agent".to_string(),
             author: "test".to_string(),
             module: "test.wasm".to_string(),
-            schedule: ScheduleMode::default(),
-            model: ModelConfig::default(),
-            fallback_models: vec![],
-            resources: ResourceQuota::default(),
-            priority: Priority::default(),
-            capabilities: ManifestCapabilities::default(),
-            profile: None,
-            tools: HashMap::new(),
-            skills: vec![],
-            mcp_servers: vec![],
-            metadata: HashMap::new(),
             tags: vec!["test".to_string()],
-            routing: None,
-            autonomous: None,
-            pinned_model: None,
-            workspace: None,
-            generate_identity_files: true,
-            exec_policy: None,
-            tool_allowlist: Vec::new(),
-            tool_blocklist: Vec::new(),
+            ..Default::default()
         };
         let json = serde_json::to_string(&manifest).unwrap();
         let deserialized: AgentManifest = serde_json::from_str(&json).unwrap();

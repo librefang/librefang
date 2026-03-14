@@ -31,6 +31,7 @@
   <img src="https://img.shields.io/github/forks/librefang/librefang?style=flat-square" alt="Forks" />
   <img src="https://img.shields.io/github/issues-raw/librefang/librefang?style=flat-square" alt="Issues" />
   <img src="https://img.shields.io/github/v/release/librefang/librefang?style=flat-square" alt="Latest Release" />
+  <a href="https://discord.gg/DzTYqAZZmc"><img src="https://img.shields.io/discord/1481633471507071129?style=flat-square&logo=discord&label=Discord" alt="Discord" /></a>
 </p>
 
 <p align="center">
@@ -476,6 +477,20 @@ MIT License. See the LICENSE file for details.
 - [Governance](GOVERNANCE.md)
 - [Maintainers](MAINTAINERS.md)
 - [Security Policy](SECURITY.md)
+- [Discussions](https://github.com/librefang/librefang/discussions) — Questions, ideas, show & tell
+- [Discord](https://discord.gg/DzTYqAZZmc) — Real-time chat with the community
+
+---
+
+## Contributors
+
+Thanks to everyone who has contributed to LibreFang!
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>
+
+> Want to join? Check out our [Contributing Guide](CONTRIBUTING.md) — no Rust experience required for many tasks.
 
 ---
 

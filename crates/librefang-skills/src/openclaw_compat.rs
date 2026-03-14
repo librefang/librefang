@@ -233,7 +233,7 @@ pub fn convert_skillmd(dir: &Path) -> Result<ConvertedSkillMd, SkillError> {
     let manifest = SkillManifest {
         skill: SkillMeta {
             name: skill_name,
-            version: "0.1.0".to_string(),
+            version: librefang_types::VERSION.to_string(),
             description: frontmatter.description.clone(),
             author: String::new(),
             license: String::new(),
@@ -325,7 +325,7 @@ pub fn convert_skillmd_str(name_hint: &str, content: &str) -> Result<ConvertedSk
     let manifest = SkillManifest {
         skill: SkillMeta {
             name: skill_name,
-            version: "0.1.0".to_string(),
+            version: librefang_types::VERSION.to_string(),
             description: frontmatter.description.clone(),
             author: "LibreFang".to_string(),
             license: "Apache-2.0".to_string(),
@@ -372,7 +372,10 @@ pub fn convert_openclaw_skill(dir: &Path) -> Result<SkillManifest, SkillError> {
         .map_err(|e| SkillError::InvalidManifest(format!("Invalid package.json: {e}")))?;
 
     let name = pkg["name"].as_str().unwrap_or("unnamed-skill").to_string();
-    let version = pkg["version"].as_str().unwrap_or("0.1.0").to_string();
+    let version = pkg["version"]
+        .as_str()
+        .unwrap_or(librefang_types::VERSION)
+        .to_string();
     let description = pkg["description"].as_str().unwrap_or("").to_string();
     let author = pkg["author"].as_str().unwrap_or("").to_string();
 

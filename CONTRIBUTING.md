@@ -10,28 +10,107 @@ This guide covers everything you need to get started, from setting up your devel
 
 ## Table of Contents
 
+- [Ways to Contribute](#ways-to-contribute)
 - [Development Environment](#development-environment)
 - [Building and Testing](#building-and-testing)
 - [Code Style](#code-style)
 - [Architecture Overview](#architecture-overview)
 - [How to Add a New Agent Template](#how-to-add-a-new-agent-template)
+- [How to Add a New Skill](#how-to-add-a-new-skill)
 - [How to Add a New Channel Adapter](#how-to-add-a-new-channel-adapter)
+- [How to Add a New LLM Provider](#how-to-add-a-new-llm-provider)
 - [How to Add a New Tool](#how-to-add-a-new-tool)
 - [Pull Request Process](#pull-request-process)
 - [Code of Conduct](#code-of-conduct)
 
 ---
 
+## Ways to Contribute
+
+**You don't need to know Rust to contribute to LibreFang.** We have contribution paths for every skill level:
+
+### No Rust Required
+
+| What | Skills Needed | Time | Where |
+|------|--------------|------|-------|
+| Write an agent template | TOML + prompt engineering | 1-2 hours | `agents/` |
+| Write a skill (Python) | Python | 2-4 hours | `~/.librefang/skills/` |
+| Write a skill (JavaScript) | Node.js | 2-4 hours | `~/.librefang/skills/` |
+| Fix typos / improve docs | Markdown | 30 min | `docs/` |
+| Translate docs | Markdown + language | 1-2 hours | `docs/i18n/` |
+| Report bugs with reproduction steps | Testing | 30 min | GitHub Issues |
+| Test on uncommon platforms | Testing | 1 hour | GitHub Issues |
+
+### Basic Rust
+
+| What | Skills Needed | Time | Where |
+|------|--------------|------|-------|
+| Add a channel adapter | Rust + platform API | half day | `crates/librefang-channels/` |
+| Add an LLM provider driver | Rust + provider API | half day | `crates/librefang-runtime/` |
+| Add a built-in tool | Rust | 2-4 hours | `crates/librefang-runtime/` |
+| Write/improve tests | Rust | 1-2 hours | any crate |
+
+### Advanced Rust
+
+| What | Skills Needed | Time | Where |
+|------|--------------|------|-------|
+| Kernel features | Deep Rust + architecture | 1+ days | `crates/librefang-kernel/` |
+| Security hardening | Rust + security | 1+ days | multiple crates |
+| Performance optimization | Rust + profiling | varies | any crate |
+| WASM sandbox improvements | Rust + Wasmtime | 1+ days | `crates/librefang-runtime/` |
+
+### Other
+
+| What | Skills Needed | Time | Where |
+|------|--------------|------|-------|
+| Desktop app features | Rust + Tauri + TypeScript | varies | `crates/librefang-desktop/` |
+| JavaScript SDK | TypeScript | varies | `sdk/javascript/` |
+| Python SDK | Python | varies | `sdk/python/` |
+| WhatsApp gateway | Node.js | varies | `packages/whatsapp-gateway/` |
+
+> **Tip:** Look for issues labeled [`good first issue`](https://github.com/librefang/librefang/labels/good%20first%20issue) — they include the files to modify, how to test, and estimated difficulty.
+
+### Quick Start by Contribution Type
+
+**I want to add an agent template** (no Rust):
+```bash
+cp -r agents/hello-world agents/my-agent
+# Edit agents/my-agent/agent.toml
+# Submit a PR
+```
+
+**I want to write a Python skill** (no Rust):
+```bash
+mkdir -p ~/.librefang/skills/my-skill
+# See docs/skill-development.md for the skill format
+```
+
+**I want to fix a bug or add a Rust feature**:
+```bash
+git clone https://github.com/librefang/librefang.git && cd librefang
+cargo build --workspace        # Build
+cargo test --workspace         # Test
+cargo clippy --workspace --all-targets -- -D warnings  # Lint
+```
+
+---
+
 ## Development Environment
 
-### Prerequisites
+### Option A: GitHub Codespace (Recommended for first-time contributors)
+
+Click the green **"Code"** button on GitHub → **"Codespaces"** → **"Create codespace on main"**. The DevContainer will automatically install Rust, Python, Node.js, and build the project. You'll have a fully working environment in your browser within a few minutes.
+
+### Option B: Local Setup
+
+#### Prerequisites
 
 - **Rust 1.75+** (install via [rustup](https://rustup.rs/))
 - **Git**
 - **Python 3.8+** (optional, for Python runtime and skills)
 - A supported LLM API key (Anthropic, OpenAI, Groq, etc.) for end-to-end testing
 
-### Clone and Build
+#### Clone and Build
 
 ```bash
 git clone https://github.com/librefang/librefang.git
@@ -68,7 +147,7 @@ cargo build --workspace
 cargo test --workspace
 ```
 
-The test suite is currently 1,744+ tests. All must pass before merging.
+The test suite is currently 2,100+ tests. All must pass before merging.
 
 ### Run Tests for a Single Crate
 
@@ -208,6 +287,84 @@ librefang agent spawn agents/my-agent/agent.toml
 
 ---
 
+## How to Add a New Skill
+
+Skills are reusable capabilities that agents can invoke. They can be written in **Python, JavaScript, or as pure prompt templates** — no Rust required.
+
+### Skill Types
+
+| Type | Language | Description |
+|------|----------|-------------|
+| `prompt` | None (TOML only) | A prompt template with variables |
+| `python` | Python 3.8+ | A Python script with `run()` entry point |
+| `javascript` | Node.js 18+ | A JS module with `run()` export |
+
+### Steps (Python example)
+
+1. Create a skill directory:
+
+```
+my-skill/
+  skill.toml
+  main.py
+```
+
+2. Write the manifest (`skill.toml`):
+
+```toml
+name = "my-skill"
+version = "0.1.0"
+description = "What this skill does."
+author = "your-name"
+runtime = "python"
+entry = "main.py"
+tags = ["utility"]
+
+[input]
+url = { type = "string", description = "URL to process", required = true }
+```
+
+3. Write the implementation (`main.py`):
+
+```python
+def run(input: dict) -> str:
+    url = input["url"]
+    # Your logic here
+    return f"Processed: {url}"
+```
+
+4. Test locally:
+
+```bash
+librefang skill test ./my-skill --input '{"url": "https://example.com"}'
+```
+
+5. Submit as a PR to `skills/community/` or publish to FangHub.
+
+### Steps (Prompt template)
+
+For skills that are just prompt engineering, no code is needed:
+
+```toml
+name = "summarize-email"
+version = "0.1.0"
+description = "Summarize an email thread."
+runtime = "promptonly"
+tags = ["email", "productivity"]
+
+[input]
+thread = { type = "string", description = "The email thread text", required = true }
+
+[prompt]
+template = """
+Summarize the following email thread in 3 bullet points:
+
+{{thread}}
+"""
+```
+
+---
+
 ## How to Add a New Channel Adapter
 
 Channel adapters live in `crates/librefang-channels/src/`. Each adapter implements the `ChannelAdapter` trait.
@@ -261,6 +418,35 @@ pub mod myplatform;
 6. Add CLI setup wizard instructions in `crates/librefang-cli/src/main.rs` under `cmd_channel_setup`.
 
 7. Write tests and submit a PR.
+
+---
+
+## How to Add a New LLM Provider
+
+LLM provider drivers live in `crates/librefang-runtime/src/`. LibreFang uses three driver families that cover most providers:
+
+| Driver | Covers |
+|--------|--------|
+| `openai_compat` | Any OpenAI-compatible API (Groq, Together, Mistral, local Ollama, etc.) |
+| `anthropic` | Anthropic Claude models |
+| `gemini` | Google Gemini models |
+
+### If your provider is OpenAI-compatible
+
+Most new providers don't need a new driver — just add an entry to the model catalog in `crates/librefang-types/src/models.rs`:
+
+1. Add the provider constant and its base URL.
+2. Add model entries with context window sizes and pricing.
+3. Add aliases if desired (e.g., `"fast" -> "groq/llama-3.3-70b"`).
+4. Write a test verifying the model resolves correctly.
+
+### If your provider needs a custom driver
+
+1. Create `crates/librefang-runtime/src/my_provider.rs`.
+2. Implement the `LlmDriver` trait (see `anthropic.rs` for reference).
+3. Register it in the driver factory in `crates/librefang-runtime/src/llm_driver.rs`.
+4. Add config types in `crates/librefang-types/src/config.rs`.
+5. Write integration tests (they should skip gracefully if the API key env var is absent).
 
 ---
 
@@ -327,8 +513,8 @@ tools = ["my_tool"]
 
 2. **Make your changes**: Follow the code style guidelines above.
 
-3. **Test thoroughly**:
-   - `cargo test --workspace` must pass (all 1,744+ tests).
+3. Test thoroughly:
+   - `cargo test --workspace` must pass (all 2,100+ tests).
    - `cargo clippy --workspace --all-targets -- -D warnings` must produce zero warnings.
    - `cargo fmt --all --check` must produce no diff.
 
@@ -362,6 +548,7 @@ Please report unacceptable behavior to the maintainers.
 
 ## Questions?
 
-- Open a [GitHub Issue](https://github.com/librefang/librefang/issues) for bugs, feature requests, or contributor questions.
+- Ask in [GitHub Discussions](https://github.com/librefang/librefang/discussions) for questions or ideas.
+- Open a [GitHub Issue](https://github.com/librefang/librefang/issues) for bugs or feature requests.
 - Check the [docs/](docs/) directory for detailed guides on specific topics.
 - Read [GOVERNANCE.md](GOVERNANCE.md) for decision-making, maintainer expectations, and attribution rules.

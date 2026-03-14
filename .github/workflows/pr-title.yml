@@ -1,0 +1,45 @@
+name: PR Title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  check-title:
+    name: Validate PR title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check conventional commit format
+        uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Allowed prefixes (conventional commits)
+          types: |
+            feat
+            fix
+            docs
+            style
+            refactor
+            perf
+            test
+            build
+            ci
+            chore
+            revert
+          # Allow scope like feat(cli): or fix(kernel):
+          requireScope: false
+          # Enforce lowercase after prefix
+          subjectPattern: ^.+$
+          subjectPatternError: |
+            PR title "{title}" doesn't follow conventional commit format.
+
+            Expected: <type>[optional scope]: <description>
+
+            Examples:
+              feat: add Matrix channel adapter
+              fix(kernel): resolve session restore crash
+              docs: update CONTRIBUTING.md
+              chore(deps): bump clap to 4.6.0
+
+            Allowed types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert

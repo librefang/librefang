@@ -807,7 +807,7 @@ The `agents/custom/` directory is reserved for your own agent templates. Create 
 ```toml
 # Required fields
 name = "my-agent"
-version = "0.1.0"
+version = "0.4.0"
 description = "What this agent does in one sentence."
 author = "your-name"
 module = "builtin:chat"

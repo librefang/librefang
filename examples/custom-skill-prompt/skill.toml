@@ -1,0 +1,38 @@
+## Custom Prompt Skill Example
+##
+## This skill uses pure prompt engineering — no code required.
+## It generates a meeting agenda from a topic and duration.
+##
+## To test: librefang skill test ./examples/custom-skill-prompt \
+##   --input '{"topic": "Q1 planning", "duration_minutes": "30"}'
+##
+## For the full reference, see: docs/skill-development.md
+
+[skill]
+name = "meeting-agenda"
+version = "0.1.0"
+description = "Generate a structured meeting agenda from a topic and duration."
+author = "your-name"
+tags = ["meeting", "productivity", "example"]
+
+[runtime]
+type = "promptonly"
+
+[input]
+topic = { type = "string", description = "The meeting topic", required = true }
+duration_minutes = { type = "string", description = "Meeting duration in minutes", required = true }
+
+[prompt]
+template = """
+Create a structured meeting agenda for the following:
+
+Topic: {{topic}}
+Duration: {{duration_minutes}} minutes
+
+Requirements:
+- Include time allocations for each section
+- Start with a brief intro/alignment (2-3 min)
+- End with action items and next steps (3-5 min)
+- Keep sections focused and actionable
+- Format as a numbered list with time in brackets
+"""

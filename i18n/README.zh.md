@@ -260,6 +260,20 @@ MIT 许可证。详见 LICENSE 文件。
 - [治理](../GOVERNANCE.md)
 - [维护者](../MAINTAINERS.md)
 - [安全策略](../SECURITY.md)
+- [社区讨论](https://github.com/librefang/librefang/discussions) — 提问、分享想法、展示作品
+- [Discord](https://discord.gg/DzTYqAZZmc) — 实时社区交流
+
+---
+
+## 贡献者
+
+感谢所有为 LibreFang 做出贡献的人！
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>
+
+> 想加入吗？查看我们的[贡献指南](../CONTRIBUTING.md) — 许多任务不需要 Rust 经验。
 
 ---
 

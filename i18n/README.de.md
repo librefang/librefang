@@ -260,6 +260,20 @@ MIT-Lizenz. Siehe LICENSE-Datei.
 - [Governance](../GOVERNANCE.md)
 - [Maintainer](../MAINTAINERS.md)
 - [Sicherheitsrichtlinie](../SECURITY.md)
+- [Diskussionen](https://github.com/librefang/librefang/discussions) — Fragen, Ideen und Vorstellungen
+- [Discord](https://discord.gg/DzTYqAZZmc) — Echtzeit-Chat mit der Community
+
+---
+
+## Mitwirkende
+
+Danke an alle, die zu LibreFang beigetragen haben!
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>
+
+> Möchtest du mitmachen? Schau dir unseren [Beitragsleitfaden](../CONTRIBUTING.md) an — für viele Aufgaben ist keine Rust-Erfahrung nötig.
 
 ---
 

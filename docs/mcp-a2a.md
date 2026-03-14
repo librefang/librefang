@@ -260,7 +260,7 @@ Response:
   "result": {
     "protocolVersion": "2024-11-05",
     "capabilities": { "tools": {} },
-    "serverInfo": { "name": "librefang", "version": "0.1.0" }
+    "serverInfo": { "name": "librefang", "version": "0.4.0" }
   }
 }
 ```
@@ -567,7 +567,7 @@ Agent Cards are built from LibreFang agent manifests via `build_agent_card()`. E
   "name": "code-reviewer",
   "description": "Reviews code for bugs, security issues, and style",
   "url": "http://127.0.0.1:4545/a2a",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "capabilities": {
     "streaming": true,
     "pushNotifications": false,
@@ -774,7 +774,7 @@ Lists all registered agents as Agent Cards:
       "name": "code-reviewer",
       "description": "Reviews code for bugs and security issues",
       "url": "http://127.0.0.1:4545/a2a",
-      "version": "0.1.0",
+      "version": "0.4.0",
       "capabilities": { "streaming": true, "pushNotifications": false, "stateTransitionHistory": true },
       "skills": [...],
       "defaultInputModes": ["text"],
@@ -894,7 +894,7 @@ If `a2a` is `None` (not present in config), all A2A features are disabled. The A
 
 **Task Store Bounds**: The `A2aTaskStore` is bounded (default 1000 tasks) with FIFO eviction of completed/failed/cancelled tasks, preventing memory exhaustion from task accumulation.
 
-**External Agent Discovery**: The `A2aClient` uses a 30-second timeout and sends a `User-Agent: LibreFang/0.1 A2A` header. Failed discoveries are logged but do not block kernel boot.
+**External Agent Discovery**: The `A2aClient` uses a 30-second timeout and sends a `User-Agent: LibreFang/0.4 A2A` header. Failed discoveries are logged but do not block kernel boot.
 
 ### Kernel-Level Protection
 

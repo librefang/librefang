@@ -345,7 +345,6 @@ mod tests {
     use super::*;
     use chrono::Utc;
     use librefang_types::agent::*;
-    use std::collections::HashMap;
 
     fn test_entry(name: &str) -> AgentEntry {
         AgentEntry {
@@ -353,30 +352,10 @@ mod tests {
             name: name.to_string(),
             manifest: AgentManifest {
                 name: name.to_string(),
-                version: "0.1.0".to_string(),
                 description: "test".to_string(),
                 author: "test".to_string(),
                 module: "test".to_string(),
-                schedule: ScheduleMode::default(),
-                model: ModelConfig::default(),
-                fallback_models: vec![],
-                resources: ResourceQuota::default(),
-                priority: Priority::default(),
-                capabilities: ManifestCapabilities::default(),
-                profile: None,
-                tools: HashMap::new(),
-                skills: vec![],
-                mcp_servers: vec![],
-                metadata: HashMap::new(),
-                tags: vec![],
-                routing: None,
-                autonomous: None,
-                pinned_model: None,
-                workspace: None,
-                generate_identity_files: true,
-                exec_policy: None,
-                tool_allowlist: vec![],
-                tool_blocklist: vec![],
+                ..Default::default()
             },
             state: AgentState::Created,
             mode: AgentMode::default(),

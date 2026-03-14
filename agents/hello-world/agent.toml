@@ -1,5 +1,5 @@
 name = "hello-world"
-version = "0.1.0"
+version = "0.4.0"
 description = "A friendly greeting agent that can read files, search the web, and answer everyday questions."
 author = "librefang"
 module = "builtin:chat"

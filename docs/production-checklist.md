@@ -1,6 +1,6 @@
 # Production Release Checklist
 
-Everything that must be done before tagging `v0.1.0` and shipping to users. Items are ordered by dependency — complete them top to bottom.
+Everything that must be done before tagging `v0.4.0` and shipping to users. Items are ordered by dependency — complete them top to bottom.
 
 ---
 
@@ -181,7 +181,7 @@ docker build -f scripts/docker/install-smoke.Dockerfile .
 
 ---
 
-## 8. Write CHANGELOG.md for v0.1.0
+## 8. Write CHANGELOG.md for v0.4.0
 
 **Status:** VERIFY — confirm it covers all shipped features.
 
@@ -207,10 +207,10 @@ grep '^version' Cargo.toml
 
 # Commit any final changes
 git add -A
-git commit -m "chore: prepare v0.1.0 release"
+git commit -m "chore: prepare v0.4.0 release"
 
 # Tag and push
-git tag v0.1.0
+git tag v0.4.0
 git push origin main --tags
 ```
 
@@ -247,17 +247,17 @@ Visit: `https://github.com/librefang/librefang/releases/latest/download/latest.j
 ### Docker Image
 ```bash
 docker pull ghcr.io/librefang/librefang:latest
-docker pull ghcr.io/librefang/librefang:0.1.0
+docker pull ghcr.io/librefang/librefang:0.4.0
 
 # Verify both architectures
 docker run --rm ghcr.io/librefang/librefang:latest --version
 ```
 
 ### Desktop App Auto-Update (test with v0.1.1)
-1. Install v0.1.0 from the release
+1. Install v0.4.0 from the release
 2. Tag v0.1.1 and push
 3. Wait for release workflow to complete
-4. Open the v0.1.0 app — after 10 seconds it should:
+4. Open the v0.4.0 app — after 10 seconds it should:
    - Show "LibreFang Updating..." notification
    - Download and install v0.1.1
    - Restart automatically to v0.1.1
@@ -267,7 +267,7 @@ docker run --rm ghcr.io/librefang/librefang:latest --version
 ```bash
 # Linux/macOS
 curl -fsSL https://librefang.ai/install.sh | sh
-librefang --version  # Should print v0.1.0
+librefang --version  # Should print v0.4.0
 
 # Windows PowerShell
 irm https://librefang.ai/install.ps1 | iex

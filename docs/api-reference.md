@@ -112,7 +112,7 @@ Spawn a new agent from a TOML manifest.
 
 ```json
 {
-  "manifest_toml": "name = \"my-agent\"\nversion = \"0.1.0\"\ndescription = \"Test agent\"\nauthor = \"me\"\nmodule = \"builtin:chat\"\n\n[model]\nprovider = \"groq\"\nmodel = \"llama-3.3-70b-versatile\"\n\n[capabilities]\ntools = [\"file_read\", \"web_fetch\"]\nmemory_read = [\"*\"]\nmemory_write = [\"self.*\"]\n"
+  "manifest_toml": "name = \"my-agent\"\nversion = \"0.4.0\"\ndescription = \"Test agent\"\nauthor = \"me\"\nmodule = \"builtin:chat\"\n\n[model]\nprovider = \"groq\"\nmodel = \"llama-3.3-70b-versatile\"\n\n[capabilities]\ntools = [\"file_read\", \"web_fetch\"]\nmemory_read = [\"*\"]\nmemory_write = [\"self.*\"]\n"
 }
 ```
 
@@ -613,7 +613,7 @@ Get a specific template's manifest and raw TOML.
       "network": []
     }
   },
-  "manifest_toml": "name = \"hello-world\"\nversion = \"0.1.0\"\n..."
+  "manifest_toml": "name = \"hello-world\"\nversion = \"0.4.0\"\n..."
 }
 ```
 
@@ -692,7 +692,7 @@ Build and version information.
 ```json
 {
   "name": "librefang",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "build_date": "2025-01-15",
   "git_sha": "abc1234",
   "rust_version": "1.82.0",
@@ -1372,7 +1372,7 @@ A2A agent card discovery endpoint. Returns the server's A2A agent card, which de
   "name": "LibreFang",
   "description": "LibreFang Agent Operating System",
   "url": "http://127.0.0.1:4545",
-  "version": "0.1.0",
+  "version": "0.4.0",
   "capabilities": {
     "streaming": true,
     "pushNotifications": false

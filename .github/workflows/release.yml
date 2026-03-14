@@ -601,3 +601,64 @@ jobs:
           git add install.sh install.ps1 install-manifest.json
           git commit -m "chore: sync installers for ${{ github.ref_name }}" || echo "No changes"
           git push
+
+  # ── Discord Release Notification ─────────────────────────────────────
+  notify_discord:
+    name: Notify Discord
+    runs-on: ubuntu-latest
+    needs: [desktop, cli_mac, cli_linux, cli_windows, docker-manifest]
+    if: always() && !cancelled()
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract changelog and notify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "No Discord release webhook configured, skipping"
+            exit 0
+          fi
+
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+
+          # Extract this version's changelog section
+          CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md | head -30)
+
+          if [ -z "$CHANGES" ]; then
+            CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
+          fi
+
+          # Check job results
+          DESKTOP="${{ needs.desktop.result }}"
+          CLI_MAC="${{ needs.cli_mac.result }}"
+          CLI_LINUX="${{ needs.cli_linux.result }}"
+          CLI_WIN="${{ needs.cli_windows.result }}"
+          DOCKER="${{ needs.docker-manifest.result }}"
+
+          STATUS_LINE=""
+          [ "$DESKTOP" = "success" ] && STATUS_LINE="$STATUS_LINE 🖥️ Desktop" || STATUS_LINE="$STATUS_LINE ❌ Desktop"
+          [ "$CLI_MAC" = "success" ] && STATUS_LINE="$STATUS_LINE | 🍎 macOS CLI" || STATUS_LINE="$STATUS_LINE | ❌ macOS CLI"
+          [ "$CLI_LINUX" = "success" ] && STATUS_LINE="$STATUS_LINE | 🐧 Linux CLI" || STATUS_LINE="$STATUS_LINE | ❌ Linux CLI"
+          [ "$CLI_WIN" = "success" ] && STATUS_LINE="$STATUS_LINE | 🪟 Windows CLI" || STATUS_LINE="$STATUS_LINE | ❌ Windows CLI"
+          [ "$DOCKER" = "success" ] && STATUS_LINE="$STATUS_LINE | 🐳 Docker" || STATUS_LINE="$STATUS_LINE | ❌ Docker"
+
+          # Build Discord embed
+          CONTENT=$(cat <<MSG_EOF
+          🚀 **LibreFang $VERSION Released!**
+
+          $CHANGES
+
+          **Build Status:**$STATUS_LINE
+
+          📦 [Download](https://github.com/librefang/librefang/releases/tag/$TAG) | 📖 [Changelog](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) | ⭐ [Star us](https://github.com/librefang/librefang)
+          MSG_EOF
+          )
+
+          # Clean heredoc indentation
+          CONTENT=$(echo "$CONTENT" | sed 's/^          //')
+
+          printf '%s' "$CONTENT" | jq -Rs '{content: .}' | \
+            curl -s -X POST -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK_URL"

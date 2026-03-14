@@ -377,7 +377,7 @@ pub fn build_agent_card(manifest: &AgentManifest, base_url: &str) -> AgentCard {
         name: manifest.name.clone(),
         description: manifest.description.clone(),
         url: format!("{base_url}/a2a"),
-        version: "0.1.0".to_string(),
+        version: librefang_types::VERSION.to_string(),
         capabilities: AgentCapabilities {
             streaming: true,
             push_notifications: false,
@@ -418,7 +418,10 @@ impl A2aClient {
         let response = self
             .client
             .get(&agent_json_url)
-            .header("User-Agent", "LibreFang/0.1 A2A")
+            .header(
+                "User-Agent",
+                format!("LibreFang/{} A2A", librefang_types::VERSION),
+            )
             .send()
             .await
             .map_err(|e| format!("A2A discovery failed: {e}"))?;

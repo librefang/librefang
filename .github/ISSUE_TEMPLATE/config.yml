@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions & Discussions
+    url: https://github.com/librefang/librefang/discussions
+    about: Ask questions, share ideas, or show what you've built with LibreFang.
+  - name: Security Vulnerabilities
+    url: https://github.com/librefang/librefang/security/advisories/new
+    about: Report security vulnerabilities privately (do NOT use public issues).

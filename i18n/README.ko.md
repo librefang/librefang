@@ -260,6 +260,20 @@ MIT 라이선스. LICENSE 파일을 참조하세요.
 - [거버넌스](../GOVERNANCE.md)
 - [메인테이너](../MAINTAINERS.md)
 - [보안 정책](../SECURITY.md)
+- [커뮤니티 토론](https://github.com/librefang/librefang/discussions) — 질문, 아이디어, 작품 공유
+- [Discord](https://discord.gg/DzTYqAZZmc) — 실시간 커뮤니티 채팅
+
+---
+
+## 기여자
+
+LibreFang에 기여해 주신 모든 분들께 감사드립니다!
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>
+
+> 참여하고 싶으신가요? [기여 가이드](../CONTRIBUTING.md)를 확인하세요 — 많은 작업이 Rust 경험 없이도 가능합니다.
 
 ---
 

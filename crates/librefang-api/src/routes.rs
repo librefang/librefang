@@ -6047,7 +6047,7 @@ pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResp
             "name": "librefang",
             "description": "LibreFang Agent OS — no agents spawned yet",
             "url": format!("{base_url}/a2a"),
-            "version": "0.1.0",
+            "version": librefang_types::VERSION,
             "capabilities": { "streaming": true },
             "skills": [],
             "defaultInputModes": ["text"],

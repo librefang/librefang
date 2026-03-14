@@ -150,7 +150,7 @@ impl SetupWizard {
 
         let manifest = AgentManifest {
             name: intent.name.clone(),
-            version: "0.1.0".to_string(),
+            version: librefang_types::VERSION.to_string(),
             description: intent.description.clone(),
             author: "wizard".to_string(),
             module: "builtin:chat".to_string(),

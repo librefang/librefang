@@ -260,6 +260,20 @@ MITライセンス。LICENSEファイルを参照してください。
 - [ガバナンス](../GOVERNANCE.md)
 - [メンテナー](../MAINTAINERS.md)
 - [セキュリティポリシー](../SECURITY.md)
+- [コミュニティディスカッション](https://github.com/librefang/librefang/discussions) — 質問、アイデア共有、作品紹介
+- [Discord](https://discord.gg/DzTYqAZZmc) — リアルタイムコミュニティチャット
+
+---
+
+## コントリビューター
+
+LibreFangに貢献してくださった皆様に感謝します！
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>
+
+> 参加しませんか？[コントリビューションガイド](../CONTRIBUTING.md)をご覧ください — 多くのタスクはRustの経験不要です。
 
 ---
 

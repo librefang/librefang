@@ -42,7 +42,7 @@ Welcome to the LibreFang documentation. LibreFang is the open-source Agent Opera
 
 | Guide | Description |
 |-------|-------------|
-| [Production Checklist](production-checklist.md) | Every step before tagging v0.1.0 -- signing keys, secrets, verification |
+| [Production Checklist](production-checklist.md) | Every step before tagging v0.4.0 -- signing keys, secrets, verification |
 
 ## Additional Resources
 
@@ -52,6 +52,7 @@ Welcome to the LibreFang documentation. LibreFang is the open-source Agent Opera
 | [MIGRATION.md](../MIGRATION.md) | Migrating from OpenClaw, LangChain, or AutoGPT |
 | [SECURITY.md](../SECURITY.md) | Security policy and vulnerability reporting |
 | [CHANGELOG.md](../CHANGELOG.md) | Release notes and version history |
+| [Discussions](https://github.com/librefang/librefang/discussions) | Questions, ideas, and show & tell |
 
 ---
 
@@ -103,3 +104,11 @@ librefang init && librefang start
 | `XAI_API_KEY` | xAI (Grok) |
 
 Only one provider key is needed to get started. Groq offers a free tier.
+
+---
+
+## Contributors
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+</a>

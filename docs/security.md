@@ -1301,7 +1301,7 @@ LibreFang provides two health endpoints with different information levels.
 ```json
 {
     "status": "ok",
-    "version": "0.1.0"
+    "version": "0.4.0"
 }
 ```
 
@@ -1316,7 +1316,7 @@ load balancer health checks.
 ```json
 {
     "status": "ok",
-    "version": "0.1.0",
+    "version": "0.4.0",
     "uptime_seconds": 3600,
     "panic_count": 0,
     "restart_count": 2,
