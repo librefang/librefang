@@ -235,6 +235,7 @@ const HTML = `<!DOCTYPE html>
       text-decoration: none;
       color: var(--text);
       display: block;
+      min-width: 0;
     }
     .platform-card:hover {
       border-color: var(--accent);
@@ -280,6 +281,7 @@ const HTML = `<!DOCTYPE html>
       align-items: center;
       gap: 6px;
       max-width: 100%;
+      overflow: hidden;
     }
     .platform-cmd code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .copy-btn {
