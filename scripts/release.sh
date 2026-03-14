@@ -163,11 +163,21 @@ git -C "$REPO_ROOT" push origin "$TAG"
 if command -v gh &>/dev/null; then
     echo ""
     echo "Creating GitHub Release..."
-    gh release create "$TAG" \
-        --repo librefang/librefang \
-        --title "LibreFang $VERSION" \
-        --generate-notes \
-        || echo "Warning: gh release create failed — CI may create it"
+    # Extract the current version's section from CHANGELOG.md as release body
+    RELEASE_BODY=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' "$REPO_ROOT/CHANGELOG.md")
+    if [ -n "$RELEASE_BODY" ]; then
+        gh release create "$TAG" \
+            --repo librefang/librefang \
+            --title "LibreFang $VERSION" \
+            --notes "$RELEASE_BODY" \
+            || echo "Warning: gh release create failed — CI may create it"
+    else
+        gh release create "$TAG" \
+            --repo librefang/librefang \
+            --title "LibreFang $VERSION" \
+            --generate-notes \
+            || echo "Warning: gh release create failed — CI may create it"
+    fi
     echo "→ https://github.com/librefang/librefang/releases/tag/$TAG"
 fi
 
