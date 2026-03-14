@@ -6259,7 +6259,7 @@ mod tests {
     fn test_manifest_to_capabilities() {
         let mut manifest = AgentManifest {
             name: "test".to_string(),
-            version: "0.1.0".to_string(),
+            version: "0.4.0".to_string(),
             description: "test".to_string(),
             author: "test".to_string(),
             module: "test".to_string(),
@@ -6296,7 +6296,7 @@ mod tests {
     fn test_manifest(name: &str, description: &str, tags: Vec<String>) -> AgentManifest {
         AgentManifest {
             name: name.to_string(),
-            version: "0.1.0".to_string(),
+            version: "0.4.0".to_string(),
             description: description.to_string(),
             author: "test".to_string(),
             module: "builtin:chat".to_string(),

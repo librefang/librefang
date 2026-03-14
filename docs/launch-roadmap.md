@@ -353,10 +353,10 @@ These are features where LibreFang can leapfrog OpenClaw.
 
 ### 4.3 CHANGELOG & README Polish -- DONE
 
-**Status: COMPLETE** — Updated CHANGELOG.md with comprehensive v0.1.0 coverage (15 crates, 41 tools, 27 providers, 130+ models, token management, SDKs, web UI features, 1731+ tests). Updated README.md with SDK section (JS + Python examples), updated feature counts, visual workflow builder mention, comparison table with new rows (workflow builder, SDKs, voice, metrics).
+**Status: COMPLETE** — Updated CHANGELOG.md with comprehensive v0.4.0 coverage (15 crates, 41 tools, 27 providers, 130+ models, token management, SDKs, web UI features, 1731+ tests). Updated README.md with SDK section (JS + Python examples), updated feature counts, visual workflow builder mention, comparison table with new rows (workflow builder, SDKs, voice, metrics).
 
 **What to do (was):**
-1. Write `CHANGELOG.md` for v0.1.0 covering all features
+1. Write `CHANGELOG.md` for v0.4.0 covering all features
 2. Polish `README.md` — quick start, screenshots, feature comparison table
 3. Add demo GIF/video showing chat in action
 
@@ -383,10 +383,10 @@ These are features where LibreFang can leapfrog OpenClaw.
 
 ### 4.5 Final Release -- READY
 
-**Status: ALL CODE COMPLETE** — All 18 code items done. 1751 tests passing. Production audit completed: 2 critical bugs fixed (API delete alias, config/set route), CSP hardened (Tauri + middleware), Tauri signing key installed. Remaining for release: tag v0.1.0, build release artifacts, and finish the `librefang.ai` install endpoints.
+**Status: ALL CODE COMPLETE** — All 18 code items done. 1751 tests passing. Production audit completed: 2 critical bugs fixed (API delete alias, config/set route), CSP hardened (Tauri + middleware), Tauri signing key installed. Remaining for release: tag v0.4.0, build release artifacts, and finish the `librefang.ai` install endpoints.
 
 1. Complete items from `production-checklist.md` (keygen DONE, secrets, icons DONE, domain pending)
-2. Tag `v0.1.0`
+2. Tag `v0.4.0`
 3. Verify all release artifacts (desktop installers, CLI binaries, Docker image)
 4. Test auto-updater with v0.1.1 bump
 

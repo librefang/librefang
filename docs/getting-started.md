@@ -167,7 +167,7 @@ Create your own `my-agent.toml`:
 
 ```toml
 name = "my-assistant"
-version = "0.1.0"
+version = "0.4.0"
 description = "A helpful assistant"
 author = "you"
 module = "builtin:chat"

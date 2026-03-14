@@ -5,6 +5,32 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-03-14
+
+### Added
+
+#### Authentication & Drivers
+- **ChatGPT Session Auth**: New browser-based OAuth flow for ChatGPT Plus/Ultra subscribers.
+  - PKCE S256 code challenge for secure token exchange.
+  - Automatic model discovery (Codex endpoints).
+  - `librefang auth chatgpt` subcommand to easily link accounts.
+  - Persistent session caching with 7-day TTL.
+- **MiniMax Dual-Platform Support**: Added separate `minimax-cn` provider for China-specific endpoints (using `MINIMAX_CN_API_KEY`).
+- **QQ Bot Adapter**: Native support for QQ Bot messaging channel.
+
+#### Web Dashboard & i18n
+- **Internationalization (i18n)**: Full support for multiple languages in the dashboard.
+  - Added `zh-CN` (Simplified Chinese) locale.
+  - Unified translation helper `t()` across all JS modules.
+- **UI Overhaul**:
+  - New sidebar layout with integrated theme/language switchers.
+  - Replaced emoji icons with high-quality inline SVG icons (globe, search, chart, etc.).
+  - Improved ClawHub category wrapping for better responsiveness on small screens.
+
+#### Core Platform
+- **Version Alignment**: Synced all 31 built-in agents and sub-packages to version 0.4.0.
+- **Config Hot-Reloading**: Enhanced reliability for runtime configuration updates without daemon restarts.
+
 ## [0.1.0] - 2026-02-24
 
 ### Added

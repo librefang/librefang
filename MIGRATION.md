@@ -139,7 +139,7 @@ tags:
 **LibreFang** (`~/.librefang/agents/coder/agent.toml`):
 ```toml
 name = "coder"
-version = "0.1.0"
+version = "0.4.0"
 description = "A coding assistant"
 author = "librefang"
 module = "builtin:chat"

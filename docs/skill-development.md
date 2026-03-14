@@ -100,7 +100,7 @@ my-skill/
 ```toml
 [skill]
 name = "web-summarizer"
-version = "0.1.0"
+version = "0.4.0"
 description = "Summarizes any web page into bullet points"
 author = "librefang-community"
 license = "MIT"
@@ -132,7 +132,7 @@ capabilities = ["NetConnect(*)"]
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | Yes | Unique skill name (used as install directory name) |
-| `version` | string | No | Semantic version (default: `"0.1.0"`) |
+| `version` | string | No | Semantic version (default: `"0.4.0"`) |
 | `description` | string | No | Human-readable description |
 | `author` | string | No | Author name or organization |
 | `license` | string | No | License identifier (e.g., `"MIT"`, `"Apache-2.0"`) |
@@ -406,7 +406,7 @@ Output:
 
 NAME                 VERSION    TOOLS    DESCRIPTION
 ----------------------------------------------------------------------
-web-summarizer       0.1.0      2        Summarizes any web page into bullet points
+web-summarizer       0.4.0      2        Summarizes any web page into bullet points
 data-analyzer        0.2.1      3        Statistical analysis tools
 code-formatter       1.0.0      1        Format code in 20+ languages
 ```
@@ -525,7 +525,7 @@ Reference skills in the agent manifest's `skills` field:
 
 ```toml
 name = "my-assistant"
-version = "0.1.0"
+version = "0.4.0"
 description = "An assistant with extra skills"
 author = "librefang"
 module = "builtin:chat"

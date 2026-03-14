@@ -42,7 +42,7 @@ Welcome to the LibreFang documentation. LibreFang is the open-source Agent Opera
 
 | Guide | Description |
 |-------|-------------|
-| [Production Checklist](production-checklist.md) | Every step before tagging v0.1.0 -- signing keys, secrets, verification |
+| [Production Checklist](production-checklist.md) | Every step before tagging v0.4.0 -- signing keys, secrets, verification |
 
 ## Additional Resources
 

@@ -627,7 +627,7 @@ mod tests {
             zip.write_all(
                 br#"[skill]
 name = "zip-skill"
-version = "0.1.0"
+version = "0.4.0"
 "#,
             )
             .unwrap();
