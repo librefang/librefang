@@ -137,7 +137,6 @@ fi
 git -C "$REPO_ROOT" add \
     Cargo.toml Cargo.lock \
     CHANGELOG.md \
-    agents/*/agent.toml \
     sdk/javascript/package.json \
     sdk/python/setup.py \
     packages/whatsapp-gateway/package.json
