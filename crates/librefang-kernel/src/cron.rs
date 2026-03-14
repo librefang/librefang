@@ -249,9 +249,7 @@ impl CronScheduler {
 
                 Ok(meta.job.clone())
             }
-            None => Err(LibreFangError::Internal(format!(
-                "Cron job {id} not found"
-            ))),
+            None => Err(LibreFangError::Internal(format!("Cron job {id} not found"))),
         }
     }
 
