@@ -95,9 +95,11 @@ brew tap librefang/tap
 brew install librefang
 ```
 
+<a id="docker"></a>
+
 **또는 Docker로 실행:**
 ```bash
-docker compose up --build
+docker run -p 4545:4545 ghcr.io/librefang/librefang
 # 대시보드: http://localhost:4545
 ```
 

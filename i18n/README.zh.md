@@ -95,9 +95,11 @@ brew tap librefang/tap
 brew install librefang
 ```
 
+<a id="docker"></a>
+
 **或者使用 Docker 运行：**
 ```bash
-docker compose up --build
+docker run -p 4545:4545 ghcr.io/librefang/librefang
 # 仪表板地址：http://localhost:4545
 ```
 
