@@ -595,6 +595,21 @@ pub async fn build_router(
             axum::routing::post(routes::migrate_scan),
         )
         .route("/api/migrate", axum::routing::post(routes::run_migrate))
+        // Goals endpoints
+        .route(
+            "/api/goals",
+            axum::routing::get(routes::list_goals).post(routes::create_goal),
+        )
+        .route(
+            "/api/goals/{id}",
+            axum::routing::get(routes::get_goal)
+                .put(routes::update_goal_by_id)
+                .delete(routes::delete_goal),
+        )
+        .route(
+            "/api/goals/{id}/children",
+            axum::routing::get(routes::get_goal_children),
+        )
         // Cron job management endpoints
         .route(
             "/api/cron/jobs",

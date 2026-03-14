@@ -13,6 +13,7 @@ pub mod comms;
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod goal;
 pub mod manifest_signing;
 pub mod media;
 pub mod memory;
