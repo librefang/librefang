@@ -165,6 +165,26 @@ impl ModelCatalog {
         &self.aliases
     }
 
+    /// Add a custom alias mapping from `alias` to `model_id`.
+    ///
+    /// The alias is stored in lowercase. Returns `false` if the alias already
+    /// exists (use `remove_alias` first to overwrite).
+    pub fn add_alias(&mut self, alias: &str, model_id: &str) -> bool {
+        let lower = alias.to_lowercase();
+        if self.aliases.contains_key(&lower) {
+            return false;
+        }
+        self.aliases.insert(lower, model_id.to_string());
+        true
+    }
+
+    /// Remove a custom alias by name.
+    ///
+    /// Returns `true` if the alias was found and removed.
+    pub fn remove_alias(&mut self, alias: &str) -> bool {
+        self.aliases.remove(&alias.to_lowercase()).is_some()
+    }
+
     /// Set a custom base URL for a provider, overriding the default.
     ///
     /// Returns `true` if the provider was found and updated.
@@ -833,6 +853,33 @@ mod tests {
         let entry = catalog.find_model("grok").unwrap();
         assert_eq!(entry.id, "grok-4-0709");
         assert_eq!(entry.provider, "xai");
+    }
+
+    #[test]
+    fn test_add_alias() {
+        let mut catalog = ModelCatalog::new();
+        assert!(catalog.add_alias("my-sonnet", "claude-sonnet-4-6"));
+        assert_eq!(
+            catalog.resolve_alias("my-sonnet").unwrap(),
+            "claude-sonnet-4-6"
+        );
+        // Duplicate should return false
+        assert!(!catalog.add_alias("my-sonnet", "gpt-4o"));
+        // Alias is case-insensitive
+        assert!(!catalog.add_alias("MY-SONNET", "gpt-4o"));
+    }
+
+    #[test]
+    fn test_remove_alias() {
+        let mut catalog = ModelCatalog::new();
+        catalog.add_alias("temp-alias", "gpt-4o");
+        assert!(catalog.remove_alias("temp-alias"));
+        assert!(catalog.resolve_alias("temp-alias").is_none());
+        // Removing non-existent alias returns false
+        assert!(!catalog.remove_alias("no-such-alias"));
+        // Case-insensitive removal
+        catalog.add_alias("upper-alias", "gpt-4o");
+        assert!(catalog.remove_alias("UPPER-ALIAS"));
     }
 
     #[test]

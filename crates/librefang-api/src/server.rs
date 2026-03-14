@@ -500,7 +500,11 @@ pub async fn build_router(
         .route("/api/models", axum::routing::get(routes::list_models))
         .route(
             "/api/models/aliases",
-            axum::routing::get(routes::list_aliases),
+            axum::routing::get(routes::list_aliases).post(routes::create_alias),
+        )
+        .route(
+            "/api/models/aliases/{alias}",
+            axum::routing::delete(routes::delete_alias),
         )
         .route(
             "/api/models/custom",

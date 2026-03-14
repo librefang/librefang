@@ -5817,6 +5817,84 @@ pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoRespon
     )
 }
 
+/// POST /api/models/aliases — Create a new alias mapping.
+///
+/// Body: `{ "alias": "my-alias", "model_id": "gpt-4o" }`
+pub async fn create_alias(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let alias = body
+        .get("alias")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let model_id = body
+        .get("model_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if alias.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing required field: alias"})),
+        );
+    }
+    if model_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing required field: model_id"})),
+        );
+    }
+
+    let mut catalog = state
+        .kernel
+        .model_catalog
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+
+    if !catalog.add_alias(&alias, &model_id) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": format!("Alias '{}' already exists", alias)})),
+        );
+    }
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "alias": alias.to_lowercase(),
+            "model_id": model_id,
+            "status": "created"
+        })),
+    )
+}
+
+/// DELETE /api/models/aliases/{alias} — Remove an alias mapping.
+pub async fn delete_alias(
+    State(state): State<Arc<AppState>>,
+    Path(alias): Path<String>,
+) -> impl IntoResponse {
+    let mut catalog = state
+        .kernel
+        .model_catalog
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+
+    if !catalog.remove_alias(&alias) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("Alias '{}' not found", alias)})),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"status": "removed"})),
+    )
+}
+
 /// GET /api/models/{id} — Get a single model by ID or alias.
 pub async fn get_model(
     State(state): State<Arc<AppState>>,
