@@ -118,6 +118,7 @@ pub enum AgentPhase {
 
 impl AgentPhase {
     /// Sanitize a tool name for display (truncate to 64 chars, strip control chars).
+    #[inline]
     pub fn tool_use(name: &str) -> Self {
         let sanitized: String = name.chars().filter(|c| !c.is_control()).take(64).collect();
         Self::ToolUse {
@@ -150,6 +151,7 @@ pub const ALLOWED_REACTION_EMOJI: &[&str] = &[
 ];
 
 /// Get the default emoji for a given agent phase.
+#[inline]
 pub fn default_phase_emoji(phase: &AgentPhase) -> &'static str {
     match phase {
         AgentPhase::Queued => "\u{23F3}",                 // ⏳
@@ -274,6 +276,7 @@ pub trait ChannelAdapter: Send + Sync {
 /// preferring to split at newline boundaries.
 ///
 /// Shared utility used by Telegram, Discord, and Slack adapters.
+#[inline]
 pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
     if text.len() <= max_len {
         return vec![text];
