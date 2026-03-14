@@ -99,10 +99,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for OneOrMany<T> {
                 f.write_str("a single value or array of values")
             }
 
-            fn visit_seq<A: de::SeqAccess<'de>>(
-                self,
-                mut seq: A,
-            ) -> Result<Self::Value, A::Error> {
+            fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
                 let mut v = Vec::new();
                 while let Some(val) = seq.next_element()? {
                     v.push(val);
@@ -110,10 +107,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for OneOrMany<T> {
                 Ok(OneOrMany(v))
             }
 
-            fn visit_map<M: de::MapAccess<'de>>(
-                self,
-                map: M,
-            ) -> Result<Self::Value, M::Error> {
+            fn visit_map<M: de::MapAccess<'de>>(self, map: M) -> Result<Self::Value, M::Error> {
                 let val = T::deserialize(de::value::MapAccessDeserializer::new(map))?;
                 Ok(OneOrMany(vec![val]))
             }
