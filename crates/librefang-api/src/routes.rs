@@ -473,7 +473,9 @@ pub async fn get_agent_session(
                                     if let Ok(bytes) =
                                         base64::engine::general_purpose::STANDARD.decode(data)
                                     {
-                                        if let Err(e) = std::fs::write(upload_dir.join(&file_id), &bytes) {
+                                        if let Err(e) =
+                                            std::fs::write(upload_dir.join(&file_id), &bytes)
+                                        {
                                             tracing::warn!("Failed to write upload file: {e}");
                                         }
                                         UPLOAD_REGISTRY.insert(
@@ -7099,7 +7101,9 @@ pub async fn set_provider_key(
             if let Ok(existing) = std::fs::read_to_string(&config_path) {
                 // Remove existing [default_model] section if present, then append
                 let cleaned = remove_toml_section(&existing, "default_model");
-                if let Err(e) = std::fs::write(&config_path, format!("{}\n{}", cleaned.trim(), update_toml)) {
+                if let Err(e) =
+                    std::fs::write(&config_path, format!("{}\n{}", cleaned.trim(), update_toml))
+                {
                     tracing::warn!("Failed to write config file: {e}");
                 }
             } else if let Err(e) = std::fs::write(&config_path, update_toml) {
