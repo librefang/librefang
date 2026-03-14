@@ -1,0 +1,13 @@
+# Required
+project_id = "my-gcp-project-id"
+
+# Optional (defaults shown)
+# region           = "us-central1"
+# zone             = "us-central1-a"
+# ssh_pub_key_path = "~/.ssh/id_rsa.pub"
+# librefang_version = "latest"
+
+# At least one LLM API key is required
+groq_api_key      = ""
+# openai_api_key    = ""
+# anthropic_api_key = ""
