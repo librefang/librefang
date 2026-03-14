@@ -1,41 +1,55 @@
 # LibreFang Code Owners
 # These owners are automatically requested for review on PRs.
 # See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Teams:
+#   @librefang/core          — Kernel, runtime, types, memory, security
+#   @librefang/integrations  — Channels, skills, migrate, SDKs
+#   @librefang/community     — Docs, agents, examples, i18n
+#   @librefang/devops        — CI/CD, scripts, release
 
-# Default — catch-all
-* @librefang/maintainers
+# ── Default (catch-all) ──────────────────────────────────────────────
+* @librefang/core
 
-# Core crates
-crates/librefang-kernel/ @librefang/maintainers
-crates/librefang-runtime/ @librefang/maintainers
-crates/librefang-types/ @librefang/maintainers
-crates/librefang-memory/ @librefang/maintainers
-crates/librefang-api/ @librefang/maintainers
+# ── Core (kernel, runtime, types, memory) ────────────────────────────
+crates/librefang-kernel/ @librefang/core
+crates/librefang-runtime/ @librefang/core
+crates/librefang-types/ @librefang/core
+crates/librefang-memory/ @librefang/core
+crates/librefang-api/ @librefang/core
 
-# Security-sensitive
-crates/librefang-wire/ @librefang/maintainers
-crates/librefang-extensions/ @librefang/maintainers
-SECURITY.md @librefang/maintainers
+# ── Security-sensitive ───────────────────────────────────────────────
+crates/librefang-wire/ @librefang/core
+crates/librefang-extensions/ @librefang/core
+SECURITY.md @librefang/core
 
-# Community-contributed (broader review)
-crates/librefang-channels/ @librefang/maintainers
-crates/librefang-skills/ @librefang/maintainers
-crates/librefang-migrate/ @librefang/maintainers
-agents/ @librefang/maintainers
-examples/ @librefang/maintainers
+# ── Desktop & CLI ────────────────────────────────────────────────────
+crates/librefang-desktop/ @librefang/core
+crates/librefang-cli/ @librefang/core
 
-# Desktop app
-crates/librefang-desktop/ @librefang/maintainers
+# ── Integrations (channels, skills, migrate, SDKs) ───────────────────
+crates/librefang-channels/ @librefang/integrations
+crates/librefang-skills/ @librefang/integrations
+crates/librefang-migrate/ @librefang/integrations
+crates/librefang-hands/ @librefang/integrations
+sdk/javascript/ @librefang/integrations
+sdk/python/ @librefang/integrations
+packages/ @librefang/integrations
 
-# SDKs
-sdk/javascript/ @librefang/maintainers
-sdk/python/ @librefang/maintainers
+# ── Community (docs, agents, examples, i18n) ─────────────────────────
+agents/ @librefang/community
+examples/ @librefang/community
+docs/ @librefang/community
+i18n/ @librefang/community
+CONTRIBUTING.md @librefang/community
+README.md @librefang/community
 
-# CI & Release
-.github/ @librefang/maintainers
-scripts/ @librefang/maintainers
+# ── DevOps (CI, scripts, release) ────────────────────────────────────
+.github/ @librefang/devops
+scripts/ @librefang/devops
+Cargo.toml @librefang/devops @librefang/core
+Cargo.lock @librefang/devops
 
-# Docs — lower barrier, any maintainer can approve
-docs/ @librefang/maintainers
-CONTRIBUTING.md @librefang/maintainers
-GOVERNANCE.md @librefang/maintainers
+# ── Governance (owner only) ──────────────────────────────────────────
+GOVERNANCE.md @houko
+LICENSE @houko
