@@ -2,6 +2,7 @@ app = "librefang"
 primary_region = "nrt"
 
 [build]
+image = "ghcr.io/librefang/librefang:latest"
 
 [env]
   LIBREFANG_HOME = "/data"
