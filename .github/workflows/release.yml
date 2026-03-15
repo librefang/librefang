@@ -363,6 +363,78 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # ── CLI Binary (macOS) - Mini ─────────────────────────────────────────────
+  cli_mac_mini:
+    name: CLI / ${{ matrix.target }} (mini)
+    needs: [create_release]
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build CLI (mini)
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features
+      - name: Ad-hoc codesign
+        run: |
+          xattr -cr target/${{ matrix.target }}/release/librefang || true
+          codesign --force --sign - target/${{ matrix.target }}/release/librefang
+      - name: Package
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../librefang-${{ matrix.target }}-mini.tar.gz librefang
+          cd ../../..
+          sha256sum librefang-${{ matrix.target }}-mini.tar.gz > librefang-${{ matrix.target }}-mini.tar.gz.sha256
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: librefang-${{ matrix.target }}-mini.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── CLI Binary (Windows) - Mini ───────────────────────────────────────────
+  cli_windows_mini:
+    name: CLI / ${{ matrix.target }} (mini)
+    needs: [create_release]
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build CLI (mini)
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "target/${{ matrix.target }}/release/librefang.exe" -DestinationPath "librefang-${{ matrix.target }}-mini.zip"
+          $hash = (Get-FileHash "librefang-${{ matrix.target }}-mini.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  librefang-${{ matrix.target }}-mini.zip" | Out-File -Encoding ASCII "librefang-${{ matrix.target }}-mini.zip.sha256"
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: librefang-${{ matrix.target }}-mini.*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # ── Docker (linux/amd64 + linux/arm64, native runners) ────────────────────
   docker:
     name: Docker / ${{ matrix.platform }}
