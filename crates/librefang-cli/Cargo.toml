@@ -17,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 librefang-kernel = { path = "../librefang-kernel" }
-librefang-api = { path = "../librefang-api" }
+librefang-api = { path = "../librefang-api", default-features = false }
 librefang-migrate = { path = "../librefang-migrate" }
 librefang-skills = { path = "../librefang-skills" }
 librefang-extensions = { path = "../librefang-extensions" }
