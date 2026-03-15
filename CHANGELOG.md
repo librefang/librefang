@@ -5,10 +5,47 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.3-beta4] - 2026-03-14
+## [0.4.7] - 2026-03-15
 
 ### Added
 
+- Add backup and restore functionality for kernel state (#444) (@houko)
+- Add thread_id and attachments to CommsSendRequest (#469) (@TJUEZ)
+
+### Fixed
+
+- Resolve WhatsApp Web gateway E2EE, agent UUID, and auto-connect failures (#440) (@houko)
+- Wire thread_id and attachments in comms_send handler (#479) (@houko)
+- Include tauri.conf.json in release script git add (#482) (@houko)
+- Strip date suffix from Tauri version for Windows MSI builds (#485) (@houko)
+
+### Documentation
+
+- Translate getting-started.md to French (#442) (@houko)
+- Translate skill-development.md to Chinese (#447) (@houko)
+
+### Other
+
+- V0.4.6-20260315 (#478) (@houko)
+
+## [0.4.6] - 2026-03-15
+
+### Fixed
+
+- Enable all channel features by default and fix changelog dedup (#473) (@houko)
+
+## [0.4.5] - 2026-03-15
+
+### Added
+
+- Add academic-researcher agent template (#391) (@houko)
+- Add code-review-checklist prompt skill (#377) (@houko)
+- Add API endpoints for managing extensions (#372) (@houko)
+- Add memory/knowledge graph export and import API (#371) (@houko)
+- Add POST/PUT/DELETE endpoints for MCP server config management (#370) (@houko)
+- Add POST/DELETE endpoints for model aliases (#364) (@houko)
+- Add GET /api/profiles/:name endpoint (#363) (@houko)
+- Add GET /api/tools/:name endpoint (#360) (@houko)
 - Add GET /api/schedules/:id endpoint (#291) (@houko)
 - Add GET /api/a2a/agents/:id endpoint (#290) (@houko)
 - Add PUT /api/cron/jobs/:id endpoint for updating cron jobs (#289) (@houko)
@@ -22,7 +59,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Default to all-channels (#466) (@houko)
+- Remove default-features=false to enable channel features (#465) (@houko)
+- Respect PORT env var for Railway/Render compatibility (#455) (@houko)
+- Stop syncing agent.toml versions with project release version (#375) (@houko)
+- Skip pre-release tags when finding previous version for changelog (#374) (@houko)
 - Catalog sync fails to parse remote files missing provider field (#362) (@houko)
+- Add reconnect logic to Matrix channel adapter (#361) (@houko)
 - Remove VOLUME directive from Dockerfile (#294) (@houko)
 - Render card empty due to nested anchor tags (#292) (@houko)
 - Log warnings instead of silently ignoring errors in API endpoints (#288) (@houko)
@@ -51,6 +94,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
+- Update star history (#463) (@houko)
+- Update star history (#462) (@houko)
+- Update star history (#461) (@houko)
+- Update star history (#460) (@houko)
+- Update star history (#459) (@houko)
+- Update star history (#458) (@houko)
+- Update star history (#457) (@houko)
+- Update star history (#435) (@houko)
+- Update star history (#401) (@houko)
+- Update star history (#378) (@houko)
+- Update star history (#376) (@houko)
 - Update star history (#297) (@houko)
 - Update star history (#293) (@houko)
 - Update star history (#284) (@houko)
@@ -61,6 +115,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Maintenance
 
+- Keep machines running to avoid cold starts (#445) (@houko)
+- Auto-deploy to Fly.io on release (#429) (@houko)
+- Keep at least 1 machine running to avoid cold starts (#416) (@houko)
+- Add unit tests for channel rate limiter (#340) (@houko)
 - Add workflow_dispatch to deploy-worker (#273) (@houko)
 - Fix wrangler-action, force Node.js 24 (#271) (@houko)
 - Upgrade wrangler-action to v4 for Node.js 24 (#270) (@houko)
@@ -69,6 +127,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- V0.4.4-20260315 (#456) (@houko)
+- V0.4.3-beta4-20260314 (#365) (@houko)
+- V0.4.3-beta3-20260314 (#296) (@houko)
+- V0.4.3-beta2-20260314 (#277) (@houko)
+- V0.4.3-beta-20260314 (#264) (@houko)
+- V0.4.2-20260314 (#244) (@houko)
+
+## [0.4.4] - 2026-03-15
+
+### Added
+
+- Add academic-researcher agent template (#391) (@houko)
+- Add code-review-checklist prompt skill (#377) (@houko)
+- Add API endpoints for managing extensions (#372) (@houko)
+- Add memory/knowledge graph export and import API (#371) (@houko)
+- Add POST/PUT/DELETE endpoints for MCP server config management (#370) (@houko)
+- Add POST/DELETE endpoints for model aliases (#364) (@houko)
+- Add GET /api/profiles/:name endpoint (#363) (@houko)
+- Add GET /api/tools/:name endpoint (#360) (@houko)
+- Add GET /api/schedules/:id endpoint (#291) (@houko)
+- Add GET /api/a2a/agents/:id endpoint (#290) (@houko)
+- Add PUT /api/cron/jobs/:id endpoint for updating cron jobs (#289) (@houko)
+- Horizontal scroll for long commands on deploy page (#276) (@houko)
+- Add tooltip for truncated commands on deploy page (#275) (@houko)
+- Add copy buttons to install commands on deploy hub (#258) (@houko)
+- Add macOS, Linux, Windows install options to deploy hub (#257) (@houko)
+- Deploy hub with multi-platform support (#251) (@houko)
+- Add GCP free-tier deployment with Terraform (#249) (@houko)
+- Support multi-bot routing per platform (#240) (@houko)
+
+### Fixed
+
+- Respect PORT env var for Railway/Render compatibility (#455) (@houko)
+- Stop syncing agent.toml versions with project release version (#375) (@houko)
+- Skip pre-release tags when finding previous version for changelog (#374) (@houko)
+- Catalog sync fails to parse remote files missing provider field (#362) (@houko)
+- Add reconnect logic to Matrix channel adapter (#361) (@houko)
+- Remove VOLUME directive from Dockerfile (#294) (@houko)
+- Render card empty due to nested anchor tags (#292) (@houko)
+- Log warnings instead of silently ignoring errors in API endpoints (#288) (@houko)
+- Add URL validation to A2A discover endpoint to prevent SSRF (#287) (@houko)
+- Validate environment variable names in channel config API (#286) (@houko)
+- Use agent_id path parameter in KV memory endpoints (#285) (@houko)
+- Use WEBSITE_REPO_TOKEN for star history workflow (#281) (@houko)
+- Auto-merge star history PR after creation (#280) (@houko)
+- Use PR instead of direct push for star history workflow (#279) (@houko)
+- Move Fly.io-specific badges from header to deploy form (#278) (@houko)
+- Revert wrangler-action to v3 (v4 does not exist) (#274) (@houko)
+- Add explicit Tauri version for MSI compatibility (#272) (@houko)
+- Prevent long commands from stretching deploy cards (#269) (@houko)
+- Remove unnecessary card width constraint on deploy page (#268) (@houko)
+- Consistent card widths on deploy page (#266) (@houko)
+- Allow multi-segment prerelease in semver validation (#263) (@houko)
+- Use docker run command on deploy hub (#262) (@houko)
+- Use prebuilt GHCR image in docker-compose.yml (#261) (@houko)
+- Docker deploy card links to correct README section (#260) (@houko)
+- Add catalog directory to Dockerfile (#256) (@houko)
+- Correct Railway URL and use prebuilt image for Render (#255) (@houko)
+- Deploy page home button links to deploy.librefang.ai (#254) (@houko)
+- Replace emoji with SVG icons and add home button (#253) (@houko)
+- Prevent release notes from being lost due to race condition (#252) (@houko)
+- Remove disk config for Render free tier (#247) (@houko)
+
+### Documentation
+
+- Update star history (#435) (@houko)
+- Update star history (#401) (@houko)
+- Update star history (#378) (@houko)
+- Update star history (#376) (@houko)
+- Update star history (#297) (@houko)
+- Update star history (#293) (@houko)
+- Update star history (#284) (@houko)
+- Update star history (#283) (@houko)
+- Update star history (#282) (@houko)
+- Use docker run across all README translations (#267) (@houko)
+- Separate Fly.io and Render deploy descriptions (#248) (@houko)
+
+### Maintenance
+
+- Keep machines running to avoid cold starts (#445) (@houko)
+- Auto-deploy to Fly.io on release (#429) (@houko)
+- Keep at least 1 machine running to avoid cold starts (#416) (@houko)
+- Add unit tests for channel rate limiter (#340) (@houko)
+- Add workflow_dispatch to deploy-worker (#273) (@houko)
+- Fix wrangler-action, force Node.js 24 (#271) (@houko)
+- Upgrade wrangler-action to v4 for Node.js 24 (#270) (@houko)
+- Add 'release' to allowed PR title types. (#246) (@houko)
+- Update star history workflow schedule to run hourly. (#245) (@houko)
+
+### Other
+
+- V0.4.3-beta4-20260314 (#365) (@houko)
 - V0.4.3-beta3-20260314 (#296) (@houko)
 - V0.4.3-beta2-20260314 (#277) (@houko)
 - V0.4.3-beta-20260314 (#264) (@houko)

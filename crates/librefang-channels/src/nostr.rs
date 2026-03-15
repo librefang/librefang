@@ -196,6 +196,7 @@ impl ChannelAdapter for NostrAdapter {
             let own_pubkey = own_pubkey.clone();
             let seen_events = Arc::clone(&seen_events);
             let _private_key = private_key.clone();
+            let account_id = account_id.clone();
             let mut relay_shutdown_rx = shutdown_rx.clone();
 
             tokio::spawn(async move {

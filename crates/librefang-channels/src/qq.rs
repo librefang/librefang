@@ -208,7 +208,7 @@ fn parse_dispatch_event(
     // Strip bot mention prefix (e.g., "/@ Bot " or "<@!botid>")
     let clean_content = content.trim_start_matches('/').trim().to_string();
 
-    let mut msg = ChannelMessage {
+    let msg = ChannelMessage {
         channel: ChannelType::Custom("qq".to_string()),
         platform_message_id: msg_id.clone(),
         sender: ChannelUser {
@@ -379,7 +379,7 @@ impl ChannelAdapter for QqAdapter {
                                             }
 
                                             let data = &payload["d"];
-                                            if let Some((msg, _endpoint, _msg_id)) = parse_dispatch_event(event_type, data) {
+                                            if let Some((mut msg, _endpoint, _msg_id)) = parse_dispatch_event(event_type, data) {
                                                 if allowed_users.is_empty() || allowed_users.iter().any(|u| u == &msg.sender.platform_id) {
                                                     messages_received.fetch_add(1, Ordering::Relaxed);
                                                     // Inject account_id for multi-bot routing

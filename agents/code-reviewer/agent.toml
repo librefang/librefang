@@ -1,5 +1,5 @@
 name = "code-reviewer"
-version = "0.4.3-beta4-20260314"
+version = "0.4.3-beta3-20260314"
 description = "Senior code reviewer. Reviews PRs, identifies issues, suggests improvements with production standards."
 author = "librefang"
 module = "builtin:chat"
