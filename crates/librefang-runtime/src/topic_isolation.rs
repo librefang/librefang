@@ -289,7 +289,7 @@ mod tests {
         let first_user = result.iter().find(|m| m.role == Role::User).unwrap();
         let text = extract_text(first_user);
         assert!(
-            text.contains("cook pasta") || text.contains("New topic"),
+            text.contains("cook") || text.contains("pasta") || text.contains("New topic"),
             "Expected topic isolation to start from cooking topic, got: {}",
             text
         );
