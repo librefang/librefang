@@ -17,6 +17,7 @@ use librefang_api::ws;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::audit::AuditAction;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tower::ServiceExt;
@@ -29,6 +30,7 @@ use tower_http::trace::TraceLayer;
 
 struct TestServer {
     base_url: String,
+    config_path: PathBuf,
     state: Arc<AppState>,
     _tmp: tempfile::TempDir,
 }
@@ -81,6 +83,9 @@ async fn start_test_server_with_provider(
         },
         ..KernelConfig::default()
     };
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap())
+        .expect("Failed to write test config");
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let kernel = Arc::new(kernel);
@@ -103,6 +108,7 @@ async fn start_test_server_with_provider(
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))
         .route("/api/status", axum::routing::get(routes::status))
+        .route("/api/config/reload", axum::routing::post(routes::config_reload))
         .route(
             "/api/agents",
             axum::routing::get(routes::list_agents).post(routes::spawn_agent),
@@ -167,6 +173,7 @@ async fn start_test_server_with_provider(
 
     TestServer {
         base_url: format!("http://{}", addr),
+        config_path,
         state,
         _tmp: tmp,
     }
@@ -419,6 +426,50 @@ async fn test_build_router_unauthorized_responses_include_api_version_header() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(response.headers()["x-api-version"], "v1");
+}
+
+#[tokio::test]
+async fn test_config_reload_reports_proxy_changes_require_restart() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let mut config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&server.config_path).unwrap()).unwrap();
+    let table = config.as_table_mut().unwrap();
+    table.insert(
+        "home_dir".to_string(),
+        toml::Value::String(server.state.kernel.config.home_dir.display().to_string()),
+    );
+    table.insert(
+        "data_dir".to_string(),
+        toml::Value::String(server.state.kernel.config.data_dir.display().to_string()),
+    );
+    table.insert(
+        "proxy".to_string(),
+        toml::Value::Table(toml::map::Map::from_iter([(
+            "http_proxy".to_string(),
+            toml::Value::String("http://proxy.example.com:8080".to_string()),
+        )])),
+    );
+    std::fs::write(&server.config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+    let resp = client
+        .post(format!("{}/api/config/reload", server.base_url))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "partial");
+    assert_eq!(body["restart_required"], true);
+    assert!(body["restart_reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|value| value.as_str())
+        .any(|reason| reason.contains("proxy config changed")), "unexpected reload response: {body}");
 }
 
 #[tokio::test]
@@ -943,6 +994,9 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         },
         ..KernelConfig::default()
     };
+    let config_path = tmp.path().join("config.toml");
+    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap())
+        .expect("Failed to write test config");
 
     let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
     let kernel = Arc::new(kernel);
@@ -1033,6 +1087,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
 
     TestServer {
         base_url: format!("http://{}", addr),
+        config_path,
         state,
         _tmp: tmp,
     }
