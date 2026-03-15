@@ -430,10 +430,12 @@ impl ChatGptDriver {
             TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             |u| TokenUsage {
                 input_tokens: u.input_tokens,
                 output_tokens: u.output_tokens,
+                ..Default::default()
             },
         );
 

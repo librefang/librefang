@@ -2628,6 +2628,7 @@ mod tests {
                     usage: TokenUsage {
                         input_tokens: 10,
                         output_tokens: 5,
+                        ..Default::default()
                     },
                 })
             } else {
@@ -2639,6 +2640,7 @@ mod tests {
                     usage: TokenUsage {
                         input_tokens: 10,
                         output_tokens: 0,
+                        ..Default::default()
                     },
                 })
             }
@@ -2662,6 +2664,7 @@ mod tests {
                 usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 0,
+                    ..Default::default()
                 },
             })
         }
@@ -2686,6 +2689,7 @@ mod tests {
                 usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 8,
+                    ..Default::default()
                 },
             })
         }
@@ -2925,6 +2929,7 @@ mod tests {
                     usage: TokenUsage {
                         input_tokens: 10,
                         output_tokens: 0,
+                        ..Default::default()
                     },
                 })
             } else {
@@ -2939,6 +2944,7 @@ mod tests {
                     usage: TokenUsage {
                         input_tokens: 15,
                         output_tokens: 8,
+                        ..Default::default()
                     },
                 })
             }
@@ -2962,6 +2968,7 @@ mod tests {
                 usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 0,
+                    ..Default::default()
                 },
             })
         }
@@ -3809,6 +3816,7 @@ mod tests {
                     usage: TokenUsage {
                         input_tokens: 20,
                         output_tokens: 15,
+                        ..Default::default()
                     },
                 })
             } else {
@@ -3823,6 +3831,7 @@ mod tests {
                     usage: TokenUsage {
                         input_tokens: 30,
                         output_tokens: 12,
+                        ..Default::default()
                     },
                 })
             }

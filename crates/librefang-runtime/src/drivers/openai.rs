@@ -1498,6 +1498,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
                 usage: TokenUsage {
                     input_tokens: 0,
                     output_tokens: 0,
+                    ..Default::default()
                 },
             });
         }
@@ -1511,6 +1512,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
         usage: TokenUsage {
             input_tokens: 0,
             output_tokens: 0,
+            ..Default::default()
         },
     })
 }

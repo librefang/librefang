@@ -2046,6 +2046,7 @@ impl LibreFangKernel {
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             iterations: 1,
             cost_usd: None,
@@ -2106,6 +2107,7 @@ impl LibreFangKernel {
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             cost_usd: None,
             iterations: 1,
@@ -2299,6 +2301,7 @@ impl LibreFangKernel {
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             iterations: result.iterations,
             cost_usd: None,

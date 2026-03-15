@@ -273,6 +273,7 @@ impl LlmDriver for ClaudeCodeDriver {
                 usage: TokenUsage {
                     input_tokens: usage.input_tokens,
                     output_tokens: usage.output_tokens,
+                    ..Default::default()
                 },
             });
         }
@@ -289,6 +290,7 @@ impl LlmDriver for ClaudeCodeDriver {
             usage: TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
         })
     }
@@ -343,6 +345,7 @@ impl LlmDriver for ClaudeCodeDriver {
         let mut final_usage = TokenUsage {
             input_tokens: 0,
             output_tokens: 0,
+            ..Default::default()
         };
 
         while let Ok(Some(line)) = lines.next_line().await {
@@ -378,6 +381,7 @@ impl LlmDriver for ClaudeCodeDriver {
                                 final_usage = TokenUsage {
                                     input_tokens: usage.input_tokens,
                                     output_tokens: usage.output_tokens,
+                                    ..Default::default()
                                 };
                             }
                         }
