@@ -1177,7 +1177,6 @@ pub async fn get_agent_traces(
 }
 
 /// GET /api/agents/{id}/tools — Get an agent's tool allowlist/blocklist.
-
 pub async fn get_agent_tools(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1437,12 +1436,6 @@ pub async fn set_agent_mcp_servers(
         ),
     }
 }
-
-// ── Provider Key Management Endpoints ──────────────────────────────────
-
-/// POST /api/providers/{name}/key — Save an API key for a provider.
-///
-/// SECURITY: Writes to `~/.librefang/secrets.env`, sets env var in process,
 
 // ---------------------------------------------------------------------------
 // Agent update endpoint

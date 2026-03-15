@@ -241,7 +241,7 @@ pub async fn get_model(
 ///
 /// Probes run **concurrently** and results are **cached for 60 seconds** so the
 /// endpoint responds instantly on repeated dashboard loads even when local
-
+/// services are offline.
 pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
         let catalog = state
@@ -326,7 +326,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// POST /api/models/custom — Add a custom model to the catalog.
 ///
 /// Persists to `~/.librefang/custom_models.json` and makes the model immediately
-
+/// available in the catalog.
 pub async fn add_custom_model(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,

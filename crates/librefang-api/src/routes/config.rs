@@ -465,8 +465,6 @@ pub async fn run_migrate(Json(req): Json<MigrateRequest>) -> impl IntoResponse {
 
 // ── Model Catalog Endpoints ─────────────────────────────────────────
 
-/// GET /api/models — List all models in the catalog.
-
 // ---------------------------------------------------------------------------
 // Config Reload endpoint
 // ---------------------------------------------------------------------------

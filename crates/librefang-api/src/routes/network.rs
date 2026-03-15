@@ -518,7 +518,6 @@ pub async fn a2a_external_task_status(
 ///
 /// Exposes the same MCP protocol normally served via stdio, allowing
 /// external MCP clients to connect over HTTP instead.
-
 pub async fn mcp_http(
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
