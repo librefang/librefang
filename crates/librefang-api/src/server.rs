@@ -480,10 +480,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route("/shutdown", axum::routing::post(routes::shutdown))
         // Chat commands endpoint (dynamic slash menu)
         .route("/commands", axum::routing::get(routes::list_commands))
-        .route(
-            "/commands/{name}",
-            axum::routing::get(routes::get_command),
-        )
+        .route("/commands/{name}", axum::routing::get(routes::get_command))
         .route("/config/reload", axum::routing::post(routes::config_reload))
         .route(
             "/bindings",
@@ -658,8 +655,6 @@ pub async fn build_router(
             "/locales/zh-CN.json",
             axum::routing::get(webchat::locale_zh_cn),
         )
-        // API version discovery endpoint (not versioned itself)
-        .route("/api/versions", axum::routing::get(routes::api_versions))
         // Mount v1 routes at /api/v1 (explicit version)
         .nest("/api/v1", v1_routes.clone())
         // Mount the same routes at /api (latest version alias for backward compat)
