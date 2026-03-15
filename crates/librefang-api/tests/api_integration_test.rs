@@ -508,7 +508,8 @@ async fn test_spawn_list_kill_agent() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let agents: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 2);
     let test_agent = agents.iter().find(|a| a["name"] == "test-agent").unwrap();
     assert_eq!(test_agent["id"], agent_id);
@@ -531,7 +532,8 @@ async fn test_spawn_list_kill_agent() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let agents: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0]["name"], "router");
 }
@@ -936,7 +938,8 @@ memory_write = ["self.*"]
         .send()
         .await
         .unwrap();
-    let agents: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 4);
 
     // Status should agree
@@ -962,7 +965,8 @@ memory_write = ["self.*"]
         .send()
         .await
         .unwrap();
-    let agents: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 3);
 
     // Kill the rest
@@ -980,7 +984,8 @@ memory_write = ["self.*"]
         .send()
         .await
         .unwrap();
-    let agents: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 1);
 }
 
