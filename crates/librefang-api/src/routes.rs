@@ -12284,9 +12284,10 @@ pub async fn create_backup(State(state): State<Arc<AppState>>) -> impl IntoRespo
         components: components.clone(),
     };
     if let Ok(manifest_json) = serde_json::to_string_pretty(&manifest) {
-        let _ = zip
-            .start_file("manifest.json", options)
-            .and_then(|()| std::io::Write::write_all(&mut zip, manifest_json.as_bytes()));
+        let _ = zip.start_file("manifest.json", options).and_then(|()| {
+            std::io::Write::write_all(&mut zip, manifest_json.as_bytes())
+                .map_err(zip::result::ZipError::Io)
+        });
     }
 
     if let Err(e) = zip.finish() {
@@ -12308,7 +12309,8 @@ pub async fn create_backup(State(state): State<Arc<AppState>>) -> impl IntoRespo
     state.kernel.audit_log.record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
-        &format!("Backup created: {filename}"),
+        format!("Backup created: {filename}"),
+        "completed",
     );
 
     (
@@ -12346,9 +12348,9 @@ pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoRespon
             let modified = std::fs::metadata(&path)
                 .and_then(|m| m.modified())
                 .ok()
-                .and_then(|t| {
+                .map(|t| {
                     let dt: chrono::DateTime<chrono::Utc> = t.into();
-                    Some(dt.to_rfc3339())
+                    dt.to_rfc3339()
                 });
 
             // Try to read manifest from the zip
@@ -12562,7 +12564,8 @@ pub async fn restore_backup(
     state.kernel.audit_log.record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
-        &format!("Backup restored: {filename} ({total_restored} files)"),
+        format!("Backup restored: {filename} ({total_restored} files)"),
+        "completed",
     );
 
     (
