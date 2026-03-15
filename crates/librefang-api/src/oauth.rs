@@ -1269,6 +1269,6 @@ mod tests {
         };
         let result = build_decoding_key(&jwk, &Algorithm::HS256);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Unsupported"));
+        assert!(result.err().unwrap().contains("Unsupported"));
     }
 }
