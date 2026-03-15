@@ -580,8 +580,13 @@ impl VertexAiDriver {
 }
 
 fn resolve_credentials(config: &DriverConfig) -> Result<CredentialSource, LlmError> {
-    // 1. Explicit API key field (may contain JSON or path).
-    if let Some(ref key) = config.api_key {
+    // 1. Explicit config value (may contain JSON or path).
+    if let Some(key) = config
+        .vertex_ai
+        .credentials_path
+        .as_ref()
+        .or(config.api_key.as_ref())
+    {
         if !key.is_empty() {
             // Try parsing as JSON directly.
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(key) {
@@ -624,6 +629,15 @@ fn resolve_project_id(
     config: &DriverConfig,
     credential_source: &CredentialSource,
 ) -> Result<String, LlmError> {
+    if let Some(project_id) = config
+        .vertex_ai
+        .project_id
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Ok(project_id.clone());
+    }
+
     // Check env vars.
     for var in [
         "VERTEX_AI_PROJECT_ID",
@@ -668,6 +682,15 @@ fn resolve_project_id(
 }
 
 fn resolve_region(config: &DriverConfig) -> String {
+    if let Some(region) = config
+        .vertex_ai
+        .region
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return region.clone();
+    }
+
     // Check env vars.
     for var in ["VERTEX_AI_REGION", "GOOGLE_CLOUD_REGION"] {
         if let Ok(val) = std::env::var(var) {
@@ -702,17 +725,8 @@ impl LlmDriver for VertexAiDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let url = self.endpoint_url(&request.model, false);
 
-        let contents = super::gemini::convert_messages(&request);
-        let system_instruction = request
-            .system
-            .as_ref()
-            .map(|s| super::gemini::GeminiContent {
-                role: "user".to_string(),
-                parts: vec![super::gemini::GeminiPart::Text {
-                    text: s.clone(),
-                    thought_signature: None,
-                }],
-            });
+        let (contents, system_instruction) =
+            super::gemini::convert_messages(&request.messages, &request.system);
         let tools = super::gemini::convert_tools(&request);
         let body = super::gemini::build_request(
             contents,
@@ -791,17 +805,8 @@ impl LlmDriver for VertexAiDriver {
     ) -> Result<CompletionResponse, LlmError> {
         let url = self.endpoint_url(&request.model, true);
 
-        let contents = super::gemini::convert_messages(&request);
-        let system_instruction = request
-            .system
-            .as_ref()
-            .map(|s| super::gemini::GeminiContent {
-                role: "user".to_string(),
-                parts: vec![super::gemini::GeminiPart::Text {
-                    text: s.clone(),
-                    thought_signature: None,
-                }],
-            });
+        let (contents, system_instruction) =
+            super::gemini::convert_messages(&request.messages, &request.system);
         let tools = super::gemini::convert_tools(&request);
         let body = super::gemini::build_request(
             contents,
@@ -934,6 +939,7 @@ mod tests {
             provider: "vertex-ai".to_string(),
             api_key: None,
             base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let region = resolve_region(&config);

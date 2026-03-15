@@ -538,22 +538,7 @@ fn create_driver_from_entry(
         ))),
         ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::new(api_key, base_url))),
         ApiFormat::Copilot => Ok(Arc::new(copilot::CopilotDriver::new(api_key, base_url))),
-        ApiFormat::VertexAI => {
-            let credentials = config
-                .vertex_ai
-                .credentials_path
-                .clone()
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| (!api_key.is_empty()).then(|| api_key.clone()));
-            Ok(Arc::new(
-                vertex_ai::VertexAiDriver::new(
-                    config.vertex_ai.project_id.clone(),
-                    config.vertex_ai.region.clone(),
-                    credentials,
-                )
-                .map_err(|e| LlmError::Http(e.to_string()))?,
-            ))
-        }
+        ApiFormat::VertexAI => Ok(Arc::new(vertex_ai::VertexAiDriver::new(config)?)),
     }
 }
 

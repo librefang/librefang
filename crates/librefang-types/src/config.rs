@@ -1206,6 +1206,9 @@ pub struct KernelConfig {
     /// If not set, the convention `{PROVIDER_UPPER}_API_KEY` is used automatically.
     #[serde(default)]
     pub provider_api_keys: HashMap<String, String>,
+    /// Vertex AI provider configuration.
+    #[serde(default)]
+    pub vertex_ai: VertexAiConfig,
     /// OAuth client ID overrides for PKCE flows.
     #[serde(default)]
     pub oauth: OAuthConfig,
@@ -1220,6 +1223,36 @@ pub struct KernelConfig {
     /// - **OpenAI**: automatic prefix caching (response cache stats are parsed).
     #[serde(default = "default_prompt_caching")]
     pub prompt_caching: bool,
+}
+
+/// Vertex AI provider configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [vertex_ai]
+/// project_id = "my-gcp-project"
+/// region = "us-central1"
+/// credentials_path = "/path/to/service-account.json"
+/// ```
+///
+/// Credentials resolution order:
+/// 1. `credentials_path` in config (JSON string or file path)
+/// 2. `VERTEX_AI_SERVICE_ACCOUNT_JSON` env var
+/// 3. `GOOGLE_APPLICATION_CREDENTIALS` env var (file path)
+/// 4. `gcloud auth print-access-token` CLI fallback
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VertexAiConfig {
+    /// GCP project ID. Falls back to `VERTEX_AI_PROJECT_ID`,
+    /// `GOOGLE_CLOUD_PROJECT`, or the `project_id` field in the service account JSON.
+    pub project_id: Option<String>,
+    /// GCP region for the Vertex AI endpoint (default: "us-central1").
+    /// Falls back to `VERTEX_AI_REGION` or `GOOGLE_CLOUD_REGION` env var.
+    pub region: Option<String>,
+    /// Path to a GCP service account JSON key file, or the raw JSON string.
+    /// Falls back to `VERTEX_AI_SERVICE_ACCOUNT_JSON` or
+    /// `GOOGLE_APPLICATION_CREDENTIALS` env var.
+    pub credentials_path: Option<String>,
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1471,6 +1504,7 @@ impl Default for KernelConfig {
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
             provider_api_keys: HashMap::new(),
+            vertex_ai: VertexAiConfig::default(),
             oauth: OAuthConfig::default(),
             sidecar_channels: Vec::new(),
             prompt_caching: default_prompt_caching(),
