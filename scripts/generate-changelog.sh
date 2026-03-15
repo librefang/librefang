@@ -110,6 +110,13 @@ fi
 if [ ! -f "$CHANGELOG" ]; then
     printf '%s\n\n%s\n' "# Changelog" "$SECTION" > "$CHANGELOG"
 else
+    # Check if version already exists
+    if grep -q "^## \[$VERSION\]" "$CHANGELOG"; then
+        echo "Error: version $VERSION already exists in CHANGELOG.md" >&2
+        echo "Please remove the duplicate or bump to a new version." >&2
+        exit 1
+    fi
+
     FIRST=$(grep -n '^## \[' "$CHANGELOG" | head -1 | cut -d: -f1)
     if [ -n "$FIRST" ]; then
         { head -n $((FIRST - 1)) "$CHANGELOG"; echo "$SECTION"; echo ""; tail -n +"$FIRST" "$CHANGELOG"; } > "$CHANGELOG.tmp"
