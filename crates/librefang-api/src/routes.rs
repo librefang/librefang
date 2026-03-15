@@ -12800,7 +12800,6 @@ mod tests {
         assert_eq!(arr.len(), 6);
     }
 }
-|||
 
 // ---------------------------------------------------------------------------
 // Agent monitoring and profiling endpoints (#181)
