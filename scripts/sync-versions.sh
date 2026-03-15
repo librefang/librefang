@@ -8,6 +8,7 @@
 #
 # What it updates:
 #   - Cargo.toml workspace version (only when explicit version given)
+#   - crates/librefang-desktop/tauri.conf.json
 #   - sdk/javascript/package.json
 #   - sdk/python/setup.py
 #   - packages/whatsapp-gateway/package.json
@@ -76,6 +77,13 @@ WA_PKG="$REPO_ROOT/packages/whatsapp-gateway/package.json"
 if [ -f "$WA_PKG" ]; then
     sed -i.bak 's/^  "version": "[^"]*"/  "version": "'"$VERSION"'"/' "$WA_PKG" && rm -f "$WA_PKG.bak"
     echo "  Updated packages/whatsapp-gateway/package.json"
+fi
+
+# --- Tauri desktop app (full version with date suffix) ---
+TAURI_CONF="$REPO_ROOT/crates/librefang-desktop/tauri.conf.json"
+if [ -f "$TAURI_CONF" ]; then
+    sed -i.bak 's/"version": "[^"]*"/"version": "'"$VERSION"'"/' "$TAURI_CONF" && rm -f "$TAURI_CONF.bak"
+    echo "  Updated crates/librefang-desktop/tauri.conf.json"
 fi
 
 # --- Verify ---

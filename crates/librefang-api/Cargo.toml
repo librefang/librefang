@@ -10,7 +10,7 @@ librefang-types = { path = "../librefang-types" }
 librefang-kernel = { path = "../librefang-kernel" }
 librefang-runtime = { path = "../librefang-runtime" }
 librefang-memory = { path = "../librefang-memory" }
-librefang-channels = { path = "../librefang-channels", default-features = false }
+librefang-channels = { path = "../librefang-channels" }
 librefang-wire = { path = "../librefang-wire" }
 librefang-skills = { path = "../librefang-skills" }
 librefang-hands = { path = "../librefang-hands" }
@@ -87,6 +87,22 @@ channel-qq = ["librefang-channels/channel-qq"]
 channel-wecom = ["librefang-channels/channel-wecom"]
 
 all-channels = ["librefang-channels/all-channels"]
+
+# Mini: 12 core channels
+mini = [
+    "librefang-channels/channel-telegram",
+    "librefang-channels/channel-discord",
+    "librefang-channels/channel-slack",
+    "librefang-channels/channel-matrix",
+    "librefang-channels/channel-email",
+    "librefang-channels/channel-webhook",
+    "librefang-channels/channel-whatsapp",
+    "librefang-channels/channel-signal",
+    "librefang-channels/channel-teams",
+    "librefang-channels/channel-mattermost",
+    "librefang-channels/channel-irc",
+    "librefang-channels/channel-google-chat",
+]
 
 [dev-dependencies]
 tokio-test = { workspace = true }

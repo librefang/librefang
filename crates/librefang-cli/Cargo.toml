@@ -6,8 +6,9 @@ license.workspace = true
 description = "CLI tool for the LibreFang Agent OS"
 
 [features]
-default = ["librefang-api/default"]
+default = ["librefang-api/all-channels"]
 all-channels = ["librefang-api/all-channels"]
+mini = ["librefang-api/mini"]
 
 [[bin]]
 name = "librefang"
@@ -16,7 +17,7 @@ path = "src/main.rs"
 [dependencies]
 librefang-types = { path = "../librefang-types" }
 librefang-kernel = { path = "../librefang-kernel" }
-librefang-api = { path = "../librefang-api", default-features = false }
+librefang-api = { path = "../librefang-api" }
 librefang-migrate = { path = "../librefang-migrate" }
 librefang-skills = { path = "../librefang-skills" }
 librefang-extensions = { path = "../librefang-extensions" }
