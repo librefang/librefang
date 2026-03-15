@@ -12053,11 +12053,14 @@ pub async fn comms_send(
         None
     } else {
         let blocks = resolve_url_attachments(&req.attachments).await;
-        if blocks.is_empty() { None } else { Some(blocks) }
+        if blocks.is_empty() {
+            None
+        } else {
+            Some(blocks)
+        }
     };
 
-    let kernel_handle: Arc<dyn KernelHandle> =
-        state.kernel.clone() as Arc<dyn KernelHandle>;
+    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
     match state
         .kernel
         .send_message_with_handle_and_blocks(
