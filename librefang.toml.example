@@ -28,6 +28,9 @@ listen_addr = "127.0.0.1:4545"           # OFP listen address
 # Usage tracking display
 # usage_footer = "Full"                   # "Off", "Tokens", "Cost", or "Full"
 
+# Prompt caching — reduces LLM costs by caching system prompts (default: true)
+# prompt_caching = true                   # Anthropic cache_control + OpenAI auto-cache
+
 # Channel adapters (configure tokens via environment variables)
 # [telegram]
 # bot_token_env = "TELEGRAM_BOT_TOKEN"

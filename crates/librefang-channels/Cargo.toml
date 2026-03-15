@@ -101,7 +101,7 @@ channel-telegram = []
 channel-discord = []
 channel-slack = []
 channel-matrix = []
-channel-email = ["dep:lettre", "dep:imap", "dep:native-tls", "dep:mailparse"]
+channel-email = ["dep:lettre", "dep:imap", "dep:rustls-connector", "dep:mailparse"]
 channel-webhook = []
 channel-whatsapp = []
 channel-signal = []
@@ -173,7 +173,7 @@ roxmltree = { version = "0.21", optional = true }
 
 lettre = { workspace = true, optional = true }
 imap = { workspace = true, optional = true }
-native-tls = { workspace = true, optional = true }
+rustls-connector = { workspace = true, optional = true }
 mailparse = { workspace = true, optional = true }
 
 [dev-dependencies]

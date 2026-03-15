@@ -65,6 +65,13 @@ pub struct CompletionRequest {
     pub system: Option<String>,
     /// Extended thinking configuration (if supported by the model).
     pub thinking: Option<librefang_types::config::ThinkingConfig>,
+    /// Enable prompt caching for providers that support it.
+    ///
+    /// - **Anthropic**: adds `cache_control: {"type": "ephemeral"}` to system
+    ///   message blocks and the last user turn.
+    /// - **OpenAI**: automatic prefix caching (no request changes needed, but
+    ///   cached token counts are parsed from the response).
+    pub prompt_caching: bool,
 }
 
 /// A response from an LLM completion.
@@ -250,6 +257,7 @@ mod tests {
                 usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    ..Default::default()
                 },
             },
         ];
@@ -278,6 +286,7 @@ mod tests {
                     usage: TokenUsage {
                         input_tokens: 5,
                         output_tokens: 3,
+                        ..Default::default()
                     },
                 })
             }
@@ -293,6 +302,7 @@ mod tests {
             temperature: 0.0,
             system: None,
             thinking: None,
+            prompt_caching: false,
         };
 
         let response = driver.stream(request, tx).await.unwrap();

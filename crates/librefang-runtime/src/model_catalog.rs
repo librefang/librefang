@@ -586,6 +586,8 @@ pub fn read_codex_credential() -> Option<String> {
     parsed
         .get("api_key")
         .or_else(|| parsed.get("token"))
+        // Codex CLI OAuth stores the token nested at tokens.id_token
+        .or_else(|| parsed.get("tokens").and_then(|t| t.get("id_token")))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
@@ -621,6 +623,7 @@ const BUILTIN_OPENAI: &str = include_str!("../../../catalog/providers/openai.tom
 const BUILTIN_OPENROUTER: &str = include_str!("../../../catalog/providers/openrouter.toml");
 const BUILTIN_PERPLEXITY: &str = include_str!("../../../catalog/providers/perplexity.toml");
 const BUILTIN_QIANFAN: &str = include_str!("../../../catalog/providers/qianfan.toml");
+const BUILTIN_QWEN_CODE: &str = include_str!("../../../catalog/providers/qwen-code.toml");
 const BUILTIN_QWEN: &str = include_str!("../../../catalog/providers/qwen.toml");
 const BUILTIN_REPLICATE: &str = include_str!("../../../catalog/providers/replicate.toml");
 const BUILTIN_SAMBANOVA: &str = include_str!("../../../catalog/providers/sambanova.toml");
@@ -666,6 +669,7 @@ const BUILTIN_PROVIDER_SOURCES: &[&str] = &[
     BUILTIN_OPENROUTER,
     BUILTIN_PERPLEXITY,
     BUILTIN_QIANFAN,
+    BUILTIN_QWEN_CODE,
     BUILTIN_QWEN,
     BUILTIN_REPLICATE,
     BUILTIN_SAMBANOVA,
@@ -726,7 +730,7 @@ mod tests {
     #[test]
     fn test_catalog_has_providers() {
         let catalog = ModelCatalog::new();
-        assert_eq!(catalog.list_providers().len(), 39);
+        assert_eq!(catalog.list_providers().len(), 40);
     }
 
     #[test]

@@ -88,6 +88,10 @@ const BUNDLED_TEMPLATE_MANIFESTS: &[(&str, &str)] = &[
         include_str!("../../../agents/recruiter/agent.toml"),
     ),
     (
+        "recipe-assistant",
+        include_str!("../../../agents/recipe-assistant/agent.toml"),
+    ),
+    (
         "researcher",
         include_str!("../../../agents/researcher/agent.toml"),
     ),
@@ -514,6 +518,14 @@ const TEMPLATE_RULES: &[RouteRule] = &[
             ("财务", r"财务规划|预算|支出分析|现金流|储蓄计划|理财"),
         ],
         weak: &[("花销", r"预算|花销|财务")],
+    },
+    RouteRule {
+        target: "recipe-assistant",
+        strong: &[
+            ("recipe", r"recipe|meal plan|ingredient substitut|portion"),
+            ("食谱", r"食谱|菜谱|做菜|烹饪|膳食计划|配料替换"),
+        ],
+        weak: &[("烹饪", r"菜|做饭|食材|烹饪")],
     },
     RouteRule {
         target: "travel-planner",

@@ -41,6 +41,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
 
+const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
+
 /// The main LibreFang kernel — coordinates all subsystems.
 /// Stub LLM driver used when no providers are configured.
 /// Returns a helpful error so the dashboard still boots and users can configure providers.
@@ -159,6 +161,9 @@ pub struct LibreFangKernel {
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
     agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// Per-agent decision traces from the most recent message exchange.
+    /// Stored for retrieval via `/api/agents/{id}/traces`.
+    pub decision_traces: dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
 }
@@ -1008,6 +1013,7 @@ impl LibreFangKernel {
             channel_adapters: dashmap::DashMap::new(),
             default_model_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
+            decision_traces: dashmap::DashMap::new(),
             self_handle: OnceLock::new(),
         };
 
@@ -1231,7 +1237,18 @@ impl LibreFangKernel {
         parent: Option<AgentId>,
         source_toml_path: Option<PathBuf>,
     ) -> KernelResult<AgentId> {
-        let agent_id = AgentId::new();
+        self.spawn_agent_inner(manifest, parent, source_toml_path, None)
+    }
+
+    /// Spawn a new agent with all options including a predetermined ID.
+    fn spawn_agent_inner(
+        &self,
+        manifest: AgentManifest,
+        parent: Option<AgentId>,
+        source_toml_path: Option<PathBuf>,
+        predetermined_id: Option<AgentId>,
+    ) -> KernelResult<AgentId> {
+        let agent_id = predetermined_id.unwrap_or_default();
         let session_id = SessionId::new();
         let name = manifest.name.clone();
 
@@ -1515,6 +1532,12 @@ impl LibreFangKernel {
                 // Update last active time
                 let _ = self.registry.set_state(agent_id, AgentState::Running);
 
+                // Store decision traces for API retrieval
+                if !result.decision_traces.is_empty() {
+                    self.decision_traces
+                        .insert(agent_id, result.decision_traces.clone());
+                }
+
                 // SECURITY: Record successful message in audit trail
                 self.audit_log.record(
                     agent_id.to_string(),
@@ -1693,6 +1716,7 @@ impl LibreFangKernel {
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
+            let stable_prefix_mode = self.config.stable_prefix_mode;
             let user_name = self
                 .memory
                 .structured_get(shared_id, "user_name")
@@ -1739,11 +1763,14 @@ impl LibreFangKernel {
                     .workspace
                     .as_ref()
                     .and_then(|w| read_identity_file(w, "MEMORY.md")),
-                canonical_context: self
-                    .memory
-                    .canonical_context(agent_id, None)
-                    .ok()
-                    .and_then(|(s, _)| s),
+                canonical_context: if stable_prefix_mode {
+                    None
+                } else {
+                    self.memory
+                        .canonical_context(agent_id, None)
+                        .ok()
+                        .and_then(|(s, _)| s)
+                },
                 user_name,
                 channel_type: None,
                 is_subagent: manifest
@@ -1786,6 +1813,11 @@ impl LibreFangKernel {
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+            // Pass stable_prefix_mode flag to the agent loop via metadata
+            manifest.metadata.insert(
+                STABLE_PREFIX_MODE_METADATA_KEY.to_string(),
+                serde_json::json!(stable_prefix_mode),
+            );
             // Store canonical context separately for injection as user message
             // (keeps system prompt stable across turns for provider prompt caching)
             if let Some(cc_msg) =
@@ -1796,6 +1828,12 @@ impl LibreFangKernel {
                     serde_json::Value::String(cc_msg),
                 );
             }
+
+            // Pass prompt_caching config to the agent loop via metadata.
+            manifest.metadata.insert(
+                "prompt_caching".to_string(),
+                serde_json::Value::Bool(self.config.prompt_caching),
+            );
         }
 
         let memory = Arc::clone(&self.memory);
@@ -2040,11 +2078,13 @@ impl LibreFangKernel {
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             iterations: 1,
             cost_usd: None,
             silent: false,
             directives: Default::default(),
+            decision_traces: Vec::new(),
         })
     }
 
@@ -2100,11 +2140,13 @@ impl LibreFangKernel {
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             cost_usd: None,
             iterations: 1,
             silent: false,
             directives: Default::default(),
+            decision_traces: Vec::new(),
         })
     }
 
@@ -2293,11 +2335,13 @@ impl LibreFangKernel {
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             iterations: result.iterations,
             cost_usd: None,
             silent: result.silent,
             directives: result.directives,
+            decision_traces: result.decision_traces,
         }
     }
 
@@ -2361,6 +2405,7 @@ impl LibreFangKernel {
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
+            let stable_prefix_mode = self.config.stable_prefix_mode;
             let user_name = self
                 .memory
                 .structured_get(shared_id, "user_name")
@@ -2407,11 +2452,14 @@ impl LibreFangKernel {
                     .workspace
                     .as_ref()
                     .and_then(|w| read_identity_file(w, "MEMORY.md")),
-                canonical_context: self
-                    .memory
-                    .canonical_context(agent_id, None)
-                    .ok()
-                    .and_then(|(s, _)| s),
+                canonical_context: if stable_prefix_mode {
+                    None
+                } else {
+                    self.memory
+                        .canonical_context(agent_id, None)
+                        .ok()
+                        .and_then(|(s, _)| s)
+                },
                 user_name,
                 channel_type: None,
                 is_subagent: manifest
@@ -2454,6 +2502,11 @@ impl LibreFangKernel {
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+            // Pass stable_prefix_mode flag to the agent loop via metadata
+            manifest.metadata.insert(
+                STABLE_PREFIX_MODE_METADATA_KEY.to_string(),
+                serde_json::json!(stable_prefix_mode),
+            );
             // Store canonical context separately for injection as user message
             // (keeps system prompt stable across turns for provider prompt caching)
             if let Some(cc_msg) =
@@ -2464,6 +2517,12 @@ impl LibreFangKernel {
                     serde_json::Value::String(cc_msg),
                 );
             }
+
+            // Pass prompt_caching config to the agent loop via metadata.
+            manifest.metadata.insert(
+                "prompt_caching".to_string(),
+                serde_json::Value::Bool(self.config.prompt_caching),
+            );
         }
 
         let is_stable = self.config.mode == librefang_types::config::KernelMode::Stable;
@@ -2491,6 +2550,7 @@ impl LibreFangKernel {
                 temperature: manifest.model.temperature,
                 system: Some(manifest.model.system_prompt.clone()),
                 thinking: None,
+                prompt_caching: false,
             };
             let (complexity, routed_model) = router.select_model(&probe);
             info!(
@@ -3429,7 +3489,16 @@ impl LibreFangKernel {
             }
         }
 
-        let agent_id = self.spawn_agent_with_source(manifest, Some(hand_manifest_path.clone()))?;
+        // Use a deterministic UUID derived from the hand_id so the same hand
+        // always gets the same agent ID across daemon restarts.  This keeps
+        // triggers and cron jobs that reference the UUID stable (#313).
+        let deterministic_id = AgentId::from_hand_id(hand_id);
+        let agent_id = self.spawn_agent_inner(
+            manifest,
+            None,
+            Some(hand_manifest_path.clone()),
+            Some(deterministic_id),
+        )?;
 
         // Restore triggers from the old agent under the new agent ID (#519).
         if !saved_triggers.is_empty() {

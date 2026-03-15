@@ -188,6 +188,7 @@ mod tests {
             temperature: 0.7,
             system: None,
             thinking: None,
+            prompt_caching: false,
         }
     }
 

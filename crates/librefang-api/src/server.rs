@@ -100,6 +100,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route("/agents/{id}/stop", axum::routing::post(routes::stop_agent))
         .route("/agents/{id}/model", axum::routing::put(routes::set_model))
         .route(
+            "/agents/{id}/traces",
+            axum::routing::get(routes::get_agent_traces),
+        )
+        .route(
             "/agents/{id}/tools",
             axum::routing::get(routes::get_agent_tools).put(routes::set_agent_tools),
         )
@@ -474,7 +478,12 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
         .route("/shutdown", axum::routing::post(routes::shutdown))
+        // Chat commands endpoint (dynamic slash menu)
         .route("/commands", axum::routing::get(routes::list_commands))
+        .route(
+            "/commands/{name}",
+            axum::routing::get(routes::get_command),
+        )
         .route("/config/reload", axum::routing::post(routes::config_reload))
         .route(
             "/bindings",

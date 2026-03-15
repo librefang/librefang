@@ -42,6 +42,10 @@ node_modules/
 .DS_Store
 Thumbs.db
 
+# Nix
+result
+.direnv/
+
 # IDE & tools
 .idea/
 .vscode/

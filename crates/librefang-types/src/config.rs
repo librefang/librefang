@@ -1114,6 +1114,13 @@ pub struct KernelConfig {
     /// Usage footer mode (what to show after each response).
     #[serde(default)]
     pub usage_footer: UsageFooterMode,
+    /// Cost optimization mode for stable prompt prefixes.
+    ///
+    /// When enabled, LibreFang avoids volatile system-prompt additions that
+    /// change every turn (for example recalled memory append and canonical
+    /// context injection), improving provider-side prompt cache hit rates.
+    #[serde(default)]
+    pub stable_prefix_mode: bool,
     /// Web tools configuration (search + fetch).
     #[serde(default)]
     pub web: WebConfig,
@@ -1205,6 +1212,14 @@ pub struct KernelConfig {
     /// Sidecar channel adapters (external process-based).
     #[serde(default)]
     pub sidecar_channels: Vec<SidecarChannelConfig>,
+    /// Enable LLM provider prompt caching (default: true).
+    ///
+    /// When enabled, the runtime adds provider-specific cache hints to system
+    /// prompts and tool definitions so that repeated prefixes are cached:
+    /// - **Anthropic**: `cache_control: {"type": "ephemeral"}` on system blocks.
+    /// - **OpenAI**: automatic prefix caching (response cache stats are parsed).
+    #[serde(default = "default_prompt_caching")]
+    pub prompt_caching: bool,
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1262,6 +1277,10 @@ impl Default for BudgetConfig {
 
 fn default_max_cron_jobs() -> usize {
     500
+}
+
+fn default_prompt_caching() -> bool {
+    true
 }
 
 /// Configuration entry for an MCP server.
@@ -1425,6 +1444,7 @@ impl Default for KernelConfig {
             mcp_servers: Vec::new(),
             a2a: None,
             usage_footer: UsageFooterMode::default(),
+            stable_prefix_mode: false,
             web: WebConfig::default(),
             fallback_providers: Vec::new(),
             browser: BrowserConfig::default(),
@@ -1453,6 +1473,7 @@ impl Default for KernelConfig {
             provider_api_keys: HashMap::new(),
             oauth: OAuthConfig::default(),
             sidecar_channels: Vec::new(),
+            prompt_caching: default_prompt_caching(),
         }
     }
 }
@@ -1517,6 +1538,7 @@ impl std::fmt::Debug for KernelConfig {
             )
             .field("a2a", &self.a2a.as_ref().map(|a| a.enabled))
             .field("usage_footer", &self.usage_footer)
+            .field("stable_prefix_mode", &self.stable_prefix_mode)
             .field("web", &self.web)
             .field(
                 "fallback_providers",
@@ -3860,6 +3882,23 @@ mod tests {
         };
         assert_eq!(config.mode, KernelMode::Stable);
         assert_eq!(config.language, "ar");
+    }
+
+    #[test]
+    fn test_stable_prefix_mode_default_false() {
+        let config = KernelConfig::default();
+        assert!(!config.stable_prefix_mode);
+    }
+
+    #[test]
+    fn test_stable_prefix_mode_toml_roundtrip() {
+        let config = KernelConfig {
+            stable_prefix_mode: true,
+            ..Default::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let back: KernelConfig = toml::from_str(&toml_str).unwrap();
+        assert!(back.stable_prefix_mode);
     }
 
     #[test]
