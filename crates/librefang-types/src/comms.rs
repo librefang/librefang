@@ -173,6 +173,47 @@ mod tests {
         let req: CommsSendRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.from_agent_id, "a");
         assert_eq!(req.message, "hello");
+        assert!(req.thread_id.is_none());
+        assert!(req.attachments.is_empty());
+    }
+
+    #[test]
+    fn comms_send_request_with_thread_and_attachments() {
+        let json = r#"{
+            "from_agent_id": "a",
+            "to_agent_id": "b",
+            "message": "check this image",
+            "thread_id": "topic-42",
+            "attachments": [
+                {"url": "https://example.com/photo.jpg", "filename": "photo.jpg", "content_type": "image/jpeg"},
+                {"url": "https://example.com/doc.pdf"}
+            ]
+        }"#;
+        let req: CommsSendRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.thread_id.as_deref(), Some("topic-42"));
+        assert_eq!(req.attachments.len(), 2);
+        assert_eq!(req.attachments[0].url, "https://example.com/photo.jpg");
+        assert_eq!(req.attachments[0].filename.as_deref(), Some("photo.jpg"));
+        assert_eq!(
+            req.attachments[0].content_type.as_deref(),
+            Some("image/jpeg")
+        );
+        assert!(req.attachments[1].filename.is_none());
+    }
+
+    #[test]
+    fn attachment_roundtrip() {
+        let att = Attachment {
+            url: "https://example.com/img.png".into(),
+            filename: Some("img.png".into()),
+            content_type: Some("image/png".into()),
+            caption: None,
+        };
+        let json = serde_json::to_string(&att).unwrap();
+        let parsed: Attachment = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.url, att.url);
+        assert_eq!(parsed.filename, att.filename);
+        assert!(parsed.caption.is_none());
     }
 
     #[test]

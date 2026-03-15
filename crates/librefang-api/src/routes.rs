@@ -320,6 +320,82 @@ pub fn inject_attachments_into_session(
     }
 }
 
+/// Resolve URL-based attachments into image content blocks.
+///
+/// Downloads each attachment URL, base64-encodes images, and returns
+/// content blocks ready to inject into a session. Non-image attachments
+/// and download failures are skipped with a warning.
+pub async fn resolve_url_attachments(
+    attachments: &[librefang_types::comms::Attachment],
+) -> Vec<librefang_types::message::ContentBlock> {
+    use base64::Engine;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+    let mut blocks = Vec::new();
+
+    for att in attachments {
+        // Determine MIME type from explicit field or guess from URL extension
+        let content_type = if let Some(ref ct) = att.content_type {
+            ct.clone()
+        } else {
+            mime_from_url(&att.url).unwrap_or_default()
+        };
+
+        // Only process image types
+        if !content_type.starts_with("image/") {
+            tracing::debug!(url = %att.url, content_type, "Skipping non-image attachment");
+            continue;
+        }
+
+        match client.get(&att.url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.bytes().await {
+                    Ok(data) => {
+                        // Limit to 20MB to prevent OOM
+                        if data.len() > 20 * 1024 * 1024 {
+                            tracing::warn!(url = %att.url, size = data.len(), "Attachment too large, skipping");
+                            continue;
+                        }
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                        blocks.push(librefang_types::message::ContentBlock::Image {
+                            media_type: content_type,
+                            data: b64,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(url = %att.url, error = %e, "Failed to read attachment body");
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::warn!(url = %att.url, status = %resp.status(), "Attachment download failed");
+            }
+            Err(e) => {
+                tracing::warn!(url = %att.url, error = %e, "Failed to fetch attachment URL");
+            }
+        }
+    }
+
+    blocks
+}
+
+/// Guess MIME type from a URL file extension.
+fn mime_from_url(url: &str) -> Option<String> {
+    let path = url.split('?').next().unwrap_or(url);
+    let ext = path.rsplit('.').next()?;
+    match ext.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => Some("image/jpeg".into()),
+        "png" => Some("image/png".into()),
+        "gif" => Some("image/gif".into()),
+        "webp" => Some("image/webp".into()),
+        "svg" => Some("image/svg+xml".into()),
+        _ => None,
+    }
+}
+
 /// POST /api/agents/:id/message — Send a message to an agent.
 pub async fn send_message(
     State(state): State<Arc<AppState>>,
@@ -11441,6 +11517,78 @@ pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoRespo
     Json(serde_json::json!({"commands": commands}))
 }
 
+/// GET /api/commands/{name} — Return a single command by name.
+///
+/// The `name` path parameter should be the command name with or without the
+/// leading slash (e.g. "help" or "/help" both match `/help`).
+/// Returns 404 if the command is not found.
+pub async fn get_command(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    // Normalise: ensure lookup key has a leading slash
+    let lookup = if name.starts_with('/') {
+        name.clone()
+    } else {
+        format!("/{name}")
+    };
+
+    // Built-in commands
+    let builtins = [
+        ("/help", "Show available commands"),
+        ("/new", "Reset session (clear history)"),
+        ("/compact", "Trigger LLM session compaction"),
+        ("/model", "Show or switch model (/model [name])"),
+        ("/stop", "Cancel current agent run"),
+        ("/usage", "Show session token usage & cost"),
+        (
+            "/think",
+            "Toggle extended thinking (/think [on|off|stream])",
+        ),
+        ("/context", "Show context window usage & pressure"),
+        (
+            "/verbose",
+            "Cycle tool detail level (/verbose [off|on|full])",
+        ),
+        ("/queue", "Check if agent is processing"),
+        ("/status", "Show system status"),
+        ("/clear", "Clear chat display"),
+        ("/exit", "Disconnect from agent"),
+    ];
+
+    for (cmd, desc) in &builtins {
+        if cmd.eq_ignore_ascii_case(&lookup) {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({"cmd": cmd, "desc": desc})),
+            );
+        }
+    }
+
+    // Skill-registered commands
+    if let Ok(registry) = state.kernel.skill_registry.read() {
+        for skill in registry.list() {
+            let skill_cmd = format!("/{}", skill.manifest.skill.name);
+            if skill_cmd.eq_ignore_ascii_case(&lookup) {
+                let desc: String = skill.manifest.skill.description.chars().take(80).collect();
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "cmd": skill_cmd,
+                        "desc": if desc.is_empty() { format!("Skill: {}", skill.manifest.skill.name) } else { desc },
+                        "source": "skill",
+                    })),
+                );
+            }
+        }
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"error": format!("Command '{}' not found", lookup)})),
+    )
+}
+
 /// SECURITY: Validate webhook bearer token using constant-time comparison.
 fn validate_webhook_token(headers: &axum::http::HeaderMap, token_env: &str) -> bool {
     let expected = match std::env::var(token_env) {
@@ -11972,16 +12120,41 @@ pub async fn comms_send(
         );
     }
 
-    match state.kernel.send_message(to_id, &req.message).await {
-        Ok(result) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
+    // Resolve URL-based attachments into image content blocks
+    let content_blocks = if req.attachments.is_empty() {
+        None
+    } else {
+        let blocks = resolve_url_attachments(&req.attachments).await;
+        if blocks.is_empty() {
+            None
+        } else {
+            Some(blocks)
+        }
+    };
+
+    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+    match state
+        .kernel
+        .send_message_with_handle_and_blocks(
+            to_id,
+            &req.message,
+            Some(kernel_handle),
+            content_blocks,
+        )
+        .await
+    {
+        Ok(result) => {
+            let mut resp = serde_json::json!({
                 "ok": true,
                 "response": result.response,
                 "input_tokens": result.total_usage.input_tokens,
                 "output_tokens": result.total_usage.output_tokens,
-            })),
-        ),
+            });
+            if let Some(tid) = &req.thread_id {
+                resp["thread_id"] = serde_json::json!(tid);
+            }
+            (StatusCode::OK, Json(resp))
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Message delivery failed: {e}")})),
@@ -12099,6 +12272,503 @@ pub async fn catalog_status() -> impl IntoResponse {
     }))
 }
 
+// ---------------------------------------------------------------------------
+// Backup / Restore endpoints
+// ---------------------------------------------------------------------------
+
+/// Metadata stored inside every backup archive as `manifest.json`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BackupManifest {
+    version: u32,
+    created_at: String,
+    hostname: String,
+    librefang_version: String,
+    components: Vec<String>,
+}
+
+/// POST /api/backup — Create a backup archive of kernel state.
+///
+/// Returns the backup metadata including the filename. The archive is stored
+/// in `<home_dir>/backups/` with a timestamped filename.
+pub async fn create_backup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let home_dir = &state.kernel.config.home_dir;
+    let backups_dir = home_dir.join("backups");
+    if let Err(e) = std::fs::create_dir_all(&backups_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to create backups directory: {e}")})),
+        );
+    }
+
+    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    let filename = format!("librefang_backup_{timestamp}.zip");
+    let backup_path = backups_dir.join(&filename);
+
+    let mut components: Vec<String> = Vec::new();
+
+    // Create zip archive
+    let file = match std::fs::File::create(&backup_path) {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Failed to create backup file: {e}")})),
+            );
+        }
+    };
+    let mut zip = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    // Helper: add a single file to the zip relative to home_dir
+    let add_file = |zip: &mut zip::ZipWriter<std::fs::File>,
+                    src: &std::path::Path,
+                    archive_name: &str|
+     -> Result<(), String> {
+        let data = std::fs::read(src).map_err(|e| format!("read {}: {e}", src.display()))?;
+        zip.start_file(archive_name, options)
+            .map_err(|e| format!("zip start {archive_name}: {e}"))?;
+        std::io::Write::write_all(zip, &data)
+            .map_err(|e| format!("zip write {archive_name}: {e}"))?;
+        Ok(())
+    };
+
+    // Helper: recursively add a directory to the zip
+    let add_dir = |zip: &mut zip::ZipWriter<std::fs::File>,
+                   dir: &std::path::Path,
+                   prefix: &str|
+     -> Result<u64, String> {
+        let mut count = 0u64;
+        if !dir.exists() {
+            return Ok(0);
+        }
+        for entry in walkdir::WalkDir::new(dir)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(dir)
+                .map_err(|e| format!("strip prefix: {e}"))?;
+            let archive_name = if prefix.is_empty() {
+                rel.to_string_lossy().to_string()
+            } else {
+                format!("{prefix}/{}", rel.to_string_lossy())
+            };
+            if path.is_file() {
+                let data =
+                    std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+                zip.start_file(&archive_name, options)
+                    .map_err(|e| format!("zip start {archive_name}: {e}"))?;
+                std::io::Write::write_all(zip, &data)
+                    .map_err(|e| format!("zip write {archive_name}: {e}"))?;
+                count += 1;
+            }
+        }
+        Ok(count)
+    };
+
+    // 1. config.toml
+    let config_path = home_dir.join("config.toml");
+    if config_path.exists() {
+        if let Err(e) = add_file(&mut zip, &config_path, "config.toml") {
+            tracing::warn!("Backup: skipping config.toml: {e}");
+        } else {
+            components.push("config".to_string());
+        }
+    }
+
+    // 2. cron_jobs.json
+    let cron_path = home_dir.join("cron_jobs.json");
+    if cron_path.exists() {
+        if let Err(e) = add_file(&mut zip, &cron_path, "cron_jobs.json") {
+            tracing::warn!("Backup: skipping cron_jobs.json: {e}");
+        } else {
+            components.push("cron_jobs".to_string());
+        }
+    }
+
+    // 3. hand_state.json
+    let hand_state_path = home_dir.join("hand_state.json");
+    if hand_state_path.exists() {
+        if let Err(e) = add_file(&mut zip, &hand_state_path, "hand_state.json") {
+            tracing::warn!("Backup: skipping hand_state.json: {e}");
+        } else {
+            components.push("hand_state".to_string());
+        }
+    }
+
+    // 4. custom_models.json
+    let custom_models_path = home_dir.join("custom_models.json");
+    if custom_models_path.exists() {
+        if let Err(e) = add_file(&mut zip, &custom_models_path, "custom_models.json") {
+            tracing::warn!("Backup: skipping custom_models.json: {e}");
+        } else {
+            components.push("custom_models".to_string());
+        }
+    }
+
+    // 5. agents/ directory (user templates)
+    let agents_dir = home_dir.join("agents");
+    if agents_dir.exists() {
+        match add_dir(&mut zip, &agents_dir, "agents") {
+            Ok(n) if n > 0 => components.push("agents".to_string()),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Backup: skipping agents/: {e}"),
+        }
+    }
+
+    // 6. skills/ directory
+    let skills_dir = home_dir.join("skills");
+    if skills_dir.exists() {
+        match add_dir(&mut zip, &skills_dir, "skills") {
+            Ok(n) if n > 0 => components.push("skills".to_string()),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Backup: skipping skills/: {e}"),
+        }
+    }
+
+    // 7. workflows/ directory
+    let workflows_dir = home_dir.join("workflows");
+    if workflows_dir.exists() {
+        match add_dir(&mut zip, &workflows_dir, "workflows") {
+            Ok(n) if n > 0 => components.push("workflows".to_string()),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Backup: skipping workflows/: {e}"),
+        }
+    }
+
+    // 8. data/ directory (SQLite DB, memory, etc.)
+    let data_dir = home_dir.join("data");
+    if data_dir.exists() {
+        match add_dir(&mut zip, &data_dir, "data") {
+            Ok(n) if n > 0 => components.push("data".to_string()),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("Backup: skipping data/: {e}"),
+        }
+    }
+
+    // Write manifest
+    let manifest = BackupManifest {
+        version: 1,
+        created_at: chrono::Utc::now().to_rfc3339(),
+        hostname: hostname_string(),
+        librefang_version: env!("CARGO_PKG_VERSION").to_string(),
+        components: components.clone(),
+    };
+    if let Ok(manifest_json) = serde_json::to_string_pretty(&manifest) {
+        let _ = zip.start_file("manifest.json", options).and_then(|()| {
+            std::io::Write::write_all(&mut zip, manifest_json.as_bytes())
+                .map_err(zip::result::ZipError::Io)
+        });
+    }
+
+    if let Err(e) = zip.finish() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to finalize backup: {e}")})),
+        );
+    }
+
+    let size = std::fs::metadata(&backup_path)
+        .map(|m| m.len())
+        .unwrap_or(0);
+
+    tracing::info!(
+        "Backup created: {filename} ({} bytes, {} components)",
+        size,
+        components.len()
+    );
+    state.kernel.audit_log.record(
+        "system",
+        librefang_runtime::audit::AuditAction::ConfigChange,
+        format!("Backup created: {filename}"),
+        "completed",
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "filename": filename,
+            "path": backup_path.to_string_lossy(),
+            "size_bytes": size,
+            "components": components,
+            "created_at": manifest.created_at,
+        })),
+    )
+}
+
+/// GET /api/backups — List existing backups.
+pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let backups_dir = state.kernel.config.home_dir.join("backups");
+    if !backups_dir.exists() {
+        return Json(serde_json::json!({"backups": [], "total": 0}));
+    }
+
+    let mut backups: Vec<serde_json::Value> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&backups_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("zip") {
+                continue;
+            }
+            let filename = path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let modified = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .map(|t| {
+                    let dt: chrono::DateTime<chrono::Utc> = t.into();
+                    dt.to_rfc3339()
+                });
+
+            // Try to read manifest from the zip
+            let manifest = read_backup_manifest(&path);
+
+            backups.push(serde_json::json!({
+                "filename": filename,
+                "path": path.to_string_lossy(),
+                "size_bytes": size,
+                "modified_at": modified,
+                "components": manifest.as_ref().map(|m| &m.components),
+                "librefang_version": manifest.as_ref().map(|m| &m.librefang_version),
+                "created_at": manifest.as_ref().map(|m| &m.created_at),
+            }));
+        }
+    }
+
+    // Sort by filename descending (newest first since filenames contain timestamps)
+    backups.sort_by(|a, b| {
+        let fa = a["filename"].as_str().unwrap_or("");
+        let fb = b["filename"].as_str().unwrap_or("");
+        fb.cmp(fa)
+    });
+
+    let total = backups.len();
+    Json(serde_json::json!({"backups": backups, "total": total}))
+}
+
+/// DELETE /api/backups/{filename} — Delete a specific backup.
+pub async fn delete_backup(
+    State(state): State<Arc<AppState>>,
+    Path(filename): Path<String>,
+) -> impl IntoResponse {
+    // Sanitize filename to prevent path traversal
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid backup filename"})),
+        );
+    }
+    if !filename.ends_with(".zip") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid backup filename — must be a .zip file"})),
+        );
+    }
+
+    let backup_path = state.kernel.config.home_dir.join("backups").join(&filename);
+    if !backup_path.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Backup not found"})),
+        );
+    }
+
+    if let Err(e) = std::fs::remove_file(&backup_path) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to delete backup: {e}")})),
+        );
+    }
+
+    tracing::info!("Backup deleted: {filename}");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"deleted": filename})),
+    )
+}
+
+/// POST /api/restore — Restore kernel state from a backup archive.
+///
+/// Accepts a JSON body with `{"filename": "librefang_backup_20260315_120000.zip"}`.
+/// The file must exist in `<home_dir>/backups/`.
+///
+/// **Warning**: This overwrites existing state files. The daemon should be
+/// restarted after a restore for all changes to take effect.
+pub async fn restore_backup(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let filename = match req.get("filename").and_then(|v| v.as_str()) {
+        Some(f) => f.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing 'filename' field"})),
+            );
+        }
+    };
+
+    // Sanitize
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid backup filename"})),
+        );
+    }
+
+    let home_dir = &state.kernel.config.home_dir;
+    let backup_path = home_dir.join("backups").join(&filename);
+    if !backup_path.exists() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Backup file not found"})),
+        );
+    }
+
+    // Open zip
+    let file = match std::fs::File::open(&backup_path) {
+        Ok(f) => f,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Failed to open backup: {e}")})),
+            );
+        }
+    };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Invalid backup archive: {e}")})),
+            );
+        }
+    };
+
+    // Validate manifest
+    let manifest: Option<BackupManifest> = {
+        match archive.by_name("manifest.json") {
+            Ok(mut entry) => {
+                let mut buf = String::new();
+                if std::io::Read::read_to_string(&mut entry, &mut buf).is_ok() {
+                    serde_json::from_str(&buf).ok()
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        }
+    };
+
+    if manifest.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": "Backup archive is missing manifest.json — not a valid LibreFang backup"}),
+            ),
+        );
+    }
+
+    let mut restored: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    // Extract all files to home_dir, skipping manifest.json itself
+    for i in 0..archive.len() {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(e) => {
+                errors.push(format!("Failed to read entry {i}: {e}"));
+                continue;
+            }
+        };
+
+        let entry_name = match entry.enclosed_name() {
+            Some(name) => name.to_path_buf(),
+            None => {
+                errors.push(format!("Skipped unsafe entry name at index {i}"));
+                continue;
+            }
+        };
+
+        if entry_name.to_string_lossy() == "manifest.json" {
+            continue;
+        }
+
+        let target = home_dir.join(&entry_name);
+
+        if entry.is_dir() {
+            if let Err(e) = std::fs::create_dir_all(&target) {
+                errors.push(format!("mkdir {}: {e}", entry_name.display()));
+            }
+            continue;
+        }
+
+        // Ensure parent directory exists
+        if let Some(parent) = target.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                errors.push(format!("mkdir parent for {}: {e}", entry_name.display()));
+                continue;
+            }
+        }
+
+        let mut data = Vec::new();
+        if let Err(e) = std::io::Read::read_to_end(&mut entry, &mut data) {
+            errors.push(format!("read {}: {e}", entry_name.display()));
+            continue;
+        }
+        if let Err(e) = std::fs::write(&target, &data) {
+            errors.push(format!("write {}: {e}", entry_name.display()));
+            continue;
+        }
+        restored.push(entry_name.to_string_lossy().to_string());
+    }
+
+    let total_restored = restored.len();
+    tracing::info!(
+        "Restore from {filename}: {total_restored} files restored, {} errors",
+        errors.len()
+    );
+    state.kernel.audit_log.record(
+        "system",
+        librefang_runtime::audit::AuditAction::ConfigChange,
+        format!("Backup restored: {filename} ({total_restored} files)"),
+        "completed",
+    );
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "restored_files": total_restored,
+            "errors": errors,
+            "manifest": manifest,
+            "message": "Restore complete. Restart the daemon for all changes to take effect.",
+        })),
+    )
+}
+
+/// Read the `manifest.json` from a backup zip without extracting everything.
+fn read_backup_manifest(path: &std::path::Path) -> Option<BackupManifest> {
+    let file = std::fs::File::open(path).ok()?;
+    let mut archive = zip::ZipArchive::new(file).ok()?;
+    let mut entry = archive.by_name("manifest.json").ok()?;
+    let mut buf = String::new();
+    std::io::Read::read_to_string(&mut entry, &mut buf).ok()?;
+    serde_json::from_str(&buf).ok()
+}
+
+/// Get the machine hostname (best-effort).
+fn hostname_string() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12106,7 +12776,70 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
     use axum::Router;
+    use librefang_types::config::KernelConfig;
     use tower::ServiceExt;
+
+    /// Helper: build a minimal AppState backed by a real kernel.
+    fn test_app_state() -> Arc<AppState> {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-api-cmd-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_get_command_builtin_found() {
+        let state = test_app_state();
+        let resp = get_command(State(state), Path("help".to_string())).await;
+        let (status, Json(body)) = resp;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cmd"], "/help");
+        assert!(!body["desc"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_command_builtin_with_slash() {
+        let state = test_app_state();
+        let resp = get_command(State(state), Path("/stop".to_string())).await;
+        let (status, Json(body)) = resp;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cmd"], "/stop");
+    }
+
+    #[tokio::test]
+    async fn test_get_command_not_found() {
+        let state = test_app_state();
+        let resp = get_command(State(state), Path("nonexistent".to_string())).await;
+        let (status, Json(body)) = resp;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body["error"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_get_command_case_insensitive() {
+        let state = test_app_state();
+        let resp = get_command(State(state), Path("HELP".to_string())).await;
+        let (status, Json(body)) = resp;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["cmd"], "/help");
+    }
 
     fn profile_router() -> Router {
         Router::new()

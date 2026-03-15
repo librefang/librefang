@@ -5,6 +5,29 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.7] - 2026-03-15
+
+### Added
+
+- Add backup and restore functionality for kernel state (#444) (@houko)
+- Add thread_id and attachments to CommsSendRequest (#469) (@TJUEZ)
+
+### Fixed
+
+- Resolve WhatsApp Web gateway E2EE, agent UUID, and auto-connect failures (#440) (@houko)
+- Wire thread_id and attachments in comms_send handler (#479) (@houko)
+- Include tauri.conf.json in release script git add (#482) (@houko)
+- Strip date suffix from Tauri version for Windows MSI builds (#485) (@houko)
+
+### Documentation
+
+- Translate getting-started.md to French (#442) (@houko)
+- Translate skill-development.md to Chinese (#447) (@houko)
+
+### Other
+
+- V0.4.6-20260315 (#478) (@houko)
+
 ## [0.4.6] - 2026-03-15
 
 ### Fixed

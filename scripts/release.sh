@@ -139,7 +139,8 @@ git -C "$REPO_ROOT" add \
     CHANGELOG.md \
     sdk/javascript/package.json \
     sdk/python/setup.py \
-    packages/whatsapp-gateway/package.json
+    packages/whatsapp-gateway/package.json \
+    crates/librefang-desktop/tauri.conf.json
 git -C "$REPO_ROOT" commit -m "chore: bump version to $TAG"
 git -C "$REPO_ROOT" tag "$TAG"
 
