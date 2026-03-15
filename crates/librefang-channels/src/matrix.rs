@@ -77,7 +77,7 @@ impl MatrixAdapter {
         &self,
         room_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let txn_id = uuid::Uuid::new_v4().to_string();
         let url = format!(
             "{}/_matrix/client/v3/rooms/{}/send/m.room.message/{}",
@@ -110,7 +110,7 @@ impl MatrixAdapter {
     }
 
     /// Validate credentials by calling /whoami.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/_matrix/client/v3/account/whoami", self.homeserver_url);
 
         let resp = self
@@ -148,8 +148,10 @@ impl ChannelAdapter for MatrixAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let validated_user = self.validate().await?;
         info!("Matrix adapter authenticated as {validated_user}");
@@ -304,7 +306,7 @@ impl ChannelAdapter for MatrixAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -317,7 +319,10 @@ impl ChannelAdapter for MatrixAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/_matrix/client/v3/rooms/{}/typing/{}",
             self.homeserver_url, user.platform_id, self.user_id
@@ -339,7 +344,7 @@ impl ChannelAdapter for MatrixAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

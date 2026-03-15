@@ -114,7 +114,10 @@ impl SidecarAdapter {
     }
 
     /// Write a command to the sidecar process stdin.
-    async fn send_command(&self, cmd: &SidecarCommand) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_command(
+        &self,
+        cmd: &SidecarCommand,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut guard = self.stdin_tx.lock().await;
         let stdin = guard
             .as_mut()
@@ -139,8 +142,10 @@ impl ChannelAdapter for SidecarAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         info!(
             name = %self.name,
             command = %self.command,
@@ -330,7 +335,7 @@ impl ChannelAdapter for SidecarAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(t) => t,
             other => serde_json::to_string(&other)?,
@@ -351,7 +356,7 @@ impl ChannelAdapter for SidecarAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!(name = %self.name, "Stopping sidecar channel adapter");
 
         // Send shutdown command (best-effort)

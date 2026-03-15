@@ -77,7 +77,9 @@ impl ZulipAdapter {
     }
 
     /// Register an event queue with the Zulip server.
-    async fn register_queue(&self) -> Result<(String, i64), Box<dyn std::error::Error>> {
+    async fn register_queue(
+        &self,
+    ) -> Result<(String, i64), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/v1/register", self.server_url);
 
         let mut params = vec![("event_types", r#"["message"]"#.to_string())];
@@ -120,7 +122,7 @@ impl ZulipAdapter {
     }
 
     /// Validate credentials by fetching the bot's own profile.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/v1/users/me", self.server_url);
         let resp = self
             .client
@@ -145,7 +147,7 @@ impl ZulipAdapter {
         to: &str,
         topic: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/v1/messages", self.server_url);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -197,8 +199,10 @@ impl ChannelAdapter for ZulipAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let bot_name = self.validate().await?;
         info!("Zulip adapter authenticated as {bot_name}");
@@ -443,7 +447,7 @@ impl ChannelAdapter for ZulipAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(text) => text,
             _ => "(Unsupported content type)".to_string(),
@@ -469,7 +473,7 @@ impl ChannelAdapter for ZulipAdapter {
         user: &ChannelUser,
         content: ChannelContent,
         thread_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(text) => text,
             _ => "(Unsupported content type)".to_string(),
@@ -481,7 +485,7 @@ impl ChannelAdapter for ZulipAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

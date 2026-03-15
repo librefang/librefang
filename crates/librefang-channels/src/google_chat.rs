@@ -76,7 +76,7 @@ impl GoogleChatAdapter {
     /// Google's OAuth2 token endpoint. For now it parses a pre-supplied token
     /// from the service account key JSON (field "access_token") or returns an
     /// error indicating that full JWT auth is not yet wired.
-    async fn get_access_token(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn get_access_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // Check cache first
         {
             let cache = self.cached_token.read().await;
@@ -111,7 +111,7 @@ impl GoogleChatAdapter {
         &self,
         space_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_access_token().await?;
         let url = format!("https://chat.googleapis.com/v1/{}/messages", space_id);
 
@@ -158,8 +158,10 @@ impl ChannelAdapter for GoogleChatAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate we can parse the service account key
         let _key: serde_json::Value = serde_json::from_str(&self.service_account_key)
             .map_err(|e| format!("Invalid service account key: {e}"))?;
@@ -351,7 +353,7 @@ impl ChannelAdapter for GoogleChatAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -364,7 +366,7 @@ impl ChannelAdapter for GoogleChatAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

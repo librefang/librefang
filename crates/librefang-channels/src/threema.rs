@@ -70,7 +70,7 @@ impl ThreemaAdapter {
     }
 
     /// Validate credentials by checking the remaining credits.
-    async fn validate(&self) -> Result<u64, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/credits?from={}&secret={}",
             THREEMA_API_URL,
@@ -92,7 +92,7 @@ impl ThreemaAdapter {
         &self,
         to: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/send_simple", THREEMA_API_URL);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -194,8 +194,10 @@ impl ChannelAdapter for ThreemaAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let credits = self.validate().await?;
         info!(
@@ -329,7 +331,7 @@ impl ChannelAdapter for ThreemaAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -342,12 +344,15 @@ impl ChannelAdapter for ThreemaAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Threema Gateway does not support typing indicators
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

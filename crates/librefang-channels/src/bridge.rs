@@ -284,7 +284,7 @@ impl BridgeManager {
     pub async fn start_adapter(
         &mut self,
         adapter: Arc<dyn ChannelAdapter>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let stream = adapter.start().await?;
         let handle = self.handle.clone();
         let router = self.router.clone();

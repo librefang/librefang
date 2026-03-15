@@ -113,7 +113,7 @@ impl RedditAdapter {
     }
 
     /// Obtain a valid OAuth2 bearer token, refreshing if expired or missing.
-    async fn get_token(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn get_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // Check cache first
         {
             let guard = self.cached_token.read().await;
@@ -161,7 +161,7 @@ impl RedditAdapter {
     }
 
     /// Validate credentials by calling `/api/v1/me`.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
         let url = format!("{}/api/v1/me", REDDIT_API_BASE);
 
@@ -183,7 +183,7 @@ impl RedditAdapter {
         &self,
         parent_fullname: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
         let url = format!("{}/api/comment", REDDIT_API_BASE);
 
@@ -326,8 +326,10 @@ impl ChannelAdapter for RedditAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let username = self.validate().await?;
         info!("Reddit adapter authenticated as u/{username}");
@@ -509,7 +511,7 @@ impl ChannelAdapter for RedditAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 // user.platform_id is the author username; we need the fullname from metadata
@@ -527,12 +529,15 @@ impl ChannelAdapter for RedditAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Reddit does not support typing indicators
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

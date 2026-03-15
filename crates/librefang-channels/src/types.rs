@@ -230,17 +230,23 @@ pub trait ChannelAdapter: Send + Sync {
     /// Start receiving messages. Returns a stream of incoming messages.
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>;
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    >;
 
     /// Send a response back to a user on this channel.
     async fn send(
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>>;
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Send a typing indicator (optional — default no-op).
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
@@ -250,7 +256,7 @@ pub trait ChannelAdapter: Send + Sync {
         _user: &ChannelUser,
         _message_id: &str,
         _reaction: &LifecycleReaction,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
@@ -262,7 +268,7 @@ pub trait ChannelAdapter: Send + Sync {
     }
 
     /// Stop the adapter and clean up resources.
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>>;
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Get the current health status of this adapter (optional — default returns disconnected).
     fn status(&self) -> ChannelStatus {
@@ -275,7 +281,7 @@ pub trait ChannelAdapter: Send + Sync {
         user: &ChannelUser,
         content: ChannelContent,
         _thread_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.send(user, content).await
     }
 
@@ -299,7 +305,7 @@ pub trait ChannelAdapter: Send + Sync {
         user: &ChannelUser,
         mut delta_rx: mpsc::Receiver<String>,
         _thread_id: Option<&str>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let mut full_text = String::new();
         while let Some(delta) = delta_rx.recv().await {
             full_text.push_str(&delta);

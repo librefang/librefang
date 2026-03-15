@@ -107,8 +107,10 @@ impl ChannelAdapter for XmppAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         warn!(
             "XMPP adapter for {}@{}:{} cannot start: \
              full XMPP support requires the tokio-xmpp dependency which is not \
@@ -132,11 +134,11 @@ impl ChannelAdapter for XmppAdapter {
         &self,
         _user: &ChannelUser,
         _content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Err("XMPP adapter not started: tokio-xmpp dependency required".into())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

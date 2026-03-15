@@ -237,8 +237,10 @@ impl ChannelAdapter for IrcAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
         let (write_cmd_tx, mut write_cmd_rx) = mpsc::channel::<String>(64);
 
@@ -432,7 +434,7 @@ impl ChannelAdapter for IrcAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let write_tx = self.write_tx.read().await;
         let write_tx = write_tx
             .as_ref()
@@ -459,7 +461,7 @@ impl ChannelAdapter for IrcAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

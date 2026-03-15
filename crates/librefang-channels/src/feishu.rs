@@ -105,7 +105,7 @@ impl FeishuAdapter {
     }
 
     /// Obtain a valid tenant access token, refreshing if expired or missing.
-    async fn get_token(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn get_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // Check cache first
         {
             let guard = self.cached_token.read().await;
@@ -157,7 +157,7 @@ impl FeishuAdapter {
     }
 
     /// Validate credentials by fetching bot info.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
 
         let resp = self
@@ -193,7 +193,7 @@ impl FeishuAdapter {
         receive_id: &str,
         receive_id_type: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
         let url = format!("{}?receive_id_type={}", FEISHU_SEND_URL, receive_id_type);
 
@@ -241,7 +241,7 @@ impl FeishuAdapter {
         &self,
         message_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
         let url = format!(
             "https://open.feishu.cn/open-apis/im/v1/messages/{}/reply",
@@ -389,8 +389,10 @@ impl ChannelAdapter for FeishuAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let bot_name = self.validate().await?;
         info!("Feishu adapter authenticated as {bot_name}");
@@ -557,7 +559,7 @@ impl ChannelAdapter for FeishuAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 // Use chat_id as receive_id with chat_id type
@@ -572,12 +574,15 @@ impl ChannelAdapter for FeishuAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Feishu does not support typing indicators via REST API
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

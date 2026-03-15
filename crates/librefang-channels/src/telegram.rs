@@ -89,7 +89,7 @@ impl TelegramAdapter {
     }
 
     /// Validate the bot token by calling `getMe`.
-    pub async fn validate_token(&self) -> Result<String, Box<dyn std::error::Error>> {
+    pub async fn validate_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/bot{}/getMe", self.api_base_url, self.token.as_str());
         let resp: serde_json::Value = self.client.get(&url).send().await?.json().await?;
 
@@ -114,7 +114,7 @@ impl TelegramAdapter {
         chat_id: i64,
         text: &str,
         thread_id: Option<i64>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/bot{}/sendMessage",
             self.api_base_url,
@@ -155,7 +155,7 @@ impl TelegramAdapter {
         photo_url: &str,
         caption: Option<&str>,
         thread_id: Option<i64>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/bot{}/sendPhoto", self.api_base_url, self.token.as_str());
         let mut body = serde_json::json!({
             "chat_id": chat_id,
@@ -183,7 +183,7 @@ impl TelegramAdapter {
         document_url: &str,
         filename: &str,
         thread_id: Option<i64>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/bot{}/sendDocument",
             self.api_base_url,
@@ -216,7 +216,7 @@ impl TelegramAdapter {
         filename: &str,
         mime_type: &str,
         thread_id: Option<i64>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/bot{}/sendDocument",
             self.api_base_url,
@@ -249,7 +249,7 @@ impl TelegramAdapter {
         chat_id: i64,
         voice_url: &str,
         thread_id: Option<i64>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/bot{}/sendVoice", self.api_base_url, self.token.as_str());
         let mut body = serde_json::json!({
             "chat_id": chat_id,
@@ -273,7 +273,7 @@ impl TelegramAdapter {
         lat: f64,
         lon: f64,
         thread_id: Option<i64>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/bot{}/sendLocation",
             self.api_base_url,
@@ -302,7 +302,7 @@ impl TelegramAdapter {
         &self,
         chat_id: i64,
         thread_id: Option<i64>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/bot{}/sendChatAction",
             self.api_base_url,
@@ -371,7 +371,7 @@ impl TelegramAdapter {
         chat_id: i64,
         message_id: i64,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/bot{}/editMessageText",
             self.api_base_url,
@@ -441,7 +441,7 @@ impl TelegramAdapter {
         user: &ChannelUser,
         content: ChannelContent,
         thread_id: Option<i64>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chat_id: i64 = user
             .platform_id
             .parse()
@@ -495,8 +495,10 @@ impl ChannelAdapter for TelegramAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate token first (fail fast) and store bot username for mention detection
         let bot_name = self.validate_token().await?;
         {
@@ -694,11 +696,14 @@ impl ChannelAdapter for TelegramAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.send_content(user, content, None).await
     }
 
-    async fn send_typing(&self, user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chat_id: i64 = user
             .platform_id
             .parse()
@@ -711,7 +716,7 @@ impl ChannelAdapter for TelegramAdapter {
         user: &ChannelUser,
         content: ChannelContent,
         thread_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let tid: Option<i64> = thread_id.parse().ok();
         self.send_content(user, content, tid).await
     }
@@ -721,7 +726,7 @@ impl ChannelAdapter for TelegramAdapter {
         user: &ChannelUser,
         message_id: &str,
         reaction: &LifecycleReaction,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chat_id: i64 = user
             .platform_id
             .parse()
@@ -742,7 +747,7 @@ impl ChannelAdapter for TelegramAdapter {
         user: &ChannelUser,
         mut delta_rx: mpsc::Receiver<String>,
         thread_id: Option<&str>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chat_id: i64 = user
             .platform_id
             .parse()
@@ -808,7 +813,7 @@ impl ChannelAdapter for TelegramAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
