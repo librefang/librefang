@@ -318,7 +318,7 @@ fn pkcs1_v15_pad(digest: &[u8], modulus_len: usize) -> Result<Vec<u8>, LlmError>
     let mut em = Vec::with_capacity(modulus_len);
     em.push(0x00);
     em.push(0x01);
-    em.extend(std::iter::repeat(0xFF).take(ps_len));
+    em.extend(std::iter::repeat_n(0xFF, ps_len));
     em.push(0x00);
     em.extend_from_slice(prefix);
     em.extend_from_slice(digest);
@@ -356,10 +356,10 @@ impl BigUint {
         if bytes.is_empty() {
             return Self::zero();
         }
-        let mut digits = Vec::with_capacity((bytes.len() + 3) / 4);
+        let mut digits = Vec::with_capacity(bytes.len().div_ceil(4));
         let mut i = bytes.len();
         while i > 0 {
-            let start = if i >= 4 { i - 4 } else { 0 };
+            let start = i.saturating_sub(4);
             let mut word: u32 = 0;
             for &b in &bytes[start..i] {
                 word = (word << 8) | (b as u32);
