@@ -454,7 +454,9 @@ impl ChannelAdapter for IrcAdapter {
                 warn!("IRC message exceeds 512 bytes, truncating");
             }
             write_tx.send(raw).await.map_err(|e| {
-                Box::<dyn std::error::Error>::from(format!("IRC write channel closed: {e}"))
+                Box::<dyn std::error::Error + Send + Sync>::from(format!(
+                    "IRC write channel closed: {e}"
+                ))
             })?;
         }
 
