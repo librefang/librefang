@@ -1242,7 +1242,7 @@ impl LibreFangKernel {
         source_toml_path: Option<PathBuf>,
         predetermined_id: Option<AgentId>,
     ) -> KernelResult<AgentId> {
-        let agent_id = predetermined_id.unwrap_or_else(AgentId::new);
+        let agent_id = predetermined_id.unwrap_or_default();
         let session_id = SessionId::new();
         let name = manifest.name.clone();
 
