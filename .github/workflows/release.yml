@@ -314,7 +314,7 @@ jobs:
         with:
           key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI (mini)
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
@@ -383,7 +383,7 @@ jobs:
         with:
           key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI (mini)
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang --features mini
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
       - name: Ad-hoc codesign
         run: |
           xattr -cr target/${{ matrix.target }}/release/librefang || true
@@ -421,7 +421,7 @@ jobs:
         with:
           key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
       - name: Build CLI (mini)
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang --features mini
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang --no-default-features --features mini
       - name: Package
         shell: pwsh
         run: |
