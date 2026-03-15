@@ -48,7 +48,6 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route("/health/detail", axum::routing::get(routes::health_detail))
         .route("/status", axum::routing::get(routes::status))
         .route("/version", axum::routing::get(routes::version))
-        .route("/versions", axum::routing::get(routes::api_versions))
         .route(
             "/agents",
             axum::routing::get(routes::list_agents).post(routes::spawn_agent),
@@ -655,8 +654,6 @@ pub async fn build_router(
             "/locales/zh-CN.json",
             axum::routing::get(webchat::locale_zh_cn),
         )
-        // API version discovery endpoint (not versioned itself)
-        .route("/api/versions", axum::routing::get(routes::api_versions))
         // Mount v1 routes at /api/v1 (explicit version)
         .nest("/api/v1", v1_routes.clone())
         // Mount the same routes at /api (latest version alias for backward compat)
