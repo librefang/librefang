@@ -320,6 +320,82 @@ pub fn inject_attachments_into_session(
     }
 }
 
+/// Resolve URL-based attachments into image content blocks.
+///
+/// Downloads each attachment URL, base64-encodes images, and returns
+/// content blocks ready to inject into a session. Non-image attachments
+/// and download failures are skipped with a warning.
+pub async fn resolve_url_attachments(
+    attachments: &[librefang_types::comms::Attachment],
+) -> Vec<librefang_types::message::ContentBlock> {
+    use base64::Engine;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+    let mut blocks = Vec::new();
+
+    for att in attachments {
+        // Determine MIME type from explicit field or guess from URL extension
+        let content_type = if let Some(ref ct) = att.content_type {
+            ct.clone()
+        } else {
+            mime_from_url(&att.url).unwrap_or_default()
+        };
+
+        // Only process image types
+        if !content_type.starts_with("image/") {
+            tracing::debug!(url = %att.url, content_type, "Skipping non-image attachment");
+            continue;
+        }
+
+        match client.get(&att.url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.bytes().await {
+                    Ok(data) => {
+                        // Limit to 20MB to prevent OOM
+                        if data.len() > 20 * 1024 * 1024 {
+                            tracing::warn!(url = %att.url, size = data.len(), "Attachment too large, skipping");
+                            continue;
+                        }
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                        blocks.push(librefang_types::message::ContentBlock::Image {
+                            media_type: content_type,
+                            data: b64,
+                        });
+                    }
+                    Err(e) => {
+                        tracing::warn!(url = %att.url, error = %e, "Failed to read attachment body");
+                    }
+                }
+            }
+            Ok(resp) => {
+                tracing::warn!(url = %att.url, status = %resp.status(), "Attachment download failed");
+            }
+            Err(e) => {
+                tracing::warn!(url = %att.url, error = %e, "Failed to fetch attachment URL");
+            }
+        }
+    }
+
+    blocks
+}
+
+/// Guess MIME type from a URL file extension.
+fn mime_from_url(url: &str) -> Option<String> {
+    let path = url.split('?').next().unwrap_or(url);
+    let ext = path.rsplit('.').next()?;
+    match ext.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => Some("image/jpeg".into()),
+        "png" => Some("image/png".into()),
+        "gif" => Some("image/gif".into()),
+        "webp" => Some("image/webp".into()),
+        "svg" => Some("image/svg+xml".into()),
+        _ => None,
+    }
+}
+
 /// POST /api/agents/:id/message — Send a message to an agent.
 pub async fn send_message(
     State(state): State<Arc<AppState>>,
@@ -11972,16 +12048,38 @@ pub async fn comms_send(
         );
     }
 
-    match state.kernel.send_message(to_id, &req.message).await {
-        Ok(result) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
+    // Resolve URL-based attachments into image content blocks
+    let content_blocks = if req.attachments.is_empty() {
+        None
+    } else {
+        let blocks = resolve_url_attachments(&req.attachments).await;
+        if blocks.is_empty() { None } else { Some(blocks) }
+    };
+
+    let kernel_handle: Arc<dyn KernelHandle> =
+        state.kernel.clone() as Arc<dyn KernelHandle>;
+    match state
+        .kernel
+        .send_message_with_handle_and_blocks(
+            to_id,
+            &req.message,
+            Some(kernel_handle),
+            content_blocks,
+        )
+        .await
+    {
+        Ok(result) => {
+            let mut resp = serde_json::json!({
                 "ok": true,
                 "response": result.response,
                 "input_tokens": result.total_usage.input_tokens,
                 "output_tokens": result.total_usage.output_tokens,
-            })),
-        ),
+            });
+            if let Some(tid) = &req.thread_id {
+                resp["thread_id"] = serde_json::json!(tid);
+            }
+            (StatusCode::OK, Json(resp))
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Message delivery failed: {e}")})),
