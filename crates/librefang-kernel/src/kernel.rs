@@ -579,6 +579,7 @@ impl LibreFangKernel {
                     .get(&config.default_model.provider)
                     .cloned()
             }),
+            vertex_ai: config.vertex_ai.clone(),
             skip_permissions: true,
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
@@ -600,6 +601,7 @@ impl LibreFangKernel {
                         provider: provider.to_string(),
                         api_key: std::env::var(env_var).ok(),
                         base_url: config.provider_urls.get(provider).cloned(),
+                        vertex_ai: config.vertex_ai.clone(),
                         skip_permissions: true,
                     };
                     match drivers::create_driver(&auto_config) {
@@ -645,6 +647,7 @@ impl LibreFangKernel {
                     .base_url
                     .clone()
                     .or_else(|| config.provider_urls.get(&fb.provider).cloned()),
+                vertex_ai: config.vertex_ai.clone(),
                 skip_permissions: true,
             };
             match drivers::create_driver(&fb_config) {
@@ -4556,6 +4559,7 @@ impl LibreFangKernel {
                 provider: agent_provider.clone(),
                 api_key,
                 base_url,
+                vertex_ai: self.config.vertex_ai.clone(),
                 skip_permissions: true,
             };
 
@@ -4604,6 +4608,7 @@ impl LibreFangKernel {
                         .base_url
                         .clone()
                         .or_else(|| self.lookup_provider_url(&fb.provider)),
+                    vertex_ai: self.config.vertex_ai.clone(),
                     skip_permissions: true,
                 };
                 match drivers::create_driver(&config) {

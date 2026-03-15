@@ -1,6 +1,7 @@
 [provider]
 id = "vertex-ai"
 display_name = "Google Cloud Vertex AI"
+# Points to a service-account JSON file path, not a raw API key.
 api_key_env = "GOOGLE_APPLICATION_CREDENTIALS"
 base_url = "https://us-central1-aiplatform.googleapis.com"
 key_required = true

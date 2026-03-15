@@ -457,7 +457,7 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         aliases: &["vertex", "vertex_ai"],
         base_url: VERTEX_AI_BASE_URL,
         api_key_env: "GOOGLE_APPLICATION_CREDENTIALS",
-        key_required: false, // Uses OAuth2, not a simple API key
+        key_required: true, // Requires Google auth, but create_driver handles OAuth flows separately.
         api_format: ApiFormat::VertexAI,
         alt_api_key_env: None,
         hidden: false,
@@ -521,7 +521,7 @@ fn create_driver_from_entry(
         }
     }
 
-    if entry.key_required && api_key.is_empty() {
+    if entry.key_required && entry.api_format != ApiFormat::VertexAI && api_key.is_empty() {
         return Err(LlmError::MissingApiKey(format!(
             "Set {} environment variable for provider '{}'",
             entry.api_key_env, config.provider
@@ -539,17 +539,19 @@ fn create_driver_from_entry(
         ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::new(api_key, base_url))),
         ApiFormat::Copilot => Ok(Arc::new(copilot::CopilotDriver::new(api_key, base_url))),
         ApiFormat::VertexAI => {
-            // Vertex AI uses OAuth2, not a simple API key.
-            // The api_key field is repurposed: if non-empty, treat it as
-            // service account JSON (content or file path).
-            let sa_json = if api_key.is_empty() {
-                None
-            } else {
-                Some(api_key)
-            };
+            let credentials = config
+                .vertex_ai
+                .credentials_path
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| (!api_key.is_empty()).then(|| api_key.clone()));
             Ok(Arc::new(
-                vertex_ai::VertexAiDriver::new(None, None, sa_json)
-                    .map_err(|e| LlmError::Http(e.to_string()))?,
+                vertex_ai::VertexAiDriver::new(
+                    config.vertex_ai.project_id.clone(),
+                    config.vertex_ai.region.clone(),
+                    credentials,
+                )
+                .map_err(|e| LlmError::Http(e.to_string()))?,
             ))
         }
     }
@@ -738,6 +740,7 @@ mod tests {
             provider: "my-custom-llm".to_string(),
             api_key: Some("test".to_string()),
             base_url: Some("http://localhost:9999/v1".to_string()),
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -750,6 +753,7 @@ mod tests {
             provider: "nonexistent".to_string(),
             api_key: None,
             base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -853,6 +857,7 @@ mod tests {
             provider: "nvidia".to_string(),
             api_key: None, // not explicitly passed
             base_url: Some("https://integrate.api.nvidia.com/v1".to_string()),
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -870,6 +875,7 @@ mod tests {
             provider: "nvidia".to_string(),
             api_key: None,
             base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -885,6 +891,7 @@ mod tests {
             provider: "nvidia".to_string(),
             api_key: None,
             base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let result = create_driver(&config);
@@ -913,9 +920,37 @@ mod tests {
             provider: "my-custom-provider".to_string(),
             api_key: Some("explicit-key".to_string()),
             base_url: Some("https://api.example.com/v1".to_string()),
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
+    }
+
+    #[test]
+    fn test_vertex_ai_uses_kernel_vertex_config() {
+        let config = DriverConfig {
+            provider: "vertex-ai".to_string(),
+            api_key: None,
+            base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig {
+                project_id: Some("config-project".to_string()),
+                region: Some("europe-west4".to_string()),
+                credentials_path: Some(
+                    serde_json::json!({
+                        "type": "service_account",
+                        "project_id": "json-project",
+                    })
+                    .to_string(),
+                ),
+            },
+            skip_permissions: true,
+        };
+
+        let driver = create_driver(&config);
+        assert!(
+            driver.is_ok(),
+            "Vertex AI driver should initialize from [vertex_ai] config without env vars"
+        );
     }
 }
