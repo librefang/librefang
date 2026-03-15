@@ -45,7 +45,7 @@ impl ChannelRateLimiter {
 
         let mut entry = self.buckets.entry(key).or_default();
         // Evict timestamps older than 1 minute
-        entry.retain(|&ts| now.duration_since(ts) < window);
+        entry.retain(|ts| now.duration_since(*ts) < window);
 
         if entry.len() >= max_per_minute as usize {
             return Err(format!(
