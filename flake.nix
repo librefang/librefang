@@ -43,6 +43,7 @@
 
         commonArgs = {
           inherit src nativeBuildInputs buildInputs;
+          pname = "librefang";
           strictDeps = true;
         };
 
@@ -68,6 +69,7 @@
 
           librefang-fmt = craneLib.cargoFmt {
             inherit src;
+            pname = "librefang";
           };
         };
 
