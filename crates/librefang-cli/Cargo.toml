@@ -6,7 +6,7 @@ license.workspace = true
 description = "CLI tool for the LibreFang Agent OS"
 
 [features]
-default = ["librefang-api/all-channels"]
+default = ["librefang-api/default"]
 all-channels = ["librefang-api/all-channels"]
 
 [[bin]]
