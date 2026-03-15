@@ -33,8 +33,10 @@ const GOOGLE_CHAT_SCOPE: &str = "https://www.googleapis.com/auth/chat.bot";
 #[derive(Debug, Clone, serde::Deserialize)]
 struct ServiceAccountKey {
     /// Service account email address (used as JWT `iss` and `sub`).
+    #[serde(default)]
     client_email: String,
     /// PEM-encoded RSA private key.
+    #[serde(default)]
     private_key: String,
     /// Token endpoint URL (typically `https://oauth2.googleapis.com/token`).
     #[serde(default = "default_token_uri")]
