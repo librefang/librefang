@@ -480,10 +480,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route("/shutdown", axum::routing::post(routes::shutdown))
         // Chat commands endpoint (dynamic slash menu)
         .route("/commands", axum::routing::get(routes::list_commands))
-        .route(
-            "/commands/{name}",
-            axum::routing::get(routes::get_command),
-        )
+        .route("/commands/{name}", axum::routing::get(routes::get_command))
         .route("/config/reload", axum::routing::post(routes::config_reload))
         .route(
             "/bindings",
