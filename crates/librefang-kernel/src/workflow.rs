@@ -2656,6 +2656,98 @@ id = "{id}"
         );
     }
 
+    #[test]
+    fn test_parse_toml_template_reads_parameters_and_template_id_seed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("parameterized-template.toml");
+        std::fs::write(
+            &path,
+            r#"
+[template]
+id = "stable-template-id"
+name = "Renamable Template"
+description = "Template with parameters"
+author = "tester"
+version = "1.2.3"
+category = "custom"
+tags = ["templated"]
+
+[template.parameters]
+language = { description = "Programming language", default = "rust" }
+
+[[steps]]
+name = "review"
+agent_name = "reviewer"
+prompt = "Review {{language}} code: {{input}}"
+depends_on = ["prepare"]
+"#,
+        )
+        .unwrap();
+
+        let template = WorkflowTemplateRegistry::parse_template_toml(&path).unwrap();
+        let namespace = Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
+        let expected_id = WorkflowTemplateId(Uuid::new_v5(&namespace, b"stable-template-id"));
+
+        assert_eq!(template.id, expected_id);
+        assert_eq!(
+            template.parameters["language"],
+            WorkflowTemplateParameter {
+                description: "Programming language".to_string(),
+                default: "rust".to_string(),
+            }
+        );
+        assert_eq!(template.steps[0].depends_on, vec!["prepare".to_string()]);
+    }
+
+    #[test]
+    fn test_template_instantiation_applies_parameters_and_preserves_dependencies() {
+        let mut parameters = HashMap::new();
+        parameters.insert(
+            "language".to_string(),
+            WorkflowTemplateParameter {
+                description: "Programming language".to_string(),
+                default: "rust".to_string(),
+            },
+        );
+        let template = WorkflowTemplate {
+            id: WorkflowTemplateId::new(),
+            name: "templated-review".to_string(),
+            description: "Parameterized template".to_string(),
+            author: "tester".to_string(),
+            version: "0.1.0".to_string(),
+            category: "custom".to_string(),
+            tags: vec!["test".into()],
+            parameters,
+            steps: vec![WorkflowTemplateStep {
+                name: "review".to_string(),
+                agent_name: "reviewer".to_string(),
+                prompt_template: "Review {{language}} code: {{input}}".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                depends_on: vec!["prepare".to_string()],
+            }],
+            created_at: Utc::now(),
+        };
+
+        let workflow_default = WorkflowTemplateRegistry::instantiate(&template);
+        assert_eq!(
+            workflow_default.steps[0].prompt_template,
+            "Review rust code: {{input}}"
+        );
+
+        let workflow = WorkflowTemplateRegistry::instantiate_with_parameters(
+            &template,
+            &HashMap::from([("language".to_string(), "python".to_string())]),
+        );
+        assert_eq!(
+            workflow.steps[0].prompt_template,
+            "Review python code: {{input}}"
+        );
+        assert_eq!(workflow.steps[0].depends_on, vec!["prepare".to_string()]);
+    }
+
     #[tokio::test]
     async fn test_parse_toml_template_reads_parameters_and_template_id_seed() {
         let dir = tempdir().unwrap();
