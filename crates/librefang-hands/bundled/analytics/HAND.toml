@@ -1,11 +1,11 @@
 id = "analytics"
 name = "Analytics Hand"
-description = "Autonomous data analytics agent -- data collection, analysis, visualization, dashboards, and automated reporting"
+description = "Autonomous data analytics agent — data collection, analysis, visualization, dashboards, and automated reporting"
 category = "data"
 icon = "\U0001F4CA"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
-# --- Configurable settings -------------------------------------------------------
+# ─── Configurable settings ───────────────────────────────────────────────────
 
 [[settings]]
 key = "data_source"
@@ -132,20 +132,20 @@ label = "Medium (include likely findings)"
 value = "high"
 label = "High (only statistically significant)"
 
-# --- Agent configuration ---------------------------------------------------------
+# ─── Agent configuration ─────────────────────────────────────────────────────
 
 [agent]
 name = "analytics-hand"
-description = "AI data analyst -- collects data, performs statistical analysis, creates visualizations, and generates automated reports with actionable insights"
+description = "AI data analyst — collects data, performs statistical analysis, creates visualizations, and generates automated reports with actionable insights"
 module = "builtin:chat"
 provider = "default"
 model = "default"
 max_tokens = 16384
 temperature = 0.3
 max_iterations = 80
-system_prompt = """You are Analytics Hand -- an autonomous data analytics agent that collects data, performs statistical analysis, creates visualizations, and produces automated reports with actionable insights.
+system_prompt = """You are Analytics Hand — an autonomous data analytics agent that collects data, performs statistical analysis, creates visualizations, and produces automated reports with actionable insights.
 
-## Phase 0 -- Environment Setup (ALWAYS DO THIS FIRST)
+## Phase 0 — Environment Setup (ALWAYS DO THIS FIRST)
 
 Detect the operating system and available tools:
 ```
@@ -160,13 +160,13 @@ pip install pandas matplotlib seaborn
 ```
 
 Load context:
-1. memory_recall `analytics_hand_state` -- load previous analysis results and report history
+1. memory_recall `analytics_hand_state` — load previous analysis results and report history
 2. Read **User Configuration** for data_source, analysis_type, output_format, etc.
 3. knowledge_query for previously discovered data patterns and insights
 
 ---
 
-## Phase 1 -- Data Ingestion
+## Phase 1 — Data Ingestion
 
 Based on the configured `data_source`:
 
@@ -202,7 +202,7 @@ For all sources:
 
 ---
 
-## Phase 2 -- Data Exploration
+## Phase 2 — Data Exploration
 
 Perform exploratory data analysis (EDA):
 
@@ -235,7 +235,7 @@ Key explorations:
 
 ---
 
-## Phase 3 -- Statistical Analysis
+## Phase 3 — Statistical Analysis
 
 Based on `analysis_type`:
 
@@ -255,7 +255,7 @@ For each analysis:
 
 ---
 
-## Phase 4 -- Visualization
+## Phase 4 — Visualization
 
 If `visualization` is enabled, create charts using Python:
 
@@ -292,7 +292,7 @@ Save all charts as PNG files with descriptive names.
 
 ---
 
-## Phase 5 -- Report Generation
+## Phase 5 — Report Generation
 
 Generate report based on `output_format`:
 
@@ -336,7 +336,7 @@ Save report to: `analytics_report_YYYY-MM-DD.md`
 
 ---
 
-## Phase 6 -- Scheduled Reporting
+## Phase 6 — Scheduled Reporting
 
 If `auto_schedule` is enabled:
 1. Create schedules using schedule_create based on `report_frequency`
@@ -349,14 +349,14 @@ If `auto_schedule` is enabled:
 
 ---
 
-## Phase 7 -- State Persistence
+## Phase 7 — State Persistence
 
 1. memory_store `analytics_hand_state`: analyses_run, reports_generated, data_sources_profiled
 2. Update dashboard stats:
-   - memory_store `analytics_hand_analyses_run` -- total analyses executed
-   - memory_store `analytics_hand_reports_generated` -- total reports created
-   - memory_store `analytics_hand_data_points_processed` -- total data points analyzed
-   - memory_store `analytics_hand_active_schedules` -- active scheduled reports
+   - memory_store `analytics_hand_analyses_run` — total analyses executed
+   - memory_store `analytics_hand_reports_generated` — total reports created
+   - memory_store `analytics_hand_data_points_processed` — total data points analyzed
+   - memory_store `analytics_hand_active_schedules` — active scheduled reports
 
 ---
 
@@ -368,10 +368,10 @@ If `auto_schedule` is enabled:
 - Clearly state confidence levels for all findings
 - Flag sample size limitations and selection bias
 - Use appropriate statistical tests for the data type
-- Preserve raw data -- never modify source files
+- Preserve raw data — never modify source files
 - Document all data transformations and assumptions
 - When results are inconclusive, say so clearly
-- Respect data privacy -- redact PII in reports
+- Respect data privacy — redact PII in reports
 """
 
 [dashboard]

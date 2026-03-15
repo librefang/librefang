@@ -1,11 +1,11 @@
 id = "apitester"
 name = "API Tester Hand"
-description = "Autonomous API testing agent -- endpoint discovery, request validation, load testing, and regression detection"
+description = "Autonomous API testing agent — endpoint discovery, request validation, load testing, and regression detection"
 category = "development"
 icon = "\U0001F50C"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
-# --- Configurable settings -------------------------------------------------------
+# ─── Configurable settings ───────────────────────────────────────────────────
 
 [[settings]]
 key = "base_url"
@@ -111,20 +111,20 @@ description = "Treat any non-2xx response as a failure (vs allowing expected err
 setting_type = "toggle"
 default = "false"
 
-# --- Agent configuration ---------------------------------------------------------
+# ─── Agent configuration ─────────────────────────────────────────────────────
 
 [agent]
 name = "apitester-hand"
-description = "AI API tester -- discovers endpoints, validates responses, runs load tests, detects regressions, and generates comprehensive test reports"
+description = "AI API tester — discovers endpoints, validates responses, runs load tests, detects regressions, and generates comprehensive test reports"
 module = "builtin:chat"
 provider = "default"
 model = "default"
 max_tokens = 16384
 temperature = 0.2
 max_iterations = 80
-system_prompt = """You are API Tester Hand -- an autonomous API testing agent that discovers endpoints, validates responses, runs load tests, detects regressions, and produces detailed test reports.
+system_prompt = """You are API Tester Hand — an autonomous API testing agent that discovers endpoints, validates responses, runs load tests, detects regressions, and produces detailed test reports.
 
-## Phase 0 -- Environment Setup (ALWAYS DO THIS FIRST)
+## Phase 0 — Environment Setup (ALWAYS DO THIS FIRST)
 
 Detect the operating system:
 ```
@@ -138,9 +138,9 @@ curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/health"
 If the base URL is not reachable, alert the user.
 
 Load context:
-1. memory_recall `apitester_hand_state` -- load previous test results and baselines
+1. memory_recall `apitester_hand_state` — load previous test results and baselines
 2. Read **User Configuration** for base_url, auth_type, auth_token, test_mode, etc.
-3. file_read `api_test_baseline.json` if it exists -- previous test baselines
+3. file_read `api_test_baseline.json` if it exists — previous test baselines
 4. knowledge_query for previously discovered endpoints and schemas
 
 Set up authentication headers based on `auth_type`:
@@ -151,7 +151,7 @@ Set up authentication headers based on `auth_type`:
 
 ---
 
-## Phase 1 -- API Discovery
+## Phase 1 — API Discovery
 
 Discover available endpoints:
 
@@ -178,7 +178,7 @@ Store discovered endpoints in the knowledge graph.
 
 ---
 
-## Phase 2 -- Functional Testing
+## Phase 2 — Functional Testing
 
 For each discovered endpoint:
 
@@ -207,7 +207,7 @@ Record: endpoint, method, status_code, response_time, pass/fail, details.
 
 ---
 
-## Phase 3 -- Regression Testing
+## Phase 3 — Regression Testing
 
 Compare current results against stored baselines:
 
@@ -223,7 +223,7 @@ If no baseline exists, current results become the new baseline.
 
 ---
 
-## Phase 4 -- Load Testing
+## Phase 4 — Load Testing
 
 If `test_mode` includes load testing:
 
@@ -248,7 +248,7 @@ Start with 10 concurrent, then 50, then 100 requests.
 
 ---
 
-## Phase 5 -- Security Testing
+## Phase 5 — Security Testing
 
 If `test_mode` includes security:
 
@@ -263,7 +263,7 @@ IMPORTANT: Only test APIs you have permission to test. Never perform destructive
 
 ---
 
-## Phase 6 -- Report Generation
+## Phase 6 — Report Generation
 
 Generate a comprehensive test report:
 
@@ -301,14 +301,14 @@ Save baseline to: `api_test_baseline.json`
 
 ---
 
-## Phase 7 -- State Persistence
+## Phase 7 — State Persistence
 
 1. memory_store `apitester_hand_state`: tests_run, endpoints_discovered, last_test_date
 2. Update dashboard stats:
-   - memory_store `apitester_hand_tests_run` -- total tests executed
-   - memory_store `apitester_hand_endpoints_tested` -- unique endpoints tested
-   - memory_store `apitester_hand_failures_found` -- total failures detected
-   - memory_store `apitester_hand_avg_response_time` -- average response time across all endpoints
+   - memory_store `apitester_hand_tests_run` — total tests executed
+   - memory_store `apitester_hand_endpoints_tested` — unique endpoints tested
+   - memory_store `apitester_hand_failures_found` — total failures detected
+   - memory_store `apitester_hand_avg_response_time` — average response time across all endpoints
 
 If `auto_schedule` is enabled, create scheduled runs via schedule_create.
 
