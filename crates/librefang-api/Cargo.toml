@@ -36,9 +36,11 @@ base64 = { workspace = true }
 socket2 = { workspace = true }
 reqwest = { workspace = true }
 url = { workspace = true }
+zip = { workspace = true }
+walkdir = { workspace = true }
 
 [features]
-default = ["librefang-channels/default"]
+default = ["all-channels"]
 
 # Individual channel features — forwarded to librefang-channels
 channel-telegram = ["librefang-channels/channel-telegram"]
@@ -84,7 +86,26 @@ channel-ntfy = ["librefang-channels/channel-ntfy"]
 channel-qq = ["librefang-channels/channel-qq"]
 channel-wecom = ["librefang-channels/channel-wecom"]
 
-all-channels = ["librefang-channels/all-channels"]
+all-channels = [
+    "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
+    "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
+    "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
+    "channel-twitch", "channel-rocketchat", "channel-zulip", "channel-xmpp",
+    "channel-bluesky", "channel-feishu", "channel-line", "channel-mastodon",
+    "channel-messenger", "channel-reddit", "channel-revolt", "channel-viber",
+    "channel-flock", "channel-guilded", "channel-keybase", "channel-nextcloud",
+    "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
+    "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
+    "channel-gotify", "channel-linkedin", "channel-mumble", "channel-ntfy",
+    "channel-qq", "channel-wecom",
+]
+
+# Mini: 12 core channels
+mini = [
+    "channel-telegram", "channel-discord", "channel-slack", "channel-matrix",
+    "channel-email", "channel-webhook", "channel-whatsapp", "channel-signal",
+    "channel-teams", "channel-mattermost", "channel-irc", "channel-google-chat",
+]
 
 [dev-dependencies]
 tokio-test = { workspace = true }

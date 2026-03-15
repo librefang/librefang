@@ -25,6 +25,75 @@ let isConnecting = false;
 const MAX_RECONNECT_DELAY = 60_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 
+// Cached agent UUID — resolved from DEFAULT_AGENT name on first use
+let cachedAgentId = null;
+
+// The user's own JID (set after connection opens) for self-chat detection
+let ownJid = null;
+
+// ---------------------------------------------------------------------------
+// Resolve agent name → UUID via LibreFang API
+// ---------------------------------------------------------------------------
+function resolveAgentId() {
+  return new Promise((resolve, reject) => {
+    // If DEFAULT_AGENT is already a UUID, use it directly
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(DEFAULT_AGENT)) {
+      cachedAgentId = DEFAULT_AGENT;
+      return resolve(DEFAULT_AGENT);
+    }
+
+    const url = new URL(`${LIBREFANG_URL}/api/agents`);
+
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port || 4545,
+        path: url.pathname,
+        method: 'GET',
+        headers: { 'Accept': 'application/json' },
+        timeout: 10_000,
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => (body += chunk));
+        res.on('end', () => {
+          try {
+            const agents = JSON.parse(body);
+            if (!Array.isArray(agents)) {
+              return reject(new Error('Unexpected /api/agents response'));
+            }
+            // Match by name (case-insensitive)
+            const match = agents.find(
+              (a) => (a.name || '').toLowerCase() === DEFAULT_AGENT.toLowerCase()
+            );
+            if (match && match.id) {
+              cachedAgentId = match.id;
+              console.log(`[gateway] Resolved agent "${DEFAULT_AGENT}" → ${cachedAgentId}`);
+              resolve(cachedAgentId);
+            } else if (agents.length > 0) {
+              // Fallback: use first available agent
+              cachedAgentId = agents[0].id;
+              console.log(`[gateway] Agent "${DEFAULT_AGENT}" not found, using first agent: ${cachedAgentId}`);
+              resolve(cachedAgentId);
+            } else {
+              reject(new Error('No agents available on LibreFang'));
+            }
+          } catch (e) {
+            reject(new Error(`Failed to parse /api/agents: ${e.message}`));
+          }
+        });
+      },
+    );
+
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('LibreFang /api/agents timeout'));
+    });
+    req.end();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Baileys connection
 // ---------------------------------------------------------------------------
@@ -43,7 +112,6 @@ async function startConnection() {
   const pino = (await import('pino')).default || await import('pino');
 
   const logger = pino({ level: 'warn' });
-  const authDir = require('node:path').join(__dirname, 'auth_store');
 
   const { state, saveCreds } = await useMultiFileAuthState(
     require('node:path').join(__dirname, 'auth_store')
@@ -95,7 +163,10 @@ async function startConnection() {
         statusMessage = 'Logged out. Generate a new QR code to reconnect.';
         qrDataUrl = '';
         sock = null;
+        ownJid = null;
         reconnectAttempts = 0;
+        // Invalidate cached agent ID so it re-resolves on next connect
+        cachedAgentId = null;
         // Remove auth store so next connect gets a fresh QR
         const fs = require('node:fs');
         const path = require('node:path');
@@ -103,9 +174,18 @@ async function startConnection() {
         if (fs.existsSync(authPath)) {
           fs.rmSync(authPath, { recursive: true, force: true });
         }
-      } else if (statusCode === DisconnectReason.restartRequired ||
-                 statusCode === DisconnectReason.timedOut) {
-        // Recoverable — reconnect automatically with max attempt limit
+      } else if (statusCode === DisconnectReason.loggedOut ||
+                 statusCode === DisconnectReason.forbidden) {
+        // Non-recoverable — don't auto-reconnect
+        connStatus = 'disconnected';
+        statusMessage = `Disconnected: ${reason}. Use POST /login/start to reconnect.`;
+        qrDataUrl = '';
+        sock = null;
+        ownJid = null;
+      } else {
+        // All other disconnect reasons are treated as recoverable:
+        // restartRequired, timedOut, connectionClosed, connectionLost,
+        // connectionReplaced, multideviceMismatch, badSession, etc.
         reconnectAttempts += 1;
         if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
           console.error(`[gateway] Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`);
@@ -123,12 +203,6 @@ async function startConnection() {
           statusMessage = `Reconnecting (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
           setTimeout(() => startConnection(), delay);
         }
-      } else {
-        // Non-recoverable (e.g. QR expired, forbidden) — don't auto-reconnect
-        connStatus = 'disconnected';
-        statusMessage = `Disconnected: ${reason}. Use POST /login/start to reconnect.`;
-        qrDataUrl = '';
-        sock = null;
       }
     }
 
@@ -139,24 +213,47 @@ async function startConnection() {
       reconnectAttempts = 0;
       statusMessage = 'Connected to WhatsApp';
       console.log('[gateway] Connected to WhatsApp!');
+
+      // Capture own JID for self-chat detection
+      if (sock?.user?.id) {
+        // Baileys user.id is like "1234567890:42@s.whatsapp.net" — normalize
+        ownJid = sock.user.id.replace(/:.*@/, '@');
+        console.log(`[gateway] Own JID: ${ownJid}`);
+      }
+
+      // Invalidate cached agent UUID on reconnect — the daemon may have
+      // restarted and agents may have new UUIDs.
+      cachedAgentId = null;
     }
   });
-
-  isConnecting = false;
 
   // Incoming messages → forward to LibreFang
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
-      // Skip messages from self and status broadcasts
-      if (msg.key.fromMe) continue;
+      // Skip status broadcasts
       if (msg.key.remoteJid === 'status@broadcast') continue;
 
+      // Handle self-chat ("Notes to Self"): fromMe messages to own JID.
+      // Normal messages from others have fromMe=false.
+      // Self-chat messages have fromMe=true AND remoteJid === own JID.
+      if (msg.key.fromMe) {
+        const isSelfChat = ownJid && msg.key.remoteJid === ownJid;
+        if (!isSelfChat) continue; // Skip regular outgoing messages
+      }
+
       const sender = msg.key.remoteJid || '';
-      const text = msg.message?.conversation
-        || msg.message?.extendedTextMessage?.text
-        || msg.message?.imageMessage?.caption
+
+      // Extract text from various message types.
+      // Baileys decrypts E2EE internally; these fields are already plaintext.
+      // Protocol messages (key distribution, receipts) have no user text.
+      const innerMsg = msg.message || {};
+      const text = innerMsg.conversation
+        || innerMsg.extendedTextMessage?.text
+        || innerMsg.imageMessage?.caption
+        || innerMsg.videoMessage?.caption
+        || innerMsg.documentWithCaptionMessage?.message?.documentMessage?.caption
         || '';
 
       if (!text) continue;
@@ -188,7 +285,17 @@ async function startConnection() {
 // ---------------------------------------------------------------------------
 // Forward incoming message to LibreFang API, return agent response
 // ---------------------------------------------------------------------------
-function forwardToLibreFang(text, phone, pushName) {
+async function forwardToLibreFang(text, phone, pushName) {
+  // Resolve agent UUID if not cached (or if invalidated on reconnect)
+  if (!cachedAgentId) {
+    try {
+      await resolveAgentId();
+    } catch (err) {
+      console.error(`[gateway] Agent resolution failed: ${err.message}`);
+      throw err;
+    }
+  }
+
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify({
       message: text,
@@ -199,7 +306,7 @@ function forwardToLibreFang(text, phone, pushName) {
       },
     });
 
-    const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(DEFAULT_AGENT)}/message`);
+    const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(cachedAgentId)}/message`);
 
     const req = http.request(
       {
@@ -217,6 +324,18 @@ function forwardToLibreFang(text, phone, pushName) {
         let body = '';
         res.on('data', (chunk) => (body += chunk));
         res.on('end', () => {
+          // If the agent UUID became stale (404), invalidate cache and retry once
+          if (res.statusCode === 404) {
+            console.log('[gateway] Agent UUID stale (404), re-resolving...');
+            cachedAgentId = null;
+            // Retry once with fresh UUID
+            resolveAgentId()
+              .then(() => forwardToLibreFang(text, phone, pushName))
+              .then(resolve)
+              .catch(reject);
+            return;
+          }
+
           try {
             const data = JSON.parse(body);
             // The /api/agents/{id}/message endpoint returns { response: "..." }
@@ -369,6 +488,7 @@ server.listen(PORT, '127.0.0.1', async () => {
   console.log(`[gateway] LibreFang URL: ${LIBREFANG_URL}`);
   console.log(`[gateway] Default agent: ${DEFAULT_AGENT}`);
 
+  // Auto-connect from existing credentials on startup
   const fs = require('node:fs');
   const authPath = require('node:path').join(__dirname, 'auth_store', 'creds.json');
   if (fs.existsSync(authPath)) {
@@ -377,6 +497,15 @@ server.listen(PORT, '127.0.0.1', async () => {
       await startConnection();
     } catch (err) {
       console.error('[gateway] Auto-connect failed:', err.message);
+      // Schedule a retry after a short delay — the daemon may still be booting
+      console.log('[gateway] Will retry auto-connect in 10s...');
+      setTimeout(async () => {
+        try {
+          await startConnection();
+        } catch (retryErr) {
+          console.error('[gateway] Auto-connect retry failed:', retryErr.message);
+        }
+      }, 10_000);
     }
   } else {
     console.log('[gateway] No auth found — waiting for POST /login/start to begin QR flow...');

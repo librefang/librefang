@@ -241,6 +241,7 @@ impl ChannelAdapter for ThreemaAdapter {
 
                 let tx = tx.clone();
                 let own_id = own_id.clone();
+                let account_id = account_id.clone();
 
                 tokio::spawn(async move {
                     use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};

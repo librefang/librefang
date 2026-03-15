@@ -192,6 +192,10 @@ pub async fn build_router(
             axum::routing::put(routes::set_model),
         )
         .route(
+            "/api/agents/{id}/traces",
+            axum::routing::get(routes::get_agent_traces),
+        )
+        .route(
             "/api/agents/{id}/tools",
             axum::routing::get(routes::get_agent_tools).put(routes::set_agent_tools),
         )
@@ -612,12 +616,24 @@ pub async fn build_router(
             "/api/cron/jobs/{id}/status",
             axum::routing::get(routes::cron_job_status),
         )
+        // Backup / Restore endpoints
+        .route("/api/backup", axum::routing::post(routes::create_backup))
+        .route("/api/backups", axum::routing::get(routes::list_backups))
+        .route(
+            "/api/backups/{filename}",
+            axum::routing::delete(routes::delete_backup),
+        )
+        .route("/api/restore", axum::routing::post(routes::restore_backup))
         // Webhook trigger endpoints (external event injection)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
         .route("/api/shutdown", axum::routing::post(routes::shutdown))
         // Chat commands endpoint (dynamic slash menu)
         .route("/api/commands", axum::routing::get(routes::list_commands))
+        .route(
+            "/api/commands/{name}",
+            axum::routing::get(routes::get_command),
+        )
         // Config reload endpoint
         .route(
             "/api/config/reload",

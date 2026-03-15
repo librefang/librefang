@@ -5,7 +5,7 @@
 //!
 //! **No-op** (informational only): log_level, language, mode.
 //!
-//! **Restart required**: api_listen, api_key, network, memory.
+//! **Restart required**: api_listen, api_key, network, memory, stable_prefix_mode.
 
 use librefang_types::config::{KernelConfig, ReloadMode};
 use tracing::{info, warn};
@@ -181,6 +181,15 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         plan.restart_reasons.push(format!(
             "data_dir changed: {:?} -> {:?}",
             old.data_dir, new.data_dir
+        ));
+    }
+
+    // Stable prefix mode — requires restart (affects prompt building for all agents)
+    if old.stable_prefix_mode != new.stable_prefix_mode {
+        plan.restart_required = true;
+        plan.restart_reasons.push(format!(
+            "stable_prefix_mode changed: {} -> {}",
+            old.stable_prefix_mode, new.stable_prefix_mode
         ));
     }
 
@@ -421,6 +430,19 @@ mod tests {
             "default_model should be hot-reloadable"
         );
         assert!(plan.hot_actions.contains(&HotAction::UpdateDefaultModel));
+    }
+
+    #[test]
+    fn test_stable_prefix_mode_requires_restart() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.stable_prefix_mode = true;
+        let plan = build_reload_plan(&a, &b);
+        assert!(plan.restart_required);
+        assert!(plan
+            .restart_reasons
+            .iter()
+            .any(|r| r.contains("stable_prefix_mode")));
     }
 
     // -----------------------------------------------------------------------
