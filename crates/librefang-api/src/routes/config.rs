@@ -2,11 +2,10 @@
 
 use super::AppState;
 use crate::types::*;
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {

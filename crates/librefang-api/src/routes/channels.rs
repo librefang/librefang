@@ -5,13 +5,12 @@ use super::skills::{
     write_secret_env,
 };
 use super::AppState;
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
 
 // ---------------------------------------------------------------------------
 // Channel status endpoints — data-driven registry for all 40 adapters

@@ -1,14 +1,12 @@
 //! Network, peer, A2A protocol, and inter-agent communication handlers.
 
 use super::AppState;
-use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_runtime::tool_runner::builtin_tool_definitions;
-use librefang_types::agent::{AgentId, AgentManifest};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;

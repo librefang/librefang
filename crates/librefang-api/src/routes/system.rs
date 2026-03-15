@@ -2,7 +2,6 @@
 //! bindings, pairing, webhooks, and miscellaneous system handlers.
 
 use super::AppState;
-use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;

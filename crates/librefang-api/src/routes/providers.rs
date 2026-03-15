@@ -3,14 +3,11 @@
 use super::network::remove_toml_section;
 use super::skills::{remove_secret_env, write_secret_env};
 use super::AppState;
-use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use dashmap::DashMap;
-use librefang_runtime::kernel_handle::KernelHandle;
-use librefang_types::agent::AgentManifest;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
@@ -1183,7 +1180,7 @@ pub async fn catalog_status() -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::routes::system::{get_profile, list_profiles};
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::get;
