@@ -9,6 +9,8 @@
 //! 2. Create `api_v2_routes()` in `server.rs` and nest it under `/api/v2`.
 //! 3. Update [`SUPPORTED_VERSIONS`], [`CURRENT_VERSION`], and `API_VERSIONS` in `server.rs`.
 
+use std::str::FromStr;
+
 use axum::http::Request;
 
 // ---------------------------------------------------------------------------
@@ -40,18 +42,21 @@ pub enum ApiVersion {
 }
 
 impl ApiVersion {
-    /// Parse a version string like `"v1"` into an [`ApiVersion`].
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "v1" => Some(Self::V1),
-            _ => None,
-        }
-    }
-
     /// Return the canonical string representation (e.g. `"v1"`).
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::V1 => "v1",
+        }
+    }
+}
+
+impl FromStr for ApiVersion {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "v1" => Ok(Self::V1),
+            _ => Err(()),
         }
     }
 }
@@ -74,7 +79,7 @@ pub fn version_from_path(path: &str) -> Option<ApiVersion> {
     let rest = path.strip_prefix("/api/")?;
     let segment = rest.split('/').next()?;
     if segment.starts_with('v') {
-        ApiVersion::from_str(segment)
+        segment.parse::<ApiVersion>().ok()
     } else {
         None
     }
@@ -88,7 +93,7 @@ pub fn version_from_accept_header(accept: &str) -> Option<ApiVersion> {
         let media_type = part.trim().split(';').next().unwrap_or("").trim();
         if let Some(rest) = media_type.strip_prefix(VENDOR_PREFIX) {
             let version_str = rest.split('+').next().unwrap_or("");
-            if let Some(v) = ApiVersion::from_str(version_str) {
+            if let Ok(v) = version_str.parse::<ApiVersion>() {
                 return Some(v);
             }
         }
@@ -194,8 +199,8 @@ mod tests {
     #[test]
     fn test_api_version_roundtrip() {
         assert_eq!(
-            ApiVersion::from_str(ApiVersion::V1.as_str()),
-            Some(ApiVersion::V1)
+            ApiVersion::V1.as_str().parse::<ApiVersion>(),
+            Ok(ApiVersion::V1)
         );
     }
 
