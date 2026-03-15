@@ -27,23 +27,42 @@ fi
 
 echo "Generating changelog: $VERSION (since ${BASE_TAG:-beginning})"
 
-# --- Fetch PRs ---
-
-if [ -n "$BASE_TAG" ]; then
-    BASE_DATE=$(git -C "$REPO_ROOT" log -1 --format=%aI "$BASE_TAG" 2>/dev/null || echo "")
-fi
+# --- Extract PR numbers from git commit range ---
 
 if ! command -v gh &>/dev/null; then
     echo "Error: gh CLI required" >&2
     exit 1
 fi
 
-FETCH_ARGS=(--repo librefang/librefang --state merged --json number,title,author --limit 200)
-if [ -n "${BASE_DATE:-}" ]; then
-    FETCH_ARGS+=(--search "merged:>=${BASE_DATE}")
+if [ -n "$BASE_TAG" ]; then
+    GIT_RANGE="${BASE_TAG}..HEAD"
+else
+    GIT_RANGE="HEAD"
 fi
 
-PRS=$(gh pr list "${FETCH_ARGS[@]}" 2>/dev/null || echo "[]")
+# Extract PR numbers from merge commits and squash-merge messages
+PR_NUMBERS=$(git -C "$REPO_ROOT" log --oneline "$GIT_RANGE" | grep -oE '#[0-9]+' | sed 's/#//' | sort -un)
+
+if [ -z "$PR_NUMBERS" ]; then
+    echo "No PRs found in range $GIT_RANGE"
+    PRS="[]"
+else
+    # Fetch details for each PR
+    PRS="["
+    FIRST=true
+    for NUM in $PR_NUMBERS; do
+        PR_JSON=$(gh pr view "$NUM" --repo librefang/librefang --json number,title,author 2>/dev/null || echo "")
+        if [ -n "$PR_JSON" ]; then
+            if [ "$FIRST" = true ]; then
+                FIRST=false
+            else
+                PRS+=","
+            fi
+            PRS+="$PR_JSON"
+        fi
+    done
+    PRS+="]"
+fi
 
 # --- Classify by prefix ---
 
@@ -67,10 +86,18 @@ MAP = {
     'revert': 'Reverted',
 }
 
+SKIP_PATTERNS = [
+    r'update star history',
+]
+
 categories = {}
 for pr in prs:
     title = pr['title'].strip()
     num = pr['number']
+
+    # Skip automated/bot PRs
+    if any(re.search(p, title, re.IGNORECASE) for p in SKIP_PATTERNS):
+        continue
     author = pr.get('author', {}).get('login', '')
     credit = f' (@{author})' if author else ''
 
