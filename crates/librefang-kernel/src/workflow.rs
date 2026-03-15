@@ -1233,7 +1233,7 @@ impl WorkflowTemplateRegistry {
     /// and a `[[steps]]` array. Loaded templates are merged into the
     /// registry alongside any bundled or user-saved templates.
     pub async fn load_from_directory(&self, dir: &std::path::Path) -> usize {
-        let read_dir = match std::fs::read_dir(dir) {
+        let mut read_dir = match tokio::fs::read_dir(dir).await {
             Ok(rd) => rd,
             Err(e) => {
                 warn!(path = %dir.display(), "Failed to read workflow templates dir: {e}");
@@ -1242,12 +1242,21 @@ impl WorkflowTemplateRegistry {
         };
 
         let mut count = 0;
-        for entry in read_dir.flatten() {
+        loop {
+            let entry = match read_dir.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(e) => {
+                    warn!(path = %dir.display(), "Failed to iterate workflow templates dir: {e}");
+                    break;
+                }
+            };
+
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("toml") {
                 continue;
             }
-            match Self::parse_template_toml(&path) {
+            match Self::parse_template_toml(&path).await {
                 Ok(t) => {
                     debug!(template = %t.name, "Loaded workflow template from TOML");
                     self.templates.write().await.insert(t.id, t);
@@ -1262,9 +1271,15 @@ impl WorkflowTemplateRegistry {
     }
 
     /// Parse a single TOML template file into a `WorkflowTemplate`.
-    fn parse_template_toml(path: &std::path::Path) -> Result<WorkflowTemplate, String> {
-        let content = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
-        let doc: toml::Value = toml::from_str(&content).map_err(|e| format!("parse: {e}"))?;
+    async fn parse_template_toml(path: &std::path::Path) -> Result<WorkflowTemplate, String> {
+        let content = tokio::fs::read_to_string(path)
+            .await
+            .map_err(|e| format!("read: {e}"))?;
+        Self::parse_template_toml_contents(&content)
+    }
+
+    fn parse_template_toml_contents(content: &str) -> Result<WorkflowTemplate, String> {
+        let doc: toml::Value = toml::from_str(content).map_err(|e| format!("parse: {e}"))?;
 
         let meta = doc.get("template").ok_or("missing [template] section")?;
 
@@ -2641,8 +2656,8 @@ id = "{id}"
         );
     }
 
-    #[test]
-    fn test_parse_toml_template_reads_parameters_and_template_id_seed() {
+    #[tokio::test]
+    async fn test_parse_toml_template_reads_parameters_and_template_id_seed() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("parameterized-template.toml");
         std::fs::write(
@@ -2669,7 +2684,9 @@ depends_on = ["prepare"]
         )
         .unwrap();
 
-        let template = WorkflowTemplateRegistry::parse_template_toml(&path).unwrap();
+        let template = WorkflowTemplateRegistry::parse_template_toml(&path)
+            .await
+            .unwrap();
         let namespace = Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
         let expected_id = WorkflowTemplateId(Uuid::new_v5(&namespace, b"stable-template-id"));
 
