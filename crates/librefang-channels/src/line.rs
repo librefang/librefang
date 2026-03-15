@@ -386,6 +386,7 @@ impl ChannelAdapter for LineAdapter {
                                 access_token: Zeroizing::new(String::new()),
                                 webhook_port: 0,
                                 client: reqwest::Client::new(),
+                                account_id: None,
                                 shutdown_tx: Arc::new(watch::channel(false).0),
                                 shutdown_rx: watch::channel(false).1,
                             };

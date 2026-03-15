@@ -329,7 +329,7 @@ impl ChannelAdapter for MessengerAdapter {
                             if let Some(entries) = body.0["entry"].as_array() {
                                 for entry in entries {
                                     let msgs = parse_messenger_entry(entry);
-                                    for msg in msgs {
+                                    for mut msg in msgs {
                                         // Inject account_id for multi-bot routing
                                         if let Some(ref aid) = *account_id {
                                             msg.metadata.insert(
