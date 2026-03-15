@@ -13016,15 +13016,9 @@ pub async fn agent_metrics(
             None => (0, 0, 0.0, 0, 0),
         };
 
-    // Average response time estimate: if we have call_count and uptime, derive a rough number.
-    // This is a best-effort estimate since we don't track per-call latency yet.
-    let avg_response_time_ms: Option<f64> = if call_count > 0 {
-        // Use total uptime / call_count as a very rough proxy.
-        // A more accurate implementation would require per-call timing in UsageStore.
-        None
-    } else {
-        None
-    };
+    // Average response time is not tracked yet; keep the field stable until
+    // per-call timing is persisted in UsageStore.
+    let avg_response_time_ms: Option<f64> = None;
 
     (
         StatusCode::OK,
@@ -13105,7 +13099,7 @@ pub async fn agent_logs(
             if level_filter.is_empty() {
                 return true;
             }
-            e.outcome.to_lowercase().contains(&level_filter)
+            e.outcome.eq_ignore_ascii_case(&level_filter)
         })
         .take(max_entries)
         .map(|e| {
@@ -13127,4 +13121,115 @@ pub async fn agent_logs(
             "logs": entries,
         })),
     )
+}
+
+#[cfg(test)]
+mod monitoring_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+    use librefang_runtime::audit::AuditAction;
+    use librefang_types::config::KernelConfig;
+
+    fn monitoring_test_app_state() -> (Arc<AppState>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-api-monitoring-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = Arc::new(librefang_kernel::LibreFangKernel::boot_with_config(config).unwrap());
+        let state = Arc::new(AppState {
+            kernel,
+            started_at: std::time::Instant::now(),
+            peer_registry: None,
+            bridge_manager: tokio::sync::Mutex::new(None),
+            channels_config: tokio::sync::RwLock::new(Default::default()),
+            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
+            clawhub_cache: dashmap::DashMap::new(),
+            provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        });
+        (state, tmp)
+    }
+
+    fn spawn_monitoring_test_agent(state: &Arc<AppState>, name: &str) -> AgentId {
+        let manifest = AgentManifest {
+            name: name.to_string(),
+            ..AgentManifest::default()
+        };
+        state.kernel.spawn_agent(manifest).unwrap()
+    }
+
+    async fn json_response(response: impl IntoResponse) -> (StatusCode, serde_json::Value) {
+        let response = response.into_response();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = serde_json::from_slice(&body).unwrap();
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn test_agent_metrics_returns_json_shape_for_existing_agent() {
+        let (state, _tmp) = monitoring_test_app_state();
+        let agent_id = spawn_monitoring_test_agent(&state, "metrics-shape");
+
+        let (status, body) =
+            json_response(agent_metrics(State(state), Path(agent_id.to_string())).await).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["agent_id"], agent_id.to_string());
+        assert!(body["token_usage"].is_object());
+        assert!(body["tool_calls"].is_object());
+        assert!(body.get("avg_response_time_ms").is_some());
+    }
+
+    #[tokio::test]
+    async fn test_agent_metrics_returns_not_found_for_unknown_agent() {
+        let (state, _tmp) = monitoring_test_app_state();
+
+        let (status, body) =
+            json_response(agent_metrics(State(state), Path(AgentId::new().to_string())).await)
+                .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"], "Agent not found");
+    }
+
+    #[tokio::test]
+    async fn test_agent_logs_filters_level_by_exact_match() {
+        let (state, _tmp) = monitoring_test_app_state();
+        let agent_id = spawn_monitoring_test_agent(&state, "logs-filter");
+        let agent_id_str = agent_id.to_string();
+
+        state.kernel.audit_log.record(
+            agent_id_str.clone(),
+            AuditAction::AgentMessage,
+            "exact match target",
+            "custom_error",
+        );
+        state.kernel.audit_log.record(
+            agent_id_str.clone(),
+            AuditAction::AgentMessage,
+            "should not match substring filter",
+            "not_custom_error",
+        );
+
+        let mut params = HashMap::new();
+        params.insert("level".to_string(), "custom_error".to_string());
+
+        let (status, body) =
+            json_response(agent_logs(State(state), Path(agent_id_str), Query(params)).await).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["count"], 1);
+
+        let logs = body["logs"].as_array().unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["outcome"], "custom_error");
+    }
 }

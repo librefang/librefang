@@ -12,6 +12,7 @@ use librefang_api::middleware;
 use librefang_api::routes::{self, AppState};
 use librefang_api::ws;
 use librefang_kernel::LibreFangKernel;
+use librefang_runtime::audit::AuditAction;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::sync::Arc;
 use std::time::Instant;
@@ -94,6 +95,14 @@ async fn start_test_server_with_provider(
         .route(
             "/api/agents/{id}/session",
             axum::routing::get(routes::get_agent_session),
+        )
+        .route(
+            "/api/agents/{id}/metrics",
+            axum::routing::get(routes::agent_metrics),
+        )
+        .route(
+            "/api/agents/{id}/logs",
+            axum::routing::get(routes::agent_logs),
         )
         .route("/api/agents/{id}/ws", axum::routing::get(ws::agent_ws))
         .route(
@@ -313,6 +322,64 @@ async fn test_agent_session_empty() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["message_count"], 0);
     assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn test_agent_monitoring_endpoints() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id = body["agent_id"].as_str().unwrap().to_string();
+
+    server.state.kernel.audit_log.record(
+        agent_id.clone(),
+        AuditAction::AgentMessage,
+        "exact match target",
+        "custom_error",
+    );
+    server.state.kernel.audit_log.record(
+        agent_id.clone(),
+        AuditAction::AgentMessage,
+        "should not match substring filter",
+        "not_custom_error",
+    );
+
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/metrics",
+            server.base_url, agent_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let metrics: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(metrics["agent_id"], agent_id);
+    assert!(metrics["token_usage"].is_object());
+    assert!(metrics["tool_calls"].is_object());
+    assert!(metrics.get("avg_response_time_ms").is_some());
+
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/logs?level=custom_error&n=10",
+            server.base_url, agent_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let logs: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(logs["count"], 1);
+    assert_eq!(logs["logs"].as_array().unwrap().len(), 1);
+    assert_eq!(logs["logs"][0]["outcome"], "custom_error");
 }
 
 #[tokio::test]
@@ -727,6 +794,14 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         .route(
             "/api/agents/{id}/session",
             axum::routing::get(routes::get_agent_session),
+        )
+        .route(
+            "/api/agents/{id}/metrics",
+            axum::routing::get(routes::agent_metrics),
+        )
+        .route(
+            "/api/agents/{id}/logs",
+            axum::routing::get(routes::agent_logs),
         )
         .route("/api/agents/{id}/ws", axum::routing::get(ws::agent_ws))
         .route(
