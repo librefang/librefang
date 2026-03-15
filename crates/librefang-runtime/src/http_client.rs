@@ -149,11 +149,17 @@ pub fn build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder {
         .or_else(|| std::env::var("NO_PROXY").ok())
         .or_else(|| std::env::var("no_proxy").ok());
 
+    // Build the NoProxy filter once so it can be applied to each Proxy instance.
+    let no_proxy_filter = no_proxy
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .and_then(reqwest::NoProxy::from_string);
+
     // Apply HTTP proxy.
     if let Some(ref url) = http_proxy {
         if !url.is_empty() {
             if let Ok(p) = Proxy::http(url) {
-                builder = builder.proxy(p);
+                builder = builder.proxy(p.no_proxy(no_proxy_filter.clone()));
             } else {
                 tracing::warn!("invalid HTTP proxy URL: {url}");
             }
@@ -164,17 +170,10 @@ pub fn build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder {
     if let Some(ref url) = https_proxy {
         if !url.is_empty() {
             if let Ok(p) = Proxy::https(url) {
-                builder = builder.proxy(p);
+                builder = builder.proxy(p.no_proxy(no_proxy_filter.clone()));
             } else {
                 tracing::warn!("invalid HTTPS proxy URL: {url}");
             }
-        }
-    }
-
-    // Apply no-proxy list.
-    if let Some(ref no) = no_proxy {
-        if !no.is_empty() {
-            builder = builder.no_proxy(reqwest::NoProxy::from_string(no));
         }
     }
 
