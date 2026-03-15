@@ -92,6 +92,28 @@ pub struct CommsSendRequest {
     pub from_agent_id: String,
     pub to_agent_id: String,
     pub message: String,
+    /// Optional thread ID for threaded conversations (e.g., Telegram forum topics).
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    /// Optional file attachments to send with the message.
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
+/// A file attachment for channel messages.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Attachment {
+    /// File URL or upload ID.
+    pub url: String,
+    /// Optional filename.
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// Optional MIME type.
+    #[serde(default)]
+    pub content_type: Option<String>,
+    /// Optional caption (for images).
+    #[serde(default)]
+    pub caption: Option<String>,
 }
 
 /// Request body for POST /api/comms/task.
