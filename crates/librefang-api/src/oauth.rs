@@ -155,6 +155,12 @@ impl JwksCache {
     }
 }
 
+impl Default for JwksCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// JWKS cache TTL — 1 hour. Providers rotate keys infrequently.
 const JWKS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
@@ -193,10 +199,12 @@ struct TokenResponse {
     #[serde(default)]
     id_token: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     token_type: Option<String>,
     #[serde(default)]
     expires_in: Option<u64>,
     #[serde(default)]
+    #[allow(dead_code)]
     refresh_token: Option<String>,
 }
 
