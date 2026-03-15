@@ -655,8 +655,6 @@ pub async fn build_router(
             "/locales/zh-CN.json",
             axum::routing::get(webchat::locale_zh_cn),
         )
-        // API version discovery endpoint (not versioned itself)
-        .route("/api/versions", axum::routing::get(routes::api_versions))
         // Mount v1 routes at /api/v1 (explicit version)
         .nest("/api/v1", v1_routes.clone())
         // Mount the same routes at /api (latest version alias for backward compat)
@@ -690,7 +688,6 @@ pub async fn build_router(
             "/v1/models",
             axum::routing::get(crate::openai_compat::list_models),
         )
-        .layer(axum::middleware::from_fn(middleware::api_version_headers))
         .layer(axum::middleware::from_fn_with_state(
             api_key,
             middleware::auth,
@@ -699,6 +696,7 @@ pub async fn build_router(
             gcra_limiter,
             rate_limiter::gcra_rate_limit,
         ))
+        .layer(axum::middleware::from_fn(middleware::api_version_headers))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(CompressionLayer::new())

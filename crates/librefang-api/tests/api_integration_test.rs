@@ -7,14 +7,18 @@
 //!
 //! Run: cargo test -p librefang-api --test api_integration_test -- --nocapture
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use axum::Router;
 use librefang_api::middleware;
 use librefang_api::routes::{self, AppState};
+use librefang_api::server;
 use librefang_api::ws;
 use librefang_kernel::LibreFangKernel;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::sync::Arc;
 use std::time::Instant;
+use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -28,7 +32,19 @@ struct TestServer {
     _tmp: tempfile::TempDir,
 }
 
+struct FullRouterHarness {
+    app: Router,
+    state: Arc<AppState>,
+    _tmp: tempfile::TempDir,
+}
+
 impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.state.kernel.shutdown();
+    }
+}
+
+impl Drop for FullRouterHarness {
     fn drop(&mut self) {
         self.state.kernel.shutdown();
     }
@@ -144,6 +160,39 @@ async fn start_test_server_with_provider(
     }
 }
 
+async fn start_full_router(api_key: &str) -> FullRouterHarness {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: api_key.to_string(),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let (app, state) = server::build_router(
+        kernel,
+        "127.0.0.1:0".parse().expect("listen addr should parse"),
+    )
+    .await;
+
+    FullRouterHarness {
+        app,
+        state,
+        _tmp: tmp,
+    }
+}
+
 /// Manifest that uses ollama (no API key required, won't make real LLM calls).
 const TEST_MANIFEST: &str = r#"
 name = "test-agent"
@@ -229,6 +278,104 @@ async fn test_status_endpoint() {
     assert!(body["uptime_seconds"].is_number());
     assert_eq!(body["default_provider"], "ollama");
     assert_eq!(body["agents"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn test_build_router_exposes_versioned_api_aliases() {
+    let harness = start_full_router("").await;
+
+    let health = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    assert_eq!(health.headers()["x-api-version"], "v1");
+
+    let versioned_health = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(versioned_health.status(), StatusCode::OK);
+    assert_eq!(versioned_health.headers()["x-api-version"], "v1");
+
+    let versions = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/versions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(versions.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(versions.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["current"], "v1");
+    assert!(json["supported"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("v1")));
+}
+
+#[tokio::test]
+async fn test_build_router_path_version_beats_unknown_accept_header() {
+    let harness = start_full_router("").await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .header("accept", "application/vnd.librefang.v99+json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-api-version"], "v1");
+}
+
+#[tokio::test]
+async fn test_build_router_unauthorized_responses_include_api_version_header() {
+    let harness = start_full_router("secret").await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.headers()["x-api-version"], "v1");
 }
 
 #[tokio::test]

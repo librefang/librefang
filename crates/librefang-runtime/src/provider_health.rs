@@ -23,7 +23,7 @@ pub struct ProbeResult {
     pub error: Option<String>,
 }
 
-/// Check if a provider is a local provider (no key required, localhost URL).
+/// Check if a provider is a local HTTP provider that supports `/models` probing.
 ///
 /// Returns true for `"ollama"`, `"vllm"`, `"lmstudio"`.
 pub fn is_local_provider(provider: &str) -> bool {
@@ -288,6 +288,8 @@ mod tests {
         assert!(!is_local_provider("anthropic"));
         assert!(!is_local_provider("gemini"));
         assert!(!is_local_provider("groq"));
+        assert!(!is_local_provider("claude-code"));
+        assert!(!is_local_provider("qwen-code"));
     }
 
     #[test]

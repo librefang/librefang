@@ -6586,7 +6586,9 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     let local_providers: Vec<(usize, String, String)> = provider_list
         .iter()
         .enumerate()
-        .filter(|(_, p)| !p.key_required && !p.base_url.is_empty())
+        .filter(|(_, p)| {
+            librefang_runtime::provider_health::is_local_provider(&p.id) && !p.base_url.is_empty()
+        })
         .map(|(i, p)| (i, p.id.clone(), p.base_url.clone()))
         .collect();
 
@@ -6635,8 +6637,8 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             if let Some(err) = &probe.error {
                 entry["error"] = serde_json::json!(err);
             }
-        } else if !p.key_required {
-            // Local provider with empty base_url (e.g. claude-code) — skip probing
+        } else if librefang_runtime::provider_health::is_local_provider(&p.id) {
+            // Local HTTP provider with no probe result yet — still label it local.
             entry["is_local"] = serde_json::json!(true);
         }
 

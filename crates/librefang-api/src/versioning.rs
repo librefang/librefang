@@ -88,17 +88,23 @@ pub fn version_from_path(path: &str) -> Option<ApiVersion> {
 /// Try to extract an [`ApiVersion`] from the `Accept` header.
 ///
 /// Supports the vendor media type `application/vnd.librefang.v1+json`.
-pub fn version_from_accept_header(accept: &str) -> Option<ApiVersion> {
+pub fn requested_version_from_accept_header(accept: &str) -> Option<&str> {
     for part in accept.split(',') {
         let media_type = part.trim().split(';').next().unwrap_or("").trim();
         if let Some(rest) = media_type.strip_prefix(VENDOR_PREFIX) {
-            let version_str = rest.split('+').next().unwrap_or("");
-            if let Ok(v) = version_str.parse::<ApiVersion>() {
-                return Some(v);
-            }
+            return Some(rest.split('+').next().unwrap_or(""));
         }
     }
     None
+}
+
+/// Try to extract an [`ApiVersion`] from the `Accept` header.
+///
+/// Supports the vendor media type `application/vnd.librefang.v1+json`.
+pub fn version_from_accept_header(accept: &str) -> Option<ApiVersion> {
+    requested_version_from_accept_header(accept)?
+        .parse::<ApiVersion>()
+        .ok()
 }
 
 /// Resolve the API version for an incoming request.
@@ -174,6 +180,14 @@ mod tests {
     fn test_version_from_accept_header_with_other_types() {
         assert_eq!(
             version_from_accept_header("text/html, application/vnd.librefang.v1+json, */*"),
+            Some(ApiVersion::V1)
+        );
+    }
+
+    #[test]
+    fn test_version_from_accept_header_with_parameters() {
+        assert_eq!(
+            version_from_accept_header("application/vnd.librefang.v1+json; charset=utf-8"),
             Some(ApiVersion::V1)
         );
     }
