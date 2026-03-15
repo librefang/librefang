@@ -14,7 +14,6 @@ tags = ["review", "approval", "content", "editing"]
 [template.parameters]
 content_type = { description = "Type of content to produce", default = "blog post" }
 guidelines = { description = "Style or brand guidelines to follow", default = "professional tone, clear structure, concise language" }
-max_revisions = { description = "Maximum revision rounds", default = "3" }
 
 [[steps]]
 name = "Draft"

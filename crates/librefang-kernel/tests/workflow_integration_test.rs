@@ -126,6 +126,7 @@ memory_write = ["self.*"]
                 timeout_secs: 30,
                 error_mode: ErrorMode::Fail,
                 output_var: Some("alpha_out".to_string()),
+                depends_on: vec![],
             },
             WorkflowStep {
                 name: "step-beta".to_string(),
@@ -137,6 +138,7 @@ memory_write = ["self.*"]
                 timeout_secs: 30,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                depends_on: vec![],
             },
         ],
         created_at: chrono::Utc::now(),
@@ -212,6 +214,7 @@ memory_write = ["self.*"]
             timeout_secs: 30,
             error_mode: ErrorMode::Fail,
             output_var: None,
+            depends_on: vec![],
         }],
         created_at: chrono::Utc::now(),
     };
@@ -341,6 +344,7 @@ async fn test_workflow_e2e_with_groq() {
                 timeout_secs: 60,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                depends_on: vec![],
             },
             WorkflowStep {
                 name: "summarize".to_string(),
@@ -352,6 +356,7 @@ async fn test_workflow_e2e_with_groq() {
                 timeout_secs: 60,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                depends_on: vec![],
             },
         ],
         created_at: chrono::Utc::now(),

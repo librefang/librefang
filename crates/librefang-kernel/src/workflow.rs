@@ -101,6 +101,9 @@ pub struct WorkflowStep {
     /// Optional variable name to store this step's output in.
     #[serde(default)]
     pub output_var: Option<String>,
+    /// Steps this one depends on (by name).
+    #[serde(default)]
+    pub depends_on: Vec<String>,
 }
 
 fn default_timeout() -> u64 {
@@ -1062,6 +1065,17 @@ pub struct WorkflowTemplateStep {
     pub depends_on: Vec<String>,
 }
 
+/// User-configurable parameter metadata for a workflow template.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkflowTemplateParameter {
+    /// Human-readable description shown in marketplace UIs.
+    #[serde(default)]
+    pub description: String,
+    /// Default value substituted into template prompts at instantiation time.
+    #[serde(default)]
+    pub default: String,
+}
+
 /// A reusable workflow template with marketplace metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowTemplate {
@@ -1079,6 +1093,9 @@ pub struct WorkflowTemplate {
     pub category: String,
     /// Searchable tags.
     pub tags: Vec<String>,
+    /// User-configurable parameters substituted during instantiation.
+    #[serde(default)]
+    pub parameters: HashMap<String, WorkflowTemplateParameter>,
     /// The steps that make up this template.
     pub steps: Vec<WorkflowTemplateStep>,
     /// When this template was created / last updated.
@@ -1133,6 +1150,15 @@ impl WorkflowTemplateRegistry {
 
     /// Instantiate a template into a concrete `Workflow` ready for registration.
     pub fn instantiate(template: &WorkflowTemplate) -> Workflow {
+        Self::instantiate_with_parameters(template, &HashMap::new())
+    }
+
+    /// Instantiate a template using explicit parameter overrides.
+    pub fn instantiate_with_parameters(
+        template: &WorkflowTemplate,
+        overrides: &HashMap<String, String>,
+    ) -> Workflow {
+        let parameters = Self::resolve_template_parameters(template, overrides);
         let steps: Vec<WorkflowStep> = template
             .steps
             .iter()
@@ -1141,11 +1167,12 @@ impl WorkflowTemplateRegistry {
                 agent: StepAgent::ByName {
                     name: ts.agent_name.clone(),
                 },
-                prompt_template: ts.prompt_template.clone(),
+                prompt_template: Self::apply_template_parameters(&ts.prompt_template, &parameters),
                 mode: ts.mode.clone(),
                 timeout_secs: ts.timeout_secs,
                 error_mode: ts.error_mode.clone(),
                 output_var: ts.output_var.clone(),
+                depends_on: ts.depends_on.clone(),
             })
             .collect();
 
@@ -1156,6 +1183,30 @@ impl WorkflowTemplateRegistry {
             steps,
             created_at: Utc::now(),
         }
+    }
+
+    fn resolve_template_parameters(
+        template: &WorkflowTemplate,
+        overrides: &HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        let mut parameters: HashMap<String, String> = template
+            .parameters
+            .iter()
+            .map(|(name, parameter)| (name.clone(), parameter.default.clone()))
+            .collect();
+        parameters.extend(overrides.clone());
+        parameters
+    }
+
+    fn apply_template_parameters(
+        template_text: &str,
+        parameters: &HashMap<String, String>,
+    ) -> String {
+        let mut rendered = template_text.to_string();
+        for (name, value) in parameters {
+            rendered = rendered.replace(&format!("{{{{{name}}}}}"), value);
+        }
+        rendered
     }
 
     /// Search templates by query string. Matches against name, description,
@@ -1251,6 +1302,7 @@ impl WorkflowTemplateRegistry {
                     .collect()
             })
             .unwrap_or_default();
+        let parameters = Self::parse_template_parameters(meta)?;
 
         let steps_arr = doc
             .get("steps")
@@ -1310,7 +1362,12 @@ impl WorkflowTemplateRegistry {
         // Generate a deterministic ID from template name so reloads don't
         // duplicate entries. Uses UUID v5 with a fixed namespace.
         let namespace = Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
-        let id = WorkflowTemplateId(Uuid::new_v5(&namespace, name.as_bytes()));
+        let id_seed = meta
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&name);
+        let id = WorkflowTemplateId(Uuid::new_v5(&namespace, id_seed.as_bytes()));
 
         Ok(WorkflowTemplate {
             id,
@@ -1320,9 +1377,64 @@ impl WorkflowTemplateRegistry {
             version,
             category,
             tags,
+            parameters,
             steps,
             created_at: Utc::now(),
         })
+    }
+
+    fn parse_template_parameters(
+        meta: &toml::Value,
+    ) -> Result<HashMap<String, WorkflowTemplateParameter>, String> {
+        let Some(parameters) = meta.get("parameters") else {
+            return Ok(HashMap::new());
+        };
+        let table = parameters
+            .as_table()
+            .ok_or("template.parameters must be a table")?;
+
+        let mut parsed = HashMap::with_capacity(table.len());
+        for (name, value) in table {
+            let config = value
+                .as_table()
+                .ok_or_else(|| format!("template.parameters.{name} must be a table"))?;
+            let description = config
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let default = config
+                .get("default")
+                .map(Self::toml_parameter_value_to_string)
+                .transpose()?
+                .unwrap_or_default();
+            parsed.insert(
+                name.clone(),
+                WorkflowTemplateParameter {
+                    description,
+                    default,
+                },
+            );
+        }
+
+        Ok(parsed)
+    }
+
+    fn toml_parameter_value_to_string(value: &toml::Value) -> Result<String, String> {
+        match value {
+            toml::Value::String(value) => Ok(value.clone()),
+            toml::Value::Integer(value) => Ok(value.to_string()),
+            toml::Value::Float(value) => Ok(value.to_string()),
+            toml::Value::Boolean(value) => Ok(value.to_string()),
+            toml::Value::Datetime(value) => Ok(value.to_string()),
+            toml::Value::Array(values) => values
+                .iter()
+                .map(Self::toml_parameter_value_to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .map(|values| values.join(", ")),
+            toml::Value::Table(table) => serde_json::to_string(table)
+                .map_err(|e| format!("serialize parameter default: {e}")),
+        }
     }
 
     /// Parse step mode from a TOML value table.
@@ -1409,6 +1521,7 @@ impl WorkflowTemplateRegistry {
                     "analysis".into(),
                     "summarisation".into(),
                 ],
+                parameters: HashMap::new(),
                 steps: vec![
                     WorkflowTemplateStep {
                         name: "search".to_string(),
@@ -1458,6 +1571,7 @@ impl WorkflowTemplateRegistry {
                 version: "1.0.0".to_string(),
                 category: "content".to_string(),
                 tags: vec!["content".into(), "writing".into(), "review".into()],
+                parameters: HashMap::new(),
                 steps: vec![
                     WorkflowTemplateStep {
                         name: "draft".to_string(),
@@ -1524,6 +1638,7 @@ impl WorkflowTemplateRegistry {
                     "security".into(),
                     "quality".into(),
                 ],
+                parameters: HashMap::new(),
                 steps: vec![
                     WorkflowTemplateStep {
                         name: "lint".to_string(),
@@ -1576,6 +1691,7 @@ impl WorkflowTemplateRegistry {
                     "pipeline".into(),
                     "transform".into(),
                 ],
+                parameters: HashMap::new(),
                 steps: vec![
                     WorkflowTemplateStep {
                         name: "extract".to_string(),
@@ -1628,6 +1744,7 @@ impl WorkflowTemplateRegistry {
                     "refinement".into(),
                     "iteration".into(),
                 ],
+                parameters: HashMap::new(),
                 steps: vec![
                     WorkflowTemplateStep {
                         name: "initial-attempt".to_string(),
@@ -1668,6 +1785,7 @@ impl Default for WorkflowTemplateRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     fn test_workflow() -> Workflow {
         Workflow {
@@ -1685,6 +1803,7 @@ mod tests {
                     timeout_secs: 30,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    depends_on: vec![],
                 },
                 WorkflowStep {
                     name: "summarize".to_string(),
@@ -1696,6 +1815,7 @@ mod tests {
                     timeout_secs: 30,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    depends_on: vec![],
                 },
             ],
             created_at: Utc::now(),
@@ -1797,6 +1917,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    depends_on: vec![],
                 },
                 WorkflowStep {
                     name: "only-if-error".to_string(),
@@ -1810,6 +1931,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    depends_on: vec![],
                 },
             ],
             created_at: Utc::now(),
@@ -1849,6 +1971,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    depends_on: vec![],
                 },
                 WorkflowStep {
                     name: "only-if-error".to_string(),
@@ -1862,6 +1985,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    depends_on: vec![],
                 },
             ],
             created_at: Utc::now(),
@@ -1902,6 +2026,7 @@ mod tests {
                 timeout_secs: 10,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                depends_on: vec![],
             }],
             created_at: Utc::now(),
         };
@@ -1948,6 +2073,7 @@ mod tests {
                 timeout_secs: 10,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                depends_on: vec![],
             }],
             created_at: Utc::now(),
         };
@@ -1983,6 +2109,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Skip,
                     output_var: None,
+                    depends_on: vec![],
                 },
                 WorkflowStep {
                     name: "succeeds".to_string(),
@@ -1994,6 +2121,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    depends_on: vec![],
                 },
             ],
             created_at: Utc::now(),
@@ -2041,6 +2169,7 @@ mod tests {
                 timeout_secs: 10,
                 error_mode: ErrorMode::Retry { max_retries: 2 },
                 output_var: None,
+                depends_on: vec![],
             }],
             created_at: Utc::now(),
         };
@@ -2085,6 +2214,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: Some("first_result".to_string()),
+                    depends_on: vec![],
                 },
                 WorkflowStep {
                     name: "transform".to_string(),
@@ -2096,6 +2226,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: Some("second_result".to_string()),
+                    depends_on: vec![],
                 },
                 WorkflowStep {
                     name: "combine".to_string(),
@@ -2108,6 +2239,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    depends_on: vec![],
                 },
             ],
             created_at: Utc::now(),
@@ -2155,6 +2287,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    depends_on: vec![],
                 },
                 WorkflowStep {
                     name: "task-b".to_string(),
@@ -2166,6 +2299,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    depends_on: vec![],
                 },
                 WorkflowStep {
                     name: "collect".to_string(),
@@ -2177,6 +2311,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    depends_on: vec![],
                 },
             ],
             created_at: Utc::now(),
@@ -2474,6 +2609,7 @@ id = "{id}"
             version: "0.1.0".to_string(),
             category: "custom".to_string(),
             tags: vec!["test".into()],
+            parameters: HashMap::new(),
             steps: vec![],
             created_at: Utc::now(),
         };
@@ -2503,6 +2639,98 @@ id = "{id}"
             !results.is_empty(),
             "should find templates with 'security' tag"
         );
+    }
+
+    #[test]
+    fn test_parse_toml_template_reads_parameters_and_template_id_seed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("parameterized-template.toml");
+        std::fs::write(
+            &path,
+            r#"
+[template]
+id = "stable-template-id"
+name = "Renamable Template"
+description = "Template with parameters"
+author = "tester"
+version = "1.2.3"
+category = "custom"
+tags = ["templated"]
+
+[template.parameters]
+language = { description = "Programming language", default = "rust" }
+
+[[steps]]
+name = "review"
+agent_name = "reviewer"
+prompt = "Review {{language}} code: {{input}}"
+depends_on = ["prepare"]
+"#,
+        )
+        .unwrap();
+
+        let template = WorkflowTemplateRegistry::parse_template_toml(&path).unwrap();
+        let namespace = Uuid::parse_str("a1b2c3d4-e5f6-7890-abcd-ef1234567890").unwrap();
+        let expected_id = WorkflowTemplateId(Uuid::new_v5(&namespace, b"stable-template-id"));
+
+        assert_eq!(template.id, expected_id);
+        assert_eq!(
+            template.parameters["language"],
+            WorkflowTemplateParameter {
+                description: "Programming language".to_string(),
+                default: "rust".to_string(),
+            }
+        );
+        assert_eq!(template.steps[0].depends_on, vec!["prepare".to_string()]);
+    }
+
+    #[test]
+    fn test_template_instantiation_applies_parameters_and_preserves_dependencies() {
+        let mut parameters = HashMap::new();
+        parameters.insert(
+            "language".to_string(),
+            WorkflowTemplateParameter {
+                description: "Programming language".to_string(),
+                default: "rust".to_string(),
+            },
+        );
+        let template = WorkflowTemplate {
+            id: WorkflowTemplateId::new(),
+            name: "templated-review".to_string(),
+            description: "Parameterized template".to_string(),
+            author: "tester".to_string(),
+            version: "0.1.0".to_string(),
+            category: "custom".to_string(),
+            tags: vec!["test".into()],
+            parameters,
+            steps: vec![WorkflowTemplateStep {
+                name: "review".to_string(),
+                agent_name: "reviewer".to_string(),
+                prompt_template: "Review {{language}} code: {{input}}".to_string(),
+                mode: StepMode::Sequential,
+                timeout_secs: 30,
+                error_mode: ErrorMode::Fail,
+                output_var: None,
+                depends_on: vec!["prepare".to_string()],
+            }],
+            created_at: Utc::now(),
+        };
+
+        let workflow_default = WorkflowTemplateRegistry::instantiate(&template);
+        assert_eq!(
+            workflow_default.steps[0].prompt_template,
+            "Review rust code: {{input}}"
+        );
+
+        let workflow = WorkflowTemplateRegistry::instantiate_with_parameters(
+            &template,
+            &HashMap::from([("language".to_string(), "python".to_string())]),
+        );
+        assert_eq!(
+            workflow.steps[0].prompt_template,
+            "Review python code: {{input}}"
+        );
+        assert_eq!(workflow.steps[0].depends_on, vec!["prepare".to_string()]);
     }
 
     #[tokio::test]

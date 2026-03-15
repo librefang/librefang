@@ -13,8 +13,6 @@ tags = ["support", "customer", "escalation", "triage"]
 
 [template.parameters]
 product_name = { description = "Product or service name for context", default = "our product" }
-escalation_keyword = { description = "Keyword in tier-1 response that triggers escalation", default = "ESCALATE" }
-sla_seconds = { description = "Target response time in seconds", default = "120" }
 
 [[steps]]
 name = "Triage"
