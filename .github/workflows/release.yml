@@ -292,9 +292,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── CLI Binary (Linux) - All Channels ──────────────────────────────────
-  cli_linux_all:
-    name: CLI / ${{ matrix.target }} (all-channels)
+  # ── CLI Binary (Linux) - Mini (12 channels) ───────────────────────────────
+  cli_linux_mini:
+    name: CLI / ${{ matrix.target }} (mini)
     needs: [create_release]
     runs-on: ubuntu-22.04
     strategy:
@@ -312,19 +312,19 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
       - uses: Swatinem/rust-cache@v2
         with:
-          key: cli-all-${{ matrix.target }}-${{ github.ref_name }}
-      - name: Build CLI (all-channels)
-        run: cargo build --release --target ${{ matrix.target }} --bin librefang --features all-channels
+          key: cli-mini-${{ matrix.target }}-${{ github.ref_name }}
+      - name: Build CLI (mini)
+        run: cargo build --release --target ${{ matrix.target }} --bin librefang
       - name: Package
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../librefang-${{ matrix.target }}-all.tar.gz librefang
+          tar czf ../../../librefang-${{ matrix.target }}-mini.tar.gz librefang
           cd ../../..
-          sha256sum librefang-${{ matrix.target }}-all.tar.gz > librefang-${{ matrix.target }}-all.tar.gz.sha256
+          sha256sum librefang-${{ matrix.target }}-mini.tar.gz > librefang-${{ matrix.target }}-mini.tar.gz.sha256
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: librefang-${{ matrix.target }}-all.*
+          files: librefang-${{ matrix.target }}-mini.*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
