@@ -218,6 +218,16 @@ impl MemorySubstrate {
         self.sessions.create_session_with_label(agent_id, label)
     }
 
+    /// Delete sessions older than `retention_days`. Returns count deleted.
+    pub fn cleanup_expired_sessions(&self, retention_days: u32) -> LibreFangResult<u64> {
+        self.sessions.cleanup_expired_sessions(retention_days)
+    }
+
+    /// For each agent, keep only the newest `max_per_agent` sessions. Returns count deleted.
+    pub fn cleanup_excess_sessions(&self, max_per_agent: u32) -> LibreFangResult<u64> {
+        self.sessions.cleanup_excess_sessions(max_per_agent)
+    }
+
     /// Load canonical session context for cross-channel memory.
     ///
     /// Returns the compacted summary (if any) and recent messages from the

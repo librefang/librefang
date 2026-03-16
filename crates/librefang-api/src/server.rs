@@ -366,6 +366,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route("/sessions", axum::routing::get(routes::list_sessions))
         .route(
+            "/sessions/cleanup",
+            axum::routing::post(routes::session_cleanup),
+        )
+        .route(
             "/sessions/{id}",
             axum::routing::delete(routes::delete_session),
         )

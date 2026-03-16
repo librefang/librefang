@@ -4042,6 +4042,60 @@ impl LibreFangKernel {
             });
         }
 
+        // Periodic session retention cleanup (prune expired / excess sessions)
+        {
+            let session_cfg = self.config.session.clone();
+            let needs_cleanup =
+                session_cfg.retention_days > 0 || session_cfg.max_sessions_per_agent > 0;
+            if needs_cleanup && session_cfg.cleanup_interval_hours > 0 {
+                let kernel = Arc::clone(self);
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                        u64::from(session_cfg.cleanup_interval_hours) * 3600,
+                    ));
+                    interval.tick().await; // Skip first immediate tick
+                    loop {
+                        interval.tick().await;
+                        if kernel.supervisor.is_shutting_down() {
+                            break;
+                        }
+                        let mut total = 0u64;
+                        if session_cfg.retention_days > 0 {
+                            match kernel
+                                .memory
+                                .cleanup_expired_sessions(session_cfg.retention_days)
+                            {
+                                Ok(n) => total += n,
+                                Err(e) => {
+                                    warn!("Session retention cleanup (expired) failed: {e}");
+                                }
+                            }
+                        }
+                        if session_cfg.max_sessions_per_agent > 0 {
+                            match kernel
+                                .memory
+                                .cleanup_excess_sessions(session_cfg.max_sessions_per_agent)
+                            {
+                                Ok(n) => total += n,
+                                Err(e) => {
+                                    warn!("Session retention cleanup (excess) failed: {e}");
+                                }
+                            }
+                        }
+                        if total > 0 {
+                            info!("Session retention cleanup: removed {total} session(s)");
+                        }
+                    }
+                });
+                info!(
+                    "Session retention cleanup scheduled every {} hour(s) (retention_days={}, max_per_agent={})",
+                    session_cfg.cleanup_interval_hours,
+                    session_cfg.retention_days,
+                    session_cfg.max_sessions_per_agent,
+                );
+            }
+        }
+
         // Periodic memory consolidation (decays stale memory confidence)
         {
             let interval_hours = self.config.memory.consolidation_interval_hours;

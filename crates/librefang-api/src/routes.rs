@@ -5964,6 +5964,56 @@ pub async fn find_session_by_label(
 }
 
 // ---------------------------------------------------------------------------
+// Session cleanup endpoint
+// ---------------------------------------------------------------------------
+
+/// POST /api/sessions/cleanup — Manually trigger session retention cleanup.
+///
+/// Runs both expired-session and excess-session cleanup using the configured
+/// `[session]` policy. Returns `{"sessions_deleted": N}`.
+pub async fn session_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = &state.kernel.config.session;
+    let mut total: u64 = 0;
+
+    if cfg.retention_days > 0 {
+        match state
+            .kernel
+            .memory
+            .cleanup_expired_sessions(cfg.retention_days)
+        {
+            Ok(n) => total += n,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("expired cleanup failed: {e}")})),
+                );
+            }
+        }
+    }
+
+    if cfg.max_sessions_per_agent > 0 {
+        match state
+            .kernel
+            .memory
+            .cleanup_excess_sessions(cfg.max_sessions_per_agent)
+        {
+            Ok(n) => total += n,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("excess cleanup failed: {e}")})),
+                );
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"sessions_deleted": total})),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Trigger update endpoint
 // ---------------------------------------------------------------------------
 
