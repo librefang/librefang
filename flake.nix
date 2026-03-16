@@ -34,8 +34,7 @@
         buildInputs = with pkgs; [
           openssl
         ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-          pkgs.darwin.apple_sdk.frameworks.Security
-          pkgs.darwin.apple_sdk.frameworks.SystemConfiguration
+          pkgs.apple-sdk
           pkgs.libiconv
         ];
 
@@ -44,6 +43,7 @@
 
         commonArgs = {
           inherit src nativeBuildInputs buildInputs;
+          pname = "librefang";
           strictDeps = true;
         };
 
@@ -69,6 +69,7 @@
 
           librefang-fmt = craneLib.cargoFmt {
             inherit src;
+            pname = "librefang";
           };
         };
 
@@ -93,6 +94,9 @@
             # Development tools
             just
             gh
+            git
+            nodejs
+            python3
           ];
 
           inputsFrom = [ librefang ];

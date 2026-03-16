@@ -5,6 +5,71 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-03-16
+
+### Fixed
+
+- Auto-update contributors list from GitHub API (#512) (@houko)
+- Use local SVG for contributors with circular avatars (#513) (@houko)
+- WeCom secret env pattern + add pre-commit fmt hook (#518) (@houko)
+
+### Maintenance
+
+- Auto-merge release PRs after CI passes (#511) (@houko)
+
+### Other
+
+- V0.5.1-20260316 (#510) (@houko)
+
+## [0.5.1] - 2026-03-16
+
+### Fixed
+
+- Improve API version negotiation and local provider detection (#507) (@houko)
+- Inject vault secrets into process env at startup (#509) (@houko)
+
+### Other
+
+- V0.5.0-20260316 (#506) (@houko)
+
+## [0.5.0] - 2026-03-16
+
+### Added
+
+- Add GET /api/commands/:name endpoint (#369) (@houko)
+- Add recipe-assistant agent template (#393) (@houko)
+- Add Nix flake support (#412) (@houko)
+- Add Qwen Code CLI as LLM provider (#417) (@houko)
+- Add LLM provider prompt caching support (#381) (#424) (@houko)
+- Add decision trace layer for tool selection reasoning (#426) (@houko)
+- Add stable_prefix_mode for cache-friendly prompts (#427) (@houko)
+- Replace native-tls with rustls for IMAP channel (#432) (@houko)
+- Add API endpoint versioning support (#450) (@houko)
+- Generate versioned homebrew formula on release (#503) (@houko)
+
+### Fixed
+
+- Use default_model from config in Web UI agent creation (#402) (@houko)
+- Apply log_level from config.toml to tracing subscriber (#404) (@houko)
+- Correctly read nested tokens.id_token for Codex CLI OAuth (#406) (@houko)
+- Use deterministic UUIDs for hand agents to persist across restarts (#407) (@houko)
+- Update nix flake for nixpkgs darwin SDK migration (#491) (@houko)
+- Update nix flake for darwin SDK and crane warnings (#493) (@houko)
+- Add git to devShell and preserve user PATH (#494) (@houko)
+- Remove duplicate `/api/versions` route causing panic on startup (#501) (@houko)
+- Use Render API for heartbeat + release script improvements (#504) (@houko)
+- Allow re-release by replacing existing changelog entry (#505) (@houko)
+
+### Documentation
+
+- Improve CLI --help descriptions for all subcommands (#453) (@houko)
+
+### Other
+
+- V0.4.7-20260315 (#486) (@houko)
+- V0.5.0-20260316 (#499) (@houko)
+
+
 ## [0.4.7] - 2026-03-15
 
 ### Added

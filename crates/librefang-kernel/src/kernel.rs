@@ -164,6 +164,8 @@ pub struct LibreFangKernel {
     /// Per-agent decision traces from the most recent message exchange.
     /// Stored for retrieval via `/api/agents/{id}/traces`.
     pub decision_traces: dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
+    /// Command queue with lane-based concurrency control.
+    pub command_queue: librefang_runtime::command_lane::CommandQueue,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
 }
@@ -968,6 +970,13 @@ impl LibreFangKernel {
         let initial_broadcast = config.broadcast.clone();
         let auto_reply_engine = crate::auto_reply::AutoReplyEngine::new(config.auto_reply.clone());
 
+        // Initialize command queue with configured concurrency limits
+        let command_queue = librefang_runtime::command_lane::CommandQueue::with_capacities(
+            config.queue.concurrency.main_lane as u32,
+            config.queue.concurrency.cron_lane as u32,
+            config.queue.concurrency.subagent_lane as u32,
+        );
+
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1017,6 +1026,7 @@ impl LibreFangKernel {
             default_model_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
+            command_queue,
             self_handle: OnceLock::new(),
         };
 
@@ -3973,7 +3983,10 @@ impl LibreFangKernel {
                     catalog
                         .list_providers()
                         .iter()
-                        .filter(|p| !p.key_required)
+                        .filter(|p| {
+                            librefang_runtime::provider_health::is_local_provider(&p.id)
+                                && !p.base_url.is_empty()
+                        })
                         .map(|p| (p.id.clone(), p.base_url.clone()))
                         .collect()
                 };
@@ -4030,6 +4043,60 @@ impl LibreFangKernel {
                     }
                 }
             });
+        }
+
+        // Periodic session retention cleanup (prune expired / excess sessions)
+        {
+            let session_cfg = self.config.session.clone();
+            let needs_cleanup =
+                session_cfg.retention_days > 0 || session_cfg.max_sessions_per_agent > 0;
+            if needs_cleanup && session_cfg.cleanup_interval_hours > 0 {
+                let kernel = Arc::clone(self);
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                        u64::from(session_cfg.cleanup_interval_hours) * 3600,
+                    ));
+                    interval.tick().await; // Skip first immediate tick
+                    loop {
+                        interval.tick().await;
+                        if kernel.supervisor.is_shutting_down() {
+                            break;
+                        }
+                        let mut total = 0u64;
+                        if session_cfg.retention_days > 0 {
+                            match kernel
+                                .memory
+                                .cleanup_expired_sessions(session_cfg.retention_days)
+                            {
+                                Ok(n) => total += n,
+                                Err(e) => {
+                                    warn!("Session retention cleanup (expired) failed: {e}");
+                                }
+                            }
+                        }
+                        if session_cfg.max_sessions_per_agent > 0 {
+                            match kernel
+                                .memory
+                                .cleanup_excess_sessions(session_cfg.max_sessions_per_agent)
+                            {
+                                Ok(n) => total += n,
+                                Err(e) => {
+                                    warn!("Session retention cleanup (excess) failed: {e}");
+                                }
+                            }
+                        }
+                        if total > 0 {
+                            info!("Session retention cleanup: removed {total} session(s)");
+                        }
+                    }
+                });
+                info!(
+                    "Session retention cleanup scheduled every {} hour(s) (retention_days={}, max_per_agent={})",
+                    session_cfg.cleanup_interval_hours,
+                    session_cfg.retention_days,
+                    session_cfg.max_sessions_per_agent,
+                );
+            }
         }
 
         // Periodic memory consolidation (decays stale memory confidence)

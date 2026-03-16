@@ -48,7 +48,6 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route("/health/detail", axum::routing::get(routes::health_detail))
         .route("/status", axum::routing::get(routes::status))
         .route("/version", axum::routing::get(routes::version))
-        .route("/versions", axum::routing::get(routes::api_versions))
         .route(
             "/agents",
             axum::routing::get(routes::list_agents).post(routes::spawn_agent),
@@ -367,6 +366,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route("/sessions", axum::routing::get(routes::list_sessions))
         .route(
+            "/sessions/cleanup",
+            axum::routing::post(routes::session_cleanup),
+        )
+        .route(
             "/sessions/{id}",
             axum::routing::delete(routes::delete_session),
         )
@@ -466,6 +469,8 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/cron/jobs/{id}/status",
             axum::routing::get(routes::cron_job_status),
         )
+        // Queue status endpoint
+        .route("/queue/status", axum::routing::get(routes::queue_status))
         // Backup / Restore endpoints
         .route("/backup", axum::routing::post(routes::create_backup))
         .route("/backups", axum::routing::get(routes::list_backups))
@@ -655,6 +660,8 @@ pub async fn build_router(
             "/locales/zh-CN.json",
             axum::routing::get(webchat::locale_zh_cn),
         )
+        // API version discovery endpoint (not versioned itself)
+        .route("/api/versions", axum::routing::get(routes::api_versions))
         // Mount v1 routes at /api/v1 (explicit version)
         .nest("/api/v1", v1_routes.clone())
         // Mount the same routes at /api (latest version alias for backward compat)
@@ -688,7 +695,6 @@ pub async fn build_router(
             "/v1/models",
             axum::routing::get(crate::openai_compat::list_models),
         )
-        .layer(axum::middleware::from_fn(middleware::api_version_headers))
         .layer(axum::middleware::from_fn_with_state(
             api_key,
             middleware::auth,
@@ -697,6 +703,7 @@ pub async fn build_router(
             gcra_limiter,
             rate_limiter::gcra_rate_limit,
         ))
+        .layer(axum::middleware::from_fn(middleware::api_version_headers))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(CompressionLayer::new())

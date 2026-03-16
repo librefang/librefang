@@ -137,19 +137,26 @@ fi
 if [ ! -f "$CHANGELOG" ]; then
     printf '%s\n\n%s\n' "# Changelog" "$SECTION" > "$CHANGELOG"
 else
-    # Check if version already exists
+    # If version already exists, replace it; otherwise insert before first entry
     if grep -q "^## \[$VERSION\]" "$CHANGELOG"; then
-        echo "Error: version $VERSION already exists in CHANGELOG.md" >&2
-        echo "Please remove the duplicate or bump to a new version." >&2
-        exit 1
-    fi
-
-    FIRST=$(grep -n '^## \[' "$CHANGELOG" | head -1 | cut -d: -f1)
-    if [ -n "$FIRST" ]; then
-        { head -n $((FIRST - 1)) "$CHANGELOG"; echo "$SECTION"; echo ""; tail -n +"$FIRST" "$CHANGELOG"; } > "$CHANGELOG.tmp"
+        echo "Replacing existing changelog entry for $VERSION"
+        OLD_START=$(grep -n "^## \[$VERSION\]" "$CHANGELOG" | head -1 | cut -d: -f1)
+        NEXT_HEADING=$(tail -n +"$((OLD_START + 1))" "$CHANGELOG" | grep -n '^## \[' | head -1 | cut -d: -f1)
+        if [ -n "$NEXT_HEADING" ]; then
+            OLD_END=$((OLD_START + NEXT_HEADING - 1))
+            { head -n $((OLD_START - 1)) "$CHANGELOG"; echo "$SECTION"; echo ""; tail -n +"$OLD_END" "$CHANGELOG"; } > "$CHANGELOG.tmp"
+        else
+            { head -n $((OLD_START - 1)) "$CHANGELOG"; echo "$SECTION"; echo ""; } > "$CHANGELOG.tmp"
+        fi
         mv "$CHANGELOG.tmp" "$CHANGELOG"
     else
-        printf '\n%s\n' "$SECTION" >> "$CHANGELOG"
+        FIRST=$(grep -n '^## \[' "$CHANGELOG" | head -1 | cut -d: -f1)
+        if [ -n "$FIRST" ]; then
+            { head -n $((FIRST - 1)) "$CHANGELOG"; echo "$SECTION"; echo ""; tail -n +"$FIRST" "$CHANGELOG"; } > "$CHANGELOG.tmp"
+            mv "$CHANGELOG.tmp" "$CHANGELOG"
+        else
+            printf '\n%s\n' "$SECTION" >> "$CHANGELOG"
+        fi
     fi
 fi
 

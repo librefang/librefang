@@ -26,9 +26,39 @@ pub fn env_file_path() -> Option<PathBuf> {
 /// (but both yield to system env vars).
 /// Silently does nothing if the files don't exist.
 pub fn load_dotenv() {
+    // Vault takes highest priority (after system env vars).
+    load_vault();
     load_env_file(env_file_path());
     // Also load secrets.env (written by dashboard "Set API Key" button)
     load_env_file(secrets_env_path());
+}
+
+/// Try to unlock the credential vault and inject secrets into process env.
+///
+/// Vault secrets have higher priority than `.env` but lower than system env vars.
+/// Silently does nothing if vault is not initialized or cannot be unlocked.
+fn load_vault() {
+    let vault_path = match dotenv_librefang_home() {
+        Some(h) => h.join("vault.enc"),
+        None => return,
+    };
+
+    if !vault_path.exists() {
+        return;
+    }
+
+    let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+    if vault.unlock().is_err() {
+        return;
+    }
+
+    for key in vault.list_keys() {
+        if std::env::var(key).is_err() {
+            if let Some(val) = vault.get(key) {
+                std::env::set_var(key, val.as_str());
+            }
+        }
+    }
 }
 
 /// Return the path to `~/.librefang/secrets.env`.
