@@ -1,4 +1,4 @@
-use crate::{extract_error, Error, Result};
+use crate::{extract_error, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 

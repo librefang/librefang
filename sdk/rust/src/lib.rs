@@ -4,7 +4,7 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use librefang::LibreFang;
 //!
 //! #[tokio::main]
