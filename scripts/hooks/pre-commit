@@ -1,0 +1,11 @@
+#!/bin/sh
+# Pre-commit hook: ensure Rust code is formatted.
+# Install: git config core.hooksPath scripts/hooks
+
+cargo fmt --check 2>/dev/null
+if [ $? -ne 0 ]; then
+    echo "Running cargo fmt..."
+    cargo fmt
+    echo "Formatted. Please re-stage and commit again."
+    exit 1
+fi

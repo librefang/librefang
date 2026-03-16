@@ -1100,6 +1100,72 @@ impl Default for SessionConfig {
     }
 }
 
+/// Message queue configuration.
+///
+/// Controls queue depth limits and task TTL for the agent command queue.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [queue]
+/// max_depth_per_agent = 100
+/// max_depth_global = 1000
+/// task_ttl_secs = 3600
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueueConfig {
+    /// Max queue depth per agent (0 = unlimited).
+    pub max_depth_per_agent: u32,
+    /// Max queue depth globally (0 = unlimited).
+    pub max_depth_global: u32,
+    /// Task TTL in seconds (unprocessed tasks expire, 0 = unlimited).
+    pub task_ttl_secs: u64,
+    /// Per-lane concurrency limits.
+    #[serde(default)]
+    pub concurrency: QueueConcurrencyConfig,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            max_depth_per_agent: 0,
+            max_depth_global: 0,
+            task_ttl_secs: 3600,
+            concurrency: QueueConcurrencyConfig::default(),
+        }
+    }
+}
+
+/// Per-lane concurrency limits for the command queue.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [queue.concurrency]
+/// main_lane = 1
+/// cron_lane = 2
+/// subagent_lane = 3
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueueConcurrencyConfig {
+    /// Main lane concurrent limit (user messages).
+    pub main_lane: usize,
+    /// Cron lane concurrent limit (scheduled jobs).
+    pub cron_lane: usize,
+    /// Subagent lane concurrent limit (child agents).
+    pub subagent_lane: usize,
+}
+
+impl Default for QueueConcurrencyConfig {
+    fn default() -> Self {
+        Self {
+            main_lane: 1,
+            cron_lane: 2,
+            subagent_lane: 3,
+        }
+    }
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1254,6 +1320,9 @@ pub struct KernelConfig {
     /// Session retention policy (automatic cleanup of old/excess sessions).
     #[serde(default)]
     pub session: SessionConfig,
+    /// Message queue configuration (depth limits, TTL, concurrency).
+    #[serde(default)]
+    pub queue: QueueConfig,
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1509,6 +1578,7 @@ impl Default for KernelConfig {
             sidecar_channels: Vec::new(),
             prompt_caching: default_prompt_caching(),
             session: SessionConfig::default(),
+            queue: QueueConfig::default(),
         }
     }
 }
@@ -1628,6 +1698,7 @@ impl std::fmt::Debug for KernelConfig {
                 &format!("{} mapping(s)", self.provider_api_keys.len()),
             )
             .field("session", &self.session)
+            .field("queue", &self.queue)
             .finish()
     }
 }
@@ -2685,10 +2756,10 @@ pub struct WeComConfig {
     pub secret_env: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
-    /// Callback verification token (optional, for URL verification).
-    pub token: Option<String>,
-    /// Encoding AES key for callback (optional, for encrypted mode).
-    pub encoding_aes_key: Option<String>,
+    /// Env var name holding the callback verification token (optional).
+    pub token_env: Option<String>,
+    /// Env var name holding the encoding AES key (optional).
+    pub encoding_aes_key_env: Option<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
     pub account_id: Option<String>,
@@ -2706,8 +2777,8 @@ impl Default for WeComConfig {
             agent_id: String::new(),
             secret_env: "WECOM_SECRET".to_string(),
             webhook_port: 8454,
-            token: None,
-            encoding_aes_key: None,
+            token_env: None,
+            encoding_aes_key_env: None,
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
@@ -3811,6 +3882,17 @@ impl KernelConfig {
             self.web.fetch.timeout_secs = 30;
         } else if self.web.fetch.timeout_secs > 120 {
             self.web.fetch.timeout_secs = 120;
+        }
+
+        // Queue concurrency: min 1 per lane (0 would deadlock)
+        if self.queue.concurrency.main_lane == 0 {
+            self.queue.concurrency.main_lane = 1;
+        }
+        if self.queue.concurrency.cron_lane == 0 {
+            self.queue.concurrency.cron_lane = 1;
+        }
+        if self.queue.concurrency.subagent_lane == 0 {
+            self.queue.concurrency.subagent_lane = 1;
         }
     }
 }

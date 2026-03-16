@@ -2055,8 +2055,8 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
             ChannelField { key: "corp_id", label: "Corp ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "wwxxxxx", advanced: false },
             ChannelField { key: "agent_id", label: "Agent ID", field_type: FieldType::Text, env_var: None, required: true, placeholder: "wwxxxxx", advanced: false },
             ChannelField { key: "secret_env", label: "Secret", field_type: FieldType::Secret, env_var: Some("WECOM_SECRET"), required: true, placeholder: "secret", advanced: false },
-            ChannelField { key: "token", label: "Callback Token", field_type: FieldType::Text, env_var: None, required: false, placeholder: "callback_token", advanced: true },
-            ChannelField { key: "encoding_aes_key", label: "Encoding AES Key", field_type: FieldType::Text, env_var: None, required: false, placeholder: "encoding_aes_key", advanced: true },
+            ChannelField { key: "token_env", label: "Callback Token", field_type: FieldType::Secret, env_var: Some("WECOM_TOKEN"), required: false, placeholder: "WECOM_TOKEN", advanced: true },
+            ChannelField { key: "encoding_aes_key_env", label: "Encoding AES Key", field_type: FieldType::Secret, env_var: Some("WECOM_ENCODING_AES_KEY"), required: false, placeholder: "WECOM_ENCODING_AES_KEY", advanced: true },
             ChannelField { key: "webhook_port", label: "Webhook Port", field_type: FieldType::Number, env_var: None, required: false, placeholder: "8454", advanced: true },
             ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true },
         ],
@@ -12902,6 +12902,31 @@ fn hostname_string() -> String {
     std::env::var("HOSTNAME")
         .or_else(|_| std::env::var("COMPUTERNAME"))
         .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// GET /api/queue/status — Command queue status and occupancy.
+pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let occupancy = state.kernel.command_queue.occupancy();
+    let lanes: Vec<serde_json::Value> = occupancy
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "lane": o.lane.to_string(),
+                "active": o.active,
+                "capacity": o.capacity,
+            })
+        })
+        .collect();
+
+    let queue_cfg = &state.kernel.config.queue;
+    Json(serde_json::json!({
+        "lanes": lanes,
+        "config": {
+            "max_depth_per_agent": queue_cfg.max_depth_per_agent,
+            "max_depth_global": queue_cfg.max_depth_global,
+            "task_ttl_secs": queue_cfg.task_ttl_secs,
+        },
+    }))
 }
 
 #[cfg(test)]

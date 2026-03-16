@@ -164,6 +164,8 @@ pub struct LibreFangKernel {
     /// Per-agent decision traces from the most recent message exchange.
     /// Stored for retrieval via `/api/agents/{id}/traces`.
     pub decision_traces: dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
+    /// Command queue with lane-based concurrency control.
+    pub command_queue: librefang_runtime::command_lane::CommandQueue,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
 }
@@ -965,6 +967,13 @@ impl LibreFangKernel {
         let initial_broadcast = config.broadcast.clone();
         let auto_reply_engine = crate::auto_reply::AutoReplyEngine::new(config.auto_reply.clone());
 
+        // Initialize command queue with configured concurrency limits
+        let command_queue = librefang_runtime::command_lane::CommandQueue::with_capacities(
+            config.queue.concurrency.main_lane as u32,
+            config.queue.concurrency.cron_lane as u32,
+            config.queue.concurrency.subagent_lane as u32,
+        );
+
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1014,6 +1023,7 @@ impl LibreFangKernel {
             default_model_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
+            command_queue,
             self_handle: OnceLock::new(),
         };
 
