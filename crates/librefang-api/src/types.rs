@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Request to spawn an agent from a TOML manifest string or a template name.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SpawnRequest {
     /// Agent manifest as TOML string (optional if `template` is provided).
     #[serde(default)]
@@ -19,14 +19,14 @@ pub struct SpawnRequest {
 }
 
 /// Response after spawning an agent.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SpawnResponse {
     pub agent_id: String,
     pub name: String,
 }
 
 /// A file attachment reference (from a prior upload).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct AttachmentRef {
     pub file_id: String,
     #[serde(default)]
@@ -36,7 +36,7 @@ pub struct AttachmentRef {
 }
 
 /// Request to send a message to an agent.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MessageRequest {
     pub message: String,
     /// Optional file attachments (uploaded via /upload endpoint).
@@ -45,7 +45,7 @@ pub struct MessageRequest {
 }
 
 /// Response from sending a message.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct MessageResponse {
     pub response: String,
     pub input_tokens: u64,
@@ -56,35 +56,37 @@ pub struct MessageResponse {
     /// Decision traces from tool calls made during the agent loop.
     /// Empty if no tools were called.
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[schema(value_type = Vec<serde_json::Value>)]
     pub decision_traces: Vec<librefang_types::tool::DecisionTrace>,
 }
 
 /// Request to install a skill from the marketplace.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SkillInstallRequest {
     pub name: String,
 }
 
 /// Request to uninstall a skill.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SkillUninstallRequest {
     pub name: String,
 }
 
 /// Request to update an agent's manifest.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AgentUpdateRequest {
     pub manifest_toml: String,
 }
 
 /// Request to change an agent's operational mode.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SetModeRequest {
+    #[schema(value_type = String)]
     pub mode: librefang_types::agent::AgentMode,
 }
 
 /// Request to run a migration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MigrateRequest {
     pub source: String,
     pub source_dir: String,
@@ -94,13 +96,13 @@ pub struct MigrateRequest {
 }
 
 /// Request to scan a directory for migration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct MigrateScanRequest {
     pub path: String,
 }
 
 /// Request to install a skill from ClawHub.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ClawHubInstallRequest {
     /// ClawHub skill slug (e.g., "github-helper").
     pub slug: String,
@@ -111,13 +113,13 @@ pub struct ClawHubInstallRequest {
 // ---------------------------------------------------------------------------
 
 /// Request to create multiple agents at once.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BulkCreateRequest {
     pub agents: Vec<SpawnRequest>,
 }
 
 /// Outcome of a single bulk-create item.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BulkCreateResult {
     pub index: usize,
     pub success: bool,
@@ -130,13 +132,13 @@ pub struct BulkCreateResult {
 }
 
 /// Request containing a list of agent IDs for bulk operations (delete/start/stop).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BulkAgentIdsRequest {
     pub agent_ids: Vec<String>,
 }
 
 /// Outcome of a single bulk action (delete/start/stop).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct BulkActionResult {
     pub agent_id: String,
     pub success: bool,
@@ -147,14 +149,14 @@ pub struct BulkActionResult {
 }
 
 /// Request to install an extension (integration).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ExtensionInstallRequest {
     /// Extension/integration ID (e.g., "github", "slack").
     pub name: String,
 }
 
 /// Request to uninstall an extension (integration).
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ExtensionUninstallRequest {
     /// Extension/integration ID to remove.
     pub name: String,

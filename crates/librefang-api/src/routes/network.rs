@@ -16,6 +16,14 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 
 /// GET /api/peers — List known OFP peers.
+#[utoipa::path(
+    get,
+    path = "/api/peers",
+    tag = "network",
+    responses(
+        (status = 200, description = "List known OFP peers", body = serde_json::Value)
+    )
+)]
 pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Peers are tracked in the wire module's PeerRegistry.
     // The kernel doesn't directly hold a PeerRegistry, so we return an empty list
@@ -46,6 +54,14 @@ pub async fn list_peers(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 /// GET /api/network/status — OFP network status summary.
+#[utoipa::path(
+    get,
+    path = "/api/network/status",
+    tag = "network",
+    responses(
+        (status = 200, description = "OFP network status summary", body = serde_json::Value)
+    )
+)]
 pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let enabled = state.kernel.config.network_enabled
         && !state.kernel.config.network.shared_secret.is_empty();
@@ -72,6 +88,14 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/.well-known/agent.json",
+    tag = "a2a",
+    responses(
+        (status = 200, description = "Get the A2A agent card", body = serde_json::Value)
+    )
+)]
 pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents = state.kernel.registry.list();
     let base_url = format!("http://{}", state.kernel.config.api_listen);
@@ -98,6 +122,14 @@ pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResp
 }
 
 /// GET /a2a/agents — List all A2A agent cards.
+#[utoipa::path(
+    get,
+    path = "/a2a/agents",
+    tag = "a2a",
+    responses(
+        (status = 200, description = "List all A2A agent cards", body = serde_json::Value)
+    )
+)]
 pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents = state.kernel.registry.list();
     let base_url = format!("http://{}", state.kernel.config.api_listen);
@@ -121,6 +153,15 @@ pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoRes
 }
 
 /// POST /a2a/tasks/send — Submit a task to an agent via A2A.
+#[utoipa::path(
+    post,
+    path = "/a2a/tasks/send",
+    tag = "a2a",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Submit a task to an agent via A2A", body = serde_json::Value)
+    )
+)]
 pub async fn a2a_send_task(
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
@@ -214,6 +255,17 @@ pub async fn a2a_send_task(
 }
 
 /// GET /a2a/tasks/{id} — Get task status from the task store.
+#[utoipa::path(
+    get,
+    path = "/a2a/tasks/{id}",
+    tag = "a2a",
+    params(
+        ("id" = String, Path, description = "Id"),
+    ),
+    responses(
+        (status = 200, description = "Get A2A task status", body = serde_json::Value)
+    )
+)]
 pub async fn a2a_get_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
@@ -231,6 +283,17 @@ pub async fn a2a_get_task(
 }
 
 /// POST /a2a/tasks/{id}/cancel — Cancel a tracked task.
+#[utoipa::path(
+    post,
+    path = "/a2a/tasks/{id}/cancel",
+    tag = "a2a",
+    params(
+        ("id" = String, Path, description = "Id"),
+    ),
+    responses(
+        (status = 200, description = "Cancel a tracked A2A task", body = serde_json::Value)
+    )
+)]
 pub async fn a2a_cancel_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
@@ -257,6 +320,14 @@ pub async fn a2a_cancel_task(
 // ── A2A Management Endpoints (outbound) ─────────────────────────────────
 
 /// GET /api/a2a/agents — List discovered external A2A agents.
+#[utoipa::path(
+    get,
+    path = "/api/a2a/agents",
+    tag = "a2a",
+    responses(
+        (status = 200, description = "List discovered external A2A agents", body = serde_json::Value)
+    )
+)]
 pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents = state
         .kernel
@@ -346,6 +417,17 @@ fn is_private_ip(ip: &IpAddr) -> bool {
 }
 
 /// GET /api/a2a/agents/{id} — Get a specific external A2A agent by index, URL, or name.
+#[utoipa::path(
+    get,
+    path = "/api/a2a/agents/{id}",
+    tag = "a2a",
+    params(
+        ("id" = String, Path, description = "Id"),
+    ),
+    responses(
+        (status = 200, description = "Get a specific external A2A agent", body = serde_json::Value)
+    )
+)]
 pub async fn a2a_get_external_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -390,6 +472,15 @@ pub async fn a2a_get_external_agent(
 }
 
 /// POST /api/a2a/discover — Discover a new external A2A agent by URL.
+#[utoipa::path(
+    post,
+    path = "/api/a2a/discover",
+    tag = "a2a",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Discover an external A2A agent by URL", body = serde_json::Value)
+    )
+)]
 pub async fn a2a_discover_external(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -446,6 +537,15 @@ pub async fn a2a_discover_external(
 }
 
 /// POST /api/a2a/send — Send a task to an external A2A agent.
+#[utoipa::path(
+    post,
+    path = "/api/a2a/send",
+    tag = "a2a",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Send a task to an external A2A agent", body = serde_json::Value)
+    )
+)]
 pub async fn a2a_send_external(
     State(_state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -484,6 +584,18 @@ pub async fn a2a_send_external(
 }
 
 /// GET /api/a2a/tasks/{id}/status — Get task status from an external A2A agent.
+#[utoipa::path(
+    get,
+    path = "/api/a2a/tasks/{id}/status",
+    tag = "a2a",
+    params(
+        ("id" = String, Path, description = "Id"),
+        ("url" = String, Query, description = "URL of the external A2A agent"),
+    ),
+    responses(
+        (status = 200, description = "Get external A2A task status", body = serde_json::Value)
+    )
+)]
 pub async fn a2a_external_task_status(
     State(_state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
@@ -518,6 +630,15 @@ pub async fn a2a_external_task_status(
 ///
 /// Exposes the same MCP protocol normally served via stdio, allowing
 /// external MCP clients to connect over HTTP instead.
+#[utoipa::path(
+    post,
+    path = "/mcp",
+    tag = "mcp",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Handle MCP JSON-RPC requests over HTTP", body = serde_json::Value)
+    )
+)]
 pub async fn mcp_http(
     State(state): State<Arc<AppState>>,
     Json(request): Json<serde_json::Value>,
@@ -622,6 +743,14 @@ pub async fn mcp_http(
 // ---------------------------------------------------------------------------
 
 /// GET /api/comms/topology — Build agent topology graph from registry.
+#[utoipa::path(
+    get,
+    path = "/api/comms/topology",
+    tag = "network",
+    responses(
+        (status = 200, description = "Build agent topology graph", body = serde_json::Value)
+    )
+)]
 pub async fn comms_topology(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use librefang_types::comms::{EdgeKind, TopoEdge, TopoNode, Topology};
 
@@ -839,6 +968,17 @@ fn audit_to_comms_event(
 ///
 /// Sources from both the event bus (for lifecycle events with full context)
 /// and the audit log (for message/spawn/kill events that are always captured).
+#[utoipa::path(
+    get,
+    path = "/api/comms/events",
+    tag = "network",
+    params(
+        ("limit" = Option<usize>, Query, description = "Maximum number of results"),
+    ),
+    responses(
+        (status = 200, description = "Recent inter-agent communication events", body = serde_json::Value)
+    )
+)]
 pub async fn comms_events(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -881,6 +1021,14 @@ pub async fn comms_events(
 /// GET /api/comms/events/stream — SSE stream of inter-agent communication events.
 ///
 /// Polls the audit log every 500ms for new inter-agent events.
+#[utoipa::path(
+    get,
+    path = "/api/comms/events/stream",
+    tag = "network",
+    responses(
+        (status = 200, description = "SSE stream of inter-agent events", body = serde_json::Value)
+    )
+)]
 pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::response::Response {
     use axum::response::sse::{Event, KeepAlive, Sse};
 
@@ -929,6 +1077,15 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
 }
 
 /// POST /api/comms/send — Send a message from one agent to another.
+#[utoipa::path(
+    post,
+    path = "/api/comms/send",
+    tag = "network",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Send a message between agents", body = serde_json::Value)
+    )
+)]
 pub async fn comms_send(
     State(state): State<Arc<AppState>>,
     Json(req): Json<librefang_types::comms::CommsSendRequest>,
@@ -1018,6 +1175,15 @@ pub async fn comms_send(
 }
 
 /// POST /api/comms/task — Post a task to the agent task queue.
+#[utoipa::path(
+    post,
+    path = "/api/comms/task",
+    tag = "network",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Post a task to the agent task queue", body = serde_json::Value)
+    )
+)]
 pub async fn comms_task(
     State(state): State<Arc<AppState>>,
     Json(req): Json<librefang_types::comms::CommsTaskRequest>,

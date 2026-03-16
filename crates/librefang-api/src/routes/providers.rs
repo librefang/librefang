@@ -12,6 +12,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 
+#[utoipa::path(
+    get,
+    path = "/api/models",
+    tag = "models",
+    responses(
+        (status = 200, description = "List available models", body = Vec<serde_json::Value>)
+    )
+)]
 pub async fn list_models(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -88,6 +96,7 @@ pub async fn list_models(
     )
 }
 
+#[utoipa::path(get, path = "/api/models/aliases", tag = "models", responses((status = 200, description = "List model aliases", body = serde_json::Value)))]
 pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let aliases = state
         .kernel
@@ -118,6 +127,7 @@ pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoRespon
 /// POST /api/models/aliases — Create a new alias mapping.
 ///
 /// Body: `{ "alias": "my-alias", "model_id": "gpt-4o" }`
+#[utoipa::path(post, path = "/api/models/aliases", tag = "models", request_body = serde_json::Value, responses((status = 200, description = "Alias created", body = serde_json::Value)))]
 pub async fn create_alias(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -170,6 +180,7 @@ pub async fn create_alias(
 }
 
 /// DELETE /api/models/aliases/{alias} — Remove an alias mapping.
+#[utoipa::path(delete, path = "/api/models/aliases/{alias}", tag = "models", params(("alias" = String, Path, description = "Alias name")), responses((status = 200, description = "Alias deleted")))]
 pub async fn delete_alias(
     State(state): State<Arc<AppState>>,
     Path(alias): Path<String>,
@@ -193,6 +204,7 @@ pub async fn delete_alias(
     )
 }
 
+#[utoipa::path(get, path = "/api/models/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Model details", body = serde_json::Value)))]
 pub async fn get_model(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -242,6 +254,14 @@ pub async fn get_model(
 /// Probes run **concurrently** and results are **cached for 60 seconds** so the
 /// endpoint responds instantly on repeated dashboard loads even when local
 /// services are offline.
+#[utoipa::path(
+    get,
+    path = "/api/providers",
+    tag = "models",
+    responses(
+        (status = 200, description = "List configured providers", body = Vec<serde_json::Value>)
+    )
+)]
 pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
         let catalog = state
@@ -329,6 +349,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 ///
 /// Persists to `~/.librefang/custom_models.json` and makes the model immediately
 /// available in the catalog.
+#[utoipa::path(post, path = "/api/models/custom", tag = "models", request_body = serde_json::Value, responses((status = 200, description = "Custom model added", body = serde_json::Value)))]
 pub async fn add_custom_model(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -427,6 +448,7 @@ pub async fn add_custom_model(
 }
 
 /// DELETE /api/models/custom/{id} — Remove a custom model.
+#[utoipa::path(delete, path = "/api/models/custom/{id}", tag = "models", params(("id" = String, Path, description = "Model ID")), responses((status = 200, description = "Custom model removed")))]
 pub async fn remove_custom_model(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(model_id): axum::extract::Path<String>,
@@ -457,6 +479,7 @@ pub async fn remove_custom_model(
 
 // ── A2A (Agent-to-Agent) Protocol Endpoints ─────────────────────────
 
+#[utoipa::path(post, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = serde_json::Value, responses((status = 200, description = "API key set", body = serde_json::Value)))]
 pub async fn set_provider_key(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -633,6 +656,7 @@ pub async fn set_provider_key(
 }
 
 /// DELETE /api/providers/{name}/key — Remove an API key for a provider.
+#[utoipa::path(delete, path = "/api/providers/{name}/key", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "API key deleted")))]
 pub async fn delete_provider_key(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -686,6 +710,7 @@ pub async fn delete_provider_key(
 }
 
 /// POST /api/providers/{name}/test — Test a provider's connectivity.
+#[utoipa::path(post, path = "/api/providers/{name}/test", tag = "models", params(("name" = String, Path, description = "Provider name")), responses((status = 200, description = "Provider test result", body = serde_json::Value)))]
 pub async fn test_provider(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -870,6 +895,7 @@ pub async fn test_provider(
 }
 
 /// PUT /api/providers/{name}/url — Set a custom base URL for a provider.
+#[utoipa::path(put, path = "/api/providers/{name}/url", tag = "models", params(("name" = String, Path, description = "Provider name")), request_body = serde_json::Value, responses((status = 200, description = "Provider URL set", body = serde_json::Value)))]
 pub async fn set_provider_url(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -996,6 +1022,7 @@ static COPILOT_FLOWS: LazyLock<DashMap<String, CopilotFlowState>> = LazyLock::ne
 ///
 /// Initiates a GitHub device flow for Copilot authentication.
 /// Returns a user code and verification URI that the user visits in their browser.
+#[utoipa::path(post, path = "/api/providers/github-copilot/oauth/start", tag = "models", responses((status = 200, description = "OAuth flow started", body = serde_json::Value)))]
 pub async fn copilot_oauth_start() -> impl IntoResponse {
     // Clean up expired flows first
     COPILOT_FLOWS.retain(|_, state| state.expires_at > Instant::now());
@@ -1036,6 +1063,7 @@ pub async fn copilot_oauth_start() -> impl IntoResponse {
 /// Poll the status of a GitHub device flow.
 /// Returns `pending`, `complete`, `expired`, `denied`, or `error`.
 /// On `complete`, saves the token to secrets.env and sets GITHUB_TOKEN.
+#[utoipa::path(get, path = "/api/providers/github-copilot/oauth/poll/{poll_id}", tag = "models", params(("poll_id" = String, Path, description = "Poll ID")), responses((status = 200, description = "OAuth poll result", body = serde_json::Value)))]
 pub async fn copilot_oauth_poll(
     State(state): State<Arc<AppState>>,
     Path(poll_id): Path<String>,
@@ -1137,6 +1165,7 @@ pub async fn copilot_oauth_poll(
 ///
 /// Downloads the latest catalog TOML files from GitHub and caches them locally.
 /// After syncing, the kernel's in-memory catalog is refreshed.
+#[utoipa::path(post, path = "/api/catalog/update", tag = "models", responses((status = 200, description = "Catalog updated", body = serde_json::Value)))]
 pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match librefang_runtime::catalog_sync::sync_catalog().await {
         Ok(result) => {
@@ -1173,6 +1202,7 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
 }
 
 /// GET /api/catalog/status — Check last catalog sync time.
+#[utoipa::path(get, path = "/api/catalog/status", tag = "models", responses((status = 200, description = "Catalog sync status", body = serde_json::Value)))]
 pub async fn catalog_status() -> impl IntoResponse {
     let last_sync = librefang_runtime::catalog_sync::last_sync_time();
     Json(serde_json::json!({

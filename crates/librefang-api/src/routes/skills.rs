@@ -17,6 +17,14 @@ use std::time::Instant;
 // ---------------------------------------------------------------------------
 
 /// GET /api/skills — List installed skills.
+#[utoipa::path(
+    get,
+    path = "/api/skills",
+    tag = "skills",
+    responses(
+        (status = 200, description = "List installed skills", body = Vec<serde_json::Value>)
+    )
+)]
 pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let skills_dir = state.kernel.config.home_dir.join("skills");
     let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
@@ -63,6 +71,15 @@ pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoRespons
 }
 
 /// POST /api/skills/install — Install a skill from FangHub (GitHub).
+#[utoipa::path(
+    post,
+    path = "/api/skills/install",
+    tag = "skills",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Install a skill from FangHub", body = serde_json::Value)
+    )
+)]
 pub async fn install_skill(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillInstallRequest>,
@@ -95,6 +112,15 @@ pub async fn install_skill(
 }
 
 /// POST /api/skills/uninstall — Uninstall a skill.
+#[utoipa::path(
+    post,
+    path = "/api/skills/uninstall",
+    tag = "skills",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Uninstall a skill", body = serde_json::Value)
+    )
+)]
 pub async fn uninstall_skill(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillUninstallRequest>,
@@ -122,6 +148,17 @@ pub async fn uninstall_skill(
 }
 
 /// GET /api/marketplace/search — Search the FangHub marketplace.
+#[utoipa::path(
+    get,
+    path = "/api/marketplace/search",
+    tag = "skills",
+    params(
+        ("q" = Option<String>, Query, description = "Search query"),
+    ),
+    responses(
+        (status = 200, description = "Search the FangHub marketplace", body = serde_json::Value)
+    )
+)]
 pub async fn marketplace_search(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
@@ -164,6 +201,17 @@ pub async fn marketplace_search(
 /// Query parameters:
 /// - `q` — search query (required)
 /// - `limit` — max results (default: 20, max: 50)
+#[utoipa::path(
+    get,
+    path = "/api/clawhub/search",
+    tag = "skills",
+    params(
+        ("q" = Option<String>, Query, description = "Search query"),
+    ),
+    responses(
+        (status = 200, description = "Search ClawHub skills", body = serde_json::Value)
+    )
+)]
 pub async fn clawhub_search(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -239,6 +287,17 @@ pub async fn clawhub_search(
 /// - `sort` — sort order: "trending", "downloads", "stars", "updated", "rating" (default: "trending")
 /// - `limit` — max results (default: 20, max: 50)
 /// - `cursor` — pagination cursor from previous response
+#[utoipa::path(
+    get,
+    path = "/api/clawhub/browse",
+    tag = "skills",
+    params(
+        ("q" = Option<String>, Query, description = "Search query"),
+    ),
+    responses(
+        (status = 200, description = "Browse ClawHub skills by sort order", body = serde_json::Value)
+    )
+)]
 pub async fn clawhub_browse(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -302,6 +361,17 @@ pub async fn clawhub_browse(
 }
 
 /// GET /api/clawhub/skill/{slug} — Get detailed info about a ClawHub skill.
+#[utoipa::path(
+    get,
+    path = "/api/clawhub/skill/{slug}",
+    tag = "skills",
+    params(
+        ("slug" = String, Path, description = "Skill slug"),
+    ),
+    responses(
+        (status = 200, description = "Get detailed info about a ClawHub skill", body = serde_json::Value)
+    )
+)]
 pub async fn clawhub_skill_detail(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
@@ -366,6 +436,17 @@ pub async fn clawhub_skill_detail(
 }
 
 /// GET /api/clawhub/skill/{slug}/code — Fetch the source code (SKILL.md) of a ClawHub skill.
+#[utoipa::path(
+    get,
+    path = "/api/clawhub/skill/{slug}/code",
+    tag = "skills",
+    params(
+        ("slug" = String, Path, description = "Skill slug"),
+    ),
+    responses(
+        (status = 200, description = "Fetch source code of a ClawHub skill", body = serde_json::Value)
+    )
+)]
 pub async fn clawhub_skill_code(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
@@ -409,6 +490,15 @@ pub async fn clawhub_skill_code(
 ///
 /// Runs the full security pipeline: SHA256 verification, format detection,
 /// manifest security scan, prompt injection scan, and binary dependency check.
+#[utoipa::path(
+    post,
+    path = "/api/clawhub/install",
+    tag = "skills",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Install a skill from ClawHub", body = serde_json::Value)
+    )
+)]
 pub async fn clawhub_install(
     State(state): State<Arc<AppState>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
@@ -514,6 +604,14 @@ fn server_platform() -> &'static str {
 }
 
 /// GET /api/hands — List all hand definitions (marketplace).
+#[utoipa::path(
+    get,
+    path = "/api/hands",
+    tag = "hands",
+    responses(
+        (status = 200, description = "List all hand definitions", body = serde_json::Value)
+    )
+)]
 pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let defs = state.kernel.hand_registry.list_definitions();
     let hands: Vec<serde_json::Value> = defs
@@ -558,6 +656,14 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 /// GET /api/hands/active — List active hand instances.
+#[utoipa::path(
+    get,
+    path = "/api/hands/active",
+    tag = "hands",
+    responses(
+        (status = 200, description = "List active hand instances", body = serde_json::Value)
+    )
+)]
 pub async fn list_active_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let instances = state.kernel.hand_registry.list_instances();
     let items: Vec<serde_json::Value> = instances
@@ -579,6 +685,17 @@ pub async fn list_active_hands(State(state): State<Arc<AppState>>) -> impl IntoR
 }
 
 /// GET /api/hands/{hand_id} — Get a single hand definition with requirements check.
+#[utoipa::path(
+    get,
+    path = "/api/hands/{hand_id}",
+    tag = "hands",
+    params(
+        ("hand_id" = String, Path, description = "Hand ID"),
+    ),
+    responses(
+        (status = 200, description = "Get a single hand definition with requirements", body = serde_json::Value)
+    )
+)]
 pub async fn get_hand(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
@@ -659,6 +776,17 @@ pub async fn get_hand(
 }
 
 /// POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a hand.
+#[utoipa::path(
+    post,
+    path = "/api/hands/{hand_id}/check-deps",
+    tag = "hands",
+    params(
+        ("hand_id" = String, Path, description = "Hand ID"),
+    ),
+    responses(
+        (status = 200, description = "Re-check dependency status for a hand", body = serde_json::Value)
+    )
+)]
 pub async fn check_hand_deps(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
@@ -713,6 +841,17 @@ pub async fn check_hand_deps(
 }
 
 /// POST /api/hands/{hand_id}/install-deps — Auto-install missing dependencies for a hand.
+#[utoipa::path(
+    post,
+    path = "/api/hands/{hand_id}/install-deps",
+    tag = "hands",
+    params(
+        ("hand_id" = String, Path, description = "Hand ID"),
+    ),
+    responses(
+        (status = 200, description = "Auto-install missing dependencies for a hand", body = serde_json::Value)
+    )
+)]
 pub async fn install_hand_deps(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
@@ -949,6 +1088,15 @@ pub async fn install_hand_deps(
 }
 
 /// POST /api/hands/install — Install a hand from TOML content.
+#[utoipa::path(
+    post,
+    path = "/api/hands/install",
+    tag = "hands",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Install a hand from TOML content", body = serde_json::Value)
+    )
+)]
 pub async fn install_hand(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -985,6 +1133,18 @@ pub async fn install_hand(
 }
 
 /// POST /api/hands/{hand_id}/activate — Activate a hand (spawns agent).
+#[utoipa::path(
+    post,
+    path = "/api/hands/{hand_id}/activate",
+    tag = "hands",
+    params(
+        ("hand_id" = String, Path, description = "Hand ID"),
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Activate a hand (spawns agent)", body = serde_json::Value)
+    )
+)]
 pub async fn activate_hand(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
@@ -1036,6 +1196,17 @@ pub async fn activate_hand(
 }
 
 /// POST /api/hands/instances/{id}/pause — Pause a hand instance.
+#[utoipa::path(
+    post,
+    path = "/api/hands/instances/{id}/pause",
+    tag = "hands",
+    params(
+        ("id" = String, Path, description = "Instance ID"),
+    ),
+    responses(
+        (status = 200, description = "Pause a hand instance", body = serde_json::Value)
+    )
+)]
 pub async fn pause_hand(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
@@ -1053,6 +1224,17 @@ pub async fn pause_hand(
 }
 
 /// POST /api/hands/instances/{id}/resume — Resume a paused hand instance.
+#[utoipa::path(
+    post,
+    path = "/api/hands/instances/{id}/resume",
+    tag = "hands",
+    params(
+        ("id" = String, Path, description = "Instance ID"),
+    ),
+    responses(
+        (status = 200, description = "Resume a paused hand instance", body = serde_json::Value)
+    )
+)]
 pub async fn resume_hand(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
@@ -1070,6 +1252,17 @@ pub async fn resume_hand(
 }
 
 /// DELETE /api/hands/instances/{id} — Deactivate a hand (kills agent).
+#[utoipa::path(
+    delete,
+    path = "/api/hands/instances/{id}",
+    tag = "hands",
+    params(
+        ("id" = String, Path, description = "Instance ID"),
+    ),
+    responses(
+        (status = 200, description = "Deactivate a hand (kills agent)", body = serde_json::Value)
+    )
+)]
 pub async fn deactivate_hand(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
@@ -1087,6 +1280,17 @@ pub async fn deactivate_hand(
 }
 
 /// GET /api/hands/{hand_id}/settings — Get settings schema and current values for a hand.
+#[utoipa::path(
+    get,
+    path = "/api/hands/{hand_id}/settings",
+    tag = "hands",
+    params(
+        ("hand_id" = String, Path, description = "Hand ID"),
+    ),
+    responses(
+        (status = 200, description = "Get settings schema and current values", body = serde_json::Value)
+    )
+)]
 pub async fn get_hand_settings(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
@@ -1126,6 +1330,18 @@ pub async fn get_hand_settings(
 }
 
 /// PUT /api/hands/{hand_id}/settings — Update settings for a hand instance.
+#[utoipa::path(
+    put,
+    path = "/api/hands/{hand_id}/settings",
+    tag = "hands",
+    params(
+        ("hand_id" = String, Path, description = "Hand ID"),
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Update settings for a hand instance", body = serde_json::Value)
+    )
+)]
 pub async fn update_hand_settings(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
@@ -1166,6 +1382,17 @@ pub async fn update_hand_settings(
 }
 
 /// GET /api/hands/instances/{id}/stats — Get dashboard stats for a hand instance.
+#[utoipa::path(
+    get,
+    path = "/api/hands/instances/{id}/stats",
+    tag = "hands",
+    params(
+        ("id" = String, Path, description = "Instance ID"),
+    ),
+    responses(
+        (status = 200, description = "Get dashboard stats for a hand instance", body = serde_json::Value)
+    )
+)]
 pub async fn hand_stats(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
@@ -1236,6 +1463,17 @@ pub async fn hand_stats(
 }
 
 /// GET /api/hands/instances/{id}/browser — Get live browser state for a hand instance.
+#[utoipa::path(
+    get,
+    path = "/api/hands/instances/{id}/browser",
+    tag = "hands",
+    params(
+        ("id" = String, Path, description = "Instance ID"),
+    ),
+    responses(
+        (status = 200, description = "Get live browser state for a hand instance", body = serde_json::Value)
+    )
+)]
 pub async fn hand_instance_browser(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
@@ -1368,6 +1606,14 @@ fn http_compat_tool_summary(
 }
 
 /// GET /api/mcp/servers — List configured MCP servers and their tools.
+#[utoipa::path(
+    get,
+    path = "/api/mcp/servers",
+    tag = "mcp",
+    responses(
+        (status = 200, description = "List configured MCP servers and their tools", body = serde_json::Value)
+    )
+)]
 pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Get configured servers from config
     let config_servers: Vec<serde_json::Value> = state
@@ -1453,6 +1699,15 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
 ///
 /// Expects a JSON body matching `McpServerConfigEntry` (name, transport, timeout_secs, env).
 /// Persists to config.toml and triggers a config reload.
+#[utoipa::path(
+    post,
+    path = "/api/mcp/servers",
+    tag = "mcp",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Add a new MCP server configuration", body = serde_json::Value)
+    )
+)]
 pub async fn add_mcp_server(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -1543,6 +1798,18 @@ pub async fn add_mcp_server(
 /// Replaces the existing entry with the provided JSON body. The `name` path
 /// parameter identifies which server to update; the body's `name` field (if
 /// present) is ignored in favour of the path parameter.
+#[utoipa::path(
+    put,
+    path = "/api/mcp/servers/{name}",
+    tag = "mcp",
+    params(
+        ("name" = String, Path, description = "Server name"),
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Update an existing MCP server configuration", body = serde_json::Value)
+    )
+)]
 pub async fn update_mcp_server(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1623,6 +1890,17 @@ pub async fn update_mcp_server(
 }
 
 /// DELETE /api/mcp/servers/{name} — Remove an MCP server configuration.
+#[utoipa::path(
+    delete,
+    path = "/api/mcp/servers/{name}",
+    tag = "mcp",
+    params(
+        ("name" = String, Path, description = "Server name"),
+    ),
+    responses(
+        (status = 200, description = "Remove an MCP server configuration", body = serde_json::Value)
+    )
+)]
 pub async fn delete_mcp_server(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1742,6 +2020,15 @@ fn remove_mcp_server_config(config_path: &std::path::Path, name: &str) -> Result
     Ok(())
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/skills/create",
+    tag = "skills",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Create a new prompt-only skill", body = serde_json::Value)
+    )
+)]
 pub async fn create_skill(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -2052,6 +2339,14 @@ pub(crate) fn remove_channel_config(
 // ---------------------------------------------------------------------------
 
 /// GET /api/integrations — List installed integrations with status.
+#[utoipa::path(
+    get,
+    path = "/api/integrations",
+    tag = "integrations",
+    responses(
+        (status = 200, description = "List installed integrations with status", body = serde_json::Value)
+    )
+)]
 pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let registry = state
         .kernel
@@ -2090,6 +2385,14 @@ pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoR
 }
 
 /// GET /api/integrations/available — List all available templates.
+#[utoipa::path(
+    get,
+    path = "/api/integrations/available",
+    tag = "integrations",
+    responses(
+        (status = 200, description = "List all available integration templates", body = serde_json::Value)
+    )
+)]
 pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let registry = state
         .kernel
@@ -2129,6 +2432,15 @@ pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> 
 }
 
 /// POST /api/integrations/add — Install an integration.
+#[utoipa::path(
+    post,
+    path = "/api/integrations/add",
+    tag = "integrations",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Install an integration", body = serde_json::Value)
+    )
+)]
 pub async fn add_integration(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
@@ -2197,6 +2509,17 @@ pub async fn add_integration(
 }
 
 /// DELETE /api/integrations/:id — Remove an integration.
+#[utoipa::path(
+    delete,
+    path = "/api/integrations/{id}",
+    tag = "integrations",
+    params(
+        ("id" = String, Path, description = "Integration ID"),
+    ),
+    responses(
+        (status = 200, description = "Remove an integration", body = serde_json::Value)
+    )
+)]
 pub async fn remove_integration(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -2235,6 +2558,17 @@ pub async fn remove_integration(
 }
 
 /// POST /api/integrations/:id/reconnect — Reconnect an MCP server.
+#[utoipa::path(
+    post,
+    path = "/api/integrations/{id}/reconnect",
+    tag = "integrations",
+    params(
+        ("id" = String, Path, description = "Integration ID"),
+    ),
+    responses(
+        (status = 200, description = "Reconnect an integration MCP server", body = serde_json::Value)
+    )
+)]
 pub async fn reconnect_integration(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -2276,6 +2610,14 @@ pub async fn reconnect_integration(
 }
 
 /// GET /api/integrations/health — Health status for all integrations.
+#[utoipa::path(
+    get,
+    path = "/api/integrations/health",
+    tag = "integrations",
+    responses(
+        (status = 200, description = "Health status for all integrations", body = serde_json::Value)
+    )
+)]
 pub async fn integrations_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let health_entries = state.kernel.extension_health.all_health();
     let entries: Vec<serde_json::Value> = health_entries
@@ -2302,6 +2644,14 @@ pub async fn integrations_health(State(state): State<Arc<AppState>>) -> impl Int
 }
 
 /// POST /api/integrations/reload — Hot-reload integration configs and reconnect MCP.
+#[utoipa::path(
+    post,
+    path = "/api/integrations/reload",
+    tag = "integrations",
+    responses(
+        (status = 200, description = "Hot-reload integration configs and reconnect MCP", body = serde_json::Value)
+    )
+)]
 pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.kernel.reload_extension_mcps().await {
         Ok(connected) => (
@@ -2323,6 +2673,14 @@ pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl Int
 // ---------------------------------------------------------------------------
 
 /// GET /api/extensions — List all installed extensions (integrations) with status.
+#[utoipa::path(
+    get,
+    path = "/api/extensions",
+    tag = "extensions",
+    responses(
+        (status = 200, description = "List all installed extensions with status", body = serde_json::Value)
+    )
+)]
 pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let registry = state
         .kernel
@@ -2364,6 +2722,17 @@ pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoRes
 }
 
 /// GET /api/extensions/:name — Get details for a single extension by name.
+#[utoipa::path(
+    get,
+    path = "/api/extensions/{name}",
+    tag = "extensions",
+    params(
+        ("name" = String, Path, description = "Extension name"),
+    ),
+    responses(
+        (status = 200, description = "Get details for a single extension", body = serde_json::Value)
+    )
+)]
 pub async fn get_extension(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -2430,6 +2799,15 @@ pub async fn get_extension(
 }
 
 /// POST /api/extensions/install — Install an extension by name.
+#[utoipa::path(
+    post,
+    path = "/api/extensions/install",
+    tag = "extensions",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Install an extension by name", body = serde_json::Value)
+    )
+)]
 pub async fn install_extension(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExtensionInstallRequest>,
@@ -2495,6 +2873,15 @@ pub async fn install_extension(
 }
 
 /// POST /api/extensions/uninstall — Uninstall an extension by name.
+#[utoipa::path(
+    post,
+    path = "/api/extensions/uninstall",
+    tag = "extensions",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Uninstall an extension by name", body = serde_json::Value)
+    )
+)]
 pub async fn uninstall_extension(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ExtensionUninstallRequest>,

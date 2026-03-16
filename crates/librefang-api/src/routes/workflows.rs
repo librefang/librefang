@@ -19,6 +19,16 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 
 /// POST /api/workflows — Register a new workflow.
+#[utoipa::path(
+    post,
+    path = "/api/workflows",
+    tag = "workflows",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Workflow created", body = serde_json::Value),
+        (status = 400, description = "Invalid workflow definition")
+    )
+)]
 pub async fn create_workflow(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
@@ -102,6 +112,14 @@ pub async fn create_workflow(
 }
 
 /// GET /api/workflows — List all workflows.
+#[utoipa::path(
+    get,
+    path = "/api/workflows",
+    tag = "workflows",
+    responses(
+        (status = 200, description = "List workflows", body = Vec<serde_json::Value>)
+    )
+)]
 pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let workflows = state.kernel.workflows.list_workflows().await;
     let list: Vec<serde_json::Value> = workflows
@@ -120,6 +138,7 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
 }
 
 /// POST /api/workflows/:id/run — Execute a workflow.
+#[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "Workflow run started", body = serde_json::Value)))]
 pub async fn run_workflow(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -157,6 +176,7 @@ pub async fn run_workflow(
 }
 
 /// GET /api/workflows/:id/runs — List runs for a workflow.
+#[utoipa::path(get, path = "/api/workflows/{id}/runs", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "List workflow runs", body = Vec<serde_json::Value>)))]
 pub async fn list_workflow_runs(
     State(state): State<Arc<AppState>>,
     Path(_id): Path<String>,
@@ -183,6 +203,16 @@ pub async fn list_workflow_runs(
 // ---------------------------------------------------------------------------
 
 /// POST /api/triggers — Register a new event trigger.
+#[utoipa::path(
+    post,
+    path = "/api/triggers",
+    tag = "workflows",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Trigger created", body = serde_json::Value),
+        (status = 400, description = "Invalid trigger definition")
+    )
+)]
 pub async fn create_trigger(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
@@ -256,6 +286,14 @@ pub async fn create_trigger(
 }
 
 /// GET /api/triggers — List all triggers (optionally filter by ?agent_id=...).
+#[utoipa::path(
+    get,
+    path = "/api/triggers",
+    tag = "workflows",
+    responses(
+        (status = 200, description = "List triggers", body = Vec<serde_json::Value>)
+    )
+)]
 pub async fn list_triggers(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -284,6 +322,7 @@ pub async fn list_triggers(
 }
 
 /// DELETE /api/triggers/:id — Remove a trigger.
+#[utoipa::path(delete, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), responses((status = 200, description = "Trigger deleted")))]
 pub async fn delete_trigger(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -316,6 +355,7 @@ pub async fn delete_trigger(
 // ---------------------------------------------------------------------------
 
 /// PUT /api/triggers/:id — Update a trigger (enable/disable toggle).
+#[utoipa::path(put, path = "/api/triggers/{id}", tag = "workflows", params(("id" = String, Path, description = "Trigger ID")), request_body = serde_json::Value, responses((status = 200, description = "Trigger updated", body = serde_json::Value)))]
 pub async fn update_trigger(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -369,6 +409,14 @@ fn schedule_shared_agent_id() -> AgentId {
 const SCHEDULES_KEY: &str = "__librefang_schedules";
 
 /// GET /api/schedules — List all cron-based scheduled jobs.
+#[utoipa::path(
+    get,
+    path = "/api/schedules",
+    tag = "workflows",
+    responses(
+        (status = 200, description = "List schedules", body = Vec<serde_json::Value>)
+    )
+)]
 pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agent_id = schedule_shared_agent_id();
     match state.kernel.memory.structured_get(agent_id, SCHEDULES_KEY) {
@@ -385,6 +433,7 @@ pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResp
 }
 
 /// GET /api/schedules/{id} — Get a specific schedule by ID.
+#[utoipa::path(get, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule details", body = serde_json::Value)))]
 pub async fn get_schedule(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -416,6 +465,16 @@ pub async fn get_schedule(
 }
 
 /// POST /api/schedules — Create a new cron-based scheduled job.
+#[utoipa::path(
+    post,
+    path = "/api/schedules",
+    tag = "workflows",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Schedule created", body = serde_json::Value),
+        (status = 400, description = "Invalid schedule definition")
+    )
+)]
 pub async fn create_schedule(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
@@ -515,6 +574,7 @@ pub async fn create_schedule(
 }
 
 /// PUT /api/schedules/:id — Update a scheduled job (toggle enabled, edit fields).
+#[utoipa::path(put, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), request_body = serde_json::Value, responses((status = 200, description = "Schedule updated", body = serde_json::Value)))]
 pub async fn update_schedule(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -582,6 +642,7 @@ pub async fn update_schedule(
 }
 
 /// DELETE /api/schedules/:id — Remove a scheduled job.
+#[utoipa::path(delete, path = "/api/schedules/{id}", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule deleted")))]
 pub async fn delete_schedule(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -621,6 +682,7 @@ pub async fn delete_schedule(
 }
 
 /// POST /api/schedules/:id/run — Manually run a scheduled job now.
+#[utoipa::path(post, path = "/api/schedules/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Schedule ID")), responses((status = 200, description = "Schedule triggered", body = serde_json::Value)))]
 pub async fn run_schedule(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -740,6 +802,7 @@ pub async fn run_schedule(
 // ---------------------------------------------------------------------------
 
 /// GET /api/cron/jobs — List all cron jobs, optionally filtered by agent_id.
+#[utoipa::path(get, path = "/api/cron/jobs", tag = "workflows", responses((status = 200, description = "List cron jobs", body = Vec<serde_json::Value>)))]
 pub async fn list_cron_jobs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -772,6 +835,7 @@ pub async fn list_cron_jobs(
 }
 
 /// POST /api/cron/jobs — Create a new cron job.
+#[utoipa::path(post, path = "/api/cron/jobs", tag = "workflows", request_body = serde_json::Value, responses((status = 200, description = "Cron job created", body = serde_json::Value)))]
 pub async fn create_cron_job(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -790,6 +854,7 @@ pub async fn create_cron_job(
 }
 
 /// DELETE /api/cron/jobs/{id} — Delete a cron job.
+#[utoipa::path(delete, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job deleted")))]
 pub async fn delete_cron_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -821,6 +886,7 @@ pub async fn delete_cron_job(
 }
 
 /// PUT /api/cron/jobs/{id} — Update a cron job's configuration.
+#[utoipa::path(put, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = serde_json::Value, responses((status = 200, description = "Cron job updated", body = serde_json::Value)))]
 pub async fn update_cron_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -851,6 +917,7 @@ pub async fn update_cron_job(
 }
 
 /// PUT /api/cron/jobs/{id}/enable — Enable or disable a cron job.
+#[utoipa::path(put, path = "/api/cron/jobs/{id}/enable", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), request_body = serde_json::Value, responses((status = 200, description = "Cron job toggled", body = serde_json::Value)))]
 pub async fn toggle_cron_job(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -884,6 +951,7 @@ pub async fn toggle_cron_job(
 }
 
 /// GET /api/cron/jobs/{id}/status — Get status of a specific cron job.
+#[utoipa::path(get, path = "/api/cron/jobs/{id}/status", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job status", body = serde_json::Value)))]
 pub async fn cron_job_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

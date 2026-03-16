@@ -124,6 +124,16 @@ async fn resolve_manifest(
 }
 
 /// POST /api/agents — Spawn a new agent.
+#[utoipa::path(
+    post,
+    path = "/api/agents",
+    tag = "agents",
+    request_body = crate::types::SpawnRequest,
+    responses(
+        (status = 200, description = "Agent spawned", body = crate::types::SpawnResponse),
+        (status = 400, description = "Invalid manifest")
+    )
+)]
 pub async fn spawn_agent(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SpawnRequest>,
@@ -188,6 +198,15 @@ fn validate_bulk_size(len: usize) -> Result<(), (StatusCode, Json<serde_json::Va
 }
 
 /// POST /api/agents/bulk — Create multiple agents at once.
+#[utoipa::path(
+    post,
+    path = "/api/agents/bulk",
+    tag = "agents",
+    request_body(content = BulkCreateRequest, description = "Array of agent spawn requests"),
+    responses(
+        (status = 200, description = "Create multiple agents at once", body = serde_json::Value)
+    )
+)]
 pub async fn bulk_create_agents(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BulkCreateRequest>,
@@ -250,6 +269,15 @@ pub async fn bulk_create_agents(
 }
 
 /// DELETE /api/agents/bulk — Delete multiple agents at once.
+#[utoipa::path(
+    delete,
+    path = "/api/agents/bulk",
+    tag = "agents",
+    request_body(content = BulkAgentIdsRequest, description = "Array of agent IDs to delete"),
+    responses(
+        (status = 200, description = "Delete multiple agents at once", body = serde_json::Value)
+    )
+)]
 pub async fn bulk_delete_agents(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BulkAgentIdsRequest>,
@@ -308,6 +336,15 @@ pub async fn bulk_delete_agents(
 }
 
 /// POST /api/agents/bulk/start — Set multiple agents to Full mode.
+#[utoipa::path(
+    post,
+    path = "/api/agents/bulk/start",
+    tag = "agents",
+    request_body(content = BulkAgentIdsRequest, description = "Array of agent IDs to start"),
+    responses(
+        (status = 200, description = "Start multiple agents (set to Full mode)", body = serde_json::Value)
+    )
+)]
 pub async fn bulk_start_agents(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BulkAgentIdsRequest>,
@@ -368,6 +405,15 @@ pub async fn bulk_start_agents(
 }
 
 /// POST /api/agents/bulk/stop — Stop multiple agents' current runs.
+#[utoipa::path(
+    post,
+    path = "/api/agents/bulk/stop",
+    tag = "agents",
+    request_body(content = BulkAgentIdsRequest, description = "Array of agent IDs to stop"),
+    responses(
+        (status = 200, description = "Stop multiple agents' current runs", body = serde_json::Value)
+    )
+)]
 pub async fn bulk_stop_agents(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BulkAgentIdsRequest>,
@@ -431,6 +477,14 @@ pub async fn bulk_stop_agents(
 }
 
 /// GET /api/agents — List all agents.
+#[utoipa::path(
+    get,
+    path = "/api/agents",
+    tag = "agents",
+    responses(
+        (status = 200, description = "List all agents", body = Vec<serde_json::Value>)
+    )
+)]
 pub async fn list_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Snapshot catalog once for enrichment
     let catalog = state.kernel.model_catalog.read().ok();
@@ -665,6 +719,17 @@ fn mime_from_url(url: &str) -> Option<String> {
 }
 
 /// POST /api/agents/:id/message — Send a message to an agent.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/message",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body = crate::types::MessageRequest,
+    responses(
+        (status = 200, description = "Message response", body = crate::types::MessageResponse),
+        (status = 404, description = "Agent not found")
+    )
+)]
 pub async fn send_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -756,6 +821,15 @@ pub async fn send_message(
 }
 
 /// GET /api/agents/:id/session — Get agent session (conversation history).
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/session",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Get agent conversation session history", body = serde_json::Value)
+    )
+)]
 pub async fn get_agent_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -953,6 +1027,16 @@ pub async fn get_agent_session(
 }
 
 /// DELETE /api/agents/:id — Kill an agent.
+#[utoipa::path(
+    delete,
+    path = "/api/agents/{id}",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Agent killed"),
+        (status = 404, description = "Agent not found")
+    )
+)]
 pub async fn kill_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -983,6 +1067,16 @@ pub async fn kill_agent(
 }
 
 /// PUT /api/agents/:id/mode — Change an agent's operational mode.
+#[utoipa::path(
+    put,
+    path = "/api/agents/{id}/mode",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = SetModeRequest, description = "New agent mode"),
+    responses(
+        (status = 200, description = "Change an agent's operational mode", body = serde_json::Value)
+    )
+)]
 pub async fn set_agent_mode(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1019,6 +1113,16 @@ pub async fn set_agent_mode(
 // ---------------------------------------------------------------------------
 
 /// GET /api/agents/:id — Get a single agent's detailed info.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Agent details", body = serde_json::Value),
+        (status = 404, description = "Agent not found")
+    )
+)]
 pub async fn get_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1078,6 +1182,16 @@ pub async fn get_agent(
 }
 
 /// POST /api/agents/:id/message/stream — SSE streaming response.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/message/stream",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body = crate::types::MessageRequest,
+    responses(
+        (status = 200, description = "Streaming message response (SSE)")
+    )
+)]
 pub async fn send_message_stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1177,6 +1291,15 @@ pub async fn send_message_stream(
     Sse::new(sse_stream).into_response()
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/sessions",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "List all sessions for an agent", body = serde_json::Value)
+    )
+)]
 pub async fn list_agent_sessions(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1203,6 +1326,16 @@ pub async fn list_agent_sessions(
 }
 
 /// POST /api/agents/{id}/sessions — Create a new session for an agent.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/sessions",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = serde_json::Value, description = "Optional label for the new session"),
+    responses(
+        (status = 200, description = "Create a new session for an agent", body = serde_json::Value)
+    )
+)]
 pub async fn create_agent_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1228,6 +1361,18 @@ pub async fn create_agent_session(
 }
 
 /// POST /api/agents/{id}/sessions/{session_id}/switch — Switch to an existing session.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/sessions/{session_id}/switch",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("session_id" = String, Path, description = "Session ID to switch to"),
+    ),
+    responses(
+        (status = 200, description = "Switch to an existing session", body = serde_json::Value)
+    )
+)]
 pub async fn switch_agent_session(
     State(state): State<Arc<AppState>>,
     Path((id, session_id_str)): Path<(String, String)>,
@@ -1265,6 +1410,15 @@ pub async fn switch_agent_session(
 // ── Extended Chat Command API Endpoints ─────────────────────────────────
 
 /// POST /api/agents/{id}/session/reset — Reset an agent's session.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/session/reset",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Reset an agent's current session", body = serde_json::Value)
+    )
+)]
 pub async fn reset_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1291,6 +1445,15 @@ pub async fn reset_session(
 }
 
 /// DELETE /api/agents/{id}/history — Clear ALL conversation history for an agent.
+#[utoipa::path(
+    delete,
+    path = "/api/agents/{id}/history",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Clear all conversation history for an agent", body = serde_json::Value)
+    )
+)]
 pub async fn clear_agent_history(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1323,6 +1486,15 @@ pub async fn clear_agent_history(
 }
 
 /// POST /api/agents/{id}/session/compact — Trigger LLM session compaction.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/session/compact",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Trigger LLM session compaction", body = serde_json::Value)
+    )
+)]
 pub async fn compact_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1349,6 +1521,15 @@ pub async fn compact_session(
 }
 
 /// POST /api/agents/{id}/stop — Cancel an agent's current LLM run.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/stop",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Cancel an agent's current LLM run", body = serde_json::Value)
+    )
+)]
 pub async fn stop_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1378,6 +1559,16 @@ pub async fn stop_agent(
     }
 }
 
+#[utoipa::path(
+    put,
+    path = "/api/agents/{id}/model",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = serde_json::Value, description = "Model name and optional provider"),
+    responses(
+        (status = 200, description = "Change an agent's LLM model", body = serde_json::Value)
+    )
+)]
 pub async fn set_model(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1439,6 +1630,15 @@ pub async fn set_model(
 ///
 /// Returns structured traces showing why each tool was selected during the last
 /// agent loop execution. Useful for debugging, auditing, and optimization.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/traces",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Get decision traces from the agent's most recent message", body = serde_json::Value)
+    )
+)]
 pub async fn get_agent_traces(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1475,6 +1675,15 @@ pub async fn get_agent_traces(
 }
 
 /// GET /api/agents/{id}/tools — Get an agent's tool allowlist/blocklist.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/tools",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Get an agent's tool allowlist and blocklist", body = serde_json::Value)
+    )
+)]
 pub async fn get_agent_tools(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1507,6 +1716,16 @@ pub async fn get_agent_tools(
 }
 
 /// PUT /api/agents/{id}/tools — Update an agent's tool allowlist/blocklist.
+#[utoipa::path(
+    put,
+    path = "/api/agents/{id}/tools",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = serde_json::Value, description = "Tool allowlist and/or blocklist arrays"),
+    responses(
+        (status = 200, description = "Update an agent's tool allowlist and blocklist", body = serde_json::Value)
+    )
+)]
 pub async fn set_agent_tools(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1560,6 +1779,15 @@ pub async fn set_agent_tools(
 // ── Per-Agent Skill & MCP Endpoints ────────────────────────────────────
 
 /// GET /api/agents/{id}/skills — Get an agent's skill assignment info.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/skills",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Get an agent's skill assignment info", body = serde_json::Value)
+    )
+)]
 pub async fn get_agent_skills(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1604,6 +1832,16 @@ pub async fn get_agent_skills(
 }
 
 /// PUT /api/agents/{id}/skills — Update an agent's skill allowlist.
+#[utoipa::path(
+    put,
+    path = "/api/agents/{id}/skills",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = serde_json::Value, description = "Array of skill names"),
+    responses(
+        (status = 200, description = "Update an agent's skill allowlist", body = serde_json::Value)
+    )
+)]
 pub async fn set_agent_skills(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1639,6 +1877,15 @@ pub async fn set_agent_skills(
 }
 
 /// GET /api/agents/{id}/mcp_servers — Get an agent's MCP server assignment info.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/mcp_servers",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Get an agent's MCP server assignment info", body = serde_json::Value)
+    )
+)]
 pub async fn get_agent_mcp_servers(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1698,6 +1945,16 @@ pub async fn get_agent_mcp_servers(
 }
 
 /// PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.
+#[utoipa::path(
+    put,
+    path = "/api/agents/{id}/mcp_servers",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = serde_json::Value, description = "Array of MCP server names"),
+    responses(
+        (status = 200, description = "Update an agent's MCP server allowlist", body = serde_json::Value)
+    )
+)]
 pub async fn set_agent_mcp_servers(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1740,6 +1997,16 @@ pub async fn set_agent_mcp_servers(
 // ---------------------------------------------------------------------------
 
 /// PUT /api/agents/:id — Update an agent (currently: re-set manifest fields).
+#[utoipa::path(
+    put,
+    path = "/api/agents/{id}/update",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = AgentUpdateRequest, description = "New agent manifest TOML"),
+    responses(
+        (status = 200, description = "Update an agent's manifest", body = serde_json::Value)
+    )
+)]
 pub async fn update_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1784,6 +2051,16 @@ pub async fn update_agent(
     )
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/agents/{id}",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = serde_json::Value, description = "Partial agent fields to update"),
+    responses(
+        (status = 200, description = "Partially update an agent (name, description, model, system prompt)", body = serde_json::Value)
+    )
+)]
 pub async fn patch_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1880,7 +2157,7 @@ pub async fn patch_agent(
 // ---------------------------------------------------------------------------
 
 /// Request body for updating agent visual identity.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct UpdateIdentityRequest {
     pub emoji: Option<String>,
     pub avatar_url: Option<String>,
@@ -1894,6 +2171,16 @@ pub struct UpdateIdentityRequest {
 }
 
 /// PATCH /api/agents/{id}/identity — Update an agent's visual identity.
+#[utoipa::path(
+    patch,
+    path = "/api/agents/{id}/identity",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = UpdateIdentityRequest, description = "Identity fields to update"),
+    responses(
+        (status = 200, description = "Update an agent's visual identity", body = serde_json::Value)
+    )
+)]
 pub async fn update_agent_identity(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1967,7 +2254,7 @@ pub async fn update_agent_identity(
 // ---------------------------------------------------------------------------
 
 /// Request body for patching agent config (name, description, prompt, identity, model).
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct PatchAgentConfigRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -1982,10 +2269,21 @@ pub struct PatchAgentConfigRequest {
     pub provider: Option<String>,
     pub api_key_env: Option<String>,
     pub base_url: Option<String>,
+    #[schema(value_type = Option<Vec<serde_json::Value>>)]
     pub fallback_models: Option<Vec<librefang_types::agent::FallbackModel>>,
 }
 
 /// PATCH /api/agents/{id}/config — Hot-update agent name, description, system prompt, and identity.
+#[utoipa::path(
+    patch,
+    path = "/api/agents/{id}/config",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = PatchAgentConfigRequest, description = "Agent config fields to update"),
+    responses(
+        (status = 200, description = "Hot-update agent name, description, system prompt, identity, and model", body = serde_json::Value)
+    )
+)]
 pub async fn patch_agent_config(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -2222,12 +2520,22 @@ pub async fn patch_agent_config(
 // ---------------------------------------------------------------------------
 
 /// Request body for cloning an agent.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct CloneAgentRequest {
     pub new_name: String,
 }
 
 /// POST /api/agents/{id}/clone — Clone an agent with its workspace files.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/clone",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = CloneAgentRequest, description = "New name for the cloned agent"),
+    responses(
+        (status = 200, description = "Clone an agent with its workspace files", body = serde_json::Value)
+    )
+)]
 pub async fn clone_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -2337,6 +2645,15 @@ const KNOWN_IDENTITY_FILES: &[&str] = &[
 ];
 
 /// GET /api/agents/{id}/files — List workspace identity files.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/files",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "List workspace identity files for an agent", body = serde_json::Value)
+    )
+)]
 pub async fn list_agent_files(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -2391,6 +2708,18 @@ pub async fn list_agent_files(
 }
 
 /// GET /api/agents/{id}/files/{filename} — Read a workspace identity file.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/files/{filename}",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("filename" = String, Path, description = "Identity file name"),
+    ),
+    responses(
+        (status = 200, description = "Read a workspace identity file", body = serde_json::Value)
+    )
+)]
 pub async fn get_agent_file(
     State(state): State<Arc<AppState>>,
     Path((id, filename)): Path<(String, String)>,
@@ -2482,12 +2811,25 @@ pub async fn get_agent_file(
 }
 
 /// Request body for writing a workspace identity file.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct SetAgentFileRequest {
     pub content: String,
 }
 
 /// PUT /api/agents/{id}/files/{filename} — Write a workspace identity file.
+#[utoipa::path(
+    put,
+    path = "/api/agents/{id}/files/{filename}",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("filename" = String, Path, description = "Identity file name"),
+    ),
+    request_body(content = SetAgentFileRequest, description = "File content to write"),
+    responses(
+        (status = 200, description = "Write a workspace identity file", body = serde_json::Value)
+    )
+)]
 pub async fn set_agent_file(
     State(state): State<Arc<AppState>>,
     Path((id, filename)): Path<(String, String)>,
@@ -2644,6 +2986,16 @@ fn is_allowed_content_type(ct: &str) -> bool {
 /// Accepts raw body bytes. The client must set:
 /// - `Content-Type` header (e.g., `image/png`, `text/plain`, `application/pdf`)
 /// - `X-Filename` header (original filename)
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/upload",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = String, content_type = "application/octet-stream"),
+    responses(
+        (status = 200, description = "Upload a file attachment for an agent", body = serde_json::Value)
+    )
+)]
 pub async fn upload_file(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -2772,6 +3124,15 @@ pub async fn upload_file(
 }
 
 /// GET /api/uploads/{file_id} — Serve an uploaded file.
+#[utoipa::path(
+    get,
+    path = "/api/uploads/{file_id}",
+    tag = "agents",
+    params(("file_id" = String, Path, description = "Upload file ID (UUID)")),
+    responses(
+        (status = 200, description = "Serve an uploaded file by ID", body = serde_json::Value)
+    )
+)]
 pub async fn serve_upload(Path(file_id): Path<String>) -> impl IntoResponse {
     // Validate file_id is a UUID to prevent path traversal
     if uuid::Uuid::parse_str(&file_id).is_err() {
@@ -2831,6 +3192,15 @@ pub async fn serve_upload(Path(file_id): Path<String>) -> impl IntoResponse {
 // ---------------------------------------------------------------------------
 
 /// GET /api/agents/:id/deliveries — List recent delivery receipts for an agent.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/deliveries",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "List recent delivery receipts for an agent", body = serde_json::Value)
+    )
+)]
 pub async fn get_agent_deliveries(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

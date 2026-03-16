@@ -41,6 +41,7 @@ walkdir = { workspace = true }
 jsonwebtoken = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+utoipa = { version = "5", features = ["axum_extras"] }
 
 [features]
 default = ["all-channels"]

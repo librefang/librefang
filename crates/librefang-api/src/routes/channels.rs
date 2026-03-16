@@ -1003,6 +1003,14 @@ fn channel_config_values(
 }
 
 /// GET /api/channels — List all 40 channel adapters with status and field metadata.
+#[utoipa::path(
+    get,
+    path = "/api/channels",
+    tag = "channels",
+    responses(
+        (status = 200, description = "List configured channels", body = Vec<serde_json::Value>)
+    )
+)]
 pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Read the live channels config (updated on every hot-reload) instead of the
     // stale boot-time kernel.config, so newly configured channels show correctly.
@@ -1058,7 +1066,20 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "configured_count": configured_count,
     }))
 }
-
+#[utoipa::path(
+    post,
+    path = "/api/channels/{name}/configure",
+    tag = "channels",
+    params(
+        ("name" = String, Path, description = "Channel name")
+    ),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Channel configured successfully", body = serde_json::Value),
+        (status = 400, description = "Bad request", body = serde_json::Value),
+        (status = 404, description = "Unknown channel", body = serde_json::Value)
+    )
+)]
 /// POST /api/channels/{name}/configure — Save channel secrets + config fields.
 pub async fn configure_channel(
     State(state): State<Arc<AppState>>,
@@ -1174,7 +1195,19 @@ pub async fn configure_channel(
         }
     }
 }
-
+#[utoipa::path(
+    delete,
+    path = "/api/channels/{name}/configure",
+    tag = "channels",
+    params(
+        ("name" = String, Path, description = "Channel name")
+    ),
+    responses(
+        (status = 200, description = "Channel removed successfully", body = serde_json::Value),
+        (status = 404, description = "Unknown channel", body = serde_json::Value),
+        (status = 500, description = "Internal server error", body = serde_json::Value)
+    )
+)]
 /// DELETE /api/channels/{name}/configure — Remove channel secrets + config section.
 pub async fn remove_channel(
     State(state): State<Arc<AppState>>,
@@ -1239,7 +1272,19 @@ pub async fn remove_channel(
         }
     }
 }
-
+#[utoipa::path(
+    post,
+    path = "/api/channels/{name}/test",
+    tag = "channels",
+    params(
+        ("name" = String, Path, description = "Channel name")
+    ),
+    request_body(content = Option<serde_json::Value>, content_type = "application/json"),
+    responses(
+        (status = 200, description = "Channel test result", body = serde_json::Value),
+        (status = 404, description = "Unknown channel", body = serde_json::Value)
+    )
+)]
 /// POST /api/channels/{name}/test — Connectivity check + optional live test message.
 ///
 /// Accepts an optional JSON body with `channel_id` (for Discord/Slack) or `chat_id`
@@ -1386,7 +1431,15 @@ async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Resul
     }
     Ok(())
 }
-
+#[utoipa::path(
+    post,
+    path = "/api/channels/reload",
+    tag = "channels",
+    responses(
+        (status = 200, description = "Channels reloaded successfully", body = serde_json::Value),
+        (status = 500, description = "Reload failed", body = serde_json::Value)
+    )
+)]
 /// POST /api/channels/reload — Manually trigger a channel hot-reload from disk config.
 pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match crate::channel_bridge::reload_channels_from_disk(&state).await {
@@ -1410,7 +1463,14 @@ pub async fn reload_channels(State(state): State<Arc<AppState>>) -> impl IntoRes
 // ---------------------------------------------------------------------------
 // WhatsApp QR login flow (OpenClaw-style)
 // ---------------------------------------------------------------------------
-
+#[utoipa::path(
+    post,
+    path = "/api/channels/whatsapp/qr/start",
+    tag = "channels",
+    responses(
+        (status = 200, description = "WhatsApp QR session started", body = serde_json::Value)
+    )
+)]
 /// POST /api/channels/whatsapp/qr/start — Start a WhatsApp Web QR login session.
 ///
 /// If a WhatsApp Web gateway is available (e.g. a Baileys-based bridge process),
@@ -1464,7 +1524,17 @@ pub async fn whatsapp_qr_start() -> impl IntoResponse {
         })),
     }
 }
-
+#[utoipa::path(
+    get,
+    path = "/api/channels/whatsapp/qr/status",
+    tag = "channels",
+    params(
+        ("session_id" = Option<String>, Query, description = "WhatsApp login session ID")
+    ),
+    responses(
+        (status = 200, description = "WhatsApp QR scan status", body = serde_json::Value)
+    )
+)]
 /// GET /api/channels/whatsapp/qr/status — Poll for QR scan completion.
 ///
 /// After calling `/qr/start`, the frontend polls this to check if the user

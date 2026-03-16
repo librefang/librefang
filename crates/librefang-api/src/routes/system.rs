@@ -18,6 +18,14 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 
 /// GET /api/profiles — List all tool profiles and their tool lists.
+#[utoipa::path(
+    get,
+    path = "/api/profiles",
+    tag = "system",
+    responses(
+        (status = 200, description = "List tool profiles", body = Vec<serde_json::Value>)
+    )
+)]
 pub async fn list_profiles() -> impl IntoResponse {
     use librefang_types::agent::ToolProfile;
 
@@ -44,6 +52,7 @@ pub async fn list_profiles() -> impl IntoResponse {
 }
 
 /// GET /api/profiles/:name — Get a single profile by name.
+#[utoipa::path(get, path = "/api/profiles/{name}", tag = "system", params(("name" = String, Path, description = "Profile name")), responses((status = 200, description = "Profile details", body = serde_json::Value)))]
 pub async fn get_profile(Path(name): Path<String>) -> impl IntoResponse {
     use librefang_types::agent::ToolProfile;
 
@@ -76,6 +85,7 @@ pub async fn get_profile(Path(name): Path<String>) -> impl IntoResponse {
 // ---------------------------------------------------------------------------
 
 /// GET /api/templates — List available agent templates.
+#[utoipa::path(get, path = "/api/templates", tag = "system", responses((status = 200, description = "List templates", body = Vec<serde_json::Value>)))]
 pub async fn list_templates() -> impl IntoResponse {
     let agents_dir = librefang_kernel::config::librefang_home().join("agents");
     let mut templates = Vec::new();
@@ -114,6 +124,7 @@ pub async fn list_templates() -> impl IntoResponse {
 }
 
 /// GET /api/templates/:name — Get template details.
+#[utoipa::path(get, path = "/api/templates/{name}", tag = "system", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template details", body = serde_json::Value)))]
 pub async fn get_template(Path(name): Path<String>) -> impl IntoResponse {
     let agents_dir = librefang_kernel::config::librefang_home().join("agents");
     let manifest_path = agents_dir.join(&name).join("agent.toml");
@@ -171,6 +182,7 @@ pub async fn get_template(Path(name): Path<String>) -> impl IntoResponse {
 // ---------------------------------------------------------------------------
 
 /// GET /api/memory/agents/:id/kv — List KV pairs for an agent.
+#[utoipa::path(get, path = "/api/memory/agents/{id}/kv", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent KV store", body = serde_json::Value)))]
 pub async fn get_agent_kv(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -203,6 +215,7 @@ pub async fn get_agent_kv(
 }
 
 /// GET /api/memory/agents/:id/kv/:key — Get a specific KV value.
+#[utoipa::path(get, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), responses((status = 200, description = "KV value", body = serde_json::Value)))]
 pub async fn get_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
@@ -236,6 +249,7 @@ pub async fn get_agent_kv_key(
 }
 
 /// PUT /api/memory/agents/:id/kv/:key — Set a KV value.
+#[utoipa::path(put, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), request_body = serde_json::Value, responses((status = 200, description = "KV value set", body = serde_json::Value)))]
 pub async fn set_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
@@ -268,6 +282,7 @@ pub async fn set_agent_kv_key(
 }
 
 /// DELETE /api/memory/agents/:id/kv/:key — Delete a KV value.
+#[utoipa::path(delete, path = "/api/memory/agents/{id}/kv/{key}", tag = "memory", params(("id" = String, Path, description = "Agent ID"), ("key" = String, Path, description = "Key name")), responses((status = 200, description = "KV key deleted")))]
 pub async fn delete_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
@@ -297,6 +312,7 @@ pub async fn delete_agent_kv_key(
 }
 
 /// GET /api/agents/:id/memory/export — Export all KV memory for an agent as JSON.
+#[utoipa::path(get, path = "/api/agents/{id}/memory/export", tag = "memory", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Exported memory", body = serde_json::Value)))]
 pub async fn export_agent_memory(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -345,6 +361,7 @@ pub async fn export_agent_memory(
 ///
 /// Accepts a JSON body with a `kv` object mapping string keys to JSON values.
 /// Optionally accepts `clear_existing: true` to wipe existing memory before import.
+#[utoipa::path(post, path = "/api/agents/{id}/memory/import", tag = "memory", params(("id" = String, Path, description = "Agent ID")), request_body = serde_json::Value, responses((status = 200, description = "Memory imported", body = serde_json::Value)))]
 pub async fn import_agent_memory(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -447,6 +464,7 @@ pub async fn import_agent_memory(
 // ---------------------------------------------------------------------------
 
 /// GET /api/audit/recent — Get recent audit log entries.
+#[utoipa::path(get, path = "/api/audit/recent", tag = "system", responses((status = 200, description = "Recent audit entries", body = Vec<serde_json::Value>)))]
 pub async fn audit_recent(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -483,6 +501,7 @@ pub async fn audit_recent(
 }
 
 /// GET /api/audit/verify — Verify the audit chain integrity.
+#[utoipa::path(get, path = "/api/audit/verify", tag = "system", responses((status = 200, description = "Audit verification result", body = serde_json::Value)))]
 pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let entry_count = state.kernel.audit_log.len();
     match state.kernel.audit_log.verify_integrity() {
@@ -523,6 +542,7 @@ pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoRespon
 /// The endpoint polls the audit log every second and sends only new entries
 /// (tracked by sequence number). On first connect, existing entries are sent
 /// as a backfill so the client has immediate context.
+#[utoipa::path(get, path = "/api/logs/stream", tag = "system", responses((status = 200, description = "SSE log stream")))]
 pub async fn logs_stream(
     State(state): State<Arc<AppState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -625,6 +645,14 @@ fn classify_audit_level(action: &str) -> &'static str {
 // ---------------------------------------------------------------------------
 
 /// GET /api/tools — List all tool definitions (built-in + MCP).
+#[utoipa::path(
+    get,
+    path = "/api/tools",
+    tag = "skills",
+    responses(
+        (status = 200, description = "List available tools", body = Vec<serde_json::Value>)
+    )
+)]
 pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut tools: Vec<serde_json::Value> = builtin_tool_definitions()
         .iter()
@@ -653,6 +681,7 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 /// GET /api/tools/:name — Get a single tool definition by name.
+#[utoipa::path(get, path = "/api/tools/{name}", tag = "skills", params(("name" = String, Path, description = "Tool name")), responses((status = 200, description = "Tool details", body = serde_json::Value)))]
 pub async fn get_tool(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -699,6 +728,14 @@ pub async fn get_tool(
 // ---------------------------------------------------------------------------
 
 /// GET /api/sessions — List all sessions with metadata.
+#[utoipa::path(
+    get,
+    path = "/api/sessions",
+    tag = "sessions",
+    responses(
+        (status = 200, description = "List sessions", body = Vec<serde_json::Value>)
+    )
+)]
 pub async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.kernel.memory.list_sessions() {
         Ok(sessions) => Json(serde_json::json!({"sessions": sessions})),
@@ -707,6 +744,7 @@ pub async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 /// DELETE /api/sessions/:id — Delete a session.
+#[utoipa::path(delete, path = "/api/sessions/{id}", tag = "sessions", params(("id" = String, Path, description = "Session ID")), responses((status = 200, description = "Session deleted")))]
 pub async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -734,6 +772,7 @@ pub async fn delete_session(
 }
 
 /// PUT /api/sessions/:id/label — Set a session label.
+#[utoipa::path(put, path = "/api/sessions/{id}/label", tag = "sessions", params(("id" = String, Path, description = "Session ID")), request_body = serde_json::Value, responses((status = 200, description = "Label set", body = serde_json::Value)))]
 pub async fn set_session_label(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -778,6 +817,7 @@ pub async fn set_session_label(
 }
 
 /// GET /api/sessions/by-label/:label — Find session by label (scoped to agent).
+#[utoipa::path(get, path = "/api/agents/{id}/sessions/by-label/{label}", tag = "sessions", params(("id" = String, Path, description = "Agent ID"), ("label" = String, Path, description = "Session label")), responses((status = 200, description = "Session found", body = serde_json::Value)))]
 pub async fn find_session_by_label(
     State(state): State<Arc<AppState>>,
     Path((agent_id_str, label)): Path<(String, String)>,
@@ -827,6 +867,7 @@ pub async fn find_session_by_label(
 ///
 /// Runs both expired-session and excess-session cleanup using the configured
 /// `[session]` policy. Returns `{"sessions_deleted": N}`.
+#[utoipa::path(post, path = "/api/sessions/cleanup", tag = "sessions", responses((status = 200, description = "Cleanup result", body = serde_json::Value)))]
 pub async fn session_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let cfg = &state.kernel.config.session;
     let mut total: u64 = 0;
@@ -877,6 +918,7 @@ pub async fn session_cleanup(State(state): State<Arc<AppState>>) -> impl IntoRes
 ///
 /// Transforms field names to match the dashboard template expectations:
 /// `action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.
+#[utoipa::path(get, path = "/api/approvals", tag = "approvals", responses((status = 200, description = "List pending approvals", body = Vec<serde_json::Value>)))]
 pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let pending = state.kernel.approval_manager.list_pending();
     let total = pending.len();
@@ -927,6 +969,7 @@ pub struct CreateApprovalRequest {
     pub action_summary: String,
 }
 
+#[utoipa::path(post, path = "/api/approvals", tag = "approvals", request_body = serde_json::Value, responses((status = 200, description = "Approval created", body = serde_json::Value)))]
 pub async fn create_approval(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateApprovalRequest>,
@@ -967,6 +1010,7 @@ pub async fn create_approval(
 }
 
 /// POST /api/approvals/{id}/approve — Approve a pending request.
+#[utoipa::path(post, path = "/api/approvals/{id}/approve", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Request approved", body = serde_json::Value)))]
 pub async fn approve_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -997,6 +1041,7 @@ pub async fn approve_request(
 }
 
 /// POST /api/approvals/{id}/reject — Reject a pending request.
+#[utoipa::path(post, path = "/api/approvals/{id}/reject", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Request rejected", body = serde_json::Value)))]
 pub async fn reject_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -1034,6 +1079,7 @@ pub async fn reject_request(
 ///
 /// Publishes a custom event through the kernel's event system, which can
 /// trigger proactive agents that subscribe to the event type.
+#[utoipa::path(post, path = "/api/hooks/wake", tag = "webhooks", request_body = serde_json::Value, responses((status = 200, description = "Wake hook triggered", body = serde_json::Value)))]
 pub async fn webhook_wake(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -1093,6 +1139,7 @@ pub async fn webhook_wake(
 ///
 /// Sends a message directly to the specified agent and returns the response.
 /// This enables external systems (CI/CD, Slack, etc.) to trigger agent work.
+#[utoipa::path(post, path = "/api/hooks/agent", tag = "webhooks", request_body = serde_json::Value, responses((status = 200, description = "Agent hook triggered", body = serde_json::Value)))]
 pub async fn webhook_agent(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -1182,6 +1229,7 @@ pub async fn webhook_agent(
 // ─── Agent Bindings API ────────────────────────────────────────────────
 
 /// GET /api/bindings — List all agent bindings.
+#[utoipa::path(get, path = "/api/bindings", tag = "system", responses((status = 200, description = "List key bindings", body = Vec<serde_json::Value>)))]
 pub async fn list_bindings(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let bindings = state.kernel.list_bindings();
     (
@@ -1191,6 +1239,7 @@ pub async fn list_bindings(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 /// POST /api/bindings — Add a new agent binding.
+#[utoipa::path(post, path = "/api/bindings", tag = "system", request_body = serde_json::Value, responses((status = 200, description = "Binding added", body = serde_json::Value)))]
 pub async fn add_binding(
     State(state): State<Arc<AppState>>,
     Json(binding): Json<librefang_types::config::AgentBinding>,
@@ -1211,6 +1260,7 @@ pub async fn add_binding(
 }
 
 /// DELETE /api/bindings/:index — Remove a binding by index.
+#[utoipa::path(delete, path = "/api/bindings/{index}", tag = "system", params(("index" = u32, Path, description = "Binding index")), responses((status = 200, description = "Binding removed")))]
 pub async fn remove_binding(
     State(state): State<Arc<AppState>>,
     Path(index): Path<usize>,
@@ -1230,6 +1280,7 @@ pub async fn remove_binding(
 // ─── Device Pairing endpoints ───────────────────────────────────────────
 
 /// POST /api/pairing/request — Create a new pairing request (returns token + QR URI).
+#[utoipa::path(post, path = "/api/pairing/request", tag = "pairing", responses((status = 200, description = "Pairing request created", body = serde_json::Value)))]
 pub async fn pairing_request(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if !state.kernel.config.pairing.enabled {
         return (
@@ -1257,6 +1308,7 @@ pub async fn pairing_request(State(state): State<Arc<AppState>>) -> impl IntoRes
 }
 
 /// POST /api/pairing/complete — Complete pairing with token + device info.
+#[utoipa::path(post, path = "/api/pairing/complete", tag = "pairing", request_body = serde_json::Value, responses((status = 200, description = "Pairing completed", body = serde_json::Value)))]
 pub async fn pairing_complete(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -1306,6 +1358,7 @@ pub async fn pairing_complete(
 }
 
 /// GET /api/pairing/devices — List paired devices.
+#[utoipa::path(get, path = "/api/pairing/devices", tag = "pairing", responses((status = 200, description = "List paired devices", body = Vec<serde_json::Value>)))]
 pub async fn pairing_devices(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if !state.kernel.config.pairing.enabled {
         return (
@@ -1333,6 +1386,7 @@ pub async fn pairing_devices(State(state): State<Arc<AppState>>) -> impl IntoRes
 }
 
 /// DELETE /api/pairing/devices/{id} — Remove a paired device.
+#[utoipa::path(delete, path = "/api/pairing/devices/{id}", tag = "pairing", params(("id" = String, Path, description = "Device ID")), responses((status = 200, description = "Device removed")))]
 pub async fn pairing_remove_device(
     State(state): State<Arc<AppState>>,
     Path(device_id): Path<String>,
@@ -1351,6 +1405,7 @@ pub async fn pairing_remove_device(
 }
 
 /// POST /api/pairing/notify — Push a notification to all paired devices.
+#[utoipa::path(post, path = "/api/pairing/notify", tag = "pairing", request_body = serde_json::Value, responses((status = 200, description = "Notification sent", body = serde_json::Value)))]
 pub async fn pairing_notify(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -1380,6 +1435,7 @@ pub async fn pairing_notify(
 }
 
 /// GET /api/commands — List available chat commands (for dynamic slash menu).
+#[utoipa::path(get, path = "/api/commands", tag = "system", responses((status = 200, description = "List chat commands", body = Vec<serde_json::Value>)))]
 pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut commands = vec![
         serde_json::json!({"cmd": "/help", "desc": "Show available commands"}),
@@ -1413,6 +1469,7 @@ pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 /// GET /api/commands/{name} — Lookup a single command by name.
+#[utoipa::path(get, path = "/api/commands/{name}", tag = "system", params(("name" = String, Path, description = "Command name")), responses((status = 200, description = "Command details", body = serde_json::Value)))]
 pub async fn get_command(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
@@ -1498,6 +1555,7 @@ struct BackupManifest {
 ///
 /// Returns the backup metadata including the filename. The archive is stored
 /// in `<home_dir>/backups/` with a timestamped filename.
+#[utoipa::path(post, path = "/api/backup", tag = "system", responses((status = 200, description = "Backup created", body = serde_json::Value)))]
 pub async fn create_backup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let home_dir = &state.kernel.config.home_dir;
     let backups_dir = home_dir.join("backups");
@@ -1707,6 +1765,7 @@ pub async fn create_backup(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 /// GET /api/backups — List existing backups.
+#[utoipa::path(get, path = "/api/backups", tag = "system", responses((status = 200, description = "List backups", body = Vec<serde_json::Value>)))]
 pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let backups_dir = state.kernel.config.home_dir.join("backups");
     if !backups_dir.exists() {
@@ -1761,6 +1820,7 @@ pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoRespon
 }
 
 /// DELETE /api/backups/{filename} — Delete a specific backup.
+#[utoipa::path(delete, path = "/api/backups/{filename}", tag = "system", params(("filename" = String, Path, description = "Backup filename")), responses((status = 200, description = "Backup deleted")))]
 pub async fn delete_backup(
     State(state): State<Arc<AppState>>,
     Path(filename): Path<String>,
@@ -1808,6 +1868,7 @@ pub async fn delete_backup(
 ///
 /// **Warning**: This overwrites existing state files. The daemon should be
 /// restarted after a restore for all changes to take effect.
+#[utoipa::path(post, path = "/api/restore", tag = "system", request_body = serde_json::Value, responses((status = 200, description = "Backup restored", body = serde_json::Value)))]
 pub async fn restore_backup(
     State(state): State<Arc<AppState>>,
     Json(req): Json<serde_json::Value>,
@@ -1971,6 +2032,7 @@ fn read_backup_manifest(path: &std::path::Path) -> Option<BackupManifest> {
 }
 
 /// GET /api/queue/status — Command queue status and occupancy.
+#[utoipa::path(get, path = "/api/queue/status", tag = "system", responses((status = 200, description = "Queue status", body = serde_json::Value)))]
 pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let occupancy = state.kernel.command_queue.occupancy();
     let lanes: Vec<serde_json::Value> = occupancy
@@ -2029,6 +2091,14 @@ fn validate_webhook_token(headers: &axum::http::HeaderMap, token_env: &str) -> b
 // ---------------------------------------------------------------------------
 
 /// GET /api/versions — List supported API versions and negotiation info.
+#[utoipa::path(
+    get,
+    path = "/api/versions",
+    tag = "system",
+    responses(
+        (status = 200, description = "API version info", body = serde_json::Value)
+    )
+)]
 pub async fn api_versions() -> impl IntoResponse {
     let supported: Vec<&str> = crate::versioning::SUPPORTED_VERSIONS.to_vec();
     let deprecated: Vec<&str> = crate::versioning::DEPRECATED_VERSIONS.to_vec();

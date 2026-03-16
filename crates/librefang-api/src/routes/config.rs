@@ -8,6 +8,14 @@ use axum::response::IntoResponse;
 use axum::Json;
 use std::sync::Arc;
 
+#[utoipa::path(
+    get,
+    path = "/api/status",
+    tag = "system",
+    responses(
+        (status = 200, description = "Daemon status", body = serde_json::Value)
+    )
+)]
 pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents: Vec<serde_json::Value> = state
         .kernel
@@ -47,6 +55,14 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 /// POST /api/shutdown — Graceful shutdown.
+#[utoipa::path(
+    post,
+    path = "/api/shutdown",
+    tag = "system",
+    responses(
+        (status = 200, description = "Graceful daemon shutdown", body = serde_json::Value)
+    )
+)]
 pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     tracing::info!("Shutdown requested via API");
     // SECURITY: Record shutdown in audit trail
@@ -67,6 +83,14 @@ pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 // ---------------------------------------------------------------------------
 
 /// GET /api/version — Build & version info (includes API versioning).
+#[utoipa::path(
+    get,
+    path = "/api/version",
+    tag = "system",
+    responses(
+        (status = 200, description = "Version information", body = serde_json::Value)
+    )
+)]
 pub async fn version() -> impl IntoResponse {
     Json(serde_json::json!({
         "name": "librefang",
@@ -87,6 +111,14 @@ pub async fn version() -> impl IntoResponse {
 /// GET /api/health — Minimal liveness probe (public, no auth required).
 /// Returns only status and version to prevent information leakage.
 /// Use GET /api/health/detail for full diagnostics (requires auth).
+#[utoipa::path(
+    get,
+    path = "/api/health",
+    tag = "system",
+    responses(
+        (status = 200, description = "Health check", body = serde_json::Value)
+    )
+)]
 pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Check database connectivity
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
@@ -107,6 +139,14 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 }
 
 /// GET /api/health/detail — Full health diagnostics (requires auth).
+#[utoipa::path(
+    get,
+    path = "/api/health/detail",
+    tag = "system",
+    responses(
+        (status = 200, description = "Detailed health diagnostics", body = serde_json::Value)
+    )
+)]
 pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let health = state.kernel.supervisor.health();
 
@@ -147,6 +187,14 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
 /// - `librefang_tool_calls_total` — total tool calls (per agent)
 /// - `librefang_panics_total` — supervisor panic count
 /// - `librefang_restarts_total` — supervisor restart count
+#[utoipa::path(
+    get,
+    path = "/api/metrics",
+    tag = "system",
+    responses(
+        (status = 200, description = "Prometheus text-format metrics", body = serde_json::Value)
+    )
+)]
 pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut out = String::with_capacity(2048);
 
@@ -224,6 +272,14 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
 // ---------------------------------------------------------------------------
 
 /// GET /api/config — Get kernel configuration (secrets redacted).
+#[utoipa::path(
+    get,
+    path = "/api/config",
+    tag = "system",
+    responses(
+        (status = 200, description = "Get kernel configuration (secrets redacted)", body = serde_json::Value)
+    )
+)]
 pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Return a redacted view of the kernel config
     let config = &state.kernel.config;
@@ -251,6 +307,14 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
 // ---------------------------------------------------------------------------
 
 /// GET /api/security — Security feature status for the dashboard.
+#[utoipa::path(
+    get,
+    path = "/api/security",
+    tag = "system",
+    responses(
+        (status = 200, description = "Security feature status", body = serde_json::Value)
+    )
+)]
 pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let auth_mode = if state.kernel.config.api_key.is_empty() {
         "localhost_only"
@@ -320,6 +384,14 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/migrate/detect",
+    tag = "system",
+    responses(
+        (status = 200, description = "Detect migratable framework installation", body = serde_json::Value)
+    )
+)]
 pub async fn migrate_detect() -> impl IntoResponse {
     match librefang_migrate::openclaw::detect_openclaw_home() {
         Some(path) => {
@@ -345,6 +417,14 @@ pub async fn migrate_detect() -> impl IntoResponse {
 }
 
 /// POST /api/migrate/scan — Scan a specific directory for OpenClaw workspace.
+#[utoipa::path(
+    post,
+    path = "/api/migrate/scan",
+    tag = "system",
+    responses(
+        (status = 200, description = "Scan directory for migratable workspace", body = serde_json::Value)
+    )
+)]
 pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoResponse {
     let path = std::path::PathBuf::from(&req.path);
     if !path.exists() {
@@ -358,6 +438,14 @@ pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoRespo
 }
 
 /// POST /api/migrate — Run migration from another agent framework.
+#[utoipa::path(
+    post,
+    path = "/api/migrate",
+    tag = "system",
+    responses(
+        (status = 200, description = "Run migration from another agent framework", body = serde_json::Value)
+    )
+)]
 pub async fn run_migrate(Json(req): Json<MigrateRequest>) -> impl IntoResponse {
     let source = match req.source.as_str() {
         "openclaw" => librefang_migrate::MigrateSource::OpenClaw,
@@ -438,6 +526,14 @@ pub async fn run_migrate(Json(req): Json<MigrateRequest>) -> impl IntoResponse {
 /// Reads the config file, diffs against current config, validates the new config,
 /// and applies hot-reloadable actions (approval policy, cron limits, etc.).
 /// Returns the reload plan showing what changed and what was applied.
+#[utoipa::path(
+    post,
+    path = "/api/config/reload",
+    tag = "system",
+    responses(
+        (status = 200, description = "Reload configuration from disk", body = serde_json::Value)
+    )
+)]
 pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // SECURITY: Record config reload in audit trail
     state.kernel.audit_log.record(
@@ -479,6 +575,14 @@ pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoRespo
 // ---------------------------------------------------------------------------
 
 /// GET /api/config/schema — Return a simplified JSON description of the config structure.
+#[utoipa::path(
+    get,
+    path = "/api/config/schema",
+    tag = "system",
+    responses(
+        (status = 200, description = "Get config structure schema", body = serde_json::Value)
+    )
+)]
 pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Build provider/model options from model catalog for dropdowns
     let catalog = state
@@ -583,6 +687,14 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
 ///
 /// Accepts JSON `{ "path": "section.key", "value": "..." }`.
 /// Writes the value to the TOML config file and triggers a reload.
+#[utoipa::path(
+    post,
+    path = "/api/config/set",
+    tag = "system",
+    responses(
+        (status = 200, description = "Set a single config value and persist", body = serde_json::Value)
+    )
+)]
 pub async fn config_set(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,

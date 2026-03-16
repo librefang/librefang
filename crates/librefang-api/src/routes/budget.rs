@@ -13,6 +13,12 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 
 /// GET /api/usage — Get per-agent usage statistics.
+#[utoipa::path(
+    get,
+    path = "/api/usage",
+    tag = "budget",
+    responses((status = 200, description = "Per-agent usage statistics", body = serde_json::Value))
+)]
 pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents: Vec<serde_json::Value> = state
         .kernel
@@ -38,6 +44,12 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
 // ---------------------------------------------------------------------------
 
 /// GET /api/usage/summary — Get overall usage summary from UsageStore.
+#[utoipa::path(
+    get,
+    path = "/api/usage/summary",
+    tag = "budget",
+    responses((status = 200, description = "Overall usage summary", body = serde_json::Value))
+)]
 pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.kernel.memory.usage().query_summary(None) {
         Ok(s) => Json(serde_json::json!({
@@ -58,6 +70,12 @@ pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 /// GET /api/usage/by-model — Get usage grouped by model.
+#[utoipa::path(
+    get,
+    path = "/api/usage/by-model",
+    tag = "budget",
+    responses((status = 200, description = "Usage grouped by model", body = serde_json::Value))
+)]
 pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     match state.kernel.memory.usage().query_by_model() {
         Ok(models) => {
@@ -80,6 +98,12 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
 }
 
 /// GET /api/usage/daily — Get daily usage breakdown for the last 7 days.
+#[utoipa::path(
+    get,
+    path = "/api/usage/daily",
+    tag = "budget",
+    responses((status = 200, description = "Daily usage breakdown", body = serde_json::Value))
+)]
 pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let days = state.kernel.memory.usage().query_daily_breakdown(7);
     let today_cost = state.kernel.memory.usage().query_today_cost();
@@ -112,6 +136,14 @@ pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoRespons
 // ---------------------------------------------------------------------------
 
 /// GET /api/budget — Current budget status (limits, spend, % used).
+#[utoipa::path(
+    get,
+    path = "/api/budget",
+    tag = "budget",
+    responses(
+        (status = 200, description = "Global budget status", body = serde_json::Value)
+    )
+)]
 pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let status = state
         .kernel
@@ -121,6 +153,12 @@ pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoRespo
 }
 
 /// PUT /api/budget — Update global budget limits (in-memory only, not persisted to config.toml).
+#[utoipa::path(
+    put,
+    path = "/api/budget",
+    tag = "budget",
+    responses((status = 200, description = "Updated global budget status", body = serde_json::Value))
+)]
 pub async fn update_budget(
     State(state): State<Arc<AppState>>,
     Json(body): Json<serde_json::Value>,
@@ -157,6 +195,13 @@ pub async fn update_budget(
 }
 
 /// GET /api/budget/agents/{id} — Per-agent budget/quota status.
+#[utoipa::path(
+    get,
+    path = "/api/budget/agents/{id}",
+    tag = "budget",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses((status = 200, description = "Per-agent budget and quota status", body = serde_json::Value))
+)]
 pub async fn agent_budget_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -221,6 +266,14 @@ pub async fn agent_budget_status(
 }
 
 /// GET /api/budget/agents — Per-agent cost ranking (top spenders).
+#[utoipa::path(
+    get,
+    path = "/api/budget/agents",
+    tag = "budget",
+    responses(
+        (status = 200, description = "Per-agent cost ranking", body = Vec<serde_json::Value>)
+    )
+)]
 pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let usage_store = librefang_memory::usage::UsageStore::new(state.kernel.memory.usage_conn());
     let agents: Vec<serde_json::Value> = state
@@ -250,6 +303,13 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
 }
 
 /// PUT /api/budget/agents/{id} — Update per-agent budget limits at runtime.
+#[utoipa::path(
+    put,
+    path = "/api/budget/agents/{id}",
+    tag = "budget",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses((status = 200, description = "Updated agent budget", body = serde_json::Value))
+)]
 pub async fn update_agent_budget(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,

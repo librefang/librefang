@@ -7,6 +7,7 @@ pub mod channel_bridge;
 pub mod middleware;
 pub mod oauth;
 pub mod openai_compat;
+pub mod openapi;
 pub mod rate_limiter;
 pub mod routes;
 pub mod server;
