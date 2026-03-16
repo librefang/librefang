@@ -171,7 +171,7 @@ jobs:
   # ── CLI Binary (Linux, musl — fully static) ─────────────────────────────
   cli_musl:
     name: CLI / ${{ matrix.target }} (static)
-    needs: [create_release]
+    needs: [wait_for_release]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/librefang/sdk-go"
+	"github.com/librefang/librefang/sdk/go"
 )
 
 func main() {

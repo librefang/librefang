@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	"github.com/librefang/sdk-go"
+	"github.com/librefang/librefang/sdk/go"
 )
 
 func main() {

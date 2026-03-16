@@ -1,3 +1,3 @@
-module github.com/librefang/sdk-go
+module github.com/librefang/librefang/sdk/go
 
 go 1.21

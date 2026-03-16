@@ -5,7 +5,7 @@ Official Go client for the LibreFang Agent OS REST API.
 ## Installation
 
 ```bash
-go get github.com/librefang/sdk-go
+go get github.com/librefang/librefang/sdk/go
 ```
 
 ## Usage
@@ -17,7 +17,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/librefang/sdk-go"
+	"github.com/librefang/librefang/sdk/go"
 )
 
 func main() {
