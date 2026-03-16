@@ -67,8 +67,10 @@ fn safe_trim_messages(messages: &mut Vec<Message>, agent_name: &str, user_messag
     let desired_trim = messages.len() - MAX_HISTORY_MESSAGES;
 
     // Find a trim point that does not split ToolUse/ToolResult pairs.
-    let trim_point =
-        crate::session_repair::find_safe_trim_point(messages, desired_trim).unwrap_or(desired_trim);
+    // Filter out 0 — drain(..0) is a no-op and would leave messages untrimmed.
+    let trim_point = crate::session_repair::find_safe_trim_point(messages, desired_trim)
+        .filter(|&p| p > 0)
+        .unwrap_or(desired_trim);
 
     warn!(
         agent = %agent_name,
