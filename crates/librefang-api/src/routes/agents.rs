@@ -13,24 +13,43 @@ use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
-/// POST /api/agents — Spawn a new agent.
-pub async fn spawn_agent(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<SpawnRequest>,
-) -> impl IntoResponse {
-    // Resolve template name → manifest_toml if template is provided and manifest_toml is empty
+// ---------------------------------------------------------------------------
+// Shared manifest resolution helper
+// ---------------------------------------------------------------------------
+
+/// Maximum manifest size (1MB) to prevent parser memory exhaustion.
+const MAX_MANIFEST_SIZE: usize = 1024 * 1024;
+
+/// Resolved manifest ready for spawning.
+struct ResolvedManifest {
+    manifest: AgentManifest,
+    name: String,
+}
+
+/// Error from manifest resolution — carries a user-facing message.
+struct ManifestError {
+    message: String,
+}
+
+/// Resolve a `SpawnRequest` into a parsed `AgentManifest`.
+///
+/// Handles template lookup, path sanitization, size guard, signed manifest
+/// verification, and TOML parsing — shared by both single and bulk spawn.
+async fn resolve_manifest(
+    state: &AppState,
+    req: &SpawnRequest,
+) -> Result<ResolvedManifest, ManifestError> {
+    // Resolve template name → manifest_toml
     let manifest_toml = if req.manifest_toml.trim().is_empty() {
         if let Some(ref tmpl_name) = req.template {
-            // Sanitize template name to prevent path traversal
-            let safe_name = tmpl_name
+            let safe_name: String = tmpl_name
                 .chars()
                 .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
-                .collect::<String>();
+                .collect();
             if safe_name.is_empty() || safe_name != *tmpl_name {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "Invalid template name"})),
-                );
+                return Err(ManifestError {
+                    message: "Invalid template name".into(),
+                });
             }
             let tmpl_path = state
                 .kernel
@@ -39,51 +58,40 @@ pub async fn spawn_agent(
                 .join("agents")
                 .join(&safe_name)
                 .join("agent.toml");
-            match std::fs::read_to_string(&tmpl_path) {
+            // 使用 tokio::fs 避免在异步上下文中阻塞
+            match tokio::fs::read_to_string(&tmpl_path).await {
                 Ok(content) => content,
                 Err(_) => {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(
-                            serde_json::json!({"error": format!("Template '{}' not found", safe_name)}),
-                        ),
-                    );
+                    return Err(ManifestError {
+                        message: format!("Template '{}' not found", safe_name),
+                    });
                 }
             }
         } else {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": "Either 'manifest_toml' or 'template' is required"}),
-                ),
-            );
+            return Err(ManifestError {
+                message: "Either 'manifest_toml' or 'template' is required".into(),
+            });
         }
     } else {
         req.manifest_toml.clone()
     };
 
-    // SECURITY: Reject oversized manifests to prevent parser memory exhaustion.
-    const MAX_MANIFEST_SIZE: usize = 1024 * 1024; // 1MB
+    // Size guard
     if manifest_toml.len() > MAX_MANIFEST_SIZE {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Manifest too large (max 1MB)"})),
-        );
+        return Err(ManifestError {
+            message: "Manifest too large (max 1MB)".into(),
+        });
     }
 
-    // SECURITY: Verify Ed25519 signature when a signed manifest is provided
+    // SECURITY: Verify Ed25519 signature when provided
     if let Some(ref signed_json) = req.signed_manifest {
         match state.kernel.verify_signed_manifest(signed_json) {
             Ok(verified_toml) => {
-                // Ensure the signed manifest matches the provided manifest_toml
                 if verified_toml.trim() != manifest_toml.trim() {
                     tracing::warn!("Signed manifest content does not match manifest_toml");
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(
-                            serde_json::json!({"error": "Signed manifest content does not match manifest_toml"}),
-                        ),
-                    );
+                    return Err(ManifestError {
+                        message: "Signed manifest content does not match manifest_toml".into(),
+                    });
                 }
             }
             Err(e) => {
@@ -94,32 +102,55 @@ pub async fn spawn_agent(
                     "manifest signature verification failed",
                     format!("error: {e}"),
                 );
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(serde_json::json!({"error": "Manifest signature verification failed"})),
-                );
+                return Err(ManifestError {
+                    message: "Manifest signature verification failed".into(),
+                });
             }
         }
     }
 
+    // Parse TOML
     let manifest: AgentManifest = match toml::from_str(&manifest_toml) {
         Ok(m) => m,
         Err(e) => {
-            tracing::warn!("Invalid manifest TOML: {e}");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid manifest format"})),
-            );
+            return Err(ManifestError {
+                message: format!("Invalid manifest: {e}"),
+            });
         }
     };
 
     let name = manifest.name.clone();
-    match state.kernel.spawn_agent(manifest) {
+    Ok(ResolvedManifest { manifest, name })
+}
+
+/// POST /api/agents — Spawn a new agent.
+pub async fn spawn_agent(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SpawnRequest>,
+) -> impl IntoResponse {
+    let resolved = match resolve_manifest(&state, &req).await {
+        Ok(r) => r,
+        Err(e) => {
+            // Map specific errors to appropriate HTTP status codes
+            let status = if e.message.contains("too large") {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else if e.message.contains("not found") && e.message.contains("Template") {
+                StatusCode::NOT_FOUND
+            } else if e.message.contains("signature verification failed") {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return (status, Json(serde_json::json!({"error": e.message})));
+        }
+    };
+
+    match state.kernel.spawn_agent(resolved.manifest) {
         Ok(id) => (
             StatusCode::CREATED,
             Json(serde_json::json!(SpawnResponse {
                 agent_id: id.to_string(),
-                name,
+                name: resolved.name,
             })),
         ),
         Err(e) => {
@@ -130,6 +161,273 @@ pub async fn spawn_agent(
             )
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Bulk agent operations
+// ---------------------------------------------------------------------------
+
+/// Maximum number of agents allowed in a single bulk request.
+const BULK_LIMIT: usize = 50;
+
+/// Validate that a bulk request array is non-empty and within the limit.
+fn validate_bulk_size(len: usize) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if len == 0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Array must not be empty"})),
+        ));
+    }
+    if len > BULK_LIMIT {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("Too many items (max {})", BULK_LIMIT)})),
+        ));
+    }
+    Ok(())
+}
+
+/// POST /api/agents/bulk — Create multiple agents at once.
+pub async fn bulk_create_agents(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkCreateRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = validate_bulk_size(req.agents.len()) {
+        return resp;
+    }
+
+    let mut results: Vec<BulkCreateResult> = Vec::with_capacity(req.agents.len());
+
+    for (index, spawn_req) in req.agents.iter().enumerate() {
+        match resolve_manifest(&state, spawn_req).await {
+            Err(e) => {
+                results.push(BulkCreateResult {
+                    index,
+                    success: false,
+                    agent_id: None,
+                    name: None,
+                    error: Some(e.message),
+                });
+            }
+            Ok(resolved) => {
+                let name = resolved.name.clone();
+                match state.kernel.spawn_agent(resolved.manifest) {
+                    Ok(id) => {
+                        results.push(BulkCreateResult {
+                            index,
+                            success: true,
+                            agent_id: Some(id.to_string()),
+                            name: Some(name),
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        results.push(BulkCreateResult {
+                            index,
+                            success: false,
+                            agent_id: None,
+                            name: None,
+                            error: Some(format!("Spawn failed: {e}")),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let total = results.len();
+    let succeeded = results.iter().filter(|r| r.success).count();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "total": total,
+            "succeeded": succeeded,
+            "failed": total - succeeded,
+            "results": results,
+        })),
+    )
+}
+
+/// DELETE /api/agents/bulk — Delete multiple agents at once.
+pub async fn bulk_delete_agents(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkAgentIdsRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = validate_bulk_size(req.agent_ids.len()) {
+        return resp;
+    }
+
+    let mut results: Vec<BulkActionResult> = Vec::with_capacity(req.agent_ids.len());
+
+    for id_str in &req.agent_ids {
+        let agent_id: AgentId = match id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some("Invalid agent ID".into()),
+                });
+                continue;
+            }
+        };
+        match state.kernel.kill_agent(agent_id) {
+            Ok(()) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: true,
+                    message: Some("Deleted".into()),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some(format!("{e}")),
+                });
+            }
+        }
+    }
+
+    let total = results.len();
+    let succeeded = results.iter().filter(|r| r.success).count();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "total": total,
+            "succeeded": succeeded,
+            "failed": total - succeeded,
+            "results": results,
+        })),
+    )
+}
+
+/// POST /api/agents/bulk/start — Set multiple agents to Full mode.
+pub async fn bulk_start_agents(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkAgentIdsRequest>,
+) -> impl IntoResponse {
+    use librefang_types::agent::AgentMode;
+
+    if let Err(resp) = validate_bulk_size(req.agent_ids.len()) {
+        return resp;
+    }
+
+    let mut results: Vec<BulkActionResult> = Vec::with_capacity(req.agent_ids.len());
+
+    for id_str in &req.agent_ids {
+        let agent_id: AgentId = match id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some("Invalid agent ID".into()),
+                });
+                continue;
+            }
+        };
+        match state.kernel.registry.set_mode(agent_id, AgentMode::Full) {
+            Ok(()) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: true,
+                    message: Some("Agent set to Full mode".into()),
+                    error: None,
+                });
+            }
+            Err(_) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some("Agent not found".into()),
+                });
+            }
+        }
+    }
+
+    let total = results.len();
+    let succeeded = results.iter().filter(|r| r.success).count();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "total": total,
+            "succeeded": succeeded,
+            "failed": total - succeeded,
+            "results": results,
+        })),
+    )
+}
+
+/// POST /api/agents/bulk/stop — Stop multiple agents' current runs.
+pub async fn bulk_stop_agents(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkAgentIdsRequest>,
+) -> impl IntoResponse {
+    if let Err(resp) = validate_bulk_size(req.agent_ids.len()) {
+        return resp;
+    }
+
+    let mut results: Vec<BulkActionResult> = Vec::with_capacity(req.agent_ids.len());
+
+    for id_str in &req.agent_ids {
+        let agent_id: AgentId = match id_str.parse() {
+            Ok(id) => id,
+            Err(_) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some("Invalid agent ID".into()),
+                });
+                continue;
+            }
+        };
+        match state.kernel.stop_agent_run(agent_id) {
+            Ok(cancelled) => {
+                let msg = if cancelled {
+                    "Run cancelled"
+                } else {
+                    "No active run"
+                };
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: true,
+                    message: Some(msg.into()),
+                    error: None,
+                });
+            }
+            Err(e) => {
+                results.push(BulkActionResult {
+                    agent_id: id_str.clone(),
+                    success: false,
+                    message: None,
+                    error: Some(format!("{e}")),
+                });
+            }
+        }
+    }
+
+    let total = results.len();
+    let succeeded = results.iter().filter(|r| r.success).count();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "total": total,
+            "succeeded": succeeded,
+            "failed": total - succeeded,
+            "results": results,
+        })),
+    )
 }
 
 /// GET /api/agents — List all agents.

@@ -52,6 +52,19 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/agents",
             axum::routing::get(routes::list_agents).post(routes::spawn_agent),
         )
+        // Bulk agent operations (before /agents/{id} to avoid path conflicts)
+        .route(
+            "/agents/bulk",
+            axum::routing::post(routes::bulk_create_agents).delete(routes::bulk_delete_agents),
+        )
+        .route(
+            "/agents/bulk/start",
+            axum::routing::post(routes::bulk_start_agents),
+        )
+        .route(
+            "/agents/bulk/stop",
+            axum::routing::post(routes::bulk_stop_agents),
+        )
         .route(
             "/agents/{id}",
             axum::routing::get(routes::get_agent)

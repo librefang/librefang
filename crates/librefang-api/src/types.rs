@@ -106,6 +106,46 @@ pub struct ClawHubInstallRequest {
     pub slug: String,
 }
 
+// ---------------------------------------------------------------------------
+// Bulk operations
+// ---------------------------------------------------------------------------
+
+/// Request to create multiple agents at once.
+#[derive(Debug, Deserialize)]
+pub struct BulkCreateRequest {
+    pub agents: Vec<SpawnRequest>,
+}
+
+/// Outcome of a single bulk-create item.
+#[derive(Debug, Serialize)]
+pub struct BulkCreateResult {
+    pub index: usize,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Request containing a list of agent IDs for bulk operations (delete/start/stop).
+#[derive(Debug, Deserialize)]
+pub struct BulkAgentIdsRequest {
+    pub agent_ids: Vec<String>,
+}
+
+/// Outcome of a single bulk action (delete/start/stop).
+#[derive(Debug, Serialize)]
+pub struct BulkActionResult {
+    pub agent_id: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Request to install an extension (integration).
 #[derive(Debug, Deserialize)]
 pub struct ExtensionInstallRequest {
@@ -150,5 +190,90 @@ mod tests {
         let json = r#"{}"#;
         let result = serde_json::from_str::<ExtensionUninstallRequest>(json);
         assert!(result.is_err());
+    }
+
+    // Bulk operation type tests
+
+    #[test]
+    fn bulk_create_request_deserialize() {
+        let json = r#"{"agents": [{"manifest_toml": "name = \"test\""}]}"#;
+        let req: BulkCreateRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.agents.len(), 1);
+        assert_eq!(req.agents[0].manifest_toml, "name = \"test\"");
+    }
+
+    #[test]
+    fn bulk_create_request_empty_agents() {
+        let json = r#"{"agents": []}"#;
+        let req: BulkCreateRequest = serde_json::from_str(json).unwrap();
+        assert!(req.agents.is_empty());
+    }
+
+    #[test]
+    fn bulk_create_request_missing_agents_fails() {
+        let json = r#"{}"#;
+        let result = serde_json::from_str::<BulkCreateRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn bulk_agent_ids_request_deserialize() {
+        let json = r#"{"agent_ids": ["id1", "id2"]}"#;
+        let req: BulkAgentIdsRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.agent_ids.len(), 2);
+    }
+
+    #[test]
+    fn bulk_agent_ids_request_missing_ids_fails() {
+        let json = r#"{}"#;
+        let result = serde_json::from_str::<BulkAgentIdsRequest>(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn bulk_create_result_serialize_success() {
+        let result = BulkCreateResult {
+            index: 0,
+            success: true,
+            agent_id: Some("abc-123".into()),
+            name: Some("test-agent".into()),
+            error: None,
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["success"], true);
+        assert_eq!(json["agent_id"], "abc-123");
+        // error field should be omitted (skip_serializing_if)
+        assert!(json.get("error").is_none());
+    }
+
+    #[test]
+    fn bulk_create_result_serialize_failure() {
+        let result = BulkCreateResult {
+            index: 1,
+            success: false,
+            agent_id: None,
+            name: None,
+            error: Some("Invalid manifest".into()),
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["success"], false);
+        assert_eq!(json["error"], "Invalid manifest");
+        // agent_id and name should be omitted
+        assert!(json.get("agent_id").is_none());
+        assert!(json.get("name").is_none());
+    }
+
+    #[test]
+    fn bulk_action_result_serialize() {
+        let result = BulkActionResult {
+            agent_id: "xyz".into(),
+            success: true,
+            message: Some("Deleted".into()),
+            error: None,
+        };
+        let json = serde_json::to_value(&result).unwrap();
+        assert_eq!(json["agent_id"], "xyz");
+        assert_eq!(json["message"], "Deleted");
+        assert!(json.get("error").is_none());
     }
 }
