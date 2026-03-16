@@ -1948,3 +1948,36 @@ fn validate_webhook_token(headers: &axum::http::HeaderMap, token_env: &str) -> b
     }
     provided.as_bytes().ct_eq(expected.as_bytes()).into()
 }
+
+// ---------------------------------------------------------------------------
+// API versioning
+// ---------------------------------------------------------------------------
+
+/// GET /api/versions — List supported API versions and negotiation info.
+pub async fn api_versions() -> impl IntoResponse {
+    let supported: Vec<&str> = crate::versioning::SUPPORTED_VERSIONS.to_vec();
+    let deprecated: Vec<&str> = crate::versioning::DEPRECATED_VERSIONS.to_vec();
+
+    let details: Vec<serde_json::Value> = crate::server::API_VERSIONS
+        .iter()
+        .map(|(ver, status)| {
+            serde_json::json!({
+                "version": ver,
+                "status": status,
+                "url_prefix": format!("/api/{ver}"),
+            })
+        })
+        .collect();
+
+    Json(serde_json::json!({
+        "current": crate::versioning::CURRENT_VERSION,
+        "supported": supported,
+        "deprecated": deprecated,
+        "details": details,
+        "negotiation": {
+            "header": "Accept",
+            "media_type_pattern": "application/vnd.librefang.<version>+json",
+            "example": "application/vnd.librefang.v1+json",
+        },
+    }))
+}
