@@ -12854,6 +12854,31 @@ fn hostname_string() -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
+/// GET /api/queue/status — Command queue status and occupancy.
+pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let occupancy = state.kernel.command_queue.occupancy();
+    let lanes: Vec<serde_json::Value> = occupancy
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "lane": o.lane.to_string(),
+                "active": o.active,
+                "capacity": o.capacity,
+            })
+        })
+        .collect();
+
+    let queue_cfg = &state.kernel.config.queue;
+    Json(serde_json::json!({
+        "lanes": lanes,
+        "config": {
+            "max_depth_per_agent": queue_cfg.max_depth_per_agent,
+            "max_depth_global": queue_cfg.max_depth_global,
+            "task_ttl_secs": queue_cfg.task_ttl_secs,
+        },
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

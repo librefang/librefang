@@ -465,6 +465,8 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/cron/jobs/{id}/status",
             axum::routing::get(routes::cron_job_status),
         )
+        // Queue status endpoint
+        .route("/queue/status", axum::routing::get(routes::queue_status))
         // Backup / Restore endpoints
         .route("/backup", axum::routing::post(routes::create_backup))
         .route("/backups", axum::routing::get(routes::list_backups))

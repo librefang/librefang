@@ -1069,6 +1069,72 @@ pub struct SidecarChannelConfig {
     pub channel_type: Option<String>,
 }
 
+/// Message queue configuration.
+///
+/// Controls queue depth limits and task TTL for the agent command queue.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [queue]
+/// max_depth_per_agent = 100
+/// max_depth_global = 1000
+/// task_ttl_secs = 3600
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueueConfig {
+    /// Max queue depth per agent (0 = unlimited).
+    pub max_depth_per_agent: u32,
+    /// Max queue depth globally (0 = unlimited).
+    pub max_depth_global: u32,
+    /// Task TTL in seconds (unprocessed tasks expire, 0 = unlimited).
+    pub task_ttl_secs: u64,
+    /// Per-lane concurrency limits.
+    #[serde(default)]
+    pub concurrency: QueueConcurrencyConfig,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            max_depth_per_agent: 0,
+            max_depth_global: 0,
+            task_ttl_secs: 3600,
+            concurrency: QueueConcurrencyConfig::default(),
+        }
+    }
+}
+
+/// Per-lane concurrency limits for the command queue.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [queue.concurrency]
+/// main_lane = 1
+/// cron_lane = 2
+/// subagent_lane = 3
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueueConcurrencyConfig {
+    /// Main lane concurrent limit (user messages).
+    pub main_lane: usize,
+    /// Cron lane concurrent limit (scheduled jobs).
+    pub cron_lane: usize,
+    /// Subagent lane concurrent limit (child agents).
+    pub subagent_lane: usize,
+}
+
+impl Default for QueueConcurrencyConfig {
+    fn default() -> Self {
+        Self {
+            main_lane: 1,
+            cron_lane: 2,
+            subagent_lane: 3,
+        }
+    }
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1220,6 +1286,9 @@ pub struct KernelConfig {
     /// - **OpenAI**: automatic prefix caching (response cache stats are parsed).
     #[serde(default = "default_prompt_caching")]
     pub prompt_caching: bool,
+    /// Message queue configuration (depth limits, TTL, concurrency).
+    #[serde(default)]
+    pub queue: QueueConfig,
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1474,6 +1543,7 @@ impl Default for KernelConfig {
             oauth: OAuthConfig::default(),
             sidecar_channels: Vec::new(),
             prompt_caching: default_prompt_caching(),
+            queue: QueueConfig::default(),
         }
     }
 }
@@ -1592,6 +1662,7 @@ impl std::fmt::Debug for KernelConfig {
                 "provider_api_keys",
                 &format!("{} mapping(s)", self.provider_api_keys.len()),
             )
+            .field("queue", &self.queue)
             .finish()
     }
 }
@@ -3775,6 +3846,17 @@ impl KernelConfig {
             self.web.fetch.timeout_secs = 30;
         } else if self.web.fetch.timeout_secs > 120 {
             self.web.fetch.timeout_secs = 120;
+        }
+
+        // Queue concurrency: min 1 per lane (0 would deadlock)
+        if self.queue.concurrency.main_lane == 0 {
+            self.queue.concurrency.main_lane = 1;
+        }
+        if self.queue.concurrency.cron_lane == 0 {
+            self.queue.concurrency.cron_lane = 1;
+        }
+        if self.queue.concurrency.subagent_lane == 0 {
+            self.queue.concurrency.subagent_lane = 1;
         }
     }
 }
