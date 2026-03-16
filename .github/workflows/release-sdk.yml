@@ -72,16 +72,23 @@ jobs:
         run: npm install --ignore-scripts
 
       - name: Publish to npm
-        run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; then
+            echo "✓ ${PKG_NAME}@${PKG_VERSION} already published to npm, skipping"
+          else
+            npm publish --access public
+          fi
 
       - name: Publish to GitHub Packages
-        run: |
-          npm config set registry https://npm.pkg.github.com
-          npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm config set registry https://npm.pkg.github.com
+          npm publish --access public 2>/dev/null || echo "✓ Already published to GitHub Packages, skipping"
 
   # ── Python SDK → PyPI ─────────────────────────────────────────────────────
   sdk_python:
@@ -118,6 +125,7 @@ jobs:
         with:
           packages-dir: sdk/python/dist/
           password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
 
   # ── Rust SDK → crates.io ──────────────────────────────────────────────────
   sdk_rust:
@@ -145,9 +153,15 @@ jobs:
         run: cargo test
 
       - name: Publish to crates.io
-        run: cargo publish --allow-dirty
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if cargo search librefang --limit 1 2>/dev/null | grep -q "librefang = \"$VERSION\""; then
+            echo "✓ librefang@$VERSION already published to crates.io, skipping"
+          else
+            cargo publish --allow-dirty
+          fi
 
   # ── Go SDK — tag for Go modules ──────────────────────────────────────────
   sdk_go:
