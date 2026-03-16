@@ -8,7 +8,7 @@
 const { LibreFang } = require("../index");
 
 async function main() {
-  const client = new LibreFang("http://localhost:3000");
+  const client = new LibreFang("http://localhost:4545");
 
   // Check server health
   const health = await client.health();

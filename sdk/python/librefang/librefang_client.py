@@ -5,7 +5,7 @@ Usage:
 
     from librefang_client import LibreFang
 
-    client = LibreFang("http://localhost:3000")
+    client = LibreFang("http://localhost:4545")
 
     # Create an agent
     agent = client.agents.create(template="assistant")

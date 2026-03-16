@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "librefang"
+version = "0.5.2"
+description = "Official Python client and SDK for the LibreFang Agent OS"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "LibreFang Team", email = "team@librefang.ai" }
+]
+keywords = ["librefang", "agent", "ai", "llm", "autonomous-agent", "sdk"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+requires-python = ">=3.8"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+]
+
+[project.urls]
+Homepage = "https://librefang.ai"
+Repository = "https://github.com/librefang/librefang"
+Issues = "https://github.com/librefang/librefang/issues"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["librefang*"]
+exclude = ["examples*"]
+
+[tool.setuptools.package-data]
+librefang = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["examples"]
+python_files = ["*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
