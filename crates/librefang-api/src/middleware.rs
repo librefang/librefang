@@ -55,52 +55,50 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
 /// server returns `406 Not Acceptable`.
 pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response<Body> {
     let path = request.uri().path().to_string();
-
-    // Check Accept header for version negotiation
+    let path_version = crate::versioning::version_from_path(&path);
     let accept_version = request
         .headers()
         .get("accept")
         .and_then(|v| v.to_str().ok())
-        .and_then(|accept| {
-            // Parse application/vnd.librefang.v1+json
-            accept.split(',').map(str::trim).find_map(|media| {
-                media
-                    .strip_prefix("application/vnd.librefang.")
-                    .and_then(|rest| rest.strip_suffix("+json"))
-                    .map(|ver| ver.to_string())
-            })
-        });
+        .and_then(crate::versioning::version_from_accept_header);
+
+    // Check Accept header for version negotiation
+    let requested_accept_version = request
+        .headers()
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::versioning::requested_version_from_accept_header);
 
     // Validate negotiated version if provided
-    if let Some(ref ver) = accept_version {
-        let known = crate::server::API_VERSIONS
-            .iter()
-            .any(|(v, _)| *v == ver.as_str());
-        if !known {
-            return Response::builder()
-                .status(StatusCode::NOT_ACCEPTABLE)
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    serde_json::json!({
-                        "error": format!("Unsupported API version: {ver}"),
-                        "available": crate::server::API_VERSIONS
-                            .iter()
-                            .map(|(v, _)| *v)
-                            .collect::<Vec<_>>(),
-                    })
-                    .to_string(),
-                ))
-                .unwrap_or_default();
+    if path_version.is_none() {
+        if let Some(ver) = requested_accept_version {
+            let known = crate::server::API_VERSIONS.iter().any(|(v, _)| *v == ver);
+            if !known {
+                return Response::builder()
+                    .status(StatusCode::NOT_ACCEPTABLE)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "error": format!("Unsupported API version: {ver}"),
+                            "available": crate::server::API_VERSIONS
+                                .iter()
+                                .map(|(v, _)| *v)
+                                .collect::<Vec<_>>(),
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap_or_default();
+            }
         }
     }
 
     let mut response = next.run(request).await;
 
-    // Determine the version to report
-    let version = if let Some(ver) = accept_version {
-        ver
-    } else if path.starts_with("/api/v1/") || path == "/api/v1" {
-        "v1".to_string()
+    // Determine the version to report. Explicit path versions win over headers.
+    let version = if let Some(ver) = path_version {
+        ver.to_string()
+    } else if let Some(ver) = accept_version {
+        ver.to_string()
     } else {
         crate::server::API_VERSION_LATEST.to_string()
     };
@@ -302,9 +300,121 @@ pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt;
 
     #[test]
     fn test_request_id_header_constant() {
         assert_eq!(REQUEST_ID_HEADER, "x-request-id");
+    }
+
+    #[tokio::test]
+    async fn test_api_version_header_prefers_explicit_path_version() {
+        let app = Router::new()
+            .route("/api/v1/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(api_version_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header("accept", "application/vnd.librefang.v99+json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-api-version"], "v1");
+    }
+
+    #[tokio::test]
+    async fn test_api_version_header_rejects_unknown_vendor_version_on_alias() {
+        let app = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(api_version_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header("accept", "application/vnd.librefang.v99+json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+    }
+
+    #[tokio::test]
+    async fn test_api_version_header_accepts_vendor_media_type_with_parameters() {
+        let app = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(api_version_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header("accept", "application/vnd.librefang.v1+json; charset=utf-8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-api-version"], "v1");
+    }
+
+    #[tokio::test]
+    async fn test_api_version_header_ignores_non_json_vendor_media_type() {
+        let app = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(api_version_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header("accept", "application/vnd.librefang.v1+xml")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-api-version"], "v1");
+    }
+
+    #[tokio::test]
+    async fn test_api_version_header_is_added_to_unauthorized_responses() {
+        let app = Router::new()
+            .route("/api/private", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                "secret".to_string(),
+                auth,
+            ))
+            .layer(axum::middleware::from_fn(api_version_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/private")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()["x-api-version"], "v1");
     }
 }

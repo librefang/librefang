@@ -84,42 +84,6 @@ pub async fn version() -> impl IntoResponse {
     }))
 }
 
-// ---------------------------------------------------------------------------
-// API versioning
-// ---------------------------------------------------------------------------
-
-/// GET /api/versions — API version discovery endpoint.
-///
-/// Returns the current version, all supported versions, deprecated versions,
-/// and content-negotiation hints so clients can adapt automatically.
-pub async fn api_versions() -> impl IntoResponse {
-    let supported: Vec<&str> = crate::versioning::SUPPORTED_VERSIONS.to_vec();
-    let deprecated: Vec<&str> = crate::versioning::DEPRECATED_VERSIONS.to_vec();
-
-    let details: Vec<serde_json::Value> = crate::server::API_VERSIONS
-        .iter()
-        .map(|(ver, status)| {
-            serde_json::json!({
-                "version": ver,
-                "status": status,
-                "url_prefix": format!("/api/{ver}"),
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "current": crate::versioning::CURRENT_VERSION,
-        "supported": supported,
-        "deprecated": deprecated,
-        "details": details,
-        "negotiation": {
-            "header": "Accept",
-            "media_type_pattern": "application/vnd.librefang.<version>+json",
-            "example": "application/vnd.librefang.v1+json",
-        },
-    }))
-}
-
 /// GET /api/health — Minimal liveness probe (public, no auth required).
 /// Returns only status and version to prevent information leakage.
 /// Use GET /api/health/detail for full diagnostics (requires auth).

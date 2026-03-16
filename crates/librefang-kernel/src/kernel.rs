@@ -3970,7 +3970,10 @@ impl LibreFangKernel {
                     catalog
                         .list_providers()
                         .iter()
-                        .filter(|p| !p.key_required)
+                        .filter(|p| {
+                            librefang_runtime::provider_health::is_local_provider(&p.id)
+                                && !p.base_url.is_empty()
+                        })
                         .map(|p| (p.id.clone(), p.base_url.clone()))
                         .collect()
                 };
