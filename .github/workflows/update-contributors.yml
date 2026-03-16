@@ -1,45 +1,57 @@
 name: Update Contributors
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+  schedule:
+    - cron: "37 0 * * *"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
 
 jobs:
   update:
+    name: Refresh contributors
+    if: github.repository == 'librefang/librefang'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
 
       - name: Generate contributors list
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
         run: |
-          # Fetch human contributors (exclude bots)
-          CONTRIBUTORS=$(gh api repos/librefang/librefang/contributors \
+          # Fetch human contributors sorted by contribution count
+          USERS=$(gh api repos/librefang/librefang/contributors \
             --jq '[.[] | select(.type == "User")] | sort_by(-.contributions) | .[].login')
 
-          # Build HTML
+          # Build HTML lines
           HTML=""
-          for user in $CONTRIBUTORS; do
-            HTML="${HTML}<a href=\"https://github.com/${user}\"><img src=\"https://github.com/${user}.png\" width=\"50\" height=\"50\" alt=\"${user}\" /></a>\n"
+          for user in $USERS; do
+            HTML="${HTML}<a href=\"https://github.com/${user}\"><img src=\"https://github.com/${user}.png\" width=\"50\" height=\"50\" alt=\"${user}\" /></a>"$'\n'
           done
 
-          # Replace between markers
-          sed -i '/<!-- CONTRIBUTORS-START -->/,/<!-- CONTRIBUTORS-END -->/{
-            /<!-- CONTRIBUTORS-START -->/{
-              a\
-          '"$(echo -e "$HTML" | sed 's/$/\\/' | sed '$ s/\\$//')"'
-            }
-            /<!-- CONTRIBUTORS-END -->/!d
-          }' README.md
+          # Replace between markers in README
+          awk -v html="$HTML" '
+            /<!-- CONTRIBUTORS-START -->/ { print; printf "%s", html; skip=1; next }
+            /<!-- CONTRIBUTORS-END -->/ { skip=0 }
+            !skip { print }
+          ' README.md > README.tmp && mv README.tmp README.md
 
-      - name: Commit if changed
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md
-          git diff --cached --quiet || git commit -m "chore: update contributors list [skip ci]"
-          git push
+      - name: Create PR with updated contributors
+        id: cpr
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
+          branch: chore/update-contributors
+          commit-message: "docs: update contributors list"
+          title: "docs: update contributors list"
+          delete-branch: true
+
+      - name: Auto-merge PR
+        if: steps.cpr.outputs.pull-request-number
+        env:
+          GH_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
+        run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch
