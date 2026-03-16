@@ -105,6 +105,8 @@ pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response
 
     if let Ok(val) = version.parse() {
         response.headers_mut().insert("x-api-version", val);
+    } else {
+        tracing::warn!("Failed to set X-API-Version header: {:?}", version);
     }
 
     response
