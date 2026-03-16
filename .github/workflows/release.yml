@@ -592,6 +592,8 @@ jobs:
 
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
+          # Extract semver without date suffix (e.g. 0.5.0-20260316 → 0.5.0)
+          SEMVER="${VERSION%-*}"
 
           asset_url() {
             jq -r --arg name "$1" '.assets[] | select(.name == $name) | .browser_download_url' release.json
@@ -641,6 +643,7 @@ jobs:
             fi
           done
 
+          # --- Main formula (latest) ---
           cat > tap/Formula/librefang.rb <<EOF
           class Librefang < Formula
             desc "Community-Maintained Agent Operating System written in Rust"
@@ -668,7 +671,45 @@ jobs:
           end
           EOF
 
+          # --- Versioned formula (e.g. librefang@0.5.0) ---
+          # Class name: LibrefangAT050 (@ → AT, dots removed)
+          CLASS_SUFFIX=$(echo "$SEMVER" | tr -d '.')
+          CLASS_NAME="LibrefangAT${CLASS_SUFFIX}"
+
+          cat > "tap/Formula/librefang@${SEMVER}.rb" <<EOF
+          class ${CLASS_NAME} < Formula
+            desc "Community-Maintained Agent Operating System written in Rust"
+            homepage "https://librefang.ai"
+            license "MIT"
+            version "$VERSION"
+
+            depends_on :macos
+
+            if Hardware::CPU.arm?
+              url "$ARM64_DARWIN_URL"
+              sha256 "$ARM64_DARWIN_SHA"
+            else
+              url "$X86_DARWIN_URL"
+              sha256 "$X86_DARWIN_SHA"
+            end
+
+            keg_only :versioned_formula
+
+            def install
+              bin.install "librefang"
+            end
+
+            test do
+              system "#{bin}/librefang", "--version"
+            end
+          end
+          EOF
+
+          echo "=== Main formula ==="
           cat tap/Formula/librefang.rb
+          echo ""
+          echo "=== Versioned formula: librefang@${SEMVER}.rb ==="
+          cat "tap/Formula/librefang@${SEMVER}.rb"
 
       - name: Commit and push
         working-directory: tap

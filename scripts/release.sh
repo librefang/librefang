@@ -63,6 +63,7 @@ PATCH=$(echo "$CURRENT" | cut -d. -f3 | sed 's/-.*//')
 if [ $# -ge 1 ]; then
     VERSION="$1"
 else
+    V_CURRENT="${MAJOR}.${MINOR}.${PATCH}"
     V_PATCH="${MAJOR}.${MINOR}.$((PATCH + 1))"
     V_MINOR="${MAJOR}.$((MINOR + 1)).0"
     V_MAJOR="$((MAJOR + 1)).0.0"
@@ -70,15 +71,17 @@ else
     echo ""
     echo "Current version: $CURRENT (tag: ${PREV_TAG:-none})"
     echo ""
-    echo "  1) patch  → $V_PATCH"
-    echo "  2) minor  → $V_MINOR"
-    echo "  3) major  → $V_MAJOR"
+    echo "  1) patch   → $V_PATCH"
+    echo "  2) minor   → $V_MINOR"
+    echo "  3) major   → $V_MAJOR"
+    echo "  4) current → $V_CURRENT (re-release, overwrites existing tag)"
     echo ""
-    read -rp "Choose [1/2/3]: " choice
+    read -rp "Choose [1/2/3/4]: " choice
     case "$choice" in
         1) VERSION="$V_PATCH" ;;
         2) VERSION="$V_MINOR" ;;
         3) VERSION="$V_MAJOR" ;;
+        4) VERSION="$V_CURRENT" ;;
         *) echo "Invalid choice"; exit 1 ;;
     esac
 fi
@@ -106,8 +109,28 @@ fi
 # --- Check tag doesn't already exist ---
 
 if git -C "$REPO_ROOT" rev-parse "$TAG" &>/dev/null; then
-    echo "Error: tag '$TAG' already exists. Delete it first or choose a different version." >&2
-    exit 1
+    echo ""
+    echo "Tag '$TAG' already exists."
+    read -rp "Delete and re-create it? [Y/n]: " overwrite_confirm
+    if [[ "$overwrite_confirm" =~ ^[Nn] ]]; then
+        echo "Aborted."
+        exit 0
+    fi
+    echo "Deleting existing tag '$TAG'..."
+    git -C "$REPO_ROOT" tag -d "$TAG"
+    git -C "$REPO_ROOT" push origin --delete "$TAG" 2>/dev/null || true
+
+    # Also delete existing release branch if present
+    RELEASE_BRANCH_CHECK="chore/bump-version-${VERSION}"
+    if git -C "$REPO_ROOT" rev-parse --verify "refs/heads/$RELEASE_BRANCH_CHECK" &>/dev/null; then
+        git -C "$REPO_ROOT" branch -D "$RELEASE_BRANCH_CHECK"
+    fi
+    git -C "$REPO_ROOT" push origin --delete "$RELEASE_BRANCH_CHECK" 2>/dev/null || true
+
+    # Delete existing GitHub release if gh is available
+    if command -v gh &>/dev/null; then
+        gh release delete "$TAG" --repo librefang/librefang --yes 2>/dev/null || true
+    fi
 fi
 
 # --- Generate changelog ---

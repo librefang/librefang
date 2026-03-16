@@ -94,6 +94,9 @@
             # Development tools
             just
             gh
+            git
+            nodejs
+            python3
           ];
 
           inputsFrom = [ librefang ];

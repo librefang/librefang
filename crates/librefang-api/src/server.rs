@@ -48,7 +48,6 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route("/health/detail", axum::routing::get(routes::health_detail))
         .route("/status", axum::routing::get(routes::status))
         .route("/version", axum::routing::get(routes::version))
-        .route("/versions", axum::routing::get(routes::api_versions))
         .route(
             "/agents",
             axum::routing::get(routes::list_agents).post(routes::spawn_agent),
