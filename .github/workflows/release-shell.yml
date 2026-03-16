@@ -194,7 +194,7 @@ jobs:
         run: |
           FILE_OUT=$(file target/${{ matrix.target }}/release/librefang)
           echo "$FILE_OUT"
-          if ! echo "$FILE_OUT" | grep -q "statically linked"; then
+          if ! echo "$FILE_OUT" | grep -qE "statically linked|static-pie linked"; then
             echo "::error::Binary is not statically linked!"
             exit 1
           fi

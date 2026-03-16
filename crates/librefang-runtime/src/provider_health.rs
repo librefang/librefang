@@ -194,7 +194,11 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
 
         let names: Vec<String> = arr
             .iter()
-            .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+            .filter_map(|m| {
+                m.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect();
 
         let info: Vec<DiscoveredModelInfo> = arr

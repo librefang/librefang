@@ -829,13 +829,9 @@ async fn parse_telegram_update(
     // Extract reply-to-message context (Telegram `reply_to_message` field).
     // Prepend the quoted original text so the agent sees what the user is replying to.
     let content = if let Some(reply) = message.get("reply_to_message") {
-        let reply_text = reply["text"]
-            .as_str()
-            .or_else(|| reply["caption"].as_str());
+        let reply_text = reply["text"].as_str().or_else(|| reply["caption"].as_str());
         if let Some(quoted) = reply_text {
-            let reply_sender = reply["from"]["first_name"]
-                .as_str()
-                .unwrap_or("Someone");
+            let reply_sender = reply["from"]["first_name"].as_str().unwrap_or("Someone");
             let prefix = format!("[Replying to {reply_sender}: \"{quoted}\"]\n");
             match content {
                 ChannelContent::Text(t) => ChannelContent::Text(format!("{prefix}{t}")),
@@ -1717,7 +1713,9 @@ mod tests {
         let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL, None)
             .await
             .unwrap();
-        assert!(matches!(msg.content, ChannelContent::Text(ref t) if t == "What was that sticker?"));
+        assert!(
+            matches!(msg.content, ChannelContent::Text(ref t) if t == "What was that sticker?")
+        );
     }
 
     #[test]
