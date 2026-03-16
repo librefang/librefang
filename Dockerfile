@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --bin librefang \
     && cp target/release/librefang /usr/local/bin/librefang
 
-FROM alpine:3
+FROM alpine:3.21
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/agents /opt/librefang/agents
