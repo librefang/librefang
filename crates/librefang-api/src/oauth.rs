@@ -214,8 +214,8 @@ fn build_state_token(provider_id: &str) -> String {
         ts,
     };
     let payload_json = serde_json::to_string(&payload).unwrap_or_default();
-    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(payload_json.as_bytes());
+    let payload_b64 =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
 
     // HMAC-sign the payload.
     let key = state_signing_key();
@@ -272,8 +272,7 @@ fn verify_state_token(state: &str) -> Result<OAuthStatePayload, String> {
 /// env var if set, otherwise falls back to a random per-process key.
 fn state_signing_key() -> String {
     static KEY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        std::env::var("LIBREFANG_STATE_SECRET")
-            .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
+        std::env::var("LIBREFANG_STATE_SECRET").unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
     });
     KEY.clone()
 }
@@ -1486,11 +1485,10 @@ mod tests {
             ts: 0, // epoch = very expired
         };
         let payload_json = serde_json::to_string(&payload).unwrap();
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(payload_json.as_bytes());
+        let payload_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
         let key = state_signing_key();
-        let mut mac =
-            HmacSha256::new_from_slice(key.as_bytes()).unwrap();
+        let mut mac = HmacSha256::new_from_slice(key.as_bytes()).unwrap();
         mac.update(payload_b64.as_bytes());
         let sig = mac.finalize().into_bytes();
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
@@ -1534,7 +1532,10 @@ mod tests {
         let providers = resolve_providers(&config).await;
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "github");
-        assert_eq!(providers[0].auth_url, "https://github.com/login/oauth/authorize");
+        assert_eq!(
+            providers[0].auth_url,
+            "https://github.com/login/oauth/authorize"
+        );
     }
 
     #[tokio::test]

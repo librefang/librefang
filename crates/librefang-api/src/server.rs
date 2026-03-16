@@ -565,10 +565,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/auth/providers",
             axum::routing::get(crate::oauth::auth_providers),
         )
-        .route(
-            "/auth/login",
-            axum::routing::get(crate::oauth::auth_login),
-        )
+        .route("/auth/login", axum::routing::get(crate::oauth::auth_login))
         .route(
             "/auth/login/{provider}",
             axum::routing::get(crate::oauth::auth_login_provider),
