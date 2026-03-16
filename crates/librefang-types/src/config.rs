@@ -2649,10 +2649,10 @@ pub struct WeComConfig {
     pub secret_env: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
-    /// Callback verification token (optional, for URL verification).
-    pub token: Option<String>,
-    /// Encoding AES key for callback (optional, for encrypted mode).
-    pub encoding_aes_key: Option<String>,
+    /// Env var name holding the callback verification token (optional).
+    pub token_env: Option<String>,
+    /// Env var name holding the encoding AES key (optional).
+    pub encoding_aes_key_env: Option<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
     pub account_id: Option<String>,
@@ -2670,8 +2670,8 @@ impl Default for WeComConfig {
             agent_id: String::new(),
             secret_env: "WECOM_SECRET".to_string(),
             webhook_port: 8454,
-            token: None,
-            encoding_aes_key: None,
+            token_env: None,
+            encoding_aes_key_env: None,
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),

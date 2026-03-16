@@ -1653,8 +1653,8 @@ pub async fn start_channel_bridge_with_config(
                     wc_config.agent_id.clone(),
                     secret,
                     wc_config.webhook_port,
-                    wc_config.encoding_aes_key.clone(),
-                    wc_config.token.clone(),
+                    wc_config.encoding_aes_key_env.as_ref().and_then(|e| std::env::var(e).ok()),
+                    wc_config.token_env.as_ref().and_then(|e| std::env::var(e).ok()),
                 )
                 .with_account_id(wc_config.account_id.clone()),
             );
