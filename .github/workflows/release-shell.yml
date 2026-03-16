@@ -194,11 +194,10 @@ jobs:
         run: cross build --release --target ${{ matrix.target }} --bin librefang
       - name: Verify static linking
         run: |
-          file target/${{ matrix.target }}/release/librefang
-          # ldd exits non-zero for static binaries ("not a dynamic executable").
-          # Works for both native and cross-compiled ELFs.
-          if ldd target/${{ matrix.target }}/release/librefang 2>&1 | grep -q "dynamic"; then
-            echo "::error::Binary is dynamically linked!"
+          FILE_OUT=$(file target/${{ matrix.target }}/release/librefang)
+          echo "$FILE_OUT"
+          if ! echo "$FILE_OUT" | grep -q "statically linked"; then
+            echo "::error::Binary is not statically linked!"
             exit 1
           fi
       - name: Package
