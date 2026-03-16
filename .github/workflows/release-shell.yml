@@ -412,7 +412,7 @@ jobs:
             desc "Community-Maintained Agent Operating System written in Rust"
             homepage "https://librefang.ai"
             license "MIT"
-            version "$VERSION"
+            version "$SEMVER"
 
             depends_on :macos
 
@@ -444,7 +444,7 @@ jobs:
             desc "Community-Maintained Agent Operating System written in Rust"
             homepage "https://librefang.ai"
             license "MIT"
-            version "$VERSION"
+            version "$SEMVER"
 
             depends_on :macos
 
