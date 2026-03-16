@@ -271,11 +271,9 @@ MIT-Lizenz. Siehe LICENSE-Datei.
 
 Danke an alle, die zu LibreFang beigetragen haben!
 
-<!-- CONTRIBUTORS-START -->
-<a href="https://github.com/houko"><img src="https://github.com/houko.png" width="50" height="50" alt="houko" /></a>
-<a href="https://github.com/jaberjaber23"><img src="https://github.com/jaberjaber23.png" width="50" height="50" alt="jaberjaber23" /></a>
-<a href="https://github.com/TJUEZ"><img src="https://github.com/TJUEZ.png" width="50" height="50" alt="TJUEZ" /></a>
-<!-- CONTRIBUTORS-END -->
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="../public/assets/contributors.svg" alt="Contributors" />
+</a>
 
 > Möchtest du mitmachen? Schau dir unseren [Beitragsleitfaden](../CONTRIBUTING.md) an — für viele Aufgaben ist keine Rust-Erfahrung nötig.
 

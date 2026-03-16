@@ -271,11 +271,9 @@ MITライセンス。LICENSEファイルを参照してください。
 
 LibreFangに貢献してくださった皆様に感謝します！
 
-<!-- CONTRIBUTORS-START -->
-<a href="https://github.com/houko"><img src="https://github.com/houko.png" width="50" height="50" alt="houko" /></a>
-<a href="https://github.com/jaberjaber23"><img src="https://github.com/jaberjaber23.png" width="50" height="50" alt="jaberjaber23" /></a>
-<a href="https://github.com/TJUEZ"><img src="https://github.com/TJUEZ.png" width="50" height="50" alt="TJUEZ" /></a>
-<!-- CONTRIBUTORS-END -->
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="../public/assets/contributors.svg" alt="Contributors" />
+</a>
 
 > 参加しませんか？[コントリビューションガイド](../CONTRIBUTING.md)をご覧ください — 多くのタスクはRustの経験不要です。
 

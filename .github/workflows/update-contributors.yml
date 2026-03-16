@@ -4,8 +4,7 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - 'README.md'
-      - 'i18n/README.*.md'
+      - 'public/assets/contributors.svg'
   workflow_dispatch:
 
 concurrency:
@@ -22,39 +21,23 @@ jobs:
         with:
           token: ${{ secrets.WEBSITE_REPO_TOKEN }}
 
-      - name: Generate contributors list
-        env:
-          GH_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
+      - name: Generate contributors SVG
         run: |
-          # Fetch human contributors sorted by contribution count
-          USERS=$(gh api repos/librefang/librefang/contributors \
-            --jq '[.[] | select(.type == "User")] | sort_by(-.contributions) | .[].login')
+          # Force contrib.rocks to rebuild cache
+          curl -sf "https://contrib.rocks/preview?repo=librefang%2Flibrefang" > /dev/null 2>&1 || true
+          sleep 5
+          # Download fresh SVG (圆形头像)
+          curl -sfL "https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" \
+            -o public/assets/contributors.svg
 
-          # Build HTML lines
-          HTML=""
-          for user in $USERS; do
-            HTML="${HTML}<a href=\"https://github.com/${user}\"><img src=\"https://github.com/${user}.png\" width=\"50\" height=\"50\" alt=\"${user}\" /></a>"$'\n'
-          done
-
-          # Update all READMEs that have contributor markers
-          for readme in README.md i18n/README.zh.md i18n/README.de.md i18n/README.es.md i18n/README.ja.md i18n/README.ko.md; do
-            if [ -f "$readme" ] && grep -q 'CONTRIBUTORS-START' "$readme"; then
-              awk -v html="$HTML" '
-                /<!-- CONTRIBUTORS-START -->/ { print; printf "%s", html; skip=1; next }
-                /<!-- CONTRIBUTORS-END -->/ { skip=0 }
-                !skip { print }
-              ' "$readme" > "${readme}.tmp" && mv "${readme}.tmp" "$readme"
-            fi
-          done
-
-      - name: Create PR with updated contributors
+      - name: Create PR with updated SVG
         id: cpr
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.WEBSITE_REPO_TOKEN }}
           branch: chore/update-contributors
-          commit-message: "docs: update contributors list"
-          title: "docs: update contributors list"
+          commit-message: "docs: update contributors"
+          title: "docs: update contributors"
           delete-branch: true
 
       - name: Auto-merge PR
