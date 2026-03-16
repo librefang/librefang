@@ -64,6 +64,13 @@ jobs:
             echo '```'
           } > /tmp/release-body.md
 
-          gh release create "$TAG" \
-            --title "LibreFang $TAG" \
-            --notes-file /tmp/release-body.md
+          if gh release view "$TAG" &>/dev/null; then
+            echo "Release $TAG already exists, updating..."
+            gh release edit "$TAG" \
+              --title "LibreFang $TAG" \
+              --notes-file /tmp/release-body.md
+          else
+            gh release create "$TAG" \
+              --title "LibreFang $TAG" \
+              --notes-file /tmp/release-body.md
+          fi
