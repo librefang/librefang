@@ -55,6 +55,7 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
 /// server returns `406 Not Acceptable`.
 pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response<Body> {
     let path = request.uri().path().to_string();
+
     let path_version = crate::versioning::version_from_path(&path);
     let accept_version = request
         .headers()
@@ -105,6 +106,8 @@ pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response
 
     if let Ok(val) = version.parse() {
         response.headers_mut().insert("x-api-version", val);
+    } else {
+        tracing::warn!("Failed to set X-API-Version header: {:?}", version);
     }
 
     response
@@ -193,7 +196,12 @@ pub async fn auth(
         || (path == "/api/workflows" && is_get)
         || path == "/api/logs/stream"  // SSE stream, read-only
         || (path.starts_with("/api/cron/") && is_get)
-        || path.starts_with("/api/providers/github-copilot/oauth/");
+        || path.starts_with("/api/providers/github-copilot/oauth/")
+        // OAuth/OIDC auth flow endpoints must be accessible without API key
+        // (they are the authentication entry points themselves).
+        || (path == "/api/auth/providers" && is_get)
+        || (path.starts_with("/api/auth/login") && is_get)
+        || path == "/api/auth/callback";
 
     if is_public {
         return next.run(request).await;

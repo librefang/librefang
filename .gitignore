@@ -1,5 +1,6 @@
 # Build
 /target
+/target-isolated
 **/*.rs.bk
 *.pdb
 

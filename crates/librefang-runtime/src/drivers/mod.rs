@@ -11,6 +11,7 @@ pub mod copilot;
 pub mod fallback;
 pub mod gemini;
 pub mod openai;
+pub mod vertex_ai;
 
 use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};
 use librefang_types::model_catalog::{
@@ -20,7 +21,7 @@ use librefang_types::model_catalog::{
     LEMONADE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_CN_BASE_URL, MINIMAX_INTL_BASE_URL,
     MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL,
     PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL, SAMBANOVA_BASE_URL,
-    TOGETHER_BASE_URL, VENICE_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
+    TOGETHER_BASE_URL, VENICE_BASE_URL, VERTEX_AI_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
     VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL,
     ZHIPU_CODING_BASE_URL,
 };
@@ -43,6 +44,8 @@ pub enum ApiFormat {
     ChatGpt,
     /// GitHub Copilot with automatic token exchange.
     Copilot,
+    /// Google Cloud Vertex AI (Gemini format with OAuth2 auth).
+    VertexAI,
 }
 
 /// A provider entry in the static registry.
@@ -449,6 +452,16 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         alt_api_key_env: None,
         hidden: false,
     },
+    ProviderEntry {
+        name: "vertex-ai",
+        aliases: &["vertex", "vertex_ai"],
+        base_url: VERTEX_AI_BASE_URL,
+        api_key_env: "GOOGLE_APPLICATION_CREDENTIALS",
+        key_required: true, // Requires Google auth, but create_driver handles OAuth flows separately.
+        api_format: ApiFormat::VertexAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
 ];
 
 // ── Registry Lookup ──────────────────────────────────────────────
@@ -508,7 +521,7 @@ fn create_driver_from_entry(
         }
     }
 
-    if entry.key_required && api_key.is_empty() {
+    if entry.key_required && entry.api_format != ApiFormat::VertexAI && api_key.is_empty() {
         return Err(LlmError::MissingApiKey(format!(
             "Set {} environment variable for provider '{}'",
             entry.api_key_env, config.provider
@@ -525,6 +538,7 @@ fn create_driver_from_entry(
         ))),
         ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::new(api_key, base_url))),
         ApiFormat::Copilot => Ok(Arc::new(copilot::CopilotDriver::new(api_key, base_url))),
+        ApiFormat::VertexAI => Ok(Arc::new(vertex_ai::VertexAiDriver::new(config)?)),
     }
 }
 
@@ -551,6 +565,7 @@ fn create_driver_from_entry(
 /// - `xai` — xAI (Grok)
 /// - `replicate` — Replicate
 /// - `chutes` — Chutes.ai (serverless open-source model inference)
+/// - `vertex-ai` — Google Cloud Vertex AI (OAuth2 auth, enterprise Gemini)
 /// - Any custom provider with `base_url` set uses OpenAI-compatible format
 pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmError> {
     let provider = config.provider.as_str();
@@ -600,7 +615,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
              deepseek, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             chutes, venice, codex, claude-code. Or set base_url for a custom OpenAI-compatible endpoint.",
+             chutes, venice, vertex-ai, codex, claude-code. Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
     })
@@ -710,6 +725,7 @@ mod tests {
             provider: "my-custom-llm".to_string(),
             api_key: Some("test".to_string()),
             base_url: Some("http://localhost:9999/v1".to_string()),
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -722,6 +738,7 @@ mod tests {
             provider: "nonexistent".to_string(),
             api_key: None,
             base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -773,7 +790,8 @@ mod tests {
         assert!(providers.contains(&"volcengine"));
         assert!(providers.contains(&"chutes"));
         assert!(providers.contains(&"claude-code"));
-        assert_eq!(providers.len(), 35);
+        assert!(providers.contains(&"vertex-ai"));
+        assert_eq!(providers.len(), 36);
     }
 
     #[test]
@@ -824,6 +842,7 @@ mod tests {
             provider: "nvidia".to_string(),
             api_key: None, // not explicitly passed
             base_url: Some("https://integrate.api.nvidia.com/v1".to_string()),
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -841,6 +860,7 @@ mod tests {
             provider: "nvidia".to_string(),
             api_key: None,
             base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -856,6 +876,7 @@ mod tests {
             provider: "nvidia".to_string(),
             api_key: None,
             base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let result = create_driver(&config);
@@ -884,9 +905,37 @@ mod tests {
             provider: "my-custom-provider".to_string(),
             api_key: Some("explicit-key".to_string()),
             base_url: Some("https://api.example.com/v1".to_string()),
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
         assert!(driver.is_ok());
+    }
+
+    #[test]
+    fn test_vertex_ai_uses_kernel_vertex_config() {
+        let config = DriverConfig {
+            provider: "vertex-ai".to_string(),
+            api_key: None,
+            base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig {
+                project_id: Some("config-project".to_string()),
+                region: Some("europe-west4".to_string()),
+                credentials_path: Some(
+                    serde_json::json!({
+                        "type": "service_account",
+                        "project_id": "json-project",
+                    })
+                    .to_string(),
+                ),
+            },
+            skip_permissions: true,
+        };
+
+        let driver = create_driver(&config);
+        assert!(
+            driver.is_ok(),
+            "Vertex AI driver should initialize from [vertex_ai] config without env vars"
+        );
     }
 }
