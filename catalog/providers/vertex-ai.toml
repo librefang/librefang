@@ -1,0 +1,91 @@
+[provider]
+id = "vertex-ai"
+display_name = "Google Cloud Vertex AI"
+# Points to a service-account JSON file path, not a raw API key.
+api_key_env = "GOOGLE_APPLICATION_CREDENTIALS"
+base_url = "https://us-central1-aiplatform.googleapis.com"
+key_required = true
+
+[[models]]
+id = "vertex-ai/gemini-2.5-pro"
+display_name = "Gemini 2.5 Pro (Vertex AI)"
+provider = "vertex-ai"
+tier = "frontier"
+context_window = 1048576
+max_output_tokens = 65536
+input_cost_per_m = 1.25
+output_cost_per_m = 10.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "vertex-ai/gemini-2.5-flash"
+display_name = "Gemini 2.5 Flash (Vertex AI)"
+provider = "vertex-ai"
+tier = "smart"
+context_window = 1048576
+max_output_tokens = 65536
+input_cost_per_m = 0.15
+output_cost_per_m = 0.6
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "vertex-ai/gemini-2.0-flash"
+display_name = "Gemini 2.0 Flash (Vertex AI)"
+provider = "vertex-ai"
+tier = "fast"
+context_window = 1048576
+max_output_tokens = 8192
+input_cost_per_m = 0.1
+output_cost_per_m = 0.4
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "vertex-ai/gemini-2.0-flash-lite"
+display_name = "Gemini 2.0 Flash Lite (Vertex AI)"
+provider = "vertex-ai"
+tier = "fast"
+context_window = 1048576
+max_output_tokens = 8192
+input_cost_per_m = 0.075
+output_cost_per_m = 0.3
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "vertex-ai/gemini-1.5-pro"
+display_name = "Gemini 1.5 Pro (Vertex AI)"
+provider = "vertex-ai"
+tier = "smart"
+context_window = 2097152
+max_output_tokens = 8192
+input_cost_per_m = 1.25
+output_cost_per_m = 5.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+
+[[models]]
+id = "vertex-ai/gemini-1.5-flash"
+display_name = "Gemini 1.5 Flash (Vertex AI)"
+provider = "vertex-ai"
+tier = "fast"
+context_window = 1048576
+max_output_tokens = 8192
+input_cost_per_m = 0.075
+output_cost_per_m = 0.3
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []

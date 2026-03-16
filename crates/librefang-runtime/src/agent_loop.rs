@@ -53,6 +53,56 @@ const MAX_HISTORY_MESSAGES: usize = 20;
 
 const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
+/// Safely trim message history to `MAX_HISTORY_MESSAGES`, cutting at
+/// conversation-turn boundaries so ToolUse/ToolResult pairs are never split.
+///
+/// After trim + repair, if fewer than 2 messages survive the function
+/// synthesises a minimal `[user_message]` so the LLM always gets at least
+/// the current question.
+fn safe_trim_messages(messages: &mut Vec<Message>, agent_name: &str, user_message: &str) {
+    if messages.len() <= MAX_HISTORY_MESSAGES {
+        return;
+    }
+
+    let desired_trim = messages.len() - MAX_HISTORY_MESSAGES;
+
+    // Find a trim point that does not split ToolUse/ToolResult pairs.
+    // Filter out 0 — drain(..0) is a no-op and would leave messages untrimmed.
+    let trim_point = crate::session_repair::find_safe_trim_point(messages, desired_trim)
+        .filter(|&p| p > 0)
+        .unwrap_or(desired_trim);
+
+    warn!(
+        agent = %agent_name,
+        total_messages = messages.len(),
+        trimming = trim_point,
+        desired = desired_trim,
+        "Trimming old messages at safe turn boundary"
+    );
+
+    messages.drain(..trim_point);
+
+    // Re-validate after trim.
+    *messages = crate::session_repair::validate_and_repair(messages);
+
+    // Post-trim safety: ensure at least a user message survives so the LLM
+    // request body is never empty.
+    if messages.len() < 2 || !messages.iter().any(|m| m.role == Role::User) {
+        warn!(
+            agent = %agent_name,
+            remaining = messages.len(),
+            "Trim + repair left too few messages, synthesizing minimal conversation"
+        );
+        // Keep any surviving system message, then append the current user turn.
+        let system_msgs: Vec<Message> = messages
+            .drain(..)
+            .filter(|m| m.role == Role::System)
+            .collect();
+        *messages = system_msgs;
+        messages.push(Message::user(user_message));
+    }
+}
+
 /// Strip a provider prefix from a model ID before sending to the API.
 ///
 /// Many models are stored as `provider/org/model` (e.g. `openrouter/google/gemini-2.5-flash`)
@@ -280,23 +330,10 @@ pub async fn run_agent_loop(
     let mut total_usage = TokenUsage::default();
     let final_response;
 
-    // Safety valve: trim excessively long message histories to prevent context overflow.
-    // The full compaction system handles sophisticated summarization, but this prevents
-    // the catastrophic case where 200+ messages cause instant context overflow.
-    if messages.len() > MAX_HISTORY_MESSAGES {
-        let trim_count = messages.len() - MAX_HISTORY_MESSAGES;
-        warn!(
-            agent = %manifest.name,
-            total_messages = messages.len(),
-            trimming = trim_count,
-            "Trimming old messages to prevent context overflow"
-        );
-        messages.drain(..trim_count);
-        // Re-validate after trimming: the drain may have split a ToolUse/ToolResult
-        // pair across the cut boundary, leaving orphaned blocks that cause the LLM
-        // to return empty responses (input_tokens=0).
-        messages = crate::session_repair::validate_and_repair(&messages);
-    }
+    // Safety valve: trim excessively long message histories to prevent context
+    // overflow. Cuts at conversation-turn boundaries so ToolUse/ToolResult
+    // pairs are never split (fixes "EOF while parsing" from empty API responses).
+    safe_trim_messages(&mut messages, &manifest.name, user_message);
 
     // Use autonomous config max_iterations if set, else default
     let max_iterations = manifest
@@ -1295,21 +1332,8 @@ pub async fn run_agent_loop_streaming(
     let mut total_usage = TokenUsage::default();
     let final_response;
 
-    // Safety valve: trim excessively long message histories to prevent context overflow.
-    if messages.len() > MAX_HISTORY_MESSAGES {
-        let trim_count = messages.len() - MAX_HISTORY_MESSAGES;
-        warn!(
-            agent = %manifest.name,
-            total_messages = messages.len(),
-            trimming = trim_count,
-            "Trimming old messages to prevent context overflow (streaming)"
-        );
-        messages.drain(..trim_count);
-        // Re-validate after trimming: the drain may have split a ToolUse/ToolResult
-        // pair across the cut boundary, leaving orphaned blocks that cause the LLM
-        // to return empty responses (input_tokens=0).
-        messages = crate::session_repair::validate_and_repair(&messages);
-    }
+    // Safety valve: trim at conversation-turn boundaries (streaming path).
+    safe_trim_messages(&mut messages, &manifest.name, user_message);
 
     // Use autonomous config max_iterations if set, else default
     let max_iterations = manifest

@@ -272,7 +272,7 @@ Licencia MIT. Ver archivo LICENSE.
 ¡Gracias a todos los que han contribuido a LibreFang!
 
 <a href="https://github.com/librefang/librefang/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+  <img src="../public/assets/contributors.svg" alt="Contributors" />
 </a>
 
 > ¿Quieres unirte? Consulta nuestra [Guía de contribuciones](../CONTRIBUTING.md) — muchas tareas no requieren experiencia en Rust.

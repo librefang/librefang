@@ -3368,6 +3368,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64 0.22.1",
+ "js-sys",
+ "pem",
+ "ring",
+ "serde",
+ "serde_json",
+ "simple_asn1",
+]
+
+[[package]]
 name = "kasuari"
 version = "0.4.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3521,7 +3536,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-api"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "async-trait",
  "axum",
@@ -3530,6 +3545,8 @@ dependencies = [
  "dashmap",
  "futures",
  "governor",
+ "hmac",
+ "jsonwebtoken",
  "librefang-channels",
  "librefang-extensions",
  "librefang-hands",
@@ -3543,6 +3560,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "socket2",
  "subtle",
  "tempfile",
@@ -3561,7 +3579,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-channels"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "aes",
  "async-trait",
@@ -3599,7 +3617,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-cli"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "clap",
  "clap_complete",
@@ -3631,7 +3649,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-desktop"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "axum",
  "librefang-api",
@@ -3657,7 +3675,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-extensions"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -3685,7 +3703,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-hands"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "chrono",
  "dashmap",
@@ -3702,7 +3720,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-kernel"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3740,7 +3758,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-memory"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3759,7 +3777,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-migrate"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
@@ -3778,7 +3796,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-runtime"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3815,7 +3833,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-skills"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "chrono",
  "hex",
@@ -3838,7 +3856,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-types"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3857,7 +3875,7 @@ dependencies = [
 
 [[package]]
 name = "librefang-wire"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 dependencies = [
  "async-trait",
  "chrono",
@@ -4276,6 +4294,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.4.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-conv"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4290,6 +4318,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "num-integer"
+version = "0.1.46"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7969661fd2958a5cb096e56c8e1ad0444ac2bbcd0061bd28660485a44879858f"
+dependencies = [
+ "num-traits",
 ]
 
 [[package]]
@@ -4635,6 +4672,16 @@ name = "pathdiff"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
+
+[[package]]
+name = "pem"
+version = "3.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
+dependencies = [
+ "base64 0.22.1",
+ "serde_core",
+]
 
 [[package]]
 name = "percent-encoding"
@@ -6375,6 +6422,18 @@ name = "simd-adler32"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e320a6c5ad31d271ad523dcf3ad13e2767ad8b1cb8f047f75a8aeaf8da139da2"
+
+[[package]]
+name = "simple_asn1"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
+dependencies = [
+ "num-bigint",
+ "num-traits",
+ "thiserror 2.0.18",
+ "time",
+]
 
 [[package]]
 name = "siphasher"
@@ -9397,7 +9456,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "0.5.0-20260316"
+version = "0.5.2-20260316"
 
 [[package]]
 name = "yoke"

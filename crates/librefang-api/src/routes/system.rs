@@ -820,6 +820,56 @@ pub async fn find_session_by_label(
 }
 
 // ---------------------------------------------------------------------------
+// Session cleanup endpoint
+// ---------------------------------------------------------------------------
+
+/// POST /api/sessions/cleanup — Manually trigger session retention cleanup.
+///
+/// Runs both expired-session and excess-session cleanup using the configured
+/// `[session]` policy. Returns `{"sessions_deleted": N}`.
+pub async fn session_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let cfg = &state.kernel.config.session;
+    let mut total: u64 = 0;
+
+    if cfg.retention_days > 0 {
+        match state
+            .kernel
+            .memory
+            .cleanup_expired_sessions(cfg.retention_days)
+        {
+            Ok(n) => total += n,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("expired cleanup failed: {e}")})),
+                );
+            }
+        }
+    }
+
+    if cfg.max_sessions_per_agent > 0 {
+        match state
+            .kernel
+            .memory
+            .cleanup_excess_sessions(cfg.max_sessions_per_agent)
+        {
+            Ok(n) => total += n,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("excess cleanup failed: {e}")})),
+                );
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"sessions_deleted": total})),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Execution Approval System — backed by kernel.approval_manager
 // ---------------------------------------------------------------------------
 
@@ -1918,6 +1968,31 @@ fn read_backup_manifest(path: &std::path::Path) -> Option<BackupManifest> {
     let mut buf = String::new();
     std::io::Read::read_to_string(&mut entry, &mut buf).ok()?;
     serde_json::from_str(&buf).ok()
+}
+
+/// GET /api/queue/status — Command queue status and occupancy.
+pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let occupancy = state.kernel.command_queue.occupancy();
+    let lanes: Vec<serde_json::Value> = occupancy
+        .iter()
+        .map(|o| {
+            serde_json::json!({
+                "lane": o.lane.to_string(),
+                "active": o.active,
+                "capacity": o.capacity,
+            })
+        })
+        .collect();
+
+    let queue_cfg = &state.kernel.config.queue;
+    Json(serde_json::json!({
+        "lanes": lanes,
+        "config": {
+            "max_depth_per_agent": queue_cfg.max_depth_per_agent,
+            "max_depth_global": queue_cfg.max_depth_global,
+            "task_ttl_secs": queue_cfg.task_ttl_secs,
+        },
+    }))
 }
 
 /// Get the machine hostname (best-effort).

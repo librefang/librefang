@@ -212,6 +212,9 @@ $RELEASE_BODY"
         --head "$RELEASE_BRANCH")
 
     echo "→ $PR_URL"
+
+    # Auto-merge the release PR (squash) once CI passes
+    gh pr merge "$PR_URL" --auto --squash --repo librefang/librefang
 else
     echo ""
     echo "gh CLI not found. Create a PR manually for branch '$RELEASE_BRANCH'."

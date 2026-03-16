@@ -378,6 +378,18 @@ impl LlmDriver for OpenAIDriver {
             })
             .collect();
 
+        // Guard: an empty message list would produce an unparseable API response
+        // (typically "EOF while parsing a value at line 1 column 0").
+        if oai_messages.is_empty() {
+            return Err(LlmError::Api {
+                status: 0,
+                message: "Cannot send completion request with no messages — \
+                          this usually means aggressive history trimming emptied \
+                          the conversation"
+                    .to_string(),
+            });
+        }
+
         let tool_choice = if oai_tools.is_empty() {
             None
         } else {
@@ -853,6 +865,17 @@ impl LlmDriver for OpenAIDriver {
                 },
             })
             .collect();
+
+        // Guard: an empty message list would produce an unparseable API response.
+        if oai_messages.is_empty() {
+            return Err(LlmError::Api {
+                status: 0,
+                message: "Cannot send streaming request with no messages — \
+                          this usually means aggressive history trimming emptied \
+                          the conversation"
+                    .to_string(),
+            });
+        }
 
         let tool_choice = if oai_tools.is_empty() {
             None
