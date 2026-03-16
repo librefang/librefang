@@ -7,13 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.5.4] - 2026-03-17
 
+### Added
+
+- Add bulk operations API for agents (#397) (@houko)
+- Add Z.AI and Kimi 2 model support (#409) (@houko)
+- Add static Linux binary builds with musl target (#438) (@houko)
+- Add multi-provider OAuth/OIDC authentication support (#454) (@houko)
+- Add session retention policy with automatic cleanup (#516) (@houko)
+- Add configurable message queue with concurrency settings (#517) (@houko)
+- Add multi-language SDKs (JavaScript, Python, Go, Rust) (#531) (@houko)
+- Auto-generate OpenAPI spec with utoipa (#534) (@houko)
+
 ### Fixed
 
+- Complete vertex ai config wiring (#498) (@houko)
+- Trim message history at safe turn boundaries (#521) (@houko)
+- Add logging for X-API-Version header insertion failures (#524) (@houko)
 - Fix SDK publishing (PyPI, npm, crates.io, GHCR) (#537) (@houko)
+- Make release creation idempotent (#539) (@houko)
+
+### Changed
+
+- Split monolithic routes.rs into domain-specific modules (#452) (@houko)
+
+### Maintenance
+
+- Move binary size check from PR to release-only (#528) (@houko)
+- Split release workflow into independent parallel pipelines (#533) (@houko)
 
 ### Other
 
+- V0.5.2-20260316 (#519) (@houko)
 - V0.5.3-20260317 (#536) (@houko)
+- V0.5.4-20260317 (#538) (@houko)
+
 
 ## [0.5.3] - 2026-03-17
 
