@@ -4,10 +4,14 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct Provider {
-    pub name: String,
+    pub id: String,
+    #[serde(rename = "display_name")]
+    pub display_name: Option<String>,
     pub status: Option<String>,
+    #[serde(rename = "api_key_env")]
+    pub api_key_env: Option<String>,
     #[serde(rename = "api_key_configured")]
-    pub api_key_configured: bool,
+    pub api_key_configured: Option<bool>,
     #[serde(rename = "default_model")]
     pub default_model: Option<String>,
 }

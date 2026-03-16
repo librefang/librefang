@@ -5,14 +5,15 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Model {
     pub id: String,
-    pub name: String,
+    #[serde(rename = "display_name")]
+    pub display_name: Option<String>,
     pub provider: Option<String>,
     #[serde(rename = "supports_streaming")]
     pub supports_streaming: Option<bool>,
-    #[serde(rename = "supports_function_calling")]
-    pub supports_function_calling: Option<bool>,
-    #[serde(rename = "max_tokens")]
-    pub max_tokens: Option<u32>,
+    #[serde(rename = "supports_tools")]
+    pub supports_tools: Option<bool>,
+    #[serde(rename = "max_output_tokens")]
+    pub max_output_tokens: Option<u32>,
     #[serde(rename = "context_window")]
     pub context_window: Option<u32>,
 }
