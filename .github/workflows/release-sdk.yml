@@ -7,7 +7,6 @@ on:
 
 permissions:
   contents: write
-  id-token: write  # PyPI trusted publishing
 
 jobs:
   # ── Wait for the GitHub Release to be created ────────────────────────────
@@ -76,7 +75,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-  # ── Python SDK → PyPI (Trusted Publishing / OIDC) ─────────────────────────
+  # ── Python SDK → PyPI ─────────────────────────────────────────────────────
   sdk_python:
     name: SDK / Python (PyPI)
     needs: [wait_for_release]
@@ -110,6 +109,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: sdk/python/dist/
+          password: ${{ secrets.PYPI_API_TOKEN }}
 
   # ── Rust SDK → crates.io ──────────────────────────────────────────────────
   sdk_rust:
