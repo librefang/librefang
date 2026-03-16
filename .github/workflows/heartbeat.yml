@@ -13,5 +13,61 @@ jobs:
     name: Keep Render alive
     runs-on: ubuntu-latest
     steps:
-      - name: Ping health endpoint
-        run: curl -sf --max-time 10 https://render.librefang.ai/api/health
+      - name: Wake Render service
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          RENDER_SERVICE_ID: ${{ secrets.RENDER_SERVICE_ID }}
+        run: |
+          set -uo pipefail
+
+          # 1. Check service status via Render API
+          if [ -n "$RENDER_API_KEY" ] && [ -n "$RENDER_SERVICE_ID" ]; then
+            resp=$(curl -s --max-time 10 \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              -H "Accept: application/json" \
+              "https://api.render.com/v1/services/${RENDER_SERVICE_ID}" || true)
+
+            suspended=$(echo "$resp" | jq -r '.suspended // "unknown"')
+            echo "Service suspended status: ${suspended}"
+
+            # If explicitly suspended, resume via API
+            if [ "$suspended" = "suspended" ]; then
+              echo "Service is suspended, resuming via API..."
+              curl -s --max-time 10 -X POST \
+                -H "Authorization: Bearer ${RENDER_API_KEY}" \
+                "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/resume" || true
+              echo "Waiting 30s for service to start..."
+              sleep 30
+            fi
+          else
+            echo "::warning::RENDER_API_KEY or RENDER_SERVICE_ID not set, skipping API check"
+          fi
+
+          # 2. Try health ping with generous timeout (handles cold start)
+          if curl -sf --max-time 60 https://render.librefang.ai/api/health; then
+            echo "Health check passed"
+            exit 0
+          fi
+          echo "Health check failed, service may be sleeping"
+
+          # 3. Force restart via Render API to wake sleeping instance
+          if [ -n "$RENDER_API_KEY" ] && [ -n "$RENDER_SERVICE_ID" ]; then
+            echo "Triggering restart via Render API..."
+            curl -s --max-time 10 -X POST \
+              -H "Authorization: Bearer ${RENDER_API_KEY}" \
+              "https://api.render.com/v1/services/${RENDER_SERVICE_ID}/restart" || true
+            echo "Waiting 30s for restart..."
+            sleep 30
+          fi
+
+          # 4. Final health check with retries
+          for i in 1 2 3; do
+            if curl -sf --max-time 60 https://render.librefang.ai/api/health; then
+              echo "Health check passed after restart (attempt $i)"
+              exit 0
+            fi
+            echo "Retry $i/3 failed, waiting 10s..."
+            sleep 10
+          done
+
+          echo "::warning::Render service did not respond after restart"
