@@ -615,7 +615,7 @@ pub async fn build_router(
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
-        peer_registry: kernel.peer_registry.as_ref().map(|r| Arc::new(r.clone())),
+        peer_registry: kernel.peer_registry.get().map(|r| Arc::new(r.clone())),
         bridge_manager: tokio::sync::Mutex::new(bridge),
         channels_config: tokio::sync::RwLock::new(channels_config),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
