@@ -16,10 +16,10 @@ API_ROOT = "https://api.github.com"
 PER_PAGE = 100
 
 COLUMNS = 12
-CELL = 64
+CELL = 54
 AVATAR_R = 24
-PAD_X = 8
-PAD_Y = 8
+PAD_X = 3
+PAD_Y = 3
 
 
 @dataclass
