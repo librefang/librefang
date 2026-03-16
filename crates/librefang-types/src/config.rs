@@ -1069,6 +1069,37 @@ pub struct SidecarChannelConfig {
     pub channel_type: Option<String>,
 }
 
+/// Session retention policy configuration.
+///
+/// Controls automatic cleanup of idle or excess sessions.
+/// Configure in `config.toml`:
+/// ```toml
+/// [session]
+/// retention_days = 30
+/// max_sessions_per_agent = 100
+/// cleanup_interval_hours = 24
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionConfig {
+    /// Maximum age for idle sessions before automatic cleanup (days, 0 = unlimited).
+    pub retention_days: u32,
+    /// Maximum number of sessions per agent (oldest pruned first, 0 = unlimited).
+    pub max_sessions_per_agent: u32,
+    /// How often the cleanup job runs (in hours).
+    pub cleanup_interval_hours: u32,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: 0,
+            max_sessions_per_agent: 0,
+            cleanup_interval_hours: 24,
+        }
+    }
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1220,6 +1251,9 @@ pub struct KernelConfig {
     /// - **OpenAI**: automatic prefix caching (response cache stats are parsed).
     #[serde(default = "default_prompt_caching")]
     pub prompt_caching: bool,
+    /// Session retention policy (automatic cleanup of old/excess sessions).
+    #[serde(default)]
+    pub session: SessionConfig,
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1474,6 +1508,7 @@ impl Default for KernelConfig {
             oauth: OAuthConfig::default(),
             sidecar_channels: Vec::new(),
             prompt_caching: default_prompt_caching(),
+            session: SessionConfig::default(),
         }
     }
 }
@@ -1592,6 +1627,7 @@ impl std::fmt::Debug for KernelConfig {
                 "provider_api_keys",
                 &format!("{} mapping(s)", self.provider_api_keys.len()),
             )
+            .field("session", &self.session)
             .finish()
     }
 }
