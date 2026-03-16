@@ -1,0 +1,69 @@
+name: "Release / Create"
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  create_release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Extract changelog for this version
+        id: changelog
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          # Strip date suffix (e.g. 0.4.2-20260314 → 0.4.2) to match CHANGELOG headers
+          VERSION="${VERSION%-*}"
+
+          # Extract this version's changelog section
+          CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)
+
+          if [ -z "$CHANGES" ]; then
+            CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
+          fi
+
+          # Write to file for multiline output
+          echo "$CHANGES" > /tmp/changelog.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+
+          {
+            echo "## What's New"
+            echo ""
+            cat /tmp/changelog.md
+            echo ""
+            echo "## Installation"
+            echo ""
+            echo "**Desktop App** — Download the installer for your platform below."
+            echo ""
+            echo '**CLI (Linux/macOS)**:'
+            echo '```bash'
+            echo 'curl -fsSL https://librefang.ai/install.sh | sh'
+            echo '```'
+            echo ""
+            echo '**Docker**:'
+            echo '```bash'
+            echo 'docker pull ghcr.io/librefang/librefang:latest'
+            echo '```'
+            echo ""
+            echo '**Coming from OpenClaw?**'
+            echo '```bash'
+            echo 'librefang migrate --from openclaw'
+            echo '```'
+          } > /tmp/release-body.md
+
+          gh release create "$TAG" \
+            --title "LibreFang $TAG" \
+            --notes-file /tmp/release-body.md

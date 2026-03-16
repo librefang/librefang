@@ -1,4 +1,4 @@
-name: Release
+name: "Release / Shell"
 
 on:
   push:
@@ -7,218 +7,49 @@ on:
 
 permissions:
   contents: write
-  packages: write
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ── Create GitHub Release first ─────────────────────────────────────────
-  # This job runs before everything else to ensure the release exists
-  # with the correct title, body, and changelog content.
-  # All subsequent jobs only upload assets to this existing release.
-  create_release:
-    name: Create Release
+  # ── Wait for the GitHub Release to be created ────────────────────────────
+  wait_for_release:
+    name: Wait for Release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Extract changelog for this version
-        id: changelog
-        run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG#v}"
-          # Strip date suffix (e.g. 0.4.2-20260314 → 0.4.2) to match CHANGELOG headers
-          VERSION="${VERSION%-*}"
-
-          # Extract this version's changelog section
-          CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)
-
-          if [ -z "$CHANGES" ]; then
-            CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
-          fi
-
-          # Write to file for multiline output
-          echo "$CHANGES" > /tmp/changelog.md
-
-      - name: Create GitHub Release
+      - name: Wait for release or create fallback
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+          for i in $(seq 1 12); do
+            if gh release view "$TAG" --repo "${{ github.repository }}" &>/dev/null; then
+              echo "✓ Release $TAG found"
+              exit 0
+            fi
+            echo "Waiting for release $TAG to be created... ($i/12)"
+            sleep 5
+          done
 
-          {
-            echo "## What's New"
-            echo ""
-            cat /tmp/changelog.md
-            echo ""
-            echo "## Installation"
-            echo ""
-            echo "**Desktop App** — Download the installer for your platform below."
-            echo ""
-            echo '**CLI (Linux/macOS)**:'
-            echo '```bash'
-            echo 'curl -fsSL https://librefang.ai/install.sh | sh'
-            echo '```'
-            echo ""
-            echo '**Docker**:'
-            echo '```bash'
-            echo 'docker pull ghcr.io/librefang/librefang:latest'
-            echo '```'
-            echo ""
-            echo '**Coming from OpenClaw?**'
-            echo '```bash'
-            echo 'librefang migrate --from openclaw'
-            echo '```'
-          } > /tmp/release-body.md
-
+          # Fallback: create a minimal release so builds can proceed
+          echo "::warning::Release not found after 60s, creating fallback release"
+          VERSION="${TAG#v}"
+          VERSION="${VERSION%-*}"
+          CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)
+          if [ -z "$CHANGES" ]; then
+            CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
+          fi
           gh release create "$TAG" \
             --title "LibreFang $TAG" \
-            --notes-file /tmp/release-body.md
-
-  # ── Tauri Desktop App (Windows + macOS + Linux) ───────────────────────────
-  # Produces: .msi, .exe (Windows) | .dmg, .app (macOS) | .AppImage, .deb (Linux)
-  # Also generates and uploads latest.json (the auto-updater manifest)
-  desktop:
-    name: Desktop / ${{ matrix.platform.name }}
-    needs: [create_release]
-    strategy:
-      fail-fast: false
-      matrix:
-        platform:
-          - name: Linux x86_64
-            os: ubuntu-22.04
-            args: "--target x86_64-unknown-linux-gnu"
-            rust_target: x86_64-unknown-linux-gnu
-
-          - name: macOS x86_64
-            os: macos-latest
-            args: "--target x86_64-apple-darwin"
-            rust_target: x86_64-apple-darwin
-
-          - name: macOS ARM64
-            os: macos-latest
-            args: "--target aarch64-apple-darwin"
-            rust_target: aarch64-apple-darwin
-
-          - name: Windows x86_64
-            os: windows-latest
-            args: "--target x86_64-pc-windows-msvc"
-            rust_target: x86_64-pc-windows-msvc
-
-          - name: Windows ARM64
-            os: windows-latest
-            args: "--target aarch64-pc-windows-msvc"
-            rust_target: aarch64-pc-windows-msvc
-
-    runs-on: ${{ matrix.platform.os }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install system deps (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            libgtk-3-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform.rust_target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: desktop-${{ matrix.platform.rust_target }}-${{ github.ref_name }}
-
-      - name: Import macOS signing certificate
-        if: runner.os == 'macOS'
-        env:
-          MAC_CERT_BASE64: ${{ secrets.MAC_CERT_BASE64 }}
-          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
-        run: |
-          if [ -z "$MAC_CERT_BASE64" ]; then
-            echo "No certificate configured, skipping..."
-            exit 0
-          fi
-          echo "$MAC_CERT_BASE64" | base64 --decode > $RUNNER_TEMP/certificate.p12
-          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
-          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security import $RUNNER_TEMP/certificate.p12 -P "$MAC_CERT_PASSWORD" \
-            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-          security set-key-partition-list -S apple-tool:,apple:,codesign: \
-            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
-          echo "Using signing identity: $IDENTITY"
-          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
-          rm -f $RUNNER_TEMP/certificate.p12
-
-      - name: Check notarization readiness
-        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
-        env:
-          TEAM_ID: ${{ secrets.MAC_NOTARIZE_TEAM_ID }}
-        run: |
-          if [ -z "$TEAM_ID" ] || [ ${#TEAM_ID} -lt 3 ]; then
-            echo "::warning::MAC_NOTARIZE_TEAM_ID is missing or invalid, falling back to unsigned build"
-            echo "APPLE_SIGNING_IDENTITY=" >> $GITHUB_ENV
-          fi
-
-      - name: Strip date suffix from Tauri version (MSI requires pre-release id ≤ 65535)
-        shell: bash
-        run: |
-          cd crates/librefang-desktop
-          # 0.4.6-20260315 → 0.4.6 (MSI version components must be ≤ 65535)
-          sed -i.bak 's/"version": "\([0-9]*\.[0-9]*\.[0-9]*\)-[^"]*"/"version": "\1"/' tauri.conf.json
-          rm -f tauri.conf.json.bak
-          echo "Tauri version: $(grep '"version"' tauri.conf.json)"
-
-      - name: Build and bundle Tauri desktop app
-        if: runner.os != 'macOS' || env.APPLE_SIGNING_IDENTITY == ''
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "LibreFang ${{ github.ref_name }}"
-          releaseDraft: false
-          prerelease: false
-          includeUpdaterJson: true
-          projectPath: crates/librefang-desktop
-          args: ${{ matrix.platform.args }}
-
-      - name: Build and bundle Tauri desktop app (signed macOS)
-        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.MAC_NOTARIZE_APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.MAC_NOTARIZE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.MAC_NOTARIZE_TEAM_ID }}
-        with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "LibreFang ${{ github.ref_name }}"
-          releaseDraft: false
-          prerelease: false
-          includeUpdaterJson: true
-          projectPath: crates/librefang-desktop
-          args: ${{ matrix.platform.args }}
+            --notes "$CHANGES" \
+            --repo "${{ github.repository }}" || true
 
   # ── CLI Binary (macOS) ────────────────────────────────────────────────────
   cli_mac:
     name: CLI / ${{ matrix.target }}
-    needs: [create_release]
+    needs: [wait_for_release]
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -246,7 +77,7 @@ jobs:
           cd target/${{ matrix.target }}/release
           tar czf ../../../librefang-${{ matrix.target }}.tar.gz librefang
           cd ../../..
-          sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
+          shasum -a 256 librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -257,7 +88,7 @@ jobs:
   # ── CLI Binary (Linux) ──────────────────────────────────────────────────
   cli_linux:
     name: CLI / ${{ matrix.target }}
-    needs: [create_release]
+    needs: [wait_for_release]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -304,7 +135,7 @@ jobs:
   # ── CLI Binary (Linux) - Mini (12 channels) ───────────────────────────────
   cli_linux_mini:
     name: CLI / ${{ matrix.target }} (mini)
-    needs: [create_release]
+    needs: [wait_for_release]
     runs-on: ubuntu-22.04
     strategy:
       fail-fast: false
@@ -386,7 +217,7 @@ jobs:
   # ── CLI Binary (Windows) ────────────────────────────────────────────────
   cli_windows:
     name: CLI / ${{ matrix.target }}
-    needs: [create_release]
+    needs: [wait_for_release]
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -421,7 +252,7 @@ jobs:
   # ── CLI Binary (macOS) - Mini ─────────────────────────────────────────────
   cli_mac_mini:
     name: CLI / ${{ matrix.target }} (mini)
-    needs: [create_release]
+    needs: [wait_for_release]
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -448,7 +279,7 @@ jobs:
           cd target/${{ matrix.target }}/release
           tar czf ../../../librefang-${{ matrix.target }}-mini.tar.gz librefang
           cd ../../..
-          sha256sum librefang-${{ matrix.target }}-mini.tar.gz > librefang-${{ matrix.target }}-mini.tar.gz.sha256
+          shasum -a 256 librefang-${{ matrix.target }}-mini.tar.gz > librefang-${{ matrix.target }}-mini.tar.gz.sha256
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -459,7 +290,7 @@ jobs:
   # ── CLI Binary (Windows) - Mini ───────────────────────────────────────────
   cli_windows_mini:
     name: CLI / ${{ matrix.target }} (mini)
-    needs: [create_release]
+    needs: [wait_for_release]
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -490,121 +321,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── Docker (linux/amd64 + linux/arm64, native runners) ────────────────────
-  docker:
-    name: Docker / ${{ matrix.platform }}
-    needs: [create_release]
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            os: ubuntu-24.04
-          - platform: linux/arm64
-            os: ubuntu-24.04-arm
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-      - name: Extract version & platform slug
-        id: meta
-        run: |
-          echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
-          platform=${{ matrix.platform }}
-          echo "slug=${platform//\//-}" >> "$GITHUB_OUTPUT"
-      - name: Build and push (single-arch digest)
-        id: build
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          push: true
-          platforms: ${{ matrix.platform }}
-          tags: ghcr.io/librefang/librefang
-          cache-from: type=gha,scope=${{ steps.meta.outputs.slug }}
-          cache-to: type=gha,mode=max,scope=${{ steps.meta.outputs.slug }}
-          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
-      - name: Export digest
-        run: |
-          mkdir -p ${{ runner.temp }}/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "${{ runner.temp }}/digests/${digest#sha256:}"
-      - name: Upload digest
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-digest-${{ steps.meta.outputs.slug }}
-          path: ${{ runner.temp }}/digests/*
-          if-no-files-found: error
-          retention-days: 1
-
-  # ── Docker manifest merge ───────────────────────────────────────────────
-  docker-manifest:
-    name: Docker Manifest
-    runs-on: ubuntu-latest
-    needs: [docker]
-    steps:
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-      - name: Extract version
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
-      - name: Download digests
-        uses: actions/download-artifact@v4
-        with:
-          path: ${{ runner.temp }}/digests
-          pattern: docker-digest-*
-          merge-multiple: true
-      - name: Create and push multi-arch manifest
-        working-directory: ${{ runner.temp }}/digests
-        run: |
-          IMAGE=ghcr.io/librefang/librefang
-          VERSION=${{ steps.version.outputs.version }}
-          docker buildx imagetools create \
-            -t "$IMAGE:latest" \
-            -t "$IMAGE:$VERSION" \
-            $(printf "$IMAGE@sha256:%s " *)
-
-  # ── Deploy to Fly.io ────────────────────────────────────────────────────
-  deploy_fly:
-    name: Deploy to Fly.io
-    runs-on: ubuntu-latest
-    needs: [docker-manifest]
-    steps:
-      - uses: actions/checkout@v6
-      - uses: superfly/flyctl-actions/setup-flyctl@master
-      - name: Deploy
-        run: flyctl deploy --remote-only
-        env:
-          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
-
-  # ── Deploy to Render ──────────────────────────────────────────────────
-  deploy_render:
-    name: Deploy to Render
-    runs-on: ubuntu-latest
-    needs: [docker-manifest]
-    steps:
-      - name: Trigger Render deploy
-        env:
-          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
-        run: |
-          if [ -z "$RENDER_DEPLOY_HOOK_URL" ]; then
-            echo "No Render deploy hook configured, skipping"
-            exit 0
-          fi
-          curl -sf "$RENDER_DEPLOY_HOOK_URL"
-
+  # ── Sync to Homebrew Tap ──────────────────────────────────────────────
   sync_homebrew:
     name: Sync to Homebrew Tap
     runs-on: ubuntu-latest
@@ -766,6 +483,7 @@ jobs:
           git commit -m "chore: update formula to ${{ github.ref_name }}" || echo "No changes"
           git push
 
+  # ── Sync Installers to Website ─────────────────────────────────────────
   sync_installers:
     name: Sync Installers to Website
     runs-on: ubuntu-latest
@@ -856,66 +574,3 @@ jobs:
           git add install.sh install.ps1 install-manifest.json
           git commit -m "chore: sync installers for ${{ github.ref_name }}" || echo "No changes"
           git push
-
-  # ── Discord Release Notification ─────────────────────────────────────
-  notify_discord:
-    name: Notify Discord
-    runs-on: ubuntu-latest
-    needs: [desktop, cli_mac, cli_linux, cli_musl, cli_windows, docker-manifest]
-    if: always() && !cancelled()
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Extract changelog and notify
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
-        run: |
-          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
-            echo "No Discord release webhook configured, skipping"
-            exit 0
-          fi
-
-          TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG#v}"
-          # Strip date suffix (e.g. 0.4.2-20260314 → 0.4.2) to match CHANGELOG headers
-          VERSION="${VERSION%-*}"
-
-          # Extract this version's changelog section
-          CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md | head -30)
-
-          if [ -z "$CHANGES" ]; then
-            CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
-          fi
-
-          # Check job results
-          DESKTOP="${{ needs.desktop.result }}"
-          CLI_MAC="${{ needs.cli_mac.result }}"
-          CLI_LINUX="${{ needs.cli_linux.result }}"
-          CLI_WIN="${{ needs.cli_windows.result }}"
-          DOCKER="${{ needs.docker-manifest.result }}"
-
-          STATUS_LINE=""
-          [ "$DESKTOP" = "success" ] && STATUS_LINE="$STATUS_LINE 🖥️ Desktop" || STATUS_LINE="$STATUS_LINE ❌ Desktop"
-          [ "$CLI_MAC" = "success" ] && STATUS_LINE="$STATUS_LINE | 🍎 macOS CLI" || STATUS_LINE="$STATUS_LINE | ❌ macOS CLI"
-          [ "$CLI_LINUX" = "success" ] && STATUS_LINE="$STATUS_LINE | 🐧 Linux CLI" || STATUS_LINE="$STATUS_LINE | ❌ Linux CLI"
-          [ "$CLI_WIN" = "success" ] && STATUS_LINE="$STATUS_LINE | 🪟 Windows CLI" || STATUS_LINE="$STATUS_LINE | ❌ Windows CLI"
-          [ "$DOCKER" = "success" ] && STATUS_LINE="$STATUS_LINE | 🐳 Docker" || STATUS_LINE="$STATUS_LINE | ❌ Docker"
-
-          # Build Discord embed
-          CONTENT=$(cat <<MSG_EOF
-          🚀 **LibreFang $VERSION Released!**
-
-          $CHANGES
-
-          **Build Status:**$STATUS_LINE
-
-          📦 [Download](https://github.com/librefang/librefang/releases/tag/$TAG) | 📖 [Changelog](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) | ⭐ [Star us](https://github.com/librefang/librefang)
-          MSG_EOF
-          )
-
-          # Clean heredoc indentation
-          CONTENT=$(echo "$CONTENT" | sed 's/^          //')
-
-          printf '%s' "$CONTENT" | jq -Rs '{content: .}' | \
-            curl -s -X POST -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK_URL"
