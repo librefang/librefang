@@ -21,14 +21,15 @@ jobs:
         with:
           token: ${{ secrets.WEBSITE_REPO_TOKEN }}
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
       - name: Generate contributors SVG
-        run: |
-          # Force contrib.rocks to rebuild cache
-          curl -sf "https://contrib.rocks/preview?repo=librefang%2Flibrefang" > /dev/null 2>&1 || true
-          sleep 5
-          # Download fresh SVG (圆形头像)
-          curl -sfL "https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" \
-            -o public/assets/contributors.svg
+        env:
+          GITHUB_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
+        run: python3 scripts/generate_contributors.py librefang/librefang public/assets/contributors.svg
 
       - name: Create PR with updated SVG
         id: cpr
