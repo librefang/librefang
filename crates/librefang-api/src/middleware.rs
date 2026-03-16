@@ -374,6 +374,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_api_version_header_ignores_non_json_vendor_media_type() {
+        let app = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(api_version_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header("accept", "application/vnd.librefang.v1+xml")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-api-version"], "v1");
+    }
+
+    #[tokio::test]
     async fn test_api_version_header_is_added_to_unauthorized_responses() {
         let app = Router::new()
             .route("/api/private", get(|| async { "ok" }))

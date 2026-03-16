@@ -358,6 +358,37 @@ async fn test_build_router_path_version_beats_unknown_accept_header() {
 }
 
 #[tokio::test]
+async fn test_build_router_providers_marks_lemonade_as_local() {
+    let harness = start_full_router("").await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/providers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let providers = json["providers"].as_array().unwrap();
+    let lemonade = providers
+        .iter()
+        .find(|provider| provider["id"] == "lemonade")
+        .expect("lemonade provider should be present");
+
+    assert_eq!(lemonade["is_local"], serde_json::json!(true));
+}
+
+#[tokio::test]
 async fn test_build_router_unauthorized_responses_include_api_version_header() {
     let harness = start_full_router("secret").await;
 

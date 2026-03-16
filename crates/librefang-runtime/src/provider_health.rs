@@ -23,13 +23,13 @@ pub struct ProbeResult {
     pub error: Option<String>,
 }
 
-/// Check if a provider is a local HTTP provider that supports `/models` probing.
+/// Check if a provider is a local HTTP provider that supports health probing.
 ///
-/// Returns true for `"ollama"`, `"vllm"`, `"lmstudio"`.
+/// Returns true for `"ollama"`, `"vllm"`, `"lmstudio"`, and `"lemonade"`.
 pub fn is_local_provider(provider: &str) -> bool {
     matches!(
         provider.to_lowercase().as_str(),
-        "ollama" | "vllm" | "lmstudio"
+        "ollama" | "vllm" | "lmstudio" | "lemonade"
     )
 }
 
@@ -280,6 +280,7 @@ mod tests {
         assert!(is_local_provider("OLLAMA"));
         assert!(is_local_provider("vllm"));
         assert!(is_local_provider("lmstudio"));
+        assert!(is_local_provider("lemonade"));
     }
 
     #[test]
