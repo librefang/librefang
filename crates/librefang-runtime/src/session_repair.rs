@@ -683,6 +683,84 @@ fn content_to_blocks(content: MessageContent) -> Vec<ContentBlock> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Safe trim helpers
+// ---------------------------------------------------------------------------
+
+/// Check if a message contains any `ToolUse` blocks.
+fn message_has_tool_use(msg: &Message) -> bool {
+    match &msg.content {
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. })),
+        _ => false,
+    }
+}
+
+/// Check if a message contains only `ToolResult` blocks (i.e. it is a tool-
+/// result delivery, not a fresh user question).
+fn message_is_only_tool_results(msg: &Message) -> bool {
+    match &msg.content {
+        MessageContent::Blocks(blocks) => {
+            !blocks.is_empty()
+                && blocks
+                    .iter()
+                    .all(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        }
+        _ => false,
+    }
+}
+
+/// Find the latest safe trim point at or after `min_trim` that does **not**
+/// split a ToolUse/ToolResult pair.
+///
+/// A "safe" trim point is an index where:
+/// - `messages[index]` is a `User` message that is a fresh question (not only
+///   ToolResult blocks), **or**
+/// - `messages[index - 1]` is an `Assistant` message without pending ToolUse
+///   blocks (the tool cycle completed).
+///
+/// Returns `None` only when no safe point exists (caller should fall back to
+/// the original `min_trim` value).
+pub fn find_safe_trim_point(messages: &[Message], min_trim: usize) -> Option<usize> {
+    let len = messages.len();
+    if min_trim >= len {
+        return None;
+    }
+
+    // Scan forward from min_trim.
+    for i in min_trim..len {
+        if is_safe_boundary(messages, i) {
+            return Some(i);
+        }
+    }
+
+    // No safe point forward — scan backward.
+    (1..min_trim).rev().find(|&i| is_safe_boundary(messages, i))
+}
+
+/// Returns `true` when index `i` is a clean conversation-turn boundary.
+fn is_safe_boundary(messages: &[Message], i: usize) -> bool {
+    let msg = &messages[i];
+
+    // The message at the cut point must be a User message that is a fresh
+    // question (not a ToolResult delivery).
+    if msg.role != Role::User || message_is_only_tool_results(msg) {
+        return false;
+    }
+
+    // If there is a preceding message it must be an Assistant message that
+    // does NOT contain unresolved ToolUse blocks.
+    if i > 0 {
+        let prev = &messages[i - 1];
+        if prev.role == Role::Assistant && message_has_tool_use(prev) {
+            return false;
+        }
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
