@@ -187,7 +187,7 @@ if [[ "$push_confirm" =~ ^[Nn] ]]; then
 fi
 
 git -C "$REPO_ROOT" push -u origin "$RELEASE_BRANCH"
-git -C "$REPO_ROOT" push origin "$TAG"
+git -C "$REPO_ROOT" push origin "$TAG" --force
 
 # --- Create PR ---
 
