@@ -1,11 +1,11 @@
 //! OAuth2/OIDC external authentication support.
 //!
 //! Provides:
-//! - OIDC discovery (fetches `.well-known/openid-configuration`)
+//! - OIDC discovery (fetches `.well-known/openid-configuration`) with caching
 //! - Multi-provider support (Google, GitHub, Azure AD, Keycloak, generic OIDC)
 //! - Login redirect to the external identity provider (per-provider)
-//! - Authorization code callback and token exchange
-//! - JWT validation with JWKS caching
+//! - Authorization code callback and token exchange with CSRF protection
+//! - JWT validation with JWKS caching and nonce verification
 //! - Token introspection endpoint
 //! - User info extraction from ID tokens
 //! - Auth middleware for injecting user claims into request extensions
@@ -14,14 +14,19 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
+use base64::Engine;
+use hmac::{Hmac, Mac};
 use jsonwebtoken::{decode, Algorithm, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use crate::routes::AppState;
+
+type HmacSha256 = Hmac<Sha256>;
 
 // ── OIDC Discovery ──────────────────────────────────────────────────────
 
@@ -108,6 +113,9 @@ pub struct IdTokenClaims {
     /// Expiration.
     #[serde(default)]
     pub exp: Option<u64>,
+    /// Nonce (for replay protection).
+    #[serde(default)]
+    pub nonce: Option<String>,
 }
 
 /// OIDC `aud` claim can be a single string or an array.
@@ -143,29 +151,132 @@ struct CachedJwks {
 }
 
 /// In-memory JWKS cache shared across requests. Maps JWKS URI to cached keys.
+#[derive(Default)]
 pub struct JwksCache {
     inner: RwLock<HashMap<String, CachedJwks>>,
-}
-
-impl JwksCache {
-    pub fn new() -> Self {
-        Self {
-            inner: RwLock::new(HashMap::new()),
-        }
-    }
-}
-
-impl Default for JwksCache {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// JWKS cache TTL — 1 hour. Providers rotate keys infrequently.
 const JWKS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Global JWKS cache instance (lazily initialized).
-static JWKS_CACHE: std::sync::LazyLock<JwksCache> = std::sync::LazyLock::new(JwksCache::new);
+static JWKS_CACHE: std::sync::LazyLock<JwksCache> = std::sync::LazyLock::new(JwksCache::default);
+
+// ── Discovery Cache ─────────────────────────────────────────────────────
+
+/// Cached OIDC discovery document.
+struct CachedDiscovery {
+    doc: OidcDiscovery,
+    fetched_at: std::time::Instant,
+}
+
+/// In-memory OIDC discovery cache. Maps issuer URL to cached discovery doc.
+#[derive(Default)]
+struct DiscoveryCache {
+    inner: RwLock<HashMap<String, CachedDiscovery>>,
+}
+
+/// Discovery cache TTL — 1 hour.
+const DISCOVERY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Global OIDC discovery cache instance.
+static DISCOVERY_CACHE: std::sync::LazyLock<DiscoveryCache> =
+    std::sync::LazyLock::new(DiscoveryCache::default);
+
+// ── State (CSRF) ────────────────────────────────────────────────────────
+
+/// State parameter payload encoded as JSON and HMAC-signed.
+/// Encodes the provider ID and a nonce so the callback can route correctly
+/// and validate against CSRF.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OAuthStatePayload {
+    /// Provider ID (e.g. "google", "github").
+    provider: String,
+    /// Random nonce for CSRF protection.
+    nonce: String,
+    /// Timestamp (seconds since UNIX epoch) for expiry checking.
+    ts: u64,
+}
+
+/// State token TTL — 10 minutes. Login flows should complete quickly.
+const STATE_TOKEN_TTL_SECS: u64 = 600;
+
+/// Build an HMAC-signed state parameter containing provider + nonce.
+fn build_state_token(provider_id: &str) -> String {
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let payload = OAuthStatePayload {
+        provider: provider_id.to_string(),
+        nonce: nonce.clone(),
+        ts,
+    };
+    let payload_json = serde_json::to_string(&payload).unwrap_or_default();
+    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(payload_json.as_bytes());
+
+    // HMAC-sign the payload.
+    let key = state_signing_key();
+    let mut mac =
+        HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(payload_b64.as_bytes());
+    let sig = mac.finalize().into_bytes();
+    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
+
+    // Format: payload.signature (both base64url)
+    format!("{payload_b64}.{sig_b64}")
+}
+
+/// Verify and decode a state token. Returns the payload if valid.
+fn verify_state_token(state: &str) -> Result<OAuthStatePayload, String> {
+    use base64::Engine;
+    let parts: Vec<&str> = state.splitn(2, '.').collect();
+    if parts.len() != 2 {
+        return Err("Invalid state format".to_string());
+    }
+    let (payload_b64, sig_b64) = (parts[0], parts[1]);
+
+    // Verify HMAC.
+    let key = state_signing_key();
+    let mut mac =
+        HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC can take key of any size");
+    mac.update(payload_b64.as_bytes());
+    let expected_sig = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(sig_b64)
+        .map_err(|_| "Invalid state signature encoding")?;
+    mac.verify_slice(&expected_sig)
+        .map_err(|_| "State signature verification failed")?;
+
+    // Decode payload.
+    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .map_err(|_| "Invalid state payload encoding")?;
+    let payload: OAuthStatePayload =
+        serde_json::from_slice(&payload_bytes).map_err(|_| "Invalid state payload JSON")?;
+
+    // Check expiry.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if now.saturating_sub(payload.ts) > STATE_TOKEN_TTL_SECS {
+        return Err("State token expired".to_string());
+    }
+
+    Ok(payload)
+}
+
+/// Derive the HMAC signing key for state tokens. Uses LIBREFANG_STATE_SECRET
+/// env var if set, otherwise falls back to a random per-process key.
+fn state_signing_key() -> String {
+    static KEY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        std::env::var("LIBREFANG_STATE_SECRET")
+            .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string())
+    });
+    KEY.clone()
+}
 
 // ── Resolved Provider ───────────────────────────────────────────────────
 
@@ -198,14 +309,12 @@ struct TokenResponse {
     access_token: String,
     #[serde(default)]
     id_token: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    token_type: Option<String>,
+    #[serde(default, rename = "token_type")]
+    _token_type: Option<String>,
     #[serde(default)]
     expires_in: Option<u64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    refresh_token: Option<String>,
+    #[serde(default, rename = "refresh_token")]
+    _refresh_token: Option<String>,
 }
 
 // ── Route: GET /api/auth/providers ──────────────────────────────────────
@@ -213,13 +322,11 @@ struct TokenResponse {
 /// GET /api/auth/providers — List available authentication providers.
 pub async fn auth_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let ext_auth = &state.kernel.config.external_auth;
-    let api_key_set = !state.kernel.config.api_key.trim().is_empty();
 
     if !ext_auth.enabled {
         return Json(serde_json::json!({
             "enabled": false,
             "providers": [],
-            "api_key_auth": api_key_set,
         }));
     }
 
@@ -238,25 +345,13 @@ pub async fn auth_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     Json(serde_json::json!({
         "enabled": true,
         "providers": summary,
-        "api_key_auth": api_key_set,
     }))
 }
 
 // ── Route: GET /api/auth/login ──────────────────────────────────────────
 
-/// Query params for the login redirect.
-#[derive(Deserialize)]
-pub struct LoginQuery {
-    /// Optional `state` parameter for CSRF protection (passed through to callback).
-    #[serde(default)]
-    pub state: Option<String>,
-}
-
 /// GET /api/auth/login — Redirect to the external identity provider (legacy single-provider).
-pub async fn auth_login(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<LoginQuery>,
-) -> Response {
+pub async fn auth_login(State(state): State<Arc<AppState>>) -> Response {
     let ext_auth = &state.kernel.config.external_auth;
     if !ext_auth.enabled {
         return (
@@ -278,14 +373,13 @@ pub async fn auth_login(
         }
     };
 
-    build_login_redirect(provider, query.state).into_response()
+    build_login_redirect(provider).into_response()
 }
 
 /// GET /api/auth/login/:provider — Redirect to a specific provider.
 pub async fn auth_login_provider(
     State(state): State<Arc<AppState>>,
     Path(provider_id): Path<String>,
-    Query(query): Query<LoginQuery>,
 ) -> Response {
     let ext_auth = &state.kernel.config.external_auth;
     if !ext_auth.enabled {
@@ -308,15 +402,19 @@ pub async fn auth_login_provider(
         }
     };
 
-    build_login_redirect(provider, query.state).into_response()
+    build_login_redirect(provider).into_response()
 }
 
 /// Build the OAuth2 authorization redirect for the given provider.
-fn build_login_redirect(
-    provider: &ResolvedProvider,
-    state_param: Option<String>,
-) -> impl IntoResponse {
-    let state_param = state_param.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+/// Generates a signed state token encoding the provider ID and a nonce.
+fn build_login_redirect(provider: &ResolvedProvider) -> impl IntoResponse {
+    let state_token = build_state_token(&provider.id);
+    // Extract the nonce from the state for the OIDC nonce parameter.
+    let nonce = if let Ok(payload) = verify_state_token(&state_token) {
+        payload.nonce
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    };
     let scopes = provider.scopes.join(" ");
 
     match url::Url::parse_with_params(
@@ -326,7 +424,8 @@ fn build_login_redirect(
             ("client_id", &provider.client_id),
             ("redirect_uri", &provider.redirect_url),
             ("scope", &scopes),
-            ("state", &state_param),
+            ("state", &state_token),
+            ("nonce", &nonce),
         ],
     ) {
         Ok(auth_url) => {
@@ -352,12 +451,9 @@ pub struct CallbackQuery {
     /// Authorization code from the IdP.
     #[serde(default)]
     pub code: Option<String>,
-    /// State parameter (CSRF token).
+    /// State parameter (signed CSRF token with embedded provider).
     #[serde(default)]
     pub state: Option<String>,
-    /// Provider identifier (passed through from login redirect).
-    #[serde(default)]
-    pub provider: Option<String>,
     /// Error from the IdP (if authorization was denied).
     #[serde(default)]
     pub error: Option<String>,
@@ -370,12 +466,8 @@ pub struct CallbackQuery {
 pub struct CallbackBody {
     /// Authorization code.
     pub code: String,
-    /// State parameter for CSRF validation.
-    #[serde(default)]
-    pub state: Option<String>,
-    /// Provider ID.
-    #[serde(default)]
-    pub provider: Option<String>,
+    /// State parameter for CSRF validation (signed token).
+    pub state: String,
 }
 
 /// Callback response with session token.
@@ -439,8 +531,31 @@ pub async fn auth_callback(
         }
     };
 
-    let provider_id = query.provider.as_deref();
-    handle_code_exchange(ext_auth, &code, provider_id).await
+    // SECURITY: Validate the state parameter (CSRF protection).
+    let state_str = match query.state {
+        Some(ref s) if !s.is_empty() => s.clone(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing state parameter"})),
+            )
+                .into_response();
+        }
+    };
+
+    let state_payload = match verify_state_token(&state_str) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = %e, "CSRF state validation failed");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid or expired state parameter"})),
+            )
+                .into_response();
+        }
+    };
+
+    handle_code_exchange(ext_auth, &code, &state_payload).await
 }
 
 /// POST /api/auth/callback — Handle the OAuth2 callback (programmatic clients).
@@ -457,37 +572,44 @@ pub async fn auth_callback_post(
             .into_response();
     }
 
-    let provider_id = body.provider.as_deref();
-    handle_code_exchange(ext_auth, &body.code, provider_id).await
+    // SECURITY: Validate the state parameter (CSRF protection).
+    let state_payload = match verify_state_token(&body.state) {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = %e, "CSRF state validation failed (POST)");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid or expired state parameter"})),
+            )
+                .into_response();
+        }
+    };
+
+    handle_code_exchange(ext_auth, &body.code, &state_payload).await
 }
 
 /// Shared code exchange logic for both GET and POST callback handlers.
 async fn handle_code_exchange(
     ext_auth: &librefang_types::config::ExternalAuthConfig,
     code: &str,
-    provider_id: Option<&str>,
+    state_payload: &OAuthStatePayload,
 ) -> Response {
     let providers = resolve_providers(ext_auth).await;
 
-    // Find the requested provider, or default to the first one.
-    let provider = if let Some(id) = provider_id {
-        match providers.iter().find(|p| p.id == id) {
-            Some(p) => p,
-            None => {
+    // Route to the provider encoded in the state token.
+    let provider = match providers.iter().find(|p| p.id == state_payload.provider) {
+        Some(p) => p,
+        None => {
+            // If the encoded provider is not found but there is exactly one provider,
+            // use it (graceful degradation for legacy clients).
+            if providers.len() == 1 {
+                &providers[0]
+            } else {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": format!("Unknown auth provider: {}", id)})),
-                )
-                    .into_response();
-            }
-        }
-    } else {
-        match providers.first() {
-            Some(p) => p,
-            None => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({"error": "No auth providers configured"})),
+                    Json(serde_json::json!({
+                        "error": format!("Unknown auth provider: {}", state_payload.provider)
+                    })),
                 )
                     .into_response();
             }
@@ -521,10 +643,11 @@ async fn handle_code_exchange(
     {
         Ok(t) => t,
         Err(e) => {
-            warn!("Token exchange failed: {e}");
+            // SECURITY: Log full error at debug level, return generic message to client.
+            debug!("Token exchange failed: {e}");
             return (
                 StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("Token exchange failed: {e}")})),
+                Json(serde_json::json!({"error": "Token exchange failed"})),
             )
                 .into_response();
         }
@@ -534,7 +657,20 @@ async fn handle_code_exchange(
     let claims = if let Some(ref id_token) = token_resp.id_token {
         if !id_token.is_empty() && !provider.jwks_uri.is_empty() {
             match validate_jwt_cached(id_token, &provider.jwks_uri, &provider.audience).await {
-                Ok(c) => Some(c),
+                Ok(c) => {
+                    // Verify nonce matches the one from our state token.
+                    if let Some(ref token_nonce) = c.nonce {
+                        if token_nonce != &state_payload.nonce {
+                            warn!("Nonce mismatch in ID token");
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({"error": "Nonce mismatch in ID token"})),
+                            )
+                                .into_response();
+                        }
+                    }
+                    Some(c)
+                }
                 Err(e) => {
                     debug!(error = %e, "ID token validation failed, falling back to userinfo");
                     None
@@ -574,12 +710,13 @@ async fn handle_code_exchange(
                         aud: OidcAudience::Single(provider.client_id.clone()),
                         iat: None,
                         exp: None,
+                        nonce: None,
                     },
                     Err(e) => {
-                        warn!(error = %e, "Userinfo fetch failed");
+                        debug!(error = %e, "Userinfo fetch failed");
                         return (
                             StatusCode::BAD_GATEWAY,
-                            Json(serde_json::json!({"error": format!("Could not retrieve user info: {e}")})),
+                            Json(serde_json::json!({"error": "Could not retrieve user info"})),
                         )
                             .into_response();
                     }
@@ -597,7 +734,7 @@ async fn handle_code_exchange(
     // Check allowed domains.
     if !provider.allowed_domains.is_empty() {
         if let Some(ref email) = claims.email {
-            let domain = email.split('@').next_back().unwrap_or("");
+            let domain = email.rsplit('@').next().unwrap_or("");
             if !provider.allowed_domains.iter().any(|d| d == domain) {
                 return (
                     StatusCode::FORBIDDEN,
@@ -829,7 +966,8 @@ pub async fn oidc_auth_middleware(
         }
         match validate_jwt_cached(&token, &provider.jwks_uri, &provider.audience).await {
             Ok(claims) => {
-                // Check allowed domains.
+                // SECURITY: Check allowed domains. When allowed_domains is non-empty,
+                // tokens without an email claim MUST be rejected.
                 if !provider.allowed_domains.is_empty() {
                     if let Some(ref email) = claims.email {
                         let domain = email.rsplit('@').next().unwrap_or("");
@@ -841,6 +979,14 @@ pub async fn oidc_auth_middleware(
                             )
                                 .into_response();
                         }
+                    } else {
+                        // SECURITY: No email claim but domain filtering is required — reject.
+                        debug!("Token has no email claim but allowed_domains is configured");
+                        return (
+                            StatusCode::FORBIDDEN,
+                            Json(serde_json::json!({"error": "Email claim required for domain authorization"})),
+                        )
+                            .into_response();
                     }
                 }
                 // Inject claims into request extensions.
@@ -860,10 +1006,10 @@ pub async fn oidc_auth_middleware(
 
 /// Resolve all configured providers to their endpoints.
 ///
-/// For providers with an `issuer_url`, performs OIDC discovery.
+/// For providers with an `issuer_url`, performs OIDC discovery (cached).
 /// For providers with explicit URLs, uses those directly.
 /// Falls back to legacy single-provider config if no explicit providers are defined.
-async fn resolve_providers(
+pub(crate) async fn resolve_providers(
     config: &librefang_types::config::ExternalAuthConfig,
 ) -> Vec<ResolvedProvider> {
     let mut resolved = Vec::new();
@@ -882,7 +1028,7 @@ async fn resolve_providers(
 
     // Legacy single-provider fallback.
     if resolved.is_empty() && !config.issuer_url.is_empty() && !config.client_id.is_empty() {
-        match discover_oidc(&config.issuer_url).await {
+        match discover_oidc_cached(&config.issuer_url).await {
             Ok(disc) => {
                 resolved.push(ResolvedProvider {
                     id: "default".to_string(),
@@ -943,7 +1089,7 @@ async fn resolve_single_provider(
         });
     }
 
-    // Use OIDC discovery.
+    // Use OIDC discovery (cached).
     if provider.issuer_url.is_empty() {
         return Err(format!(
             "Provider '{}' has no issuer_url and no explicit auth_url/token_url",
@@ -951,7 +1097,7 @@ async fn resolve_single_provider(
         ));
     }
 
-    let disc = discover_oidc(&provider.issuer_url).await?;
+    let disc = discover_oidc_cached(&provider.issuer_url).await?;
     Ok(ResolvedProvider {
         id: provider.id.clone(),
         display_name,
@@ -985,6 +1131,38 @@ async fn resolve_single_provider(
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
+
+/// Fetch the OIDC discovery document with caching.
+async fn discover_oidc_cached(issuer_url: &str) -> Result<OidcDiscovery, String> {
+    let key = issuer_url.trim_end_matches('/').to_string();
+
+    // Check cache first.
+    {
+        let read = DISCOVERY_CACHE.inner.read().await;
+        if let Some(cached) = read.get(&key) {
+            if cached.fetched_at.elapsed() < DISCOVERY_CACHE_TTL {
+                return Ok(cached.doc.clone());
+            }
+        }
+    }
+
+    // Fetch fresh.
+    let doc = discover_oidc(issuer_url).await?;
+
+    // Update cache.
+    {
+        let mut write = DISCOVERY_CACHE.inner.write().await;
+        write.insert(
+            key,
+            CachedDiscovery {
+                doc: doc.clone(),
+                fetched_at: std::time::Instant::now(),
+            },
+        );
+    }
+
+    Ok(doc)
+}
 
 /// Fetch the OIDC discovery document from `{issuer}/.well-known/openid-configuration`.
 async fn discover_oidc(issuer_url: &str) -> Result<OidcDiscovery, String> {
@@ -1032,6 +1210,8 @@ async fn exchange_code(
     if !resp.status().is_success() {
         let status = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
+        // SECURITY: Full error body is returned to caller (which logs at debug level),
+        // but caller should NOT forward this to the end user.
         return Err(format!("Token endpoint returned HTTP {status}: {body}"));
     }
 
@@ -1192,6 +1372,7 @@ pub async fn validate_external_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     #[test]
     fn test_oidc_audience_single() {
@@ -1270,5 +1451,174 @@ mod tests {
         let result = build_decoding_key(&jwk, &Algorithm::HS256);
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("Unsupported"));
+    }
+
+    // ── State token tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_build_and_verify_state_token() {
+        let token = build_state_token("google");
+        let payload = verify_state_token(&token).unwrap();
+        assert_eq!(payload.provider, "google");
+        assert!(!payload.nonce.is_empty());
+    }
+
+    #[test]
+    fn test_state_token_rejects_tampered_payload() {
+        let token = build_state_token("google");
+        // Tamper with the payload part.
+        let parts: Vec<&str> = token.splitn(2, '.').collect();
+        let tampered = format!("{}.{}", "dGFtcGVyZWQ", parts[1]);
+        assert!(verify_state_token(&tampered).is_err());
+    }
+
+    #[test]
+    fn test_state_token_rejects_missing_signature() {
+        assert!(verify_state_token("just-payload-no-dot").is_err());
+    }
+
+    #[test]
+    fn test_state_token_rejects_expired() {
+        // Build a token with an old timestamp.
+        let payload = OAuthStatePayload {
+            provider: "test".to_string(),
+            nonce: "nonce".to_string(),
+            ts: 0, // epoch = very expired
+        };
+        let payload_json = serde_json::to_string(&payload).unwrap();
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(payload_json.as_bytes());
+        let key = state_signing_key();
+        let mut mac =
+            HmacSha256::new_from_slice(key.as_bytes()).unwrap();
+        mac.update(payload_b64.as_bytes());
+        let sig = mac.finalize().into_bytes();
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
+        let token = format!("{payload_b64}.{sig_b64}");
+
+        let result = verify_state_token(&token);
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("expired"));
+    }
+
+    // ── resolve_providers tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_resolve_providers_empty_config() {
+        let config = librefang_types::config::ExternalAuthConfig::default();
+        let providers = resolve_providers(&config).await;
+        assert!(providers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_providers_explicit_urls() {
+        let config = librefang_types::config::ExternalAuthConfig {
+            enabled: true,
+            providers: vec![librefang_types::config::OidcProvider {
+                id: "github".to_string(),
+                display_name: "GitHub".to_string(),
+                issuer_url: String::new(),
+                auth_url: "https://github.com/login/oauth/authorize".to_string(),
+                token_url: "https://github.com/login/oauth/access_token".to_string(),
+                userinfo_url: "https://api.github.com/user".to_string(),
+                jwks_uri: String::new(),
+                client_id: "test-client".to_string(),
+                client_secret_env: "GH_SECRET".to_string(),
+                redirect_url: "http://localhost/callback".to_string(),
+                scopes: vec!["read:user".to_string()],
+                allowed_domains: vec![],
+                audience: String::new(),
+            }],
+            ..Default::default()
+        };
+        let providers = resolve_providers(&config).await;
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "github");
+        assert_eq!(providers[0].auth_url, "https://github.com/login/oauth/authorize");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_providers_discovery_failure_does_not_panic() {
+        // Provider with an issuer_url that will fail discovery (no server).
+        let config = librefang_types::config::ExternalAuthConfig {
+            enabled: true,
+            providers: vec![librefang_types::config::OidcProvider {
+                id: "bad".to_string(),
+                display_name: "Bad".to_string(),
+                issuer_url: "http://127.0.0.1:1/nonexistent".to_string(),
+                auth_url: String::new(),
+                token_url: String::new(),
+                userinfo_url: String::new(),
+                jwks_uri: String::new(),
+                client_id: "test".to_string(),
+                client_secret_env: "SECRET".to_string(),
+                redirect_url: "http://localhost/callback".to_string(),
+                scopes: vec!["openid".to_string()],
+                allowed_domains: vec![],
+                audience: String::new(),
+            }],
+            ..Default::default()
+        };
+        let providers = resolve_providers(&config).await;
+        // Should return empty (discovery failed) without panicking.
+        assert!(providers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_providers_legacy_fallback_no_issuer() {
+        // Legacy config with client_id but no issuer_url — should not resolve.
+        let config = librefang_types::config::ExternalAuthConfig {
+            enabled: true,
+            client_id: "legacy-client".to_string(),
+            issuer_url: String::new(),
+            ..Default::default()
+        };
+        let providers = resolve_providers(&config).await;
+        assert!(providers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_resolve_providers_multi_provider_mixed() {
+        // One provider with explicit URLs (succeeds) and one with bad issuer (fails).
+        let config = librefang_types::config::ExternalAuthConfig {
+            enabled: true,
+            providers: vec![
+                librefang_types::config::OidcProvider {
+                    id: "good".to_string(),
+                    display_name: "Good".to_string(),
+                    issuer_url: String::new(),
+                    auth_url: "https://auth.example.com/authorize".to_string(),
+                    token_url: "https://auth.example.com/token".to_string(),
+                    userinfo_url: String::new(),
+                    jwks_uri: String::new(),
+                    client_id: "good-client".to_string(),
+                    client_secret_env: "GOOD_SECRET".to_string(),
+                    redirect_url: "http://localhost/callback".to_string(),
+                    scopes: vec!["openid".to_string()],
+                    allowed_domains: vec![],
+                    audience: String::new(),
+                },
+                librefang_types::config::OidcProvider {
+                    id: "bad".to_string(),
+                    display_name: "Bad".to_string(),
+                    issuer_url: "http://127.0.0.1:1/nonexistent".to_string(),
+                    auth_url: String::new(),
+                    token_url: String::new(),
+                    userinfo_url: String::new(),
+                    jwks_uri: String::new(),
+                    client_id: "bad-client".to_string(),
+                    client_secret_env: "BAD_SECRET".to_string(),
+                    redirect_url: "http://localhost/callback".to_string(),
+                    scopes: vec!["openid".to_string()],
+                    allowed_domains: vec![],
+                    audience: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        let providers = resolve_providers(&config).await;
+        // Only the explicit-URL provider should succeed.
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "good");
     }
 }

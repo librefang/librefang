@@ -1428,9 +1428,6 @@ pub struct ExternalAuthConfig {
     /// JWT audience claim to validate (defaults to `client_id` if empty).
     #[serde(default)]
     pub audience: String,
-    /// Additional trusted JWKS URIs (beyond OIDC discovery).
-    #[serde(default)]
-    pub jwks_uris: Vec<String>,
     /// Session token lifetime in seconds. Default: 86400 (24 hours).
     #[serde(default = "default_session_ttl")]
     pub session_ttl_secs: u64,
@@ -1518,7 +1515,6 @@ impl Default for ExternalAuthConfig {
             scopes: default_oauth_scopes(),
             allowed_domains: Vec::new(),
             audience: String::new(),
-            jwks_uris: Vec::new(),
             session_ttl_secs: default_session_ttl(),
             providers: Vec::new(),
         }
