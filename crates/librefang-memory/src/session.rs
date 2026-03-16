@@ -372,46 +372,24 @@ impl SessionStore {
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
 
-        // Find all distinct agent IDs that have sessions.
-        let mut agent_stmt = conn
-            .prepare("SELECT DISTINCT agent_id FROM sessions")
+        // Single-query approach using window functions (SQLite 3.25+).
+        // ROW_NUMBER partitions by agent and ranks by recency; rows beyond
+        // the limit are deleted in one pass — no N+1 per-agent queries.
+        let deleted = conn
+            .execute(
+                "DELETE FROM sessions WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY agent_id ORDER BY updated_at DESC
+                        ) AS rn
+                        FROM sessions
+                    ) WHERE rn > ?1
+                )",
+                rusqlite::params![max_per_agent],
+            )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        let agent_ids: Vec<String> = agent_stmt
-            .query_map([], |row| row.get(0))
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .collect();
 
-        let mut total_deleted: u64 = 0;
-        for agent_id in &agent_ids {
-            // Count sessions for this agent.
-            let count: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM sessions WHERE agent_id = ?1",
-                    rusqlite::params![agent_id],
-                    |row| row.get(0),
-                )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-
-            let excess = count - i64::from(max_per_agent);
-            if excess <= 0 {
-                continue;
-            }
-
-            // Delete the oldest excess sessions.
-            let deleted = conn
-                .execute(
-                    "DELETE FROM sessions WHERE id IN (
-                        SELECT id FROM sessions WHERE agent_id = ?1
-                        ORDER BY updated_at ASC LIMIT ?2
-                    )",
-                    rusqlite::params![agent_id, excess],
-                )
-                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-            total_deleted += deleted as u64;
-        }
-
-        Ok(total_deleted)
+        Ok(deleted as u64)
     }
 }
 
