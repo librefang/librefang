@@ -26,7 +26,8 @@ fn generate_openapi_json() {
     );
 
     // Write to repo root for SDK codegen / CI consumption
-    let out_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("openapi.json");
+    // Write to repo root (two levels up from crates/librefang-api/)
+    let out_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../openapi.json");
     std::fs::write(&out_path, &json).expect("Failed to write openapi.json");
     eprintln!("Wrote {} paths to {}", paths.len(), out_path.display());
 }
