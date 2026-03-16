@@ -79,11 +79,9 @@ jobs:
           cd ../../..
           shasum -a 256 librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: librefang-${{ matrix.target }}.*
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF#refs/tags/}" librefang-${{ matrix.target }}.* --clobber
 
   # ── CLI Binary (Linux) ──────────────────────────────────────────────────
   cli_linux:
@@ -126,11 +124,9 @@ jobs:
           cd ../../..
           sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: librefang-${{ matrix.target }}.*
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF#refs/tags/}" librefang-${{ matrix.target }}.* --clobber
 
   # ── CLI Binary (Linux) - Mini (12 channels) ───────────────────────────────
   cli_linux_mini:
@@ -162,11 +158,9 @@ jobs:
           cd ../../..
           sha256sum librefang-${{ matrix.target }}-mini.tar.gz > librefang-${{ matrix.target }}-mini.tar.gz.sha256
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: librefang-${{ matrix.target }}-mini.*
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF#refs/tags/}" librefang-${{ matrix.target }}-mini.* --clobber
 
   # ── CLI Binary (Linux, musl — fully static) ─────────────────────────────
   cli_musl:
@@ -207,11 +201,9 @@ jobs:
           cd ../../..
           sha256sum librefang-${{ matrix.target }}.tar.gz > librefang-${{ matrix.target }}.tar.gz.sha256
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: librefang-${{ matrix.target }}.*
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF#refs/tags/}" librefang-${{ matrix.target }}.* --clobber
 
   # ── CLI Binary (Windows) ────────────────────────────────────────────────
   cli_windows:
@@ -242,11 +234,10 @@ jobs:
           $hash = (Get-FileHash "librefang-${{ matrix.target }}.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  librefang-${{ matrix.target }}.zip" | Out-File -Encoding ASCII "librefang-${{ matrix.target }}.zip.sha256"
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: librefang-${{ matrix.target }}.*
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF#refs/tags/}" librefang-${{ matrix.target }}.* --clobber
 
   # ── CLI Binary (macOS) - Mini ─────────────────────────────────────────────
   cli_mac_mini:
@@ -280,11 +271,9 @@ jobs:
           cd ../../..
           shasum -a 256 librefang-${{ matrix.target }}-mini.tar.gz > librefang-${{ matrix.target }}-mini.tar.gz.sha256
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: librefang-${{ matrix.target }}-mini.*
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF#refs/tags/}" librefang-${{ matrix.target }}-mini.* --clobber
 
   # ── CLI Binary (Windows) - Mini ───────────────────────────────────────────
   cli_windows_mini:
@@ -314,11 +303,10 @@ jobs:
           $hash = (Get-FileHash "librefang-${{ matrix.target }}-mini.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  librefang-${{ matrix.target }}-mini.zip" | Out-File -Encoding ASCII "librefang-${{ matrix.target }}-mini.zip.sha256"
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: librefang-${{ matrix.target }}-mini.*
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF#refs/tags/}" librefang-${{ matrix.target }}-mini.* --clobber
 
   # ── Sync to Homebrew Tap ──────────────────────────────────────────────
   sync_homebrew:
