@@ -24,17 +24,17 @@
   <text x="30" y="52" class="title">Star History</text>
   <text x="30" y="74" class="subtitle">librefang/librefang</text>
   <text x="770" y="52" class="value" text-anchor="end">16</text>
-  <text x="770" y="74" class="subtitle" text-anchor="end">Updated 2026-03-15 23:44 UTC</text>
+  <text x="770" y="74" class="subtitle" text-anchor="end">Updated 2026-03-16 03:34 UTC</text>
   <line x1="68" y1="274.00" x2="772" y2="274.00" class="grid" />
 <line x1="68" y1="189.00" x2="772" y2="189.00" class="grid" />
 <line x1="68" y1="104.00" x2="772" y2="104.00" class="grid" />
   <line x1="68" y1="274" x2="772" y2="274" class="axis" />
   <line x1="68" y1="104" x2="68" y2="274" class="axis" />
-  <path d="M 84,274 L 84.00,274.00 L 256.00,231.50 L 428.00,199.62 L 600.00,157.12 L 772.00,104.00 L 772,274 Z" class="area" />
-  <polyline points="84.00,274.00 256.00,231.50 428.00,199.62 600.00,157.12 772.00,104.00" class="line" />
+  <path d="M 84,274 L 84.00,274.00 L 221.60,231.50 L 359.20,199.62 L 496.80,157.12 L 634.40,104.00 L 772.00,104.00 L 772,274 Z" class="area" />
+  <polyline points="84.00,274.00 221.60,231.50 359.20,199.62 496.80,157.12 634.40,104.00 772.00,104.00" class="line" />
   <text x="84.00" y="306" class="axis-label" text-anchor="start">2026-03-11</text>
-<text x="428.00" y="306" class="axis-label" text-anchor="middle">2026-03-13</text>
-<text x="772.00" y="306" class="axis-label" text-anchor="end">2026-03-15</text>
+<text x="359.20" y="306" class="axis-label" text-anchor="middle">2026-03-13</text>
+<text x="772.00" y="306" class="axis-label" text-anchor="end">2026-03-16</text>
   <text x="58" y="278.00" class="axis-label" text-anchor="end">0</text>
 <text x="58" y="193.00" class="axis-label" text-anchor="end">8</text>
 <text x="58" y="108.00" class="axis-label" text-anchor="end">16</text>
