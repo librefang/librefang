@@ -1,0 +1,6481 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "LibreFang API",
+    "description": "LibreFang Agent Operating System — REST API for managing AI agents, tools, workflows, and more.",
+    "license": {
+      "name": "Apache-2.0",
+      "url": "https://www.apache.org/licenses/LICENSE-2.0"
+    },
+    "version": "0.5.2-20260316"
+  },
+  "paths": {
+    "/.well-known/agent.json": {
+      "get": {
+        "tags": [
+          "a2a"
+        ],
+        "operationId": "a2a_agent_card",
+        "responses": {
+          "200": {
+            "description": "Get the A2A agent card",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/a2a/agents": {
+      "get": {
+        "tags": [
+          "a2a"
+        ],
+        "summary": "GET /a2a/agents — List all A2A agent cards.",
+        "operationId": "a2a_list_agents",
+        "responses": {
+          "200": {
+            "description": "List all A2A agent cards",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/a2a/tasks/send": {
+      "post": {
+        "tags": [
+          "a2a"
+        ],
+        "summary": "POST /a2a/tasks/send — Submit a task to an agent via A2A.",
+        "operationId": "a2a_send_task",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Submit a task to an agent via A2A",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/a2a/tasks/{id}": {
+      "get": {
+        "tags": [
+          "a2a"
+        ],
+        "summary": "GET /a2a/tasks/{id} — Get task status from the task store.",
+        "operationId": "a2a_get_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get A2A task status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/a2a/tasks/{id}/cancel": {
+      "post": {
+        "tags": [
+          "a2a"
+        ],
+        "summary": "POST /a2a/tasks/{id}/cancel — Cancel a tracked task.",
+        "operationId": "a2a_cancel_task",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancel a tracked A2A task",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/a2a/agents": {
+      "get": {
+        "tags": [
+          "a2a"
+        ],
+        "summary": "GET /api/a2a/agents — List discovered external A2A agents.",
+        "operationId": "a2a_list_external_agents",
+        "responses": {
+          "200": {
+            "description": "List discovered external A2A agents",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/a2a/agents/{id}": {
+      "get": {
+        "tags": [
+          "a2a"
+        ],
+        "summary": "GET /api/a2a/agents/{id} — Get a specific external A2A agent by index, URL, or name.",
+        "operationId": "a2a_get_external_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get a specific external A2A agent",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/a2a/discover": {
+      "post": {
+        "tags": [
+          "a2a"
+        ],
+        "summary": "POST /api/a2a/discover — Discover a new external A2A agent by URL.",
+        "operationId": "a2a_discover_external",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Discover an external A2A agent by URL",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/a2a/send": {
+      "post": {
+        "tags": [
+          "a2a"
+        ],
+        "summary": "POST /api/a2a/send — Send a task to an external A2A agent.",
+        "operationId": "a2a_send_external",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Send a task to an external A2A agent",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/a2a/tasks/{id}/status": {
+      "get": {
+        "tags": [
+          "a2a"
+        ],
+        "summary": "GET /api/a2a/tasks/{id}/status — Get task status from an external A2A agent.",
+        "operationId": "a2a_external_task_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "url",
+            "in": "query",
+            "description": "URL of the external A2A agent",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get external A2A task status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents — List all agents.",
+        "operationId": "list_agents",
+        "responses": {
+          "200": {
+            "description": "List all agents",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents — Spawn a new agent.",
+        "operationId": "spawn_agent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SpawnRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Agent spawned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpawnResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid manifest"
+          }
+        }
+      }
+    },
+    "/api/agents/bulk": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/bulk — Create multiple agents at once.",
+        "operationId": "bulk_create_agents",
+        "requestBody": {
+          "description": "Array of agent spawn requests",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Create multiple agents at once",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "DELETE /api/agents/bulk — Delete multiple agents at once.",
+        "operationId": "bulk_delete_agents",
+        "requestBody": {
+          "description": "Array of agent IDs to delete",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkAgentIdsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Delete multiple agents at once",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/bulk/start": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/bulk/start — Set multiple agents to Full mode.",
+        "operationId": "bulk_start_agents",
+        "requestBody": {
+          "description": "Array of agent IDs to start",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkAgentIdsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Start multiple agents (set to Full mode)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/bulk/stop": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/bulk/stop — Stop multiple agents' current runs.",
+        "operationId": "bulk_stop_agents",
+        "requestBody": {
+          "description": "Array of agent IDs to stop",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkAgentIdsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stop multiple agents' current runs",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/:id — Get a single agent's detailed info.",
+        "operationId": "get_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent details",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "DELETE /api/agents/:id — Kill an agent.",
+        "operationId": "kill_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent killed"
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "agents"
+        ],
+        "operationId": "patch_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Partial agent fields to update",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Partially update an agent (name, description, model, system prompt)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/clone": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/clone — Clone an agent with its workspace files.",
+        "operationId": "clone_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "New name for the cloned agent",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloneAgentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Clone an agent with its workspace files",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/config": {
+      "patch": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PATCH /api/agents/{id}/config — Hot-update agent name, description, system prompt, and identity.",
+        "operationId": "patch_agent_config",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Agent config fields to update",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PatchAgentConfigRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Hot-update agent name, description, system prompt, identity, and model",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/deliveries": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/:id/deliveries — List recent delivery receipts for an agent.",
+        "operationId": "get_agent_deliveries",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List recent delivery receipts for an agent",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/files": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/files — List workspace identity files.",
+        "operationId": "list_agent_files",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List workspace identity files for an agent",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/files/{filename}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/files/{filename} — Read a workspace identity file.",
+        "operationId": "get_agent_file",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "description": "Identity file name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Read a workspace identity file",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/{id}/files/{filename} — Write a workspace identity file.",
+        "operationId": "set_agent_file",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "description": "Identity file name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "File content to write",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetAgentFileRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Write a workspace identity file",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/history": {
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "DELETE /api/agents/{id}/history — Clear ALL conversation history for an agent.",
+        "operationId": "clear_agent_history",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Clear all conversation history for an agent",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/identity": {
+      "patch": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PATCH /api/agents/{id}/identity — Update an agent's visual identity.",
+        "operationId": "update_agent_identity",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Identity fields to update",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateIdentityRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Update an agent's visual identity",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/mcp_servers": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/mcp_servers — Get an agent's MCP server assignment info.",
+        "operationId": "get_agent_mcp_servers",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get an agent's MCP server assignment info",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/{id}/mcp_servers — Update an agent's MCP server allowlist.",
+        "operationId": "set_agent_mcp_servers",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Array of MCP server names",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Update an agent's MCP server allowlist",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/memory/export": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "GET /api/agents/:id/memory/export — Export all KV memory for an agent as JSON.",
+        "operationId": "export_agent_memory",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exported memory",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/memory/import": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "POST /api/agents/:id/memory/import — Import KV memory from JSON into an agent.",
+        "description": "Accepts a JSON body with a `kv` object mapping string keys to JSON values.\nOptionally accepts `clear_existing: true` to wipe existing memory before import.",
+        "operationId": "import_agent_memory",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Memory imported",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/message": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/:id/message — Send a message to an agent.",
+        "operationId": "send_message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Message response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Agent not found"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/message/stream": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/:id/message/stream — SSE streaming response.",
+        "operationId": "send_message_stream",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MessageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Streaming message response (SSE)"
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/mode": {
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/:id/mode — Change an agent's operational mode.",
+        "operationId": "set_agent_mode",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "New agent mode",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetModeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Change an agent's operational mode",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/model": {
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "operationId": "set_model",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Model name and optional provider",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Change an agent's LLM model",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/session": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/:id/session — Get agent session (conversation history).",
+        "operationId": "get_agent_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get agent conversation session history",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/session/compact": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/session/compact — Trigger LLM session compaction.",
+        "operationId": "compact_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trigger LLM session compaction",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/session/reset": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/session/reset — Reset an agent's session.",
+        "operationId": "reset_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reset an agent's current session",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/sessions": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "operationId": "list_agent_sessions",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List all sessions for an agent",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/sessions — Create a new session for an agent.",
+        "operationId": "create_agent_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional label for the new session",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Create a new session for an agent",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/sessions/by-label/{label}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "GET /api/sessions/by-label/:label — Find session by label (scoped to agent).",
+        "operationId": "find_session_by_label",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "label",
+            "in": "path",
+            "description": "Session label",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session found",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/sessions/{session_id}/switch": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/sessions/{session_id}/switch — Switch to an existing session.",
+        "operationId": "switch_agent_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Session ID to switch to",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Switch to an existing session",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/skills": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/skills — Get an agent's skill assignment info.",
+        "operationId": "get_agent_skills",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get an agent's skill assignment info",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/{id}/skills — Update an agent's skill allowlist.",
+        "operationId": "set_agent_skills",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Array of skill names",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Update an agent's skill allowlist",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/stop": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/stop — Cancel an agent's current LLM run.",
+        "operationId": "stop_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancel an agent's current LLM run",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/tools": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/tools — Get an agent's tool allowlist/blocklist.",
+        "operationId": "get_agent_tools",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get an agent's tool allowlist and blocklist",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/{id}/tools — Update an agent's tool allowlist/blocklist.",
+        "operationId": "set_agent_tools",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Tool allowlist and/or blocklist arrays",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Update an agent's tool allowlist and blocklist",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/traces": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/traces — Get decision traces from the agent's most recent message.",
+        "description": "Returns structured traces showing why each tool was selected during the last\nagent loop execution. Useful for debugging, auditing, and optimization.",
+        "operationId": "get_agent_traces",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get decision traces from the agent's most recent message",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/update": {
+      "put": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "PUT /api/agents/:id — Update an agent (currently: re-set manifest fields).",
+        "operationId": "update_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "New agent manifest TOML",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Update an agent's manifest",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/upload": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/upload — Upload a file attachment.",
+        "description": "Accepts raw body bytes. The client must set:\n- `Content-Type` header (e.g., `image/png`, `text/plain`, `application/pdf`)\n- `X-Filename` header (original filename)",
+        "operationId": "upload_file",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Upload a file attachment for an agent",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/approvals": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "GET /api/approvals — List pending approval requests.",
+        "description": "Transforms field names to match the dashboard template expectations:\n`action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.",
+        "operationId": "list_approvals",
+        "responses": {
+          "200": {
+            "description": "List pending approvals",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "operationId": "create_approval",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Approval created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/approvals/{id}/approve": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "POST /api/approvals/{id}/approve — Approve a pending request.",
+        "operationId": "approve_request",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Approval ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request approved",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/approvals/{id}/reject": {
+      "post": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "POST /api/approvals/{id}/reject — Reject a pending request.",
+        "operationId": "reject_request",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Approval ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Request rejected",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/audit/recent": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/audit/recent — Get recent audit log entries.",
+        "operationId": "audit_recent",
+        "responses": {
+          "200": {
+            "description": "Recent audit entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/audit/verify": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/audit/verify — Verify the audit chain integrity.",
+        "operationId": "audit_verify",
+        "responses": {
+          "200": {
+            "description": "Audit verification result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/callback": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "GET /api/auth/callback — Handle the OAuth2 authorization code callback (browser redirect).",
+        "operationId": "auth_callback",
+        "responses": {
+          "200": {
+            "description": "OAuth callback — completes login flow",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "POST /api/auth/callback — Handle the OAuth2 callback (programmatic clients).",
+        "operationId": "auth_callback_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OAuth callback (POST) — completes login flow",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/introspect": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "POST /api/auth/introspect — Validate a token and return its claims.",
+        "description": "Follows RFC 7662 conventions: returns `{\"active\": true/false, ...}`.",
+        "operationId": "auth_introspect",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Token introspection result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "GET /api/auth/login — Redirect to the external identity provider (legacy single-provider).",
+        "operationId": "auth_login",
+        "responses": {
+          "302": {
+            "description": "Redirect to OAuth provider login"
+          }
+        }
+      }
+    },
+    "/api/auth/login/{provider}": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "GET /api/auth/login/:provider — Redirect to a specific provider.",
+        "operationId": "auth_login_provider",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "OAuth provider name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to specific OAuth provider"
+          }
+        }
+      }
+    },
+    "/api/auth/providers": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "GET /api/auth/providers — List available authentication providers.",
+        "operationId": "auth_providers",
+        "responses": {
+          "200": {
+            "description": "List configured OAuth/OIDC providers",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/userinfo": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "GET /api/auth/userinfo — Return info about the currently authenticated user.",
+        "description": "If a valid JWT is in the Authorization header and JWKS validation succeeds,\nreturns the decoded claims. Otherwise falls back to provider userinfo endpoint.",
+        "operationId": "auth_userinfo",
+        "responses": {
+          "200": {
+            "description": "Get authenticated user info",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "Not authenticated"
+          }
+        }
+      }
+    },
+    "/api/backup": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/backup — Create a backup archive of kernel state.",
+        "description": "Returns the backup metadata including the filename. The archive is stored\nin `<home_dir>/backups/` with a timestamped filename.",
+        "operationId": "create_backup",
+        "responses": {
+          "200": {
+            "description": "Backup created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/backups": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/backups — List existing backups.",
+        "operationId": "list_backups",
+        "responses": {
+          "200": {
+            "description": "List backups",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/backups/{filename}": {
+      "delete": {
+        "tags": [
+          "system"
+        ],
+        "summary": "DELETE /api/backups/{filename} — Delete a specific backup.",
+        "operationId": "delete_backup",
+        "parameters": [
+          {
+            "name": "filename",
+            "in": "path",
+            "description": "Backup filename",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Backup deleted"
+          }
+        }
+      }
+    },
+    "/api/bindings": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/bindings — List all agent bindings.",
+        "operationId": "list_bindings",
+        "responses": {
+          "200": {
+            "description": "List key bindings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/bindings — Add a new agent binding.",
+        "operationId": "add_binding",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Binding added",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/bindings/{index}": {
+      "delete": {
+        "tags": [
+          "system"
+        ],
+        "summary": "DELETE /api/bindings/:index — Remove a binding by index.",
+        "operationId": "remove_binding",
+        "parameters": [
+          {
+            "name": "index",
+            "in": "path",
+            "description": "Binding index",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Binding removed"
+          }
+        }
+      }
+    },
+    "/api/budget": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/budget — Current budget status (limits, spend, % used).",
+        "operationId": "budget_status",
+        "responses": {
+          "200": {
+            "description": "Global budget status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "PUT /api/budget — Update global budget limits (in-memory only, not persisted to config.toml).",
+        "operationId": "update_budget",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated global budget status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/budget/agents": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/budget/agents — Per-agent cost ranking (top spenders).",
+        "operationId": "agent_budget_ranking",
+        "responses": {
+          "200": {
+            "description": "Per-agent cost ranking",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/budget/agents/{id}": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/budget/agents/{id} — Per-agent budget/quota status.",
+        "operationId": "agent_budget_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-agent budget and quota status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "PUT /api/budget/agents/{id} — Update per-agent budget limits at runtime.",
+        "operationId": "update_agent_budget",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Updated agent budget",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalog/status": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "GET /api/catalog/status — Check last catalog sync time.",
+        "operationId": "catalog_status",
+        "responses": {
+          "200": {
+            "description": "Catalog sync status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/catalog/update": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "POST /api/catalog/update — Sync model catalog from the remote repository.",
+        "description": "Downloads the latest catalog TOML files from GitHub and caches them locally.\nAfter syncing, the kernel's in-memory catalog is refreshed.",
+        "operationId": "catalog_update",
+        "responses": {
+          "200": {
+            "description": "Catalog updated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels": {
+      "get": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "GET /api/channels — List all 40 channel adapters with status and field metadata.",
+        "operationId": "list_channels",
+        "responses": {
+          "200": {
+            "description": "List configured channels",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/reload": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "POST /api/channels/reload — Manually trigger a channel hot-reload from disk config.",
+        "operationId": "reload_channels",
+        "responses": {
+          "200": {
+            "description": "Channels reloaded successfully",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "500": {
+            "description": "Reload failed",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/whatsapp/qr/start": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "POST /api/channels/whatsapp/qr/start — Start a WhatsApp Web QR login session.",
+        "description": "If a WhatsApp Web gateway is available (e.g. a Baileys-based bridge process),\nthis proxies the request and returns a base64 QR code data URL. If no gateway\nis running, it returns instructions to set one up.",
+        "operationId": "whatsapp_qr_start",
+        "responses": {
+          "200": {
+            "description": "WhatsApp QR session started",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/whatsapp/qr/status": {
+      "get": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "GET /api/channels/whatsapp/qr/status — Poll for QR scan completion.",
+        "description": "After calling `/qr/start`, the frontend polls this to check if the user\nhas scanned the QR code and the WhatsApp Web session is connected.",
+        "operationId": "whatsapp_qr_status",
+        "parameters": [
+          {
+            "name": "session_id",
+            "in": "query",
+            "description": "WhatsApp login session ID",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "WhatsApp QR scan status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/{name}/configure": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "POST /api/channels/{name}/configure — Save channel secrets + config fields.",
+        "operationId": "configure_channel",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Channel name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Channel configured successfully",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown channel",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "DELETE /api/channels/{name}/configure — Remove channel secrets + config section.",
+        "operationId": "remove_channel",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Channel name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Channel removed successfully",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown channel",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/channels/{name}/test": {
+      "post": {
+        "tags": [
+          "channels"
+        ],
+        "summary": "POST /api/channels/{name}/test — Connectivity check + optional live test message.",
+        "description": "Accepts an optional JSON body with `channel_id` (for Discord/Slack) or `chat_id`\n(for Telegram). When provided, sends a real test message to verify the bot can\npost to that channel.",
+        "operationId": "test_channel",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Channel name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Channel test result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown channel",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/clawhub/browse": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/clawhub/browse — Browse ClawHub skills by sort order.",
+        "description": "Query parameters:\n- `sort` — sort order: \"trending\", \"downloads\", \"stars\", \"updated\", \"rating\" (default: \"trending\")\n- `limit` — max results (default: 20, max: 50)\n- `cursor` — pagination cursor from previous response",
+        "operationId": "clawhub_browse",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Search query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Browse ClawHub skills by sort order",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/clawhub/install": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/clawhub/install — Install a skill from ClawHub.",
+        "description": "Runs the full security pipeline: SHA256 verification, format detection,\nmanifest security scan, prompt injection scan, and binary dependency check.",
+        "operationId": "clawhub_install",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Install a skill from ClawHub",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/clawhub/search": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/clawhub/search — Search ClawHub skills using vector/semantic search.",
+        "description": "Query parameters:\n- `q` — search query (required)\n- `limit` — max results (default: 20, max: 50)",
+        "operationId": "clawhub_search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Search query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search ClawHub skills",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/clawhub/skill/{slug}": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/clawhub/skill/{slug} — Get detailed info about a ClawHub skill.",
+        "operationId": "clawhub_skill_detail",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Skill slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get detailed info about a ClawHub skill",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/clawhub/skill/{slug}/code": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/clawhub/skill/{slug}/code — Fetch the source code (SKILL.md) of a ClawHub skill.",
+        "operationId": "clawhub_skill_code",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "description": "Skill slug",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Fetch source code of a ClawHub skill",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/commands": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/commands — List available chat commands (for dynamic slash menu).",
+        "operationId": "list_commands",
+        "responses": {
+          "200": {
+            "description": "List chat commands",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/commands/{name}": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/commands/{name} — Lookup a single command by name.",
+        "operationId": "get_command",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Command name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Command details",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/comms/events": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "GET /api/comms/events — Return recent inter-agent communication events.",
+        "description": "Sources from both the event bus (for lifecycle events with full context)\nand the audit log (for message/spawn/kill events that are always captured).",
+        "operationId": "comms_events",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum number of results",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Recent inter-agent communication events",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/comms/events/stream": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "GET /api/comms/events/stream — SSE stream of inter-agent communication events.",
+        "description": "Polls the audit log every 500ms for new inter-agent events.",
+        "operationId": "comms_events_stream",
+        "responses": {
+          "200": {
+            "description": "SSE stream of inter-agent events",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/comms/send": {
+      "post": {
+        "tags": [
+          "network"
+        ],
+        "summary": "POST /api/comms/send — Send a message from one agent to another.",
+        "operationId": "comms_send",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Send a message between agents",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/comms/task": {
+      "post": {
+        "tags": [
+          "network"
+        ],
+        "summary": "POST /api/comms/task — Post a task to the agent task queue.",
+        "operationId": "comms_task",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Post a task to the agent task queue",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/comms/topology": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "GET /api/comms/topology — Build agent topology graph from registry.",
+        "operationId": "comms_topology",
+        "responses": {
+          "200": {
+            "description": "Build agent topology graph",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/config": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/config — Get kernel configuration (secrets redacted).",
+        "operationId": "get_config",
+        "responses": {
+          "200": {
+            "description": "Get kernel configuration (secrets redacted)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/config/reload": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/config/reload — Reload configuration from disk and apply hot-reloadable changes.",
+        "description": "Reads the config file, diffs against current config, validates the new config,\nand applies hot-reloadable actions (approval policy, cron limits, etc.).\nReturns the reload plan showing what changed and what was applied.",
+        "operationId": "config_reload",
+        "responses": {
+          "200": {
+            "description": "Reload configuration from disk",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/config/schema": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/config/schema — Return a simplified JSON description of the config structure.",
+        "operationId": "config_schema",
+        "responses": {
+          "200": {
+            "description": "Get config structure schema",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/config/set": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/config/set — Set a single config value and persist to config.toml.",
+        "description": "Accepts JSON `{ \"path\": \"section.key\", \"value\": \"...\" }`.\nWrites the value to the TOML config file and triggers a reload.",
+        "operationId": "config_set",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Set a single config value and persist",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cron/jobs": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "GET /api/cron/jobs — List all cron jobs, optionally filtered by agent_id.",
+        "operationId": "list_cron_jobs",
+        "responses": {
+          "200": {
+            "description": "List cron jobs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/cron/jobs — Create a new cron job.",
+        "operationId": "create_cron_job",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Cron job created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cron/jobs/{id}": {
+      "put": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "PUT /api/cron/jobs/{id} — Update a cron job's configuration.",
+        "operationId": "update_cron_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cron job ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Cron job updated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "DELETE /api/cron/jobs/{id} — Delete a cron job.",
+        "operationId": "delete_cron_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cron job ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cron job deleted"
+          }
+        }
+      }
+    },
+    "/api/cron/jobs/{id}/enable": {
+      "put": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "PUT /api/cron/jobs/{id}/enable — Enable or disable a cron job.",
+        "operationId": "toggle_cron_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cron job ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Cron job toggled",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/cron/jobs/{id}/status": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "GET /api/cron/jobs/{id}/status — Get status of a specific cron job.",
+        "operationId": "cron_job_status",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Cron job ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cron job status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/extensions": {
+      "get": {
+        "tags": [
+          "extensions"
+        ],
+        "summary": "GET /api/extensions — List all installed extensions (integrations) with status.",
+        "operationId": "list_extensions",
+        "responses": {
+          "200": {
+            "description": "List all installed extensions with status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/extensions/install": {
+      "post": {
+        "tags": [
+          "extensions"
+        ],
+        "summary": "POST /api/extensions/install — Install an extension by name.",
+        "operationId": "install_extension",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Install an extension by name",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/extensions/uninstall": {
+      "post": {
+        "tags": [
+          "extensions"
+        ],
+        "summary": "POST /api/extensions/uninstall — Uninstall an extension by name.",
+        "operationId": "uninstall_extension",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Uninstall an extension by name",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/extensions/{name}": {
+      "get": {
+        "tags": [
+          "extensions"
+        ],
+        "summary": "GET /api/extensions/:name — Get details for a single extension by name.",
+        "operationId": "get_extension",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Extension name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get details for a single extension",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands": {
+      "get": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "GET /api/hands — List all hand definitions (marketplace).",
+        "operationId": "list_hands",
+        "responses": {
+          "200": {
+            "description": "List all hand definitions",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/active": {
+      "get": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "GET /api/hands/active — List active hand instances.",
+        "operationId": "list_active_hands",
+        "responses": {
+          "200": {
+            "description": "List active hand instances",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/install": {
+      "post": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "POST /api/hands/install — Install a hand from TOML content.",
+        "operationId": "install_hand",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Install a hand from TOML content",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/instances/{id}": {
+      "delete": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "DELETE /api/hands/instances/{id} — Deactivate a hand (kills agent).",
+        "operationId": "deactivate_hand",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Deactivate a hand (kills agent)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/instances/{id}/browser": {
+      "get": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "GET /api/hands/instances/{id}/browser — Get live browser state for a hand instance.",
+        "operationId": "hand_instance_browser",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get live browser state for a hand instance",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/instances/{id}/pause": {
+      "post": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "POST /api/hands/instances/{id}/pause — Pause a hand instance.",
+        "operationId": "pause_hand",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Pause a hand instance",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/instances/{id}/resume": {
+      "post": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "POST /api/hands/instances/{id}/resume — Resume a paused hand instance.",
+        "operationId": "resume_hand",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Resume a paused hand instance",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/instances/{id}/stats": {
+      "get": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "GET /api/hands/instances/{id}/stats — Get dashboard stats for a hand instance.",
+        "operationId": "hand_stats",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Instance ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get dashboard stats for a hand instance",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/{hand_id}": {
+      "get": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "GET /api/hands/{hand_id} — Get a single hand definition with requirements check.",
+        "operationId": "get_hand",
+        "parameters": [
+          {
+            "name": "hand_id",
+            "in": "path",
+            "description": "Hand ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get a single hand definition with requirements",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/{hand_id}/activate": {
+      "post": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "POST /api/hands/{hand_id}/activate — Activate a hand (spawns agent).",
+        "operationId": "activate_hand",
+        "parameters": [
+          {
+            "name": "hand_id",
+            "in": "path",
+            "description": "Hand ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Activate a hand (spawns agent)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/{hand_id}/check-deps": {
+      "post": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "POST /api/hands/{hand_id}/check-deps — Re-check dependency status for a hand.",
+        "operationId": "check_hand_deps",
+        "parameters": [
+          {
+            "name": "hand_id",
+            "in": "path",
+            "description": "Hand ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Re-check dependency status for a hand",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/{hand_id}/install-deps": {
+      "post": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "POST /api/hands/{hand_id}/install-deps — Auto-install missing dependencies for a hand.",
+        "operationId": "install_hand_deps",
+        "parameters": [
+          {
+            "name": "hand_id",
+            "in": "path",
+            "description": "Hand ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Auto-install missing dependencies for a hand",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hands/{hand_id}/settings": {
+      "get": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "GET /api/hands/{hand_id}/settings — Get settings schema and current values for a hand.",
+        "operationId": "get_hand_settings",
+        "parameters": [
+          {
+            "name": "hand_id",
+            "in": "path",
+            "description": "Hand ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get settings schema and current values",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "hands"
+        ],
+        "summary": "PUT /api/hands/{hand_id}/settings — Update settings for a hand instance.",
+        "operationId": "update_hand_settings",
+        "parameters": [
+          {
+            "name": "hand_id",
+            "in": "path",
+            "description": "Hand ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Update settings for a hand instance",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/health — Minimal liveness probe (public, no auth required).\nReturns only status and version to prevent information leakage.\nUse GET /api/health/detail for full diagnostics (requires auth).",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Health check",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/health/detail": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/health/detail — Full health diagnostics (requires auth).",
+        "operationId": "health_detail",
+        "responses": {
+          "200": {
+            "description": "Detailed health diagnostics",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hooks/agent": {
+      "post": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "POST /hooks/agent — Run an isolated agent turn via webhook.",
+        "description": "Sends a message directly to the specified agent and returns the response.\nThis enables external systems (CI/CD, Slack, etc.) to trigger agent work.",
+        "operationId": "webhook_agent",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Agent hook triggered",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/hooks/wake": {
+      "post": {
+        "tags": [
+          "webhooks"
+        ],
+        "summary": "POST /hooks/wake — Inject a system event via webhook trigger.",
+        "description": "Publishes a custom event through the kernel's event system, which can\ntrigger proactive agents that subscribe to the event type.",
+        "operationId": "webhook_wake",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Wake hook triggered",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integrations": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "GET /api/integrations — List installed integrations with status.",
+        "operationId": "list_integrations",
+        "responses": {
+          "200": {
+            "description": "List installed integrations with status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integrations/add": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "POST /api/integrations/add — Install an integration.",
+        "operationId": "add_integration",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Install an integration",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integrations/available": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "GET /api/integrations/available — List all available templates.",
+        "operationId": "list_available_integrations",
+        "responses": {
+          "200": {
+            "description": "List all available integration templates",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integrations/health": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "GET /api/integrations/health — Health status for all integrations.",
+        "operationId": "integrations_health",
+        "responses": {
+          "200": {
+            "description": "Health status for all integrations",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integrations/reload": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "POST /api/integrations/reload — Hot-reload integration configs and reconnect MCP.",
+        "operationId": "reload_integrations",
+        "responses": {
+          "200": {
+            "description": "Hot-reload integration configs and reconnect MCP",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integrations/{id}": {
+      "delete": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "DELETE /api/integrations/:id — Remove an integration.",
+        "operationId": "remove_integration",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Integration ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Remove an integration",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/integrations/{id}/reconnect": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "POST /api/integrations/:id/reconnect — Reconnect an MCP server.",
+        "operationId": "reconnect_integration",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Integration ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Reconnect an integration MCP server",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/logs/stream": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/logs/stream — SSE endpoint for real-time audit log streaming.",
+        "description": "Streams new audit entries as Server-Sent Events. Accepts optional query\nparameters for filtering:\n  - `level`  — filter by classified level (info, warn, error)\n  - `filter` — text substring filter across action/detail/agent_id\n  - `token`  — auth token (for EventSource clients that cannot set headers)\n\nA heartbeat ping is sent every 15 seconds to keep the connection alive.\nThe endpoint polls the audit log every second and sends only new entries\n(tracked by sequence number). On first connect, existing entries are sent\nas a backfill so the client has immediate context.",
+        "operationId": "logs_stream",
+        "responses": {
+          "200": {
+            "description": "SSE log stream"
+          }
+        }
+      }
+    },
+    "/api/marketplace/search": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/marketplace/search — Search the FangHub marketplace.",
+        "operationId": "marketplace_search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Search query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search the FangHub marketplace",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mcp/servers": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "GET /api/mcp/servers — List configured MCP servers and their tools.",
+        "operationId": "list_mcp_servers",
+        "responses": {
+          "200": {
+            "description": "List configured MCP servers and their tools",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "POST /api/mcp/servers — Add a new MCP server configuration.",
+        "description": "Expects a JSON body matching `McpServerConfigEntry` (name, transport, timeout_secs, env).\nPersists to config.toml and triggers a config reload.",
+        "operationId": "add_mcp_server",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Add a new MCP server configuration",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mcp/servers/{name}": {
+      "put": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "PUT /api/mcp/servers/{name} — Update an existing MCP server configuration.",
+        "description": "Replaces the existing entry with the provided JSON body. The `name` path\nparameter identifies which server to update; the body's `name` field (if\npresent) is ignored in favour of the path parameter.",
+        "operationId": "update_mcp_server",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Server name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Update an existing MCP server configuration",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "DELETE /api/mcp/servers/{name} — Remove an MCP server configuration.",
+        "operationId": "delete_mcp_server",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Server name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Remove an MCP server configuration",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/agents/{id}/kv": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "GET /api/memory/agents/:id/kv — List KV pairs for an agent.",
+        "operationId": "get_agent_kv",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent KV store",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/agents/{id}/kv/{key}": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "GET /api/memory/agents/:id/kv/:key — Get a specific KV value.",
+        "operationId": "get_agent_kv_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Key name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "KV value",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "PUT /api/memory/agents/:id/kv/:key — Set a KV value.",
+        "operationId": "set_agent_kv_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Key name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "KV value set",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "memory"
+        ],
+        "summary": "DELETE /api/memory/agents/:id/kv/:key — Delete a KV value.",
+        "operationId": "delete_agent_kv_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Key name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "KV key deleted"
+          }
+        }
+      }
+    },
+    "/api/metrics": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/metrics — Prometheus text-format metrics.",
+        "description": "Returns counters and gauges for monitoring LibreFang in production:\n- `librefang_agents_active` — number of active agents\n- `librefang_uptime_seconds` — seconds since daemon started\n- `librefang_tokens_total` — total tokens consumed (per agent)\n- `librefang_tool_calls_total` — total tool calls (per agent)\n- `librefang_panics_total` — supervisor panic count\n- `librefang_restarts_total` — supervisor restart count",
+        "operationId": "prometheus_metrics",
+        "responses": {
+          "200": {
+            "description": "Prometheus text-format metrics",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/migrate": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/migrate — Run migration from another agent framework.",
+        "operationId": "run_migrate",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MigrateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Run migration from another agent framework",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/migrate/detect": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "migrate_detect",
+        "responses": {
+          "200": {
+            "description": "Detect migratable framework installation",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/migrate/scan": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/migrate/scan — Scan a specific directory for OpenClaw workspace.",
+        "operationId": "migrate_scan",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MigrateScanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Scan directory for migratable workspace",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "operationId": "list_models",
+        "responses": {
+          "200": {
+            "description": "List available models",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models/aliases": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "operationId": "list_aliases",
+        "responses": {
+          "200": {
+            "description": "List model aliases",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "POST /api/models/aliases — Create a new alias mapping.",
+        "description": "Body: `{ \"alias\": \"my-alias\", \"model_id\": \"gpt-4o\" }`",
+        "operationId": "create_alias",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Alias created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models/aliases/{alias}": {
+      "delete": {
+        "tags": [
+          "models"
+        ],
+        "summary": "DELETE /api/models/aliases/{alias} — Remove an alias mapping.",
+        "operationId": "delete_alias",
+        "parameters": [
+          {
+            "name": "alias",
+            "in": "path",
+            "description": "Alias name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Alias deleted"
+          }
+        }
+      }
+    },
+    "/api/models/custom": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "POST /api/models/custom — Add a custom model to the catalog.",
+        "description": "Persists to `~/.librefang/custom_models.json` and makes the model immediately\navailable in the catalog.",
+        "operationId": "add_custom_model",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Custom model added",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/models/custom/{id}": {
+      "delete": {
+        "tags": [
+          "models"
+        ],
+        "summary": "DELETE /api/models/custom/{id} — Remove a custom model.",
+        "operationId": "remove_custom_model",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Model ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Custom model removed"
+          }
+        }
+      }
+    },
+    "/api/models/{id}": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "operationId": "get_model",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Model ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Model details",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/network/status": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "GET /api/network/status — OFP network status summary.",
+        "operationId": "network_status",
+        "responses": {
+          "200": {
+            "description": "OFP network status summary",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pairing/complete": {
+      "post": {
+        "tags": [
+          "pairing"
+        ],
+        "summary": "POST /api/pairing/complete — Complete pairing with token + device info.",
+        "operationId": "pairing_complete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Pairing completed",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pairing/devices": {
+      "get": {
+        "tags": [
+          "pairing"
+        ],
+        "summary": "GET /api/pairing/devices — List paired devices.",
+        "operationId": "pairing_devices",
+        "responses": {
+          "200": {
+            "description": "List paired devices",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pairing/devices/{id}": {
+      "delete": {
+        "tags": [
+          "pairing"
+        ],
+        "summary": "DELETE /api/pairing/devices/{id} — Remove a paired device.",
+        "operationId": "pairing_remove_device",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Device ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Device removed"
+          }
+        }
+      }
+    },
+    "/api/pairing/notify": {
+      "post": {
+        "tags": [
+          "pairing"
+        ],
+        "summary": "POST /api/pairing/notify — Push a notification to all paired devices.",
+        "operationId": "pairing_notify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Notification sent",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/pairing/request": {
+      "post": {
+        "tags": [
+          "pairing"
+        ],
+        "summary": "POST /api/pairing/request — Create a new pairing request (returns token + QR URI).",
+        "operationId": "pairing_request",
+        "responses": {
+          "200": {
+            "description": "Pairing request created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/peers": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "GET /api/peers — List known OFP peers.",
+        "operationId": "list_peers",
+        "responses": {
+          "200": {
+            "description": "List known OFP peers",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiles": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/profiles — List all tool profiles and their tool lists.",
+        "operationId": "list_profiles",
+        "responses": {
+          "200": {
+            "description": "List tool profiles",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/profiles/{name}": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/profiles/:name — Get a single profile by name.",
+        "operationId": "get_profile",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Profile name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Profile details",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "GET /api/providers — List all providers with auth status.",
+        "description": "For local providers (ollama, vllm, lmstudio), also probes reachability and\ndiscovers available models via their health endpoints.\n\nProbes run **concurrently** and results are **cached for 60 seconds** so the\nendpoint responds instantly on repeated dashboard loads even when local\nservices are offline.",
+        "operationId": "list_providers",
+        "responses": {
+          "200": {
+            "description": "List configured providers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/github-copilot/oauth/poll/{poll_id}": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "GET /api/providers/github-copilot/oauth/poll/{poll_id}",
+        "description": "Poll the status of a GitHub device flow.\nReturns `pending`, `complete`, `expired`, `denied`, or `error`.\nOn `complete`, saves the token to secrets.env and sets GITHUB_TOKEN.",
+        "operationId": "copilot_oauth_poll",
+        "parameters": [
+          {
+            "name": "poll_id",
+            "in": "path",
+            "description": "Poll ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OAuth poll result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/github-copilot/oauth/start": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "POST /api/providers/github-copilot/oauth/start",
+        "description": "Initiates a GitHub device flow for Copilot authentication.\nReturns a user code and verification URI that the user visits in their browser.",
+        "operationId": "copilot_oauth_start",
+        "responses": {
+          "200": {
+            "description": "OAuth flow started",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/{name}/key": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "operationId": "set_provider_key",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Provider name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "API key set",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "models"
+        ],
+        "summary": "DELETE /api/providers/{name}/key — Remove an API key for a provider.",
+        "operationId": "delete_provider_key",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Provider name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "API key deleted"
+          }
+        }
+      }
+    },
+    "/api/providers/{name}/test": {
+      "post": {
+        "tags": [
+          "models"
+        ],
+        "summary": "POST /api/providers/{name}/test — Test a provider's connectivity.",
+        "operationId": "test_provider",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Provider name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Provider test result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/providers/{name}/url": {
+      "put": {
+        "tags": [
+          "models"
+        ],
+        "summary": "PUT /api/providers/{name}/url — Set a custom base URL for a provider.",
+        "operationId": "set_provider_url",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Provider name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Provider URL set",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/queue/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/queue/status — Command queue status and occupancy.",
+        "operationId": "queue_status",
+        "responses": {
+          "200": {
+            "description": "Queue status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/restore": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/restore — Restore kernel state from a backup archive.",
+        "description": "Accepts a JSON body with `{\"filename\": \"librefang_backup_20260315_120000.zip\"}`.\nThe file must exist in `<home_dir>/backups/`.\n\n**Warning**: This overwrites existing state files. The daemon should be\nrestarted after a restore for all changes to take effect.",
+        "operationId": "restore_backup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Backup restored",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/schedules": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "GET /api/schedules — List all cron-based scheduled jobs.",
+        "operationId": "list_schedules",
+        "responses": {
+          "200": {
+            "description": "List schedules",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/schedules — Create a new cron-based scheduled job.",
+        "operationId": "create_schedule",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Schedule created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid schedule definition"
+          }
+        }
+      }
+    },
+    "/api/schedules/{id}": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "GET /api/schedules/{id} — Get a specific schedule by ID.",
+        "operationId": "get_schedule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Schedule ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schedule details",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "PUT /api/schedules/:id — Update a scheduled job (toggle enabled, edit fields).",
+        "operationId": "update_schedule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Schedule ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Schedule updated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "DELETE /api/schedules/:id — Remove a scheduled job.",
+        "operationId": "delete_schedule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Schedule ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schedule deleted"
+          }
+        }
+      }
+    },
+    "/api/schedules/{id}/run": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/schedules/:id/run — Manually run a scheduled job now.",
+        "operationId": "run_schedule",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Schedule ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Schedule triggered",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/security": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/security — Security feature status for the dashboard.",
+        "operationId": "security_status",
+        "responses": {
+          "200": {
+            "description": "Security feature status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "GET /api/sessions — List all sessions with metadata.",
+        "operationId": "list_sessions",
+        "responses": {
+          "200": {
+            "description": "List sessions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/cleanup": {
+      "post": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "POST /api/sessions/cleanup — Manually trigger session retention cleanup.",
+        "description": "Runs both expired-session and excess-session cleanup using the configured\n`[session]` policy. Returns `{\"sessions_deleted\": N}`.",
+        "operationId": "session_cleanup",
+        "responses": {
+          "200": {
+            "description": "Cleanup result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}": {
+      "delete": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "DELETE /api/sessions/:id — Delete a session.",
+        "operationId": "delete_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session deleted"
+          }
+        }
+      }
+    },
+    "/api/sessions/{id}/label": {
+      "put": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "PUT /api/sessions/:id/label — Set a session label.",
+        "operationId": "set_session_label",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Label set",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/shutdown": {
+      "post": {
+        "tags": [
+          "system"
+        ],
+        "summary": "POST /api/shutdown — Graceful shutdown.",
+        "operationId": "shutdown",
+        "responses": {
+          "200": {
+            "description": "Graceful daemon shutdown",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/skills": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/skills — List installed skills.",
+        "operationId": "list_skills",
+        "responses": {
+          "200": {
+            "description": "List installed skills",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/skills/create": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "operationId": "create_skill",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Create a new prompt-only skill",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/skills/install": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/install — Install a skill from FangHub (GitHub).",
+        "operationId": "install_skill",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Install a skill from FangHub",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/skills/uninstall": {
+      "post": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "POST /api/skills/uninstall — Uninstall a skill.",
+        "operationId": "uninstall_skill",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Uninstall a skill",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/status": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "description": "Daemon status",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/templates": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/templates — List available agent templates.",
+        "operationId": "list_templates",
+        "responses": {
+          "200": {
+            "description": "List templates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/templates/{name}": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/templates/:name — Get template details.",
+        "operationId": "get_template",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Template name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Template details",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tools": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/tools — List all tool definitions (built-in + MCP).",
+        "operationId": "list_tools",
+        "responses": {
+          "200": {
+            "description": "List available tools",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/tools/{name}": {
+      "get": {
+        "tags": [
+          "skills"
+        ],
+        "summary": "GET /api/tools/:name — Get a single tool definition by name.",
+        "operationId": "get_tool",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Tool name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Tool details",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/triggers": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "GET /api/triggers — List all triggers (optionally filter by ?agent_id=...).",
+        "operationId": "list_triggers",
+        "responses": {
+          "200": {
+            "description": "List triggers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/triggers — Register a new event trigger.",
+        "operationId": "create_trigger",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Trigger created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid trigger definition"
+          }
+        }
+      }
+    },
+    "/api/triggers/{id}": {
+      "put": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "PUT /api/triggers/:id — Update a trigger (enable/disable toggle).",
+        "operationId": "update_trigger",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Trigger ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Trigger updated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "DELETE /api/triggers/:id — Remove a trigger.",
+        "operationId": "delete_trigger",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Trigger ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Trigger deleted"
+          }
+        }
+      }
+    },
+    "/api/uploads/{file_id}": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/uploads/{file_id} — Serve an uploaded file.",
+        "operationId": "serve_upload",
+        "parameters": [
+          {
+            "name": "file_id",
+            "in": "path",
+            "description": "Upload file ID (UUID)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Serve an uploaded file by ID",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/usage": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/usage — Get per-agent usage statistics.",
+        "operationId": "usage_stats",
+        "responses": {
+          "200": {
+            "description": "Per-agent usage statistics",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/usage/by-model": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/usage/by-model — Get usage grouped by model.",
+        "operationId": "usage_by_model",
+        "responses": {
+          "200": {
+            "description": "Usage grouped by model",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/usage/daily": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/usage/daily — Get daily usage breakdown for the last 7 days.",
+        "operationId": "usage_daily",
+        "responses": {
+          "200": {
+            "description": "Daily usage breakdown",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/usage/summary": {
+      "get": {
+        "tags": [
+          "budget"
+        ],
+        "summary": "GET /api/usage/summary — Get overall usage summary from UsageStore.",
+        "operationId": "usage_summary",
+        "responses": {
+          "200": {
+            "description": "Overall usage summary",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/version": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/version — Build & version info (includes API versioning).",
+        "operationId": "version",
+        "responses": {
+          "200": {
+            "description": "Version information",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/versions": {
+      "get": {
+        "tags": [
+          "system"
+        ],
+        "summary": "GET /api/versions — List supported API versions and negotiation info.",
+        "operationId": "api_versions",
+        "responses": {
+          "200": {
+            "description": "API version info",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workflows": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "GET /api/workflows — List all workflows.",
+        "operationId": "list_workflows",
+        "responses": {
+          "200": {
+            "description": "List workflows",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/workflows — Register a new workflow.",
+        "operationId": "create_workflow",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Workflow created",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid workflow definition"
+          }
+        }
+      }
+    },
+    "/api/workflows/{id}/run": {
+      "post": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "POST /api/workflows/:id/run — Execute a workflow.",
+        "operationId": "run_workflow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workflow ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Workflow run started",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/workflows/{id}/runs": {
+      "get": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "GET /api/workflows/:id/runs — List runs for a workflow.",
+        "operationId": "list_workflow_runs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workflow ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List workflow runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/mcp": {
+      "post": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "POST /mcp — Handle MCP JSON-RPC requests over HTTP.",
+        "description": "Exposes the same MCP protocol normally served via stdio, allowing\nexternal MCP clients to connect over HTTP instead.",
+        "operationId": "mcp_http",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Handle MCP JSON-RPC requests over HTTP",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "tags": [
+          "openai"
+        ],
+        "summary": "POST /v1/chat/completions",
+        "operationId": "chat_completions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "OpenAI-compatible chat completion",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": [
+          "openai"
+        ],
+        "summary": "GET /v1/models — List available agents as OpenAI model objects.",
+        "operationId": "list_models",
+        "responses": {
+          "200": {
+            "description": "OpenAI-compatible model list",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentUpdateRequest": {
+        "type": "object",
+        "description": "Request to update an agent's manifest.",
+        "required": [
+          "manifest_toml"
+        ],
+        "properties": {
+          "manifest_toml": {
+            "type": "string"
+          }
+        }
+      },
+      "AttachmentRef": {
+        "type": "object",
+        "description": "A file attachment reference (from a prior upload).",
+        "required": [
+          "file_id"
+        ],
+        "properties": {
+          "content_type": {
+            "type": "string"
+          },
+          "file_id": {
+            "type": "string"
+          },
+          "filename": {
+            "type": "string"
+          }
+        }
+      },
+      "BulkActionResult": {
+        "type": "object",
+        "description": "Outcome of a single bulk action (delete/start/stop).",
+        "required": [
+          "agent_id",
+          "success"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BulkAgentIdsRequest": {
+        "type": "object",
+        "description": "Request containing a list of agent IDs for bulk operations (delete/start/stop).",
+        "required": [
+          "agent_ids"
+        ],
+        "properties": {
+          "agent_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "BulkCreateRequest": {
+        "type": "object",
+        "description": "Request to create multiple agents at once.",
+        "required": [
+          "agents"
+        ],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpawnRequest"
+            }
+          }
+        }
+      },
+      "BulkCreateResult": {
+        "type": "object",
+        "description": "Outcome of a single bulk-create item.",
+        "required": [
+          "index",
+          "success"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "success": {
+            "type": "boolean"
+          }
+        }
+      },
+      "CallbackBody": {
+        "type": "object",
+        "description": "POST body for the callback (programmatic clients).",
+        "required": [
+          "code",
+          "state"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Authorization code."
+          },
+          "state": {
+            "type": "string",
+            "description": "State parameter for CSRF validation (signed token)."
+          }
+        }
+      },
+      "ClawHubInstallRequest": {
+        "type": "object",
+        "description": "Request to install a skill from ClawHub.",
+        "required": [
+          "slug"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "ClawHub skill slug (e.g., \"github-helper\")."
+          }
+        }
+      },
+      "CloneAgentRequest": {
+        "type": "object",
+        "description": "Request body for cloning an agent.",
+        "required": [
+          "new_name"
+        ],
+        "properties": {
+          "new_name": {
+            "type": "string"
+          }
+        }
+      },
+      "ExtensionInstallRequest": {
+        "type": "object",
+        "description": "Request to install an extension (integration).",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Extension/integration ID (e.g., \"github\", \"slack\")."
+          }
+        }
+      },
+      "ExtensionUninstallRequest": {
+        "type": "object",
+        "description": "Request to uninstall an extension (integration).",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Extension/integration ID to remove."
+          }
+        }
+      },
+      "MessageRequest": {
+        "type": "object",
+        "description": "Request to send a message to an agent.",
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttachmentRef"
+            },
+            "description": "Optional file attachments (uploaded via /upload endpoint)."
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "MessageResponse": {
+        "type": "object",
+        "description": "Response from sending a message.",
+        "required": [
+          "response",
+          "input_tokens",
+          "output_tokens",
+          "iterations"
+        ],
+        "properties": {
+          "cost_usd": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "decision_traces": {
+            "type": "array",
+            "items": {},
+            "description": "Decision traces from tool calls made during the agent loop.\nEmpty if no tools were called."
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "iterations": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "response": {
+            "type": "string"
+          }
+        }
+      },
+      "MigrateRequest": {
+        "type": "object",
+        "description": "Request to run a migration.",
+        "required": [
+          "source",
+          "source_dir",
+          "target_dir"
+        ],
+        "properties": {
+          "dry_run": {
+            "type": "boolean"
+          },
+          "source": {
+            "type": "string"
+          },
+          "source_dir": {
+            "type": "string"
+          },
+          "target_dir": {
+            "type": "string"
+          }
+        }
+      },
+      "MigrateScanRequest": {
+        "type": "object",
+        "description": "Request to scan a directory for migration.",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        }
+      },
+      "PatchAgentConfigRequest": {
+        "type": "object",
+        "description": "Request body for patching agent config (name, description, prompt, identity, model).",
+        "properties": {
+          "api_key_env": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "archetype": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "base_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "emoji": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fallback_models": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {}
+          },
+          "greeting_style": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "system_prompt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vibe": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "SetAgentFileRequest": {
+        "type": "object",
+        "description": "Request body for writing a workspace identity file.",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": "string"
+          }
+        }
+      },
+      "SetModeRequest": {
+        "type": "object",
+        "description": "Request to change an agent's operational mode.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "type": "string"
+          }
+        }
+      },
+      "SkillInstallRequest": {
+        "type": "object",
+        "description": "Request to install a skill from the marketplace.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "SkillUninstallRequest": {
+        "type": "object",
+        "description": "Request to uninstall a skill.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "SpawnRequest": {
+        "type": "object",
+        "description": "Request to spawn an agent from a TOML manifest string or a template name.",
+        "properties": {
+          "manifest_toml": {
+            "type": "string",
+            "description": "Agent manifest as TOML string (optional if `template` is provided)."
+          },
+          "signed_manifest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional Ed25519 signed manifest envelope (JSON).\nWhen present, the signature is verified before spawning."
+          },
+          "template": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Template name from `~/.librefang/agents/{template}/agent.toml`.\nWhen provided and `manifest_toml` is empty, the template is loaded automatically."
+          }
+        }
+      },
+      "SpawnResponse": {
+        "type": "object",
+        "description": "Response after spawning an agent.",
+        "required": [
+          "agent_id",
+          "name"
+        ],
+        "properties": {
+          "agent_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "UpdateIdentityRequest": {
+        "type": "object",
+        "description": "Request body for updating agent visual identity.",
+        "properties": {
+          "archetype": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "avatar_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "emoji": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "greeting_style": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vibe": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "system",
+      "description": "Health checks, status, version, config, and system management"
+    },
+    {
+      "name": "agents",
+      "description": "Agent lifecycle — spawn, query, message, kill, configure"
+    },
+    {
+      "name": "skills",
+      "description": "Skill and tool management, ClawHub marketplace"
+    },
+    {
+      "name": "hands",
+      "description": "Browser automation hands management"
+    },
+    {
+      "name": "mcp",
+      "description": "MCP server management and protocol endpoints"
+    },
+    {
+      "name": "extensions",
+      "description": "Extension/integration management"
+    },
+    {
+      "name": "integrations",
+      "description": "Third-party integration connections"
+    },
+    {
+      "name": "models",
+      "description": "Model catalog, aliases, and provider management"
+    },
+    {
+      "name": "channels",
+      "description": "Messaging channel configuration"
+    },
+    {
+      "name": "workflows",
+      "description": "Workflow, trigger, schedule, and cron job management"
+    },
+    {
+      "name": "sessions",
+      "description": "Session management and cleanup"
+    },
+    {
+      "name": "budget",
+      "description": "Usage tracking and budget management"
+    },
+    {
+      "name": "memory",
+      "description": "Agent key-value memory store"
+    },
+    {
+      "name": "approvals",
+      "description": "Human-in-the-loop approval requests"
+    },
+    {
+      "name": "webhooks",
+      "description": "External webhook triggers"
+    },
+    {
+      "name": "network",
+      "description": "P2P network, peers, and inter-agent communication"
+    },
+    {
+      "name": "a2a",
+      "description": "Agent-to-Agent protocol endpoints"
+    },
+    {
+      "name": "pairing",
+      "description": "Device pairing and mobile sync"
+    },
+    {
+      "name": "auth",
+      "description": "OAuth/OIDC authentication endpoints"
+    },
+    {
+      "name": "openai",
+      "description": "OpenAI-compatible API endpoints"
+    }
+  ]
+}
