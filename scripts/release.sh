@@ -131,6 +131,9 @@ if git -C "$REPO_ROOT" rev-parse "$TAG" &>/dev/null; then
     if command -v gh &>/dev/null; then
         gh release delete "$TAG" --repo librefang/librefang --yes 2>/dev/null || true
     fi
+
+    # Re-fetch PREV_TAG since we just deleted the old one
+    PREV_TAG=$(git -C "$REPO_ROOT" tag --sort=-creatordate | grep -E '^v[0-9]' | grep -vE '(alpha|beta|rc)' | head -1 || true)
 fi
 
 # --- Generate changelog ---
