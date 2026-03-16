@@ -8,6 +8,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: release-create-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   create_release:
     name: Create Release

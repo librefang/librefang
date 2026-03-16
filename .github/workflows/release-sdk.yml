@@ -9,6 +9,10 @@ permissions:
   contents: write
   packages: write
 
+concurrency:
+  group: release-sdk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ── Wait for the GitHub Release to be created ────────────────────────────
   wait_for_release:
