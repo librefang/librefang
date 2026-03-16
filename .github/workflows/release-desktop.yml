@@ -147,6 +147,22 @@ jobs:
           rm -f tauri.conf.json.bak
           echo "Tauri version: $(grep '"version"' tauri.conf.json)"
 
+      - name: Delete existing assets for this target (allows re-release)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # List assets and delete any matching this target
+          gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | while read -r name; do
+            case "$name" in
+              *${{ matrix.platform.rust_target }}*|*latest.json)
+                echo "Deleting existing asset: $name"
+                gh release delete-asset "$TAG" "$name" --yes 2>/dev/null || true
+                ;;
+            esac
+          done
+
       - name: Build and bundle Tauri desktop app
         if: runner.os != 'macOS' || env.APPLE_SIGNING_IDENTITY == ''
         uses: tauri-apps/tauri-action@v0
