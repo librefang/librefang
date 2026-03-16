@@ -319,6 +319,7 @@ struct TokenResponse {
 // ── Route: GET /api/auth/providers ──────────────────────────────────────
 
 /// GET /api/auth/providers — List available authentication providers.
+#[utoipa::path(get, path = "/api/auth/providers", tag = "auth", responses((status = 200, description = "List configured OAuth/OIDC providers", body = serde_json::Value)))]
 pub async fn auth_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let ext_auth = &state.kernel.config.external_auth;
 
@@ -350,6 +351,7 @@ pub async fn auth_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 // ── Route: GET /api/auth/login ──────────────────────────────────────────
 
 /// GET /api/auth/login — Redirect to the external identity provider (legacy single-provider).
+#[utoipa::path(get, path = "/api/auth/login", tag = "auth", responses((status = 302, description = "Redirect to OAuth provider login")))]
 pub async fn auth_login(State(state): State<Arc<AppState>>) -> Response {
     let ext_auth = &state.kernel.config.external_auth;
     if !ext_auth.enabled {
@@ -376,6 +378,7 @@ pub async fn auth_login(State(state): State<Arc<AppState>>) -> Response {
 }
 
 /// GET /api/auth/login/:provider — Redirect to a specific provider.
+#[utoipa::path(get, path = "/api/auth/login/{provider}", tag = "auth", params(("provider" = String, Path, description = "OAuth provider name")), responses((status = 302, description = "Redirect to specific OAuth provider")))]
 pub async fn auth_login_provider(
     State(state): State<Arc<AppState>>,
     Path(provider_id): Path<String>,
@@ -461,7 +464,7 @@ pub struct CallbackQuery {
 }
 
 /// POST body for the callback (programmatic clients).
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CallbackBody {
     /// Authorization code.
     pub code: String,
@@ -493,6 +496,7 @@ struct CallbackUser {
 }
 
 /// GET /api/auth/callback — Handle the OAuth2 authorization code callback (browser redirect).
+#[utoipa::path(get, path = "/api/auth/callback", tag = "auth", responses((status = 200, description = "OAuth callback — completes login flow", body = serde_json::Value)))]
 pub async fn auth_callback(
     State(state): State<Arc<AppState>>,
     Query(query): Query<CallbackQuery>,
@@ -558,6 +562,7 @@ pub async fn auth_callback(
 }
 
 /// POST /api/auth/callback — Handle the OAuth2 callback (programmatic clients).
+#[utoipa::path(post, path = "/api/auth/callback", tag = "auth", responses((status = 200, description = "OAuth callback (POST) — completes login flow", body = serde_json::Value)))]
 pub async fn auth_callback_post(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CallbackBody>,
@@ -785,6 +790,7 @@ async fn handle_code_exchange(
 ///
 /// If a valid JWT is in the Authorization header and JWKS validation succeeds,
 /// returns the decoded claims. Otherwise falls back to provider userinfo endpoint.
+#[utoipa::path(get, path = "/api/auth/userinfo", tag = "auth", responses((status = 200, description = "Get authenticated user info", body = serde_json::Value), (status = 401, description = "Not authenticated")))]
 pub async fn auth_userinfo(
     State(state): State<Arc<AppState>>,
     request: axum::http::Request<axum::body::Body>,
@@ -875,6 +881,7 @@ pub struct IntrospectRequest {
 /// POST /api/auth/introspect — Validate a token and return its claims.
 ///
 /// Follows RFC 7662 conventions: returns `{"active": true/false, ...}`.
+#[utoipa::path(post, path = "/api/auth/introspect", tag = "auth", request_body = serde_json::Value, responses((status = 200, description = "Token introspection result", body = serde_json::Value)))]
 pub async fn auth_introspect(
     State(state): State<Arc<AppState>>,
     Json(req): Json<IntrospectRequest>,

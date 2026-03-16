@@ -7,6 +7,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use utoipa::OpenApi;
 
+use crate::oauth;
+use crate::openai_compat;
 use crate::routes;
 use crate::types;
 
@@ -267,6 +269,19 @@ use crate::types;
 
         // ── MCP HTTP ──
         routes::mcp_http,
+
+        // ── OAuth / OIDC ──
+        oauth::auth_providers,
+        oauth::auth_login,
+        oauth::auth_login_provider,
+        oauth::auth_callback,
+        oauth::auth_callback_post,
+        oauth::auth_userinfo,
+        oauth::auth_introspect,
+
+        // ── OpenAI-Compatible API ──
+        openai_compat::chat_completions,
+        openai_compat::list_models,
     ),
     components(schemas(
         types::SpawnRequest,
@@ -307,6 +322,8 @@ use crate::types;
         (name = "network", description = "P2P network, peers, and inter-agent communication"),
         (name = "a2a", description = "Agent-to-Agent protocol endpoints"),
         (name = "pairing", description = "Device pairing and mobile sync"),
+        (name = "auth", description = "OAuth/OIDC authentication endpoints"),
+        (name = "openai", description = "OpenAI-compatible API endpoints"),
     ),
 )]
 pub struct ApiDoc;
