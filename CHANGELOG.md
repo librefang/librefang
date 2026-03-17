@@ -5,6 +5,24 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-03-17
+
+### Added
+
+- Add multi-language support for CLI and API error messages (#449) (@houko)
+- Add truncation and metadata for Telegram reply-to-message (#560) (@SenZhangAI)
+
+### Fixed
+
+- SDK publish fixes + Bluesky notification + auto Dev.to article (#562) (@houko)
+- YAML syntax error in Bluesky notification workflow (#563) (@houko)
+- Add missing discovered_model_info field in ProbeResult test (#565) (@houko)
+
+### Other
+
+- V0.5.5-20260317 (#559) (@houko)
+
+
 ## [0.5.5] - 2026-03-17
 
 ### Added
