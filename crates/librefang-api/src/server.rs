@@ -357,6 +357,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/approvals",
             axum::routing::get(routes::list_approvals).post(routes::create_approval),
         )
+        .route("/approvals/{id}", axum::routing::get(routes::get_approval))
         .route(
             "/approvals/{id}/approve",
             axum::routing::post(routes::approve_request),

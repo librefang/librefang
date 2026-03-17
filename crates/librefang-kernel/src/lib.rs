@@ -16,6 +16,7 @@ pub mod event_bus;
 pub mod heartbeat;
 pub mod kernel;
 pub mod metering;
+pub mod orchestration;
 pub mod pairing;
 pub mod registry;
 pub mod router;
