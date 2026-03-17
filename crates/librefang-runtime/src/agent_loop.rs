@@ -15,7 +15,8 @@ use crate::mcp::McpConnection;
 use crate::tool_runner;
 use crate::web_search::WebToolsContext;
 use librefang_memory::session::Session;
-use librefang_memory::MemorySubstrate;
+use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
+use librefang_types::memory::{MemoryFragment, MemoryId};
 use librefang_skills::registry::SkillRegistry;
 use librefang_types::agent::AgentManifest;
 use librefang_types::error::{LibreFangError, LibreFangResult};
@@ -289,6 +290,7 @@ pub async fn run_agent_loop(
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
     user_content_blocks: Option<Vec<ContentBlock>>,
+    proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
@@ -303,7 +305,7 @@ pub async fn run_agent_loop(
 
     // Recall relevant memories — prefer vector similarity search when embedding driver is available
     // In stable_prefix_mode, skip memory recall to keep the system prompt prefix stable for caching.
-    let memories = if stable_prefix_mode {
+    let mut memories = if stable_prefix_mode {
         Vec::new()
     } else if let Some(emb) = embedding_driver {
         match emb.embed_one(user_message).await {
@@ -350,6 +352,44 @@ pub async fn run_agent_loop(
             .await
             .unwrap_or_default()
     };
+
+    // Add proactive memory retrieval results (mem0-style auto_retrieve)
+    if let Some(ref pm_store_arc) = proactive_memory {
+        let user_id = session.agent_id.0.to_string();
+        match pm_store_arc.auto_retrieve(&user_id, user_message).await {
+            Ok(pm_memories) if !pm_memories.is_empty() => {
+                debug!("Proactive memory retrieved {} items", pm_memories.len());
+                // Convert MemoryItem to MemoryFragment format and append
+                let pm_fragments: Vec<_> = pm_memories
+                    .into_iter()
+                    .map(|item| MemoryFragment {
+                        id: MemoryId::new(),
+                        agent_id: session.agent_id,
+                        content: item.content,
+                        embedding: None,
+                        metadata: item.metadata,
+                        source: librefang_types::memory::MemorySource::Conversation,
+                        confidence: 1.0,
+                        created_at: chrono::Utc::now(),
+                        accessed_at: chrono::Utc::now(),
+                        access_count: 0,
+                        scope: match item.level {
+                            librefang_types::memory::MemoryLevel::User => "user_memory".to_string(),
+                            librefang_types::memory::MemoryLevel::Session => "session_memory".to_string(),
+                            librefang_types::memory::MemoryLevel::Agent => "agent_memory".to_string(),
+                        },
+                    })
+                    .collect();
+                memories.extend(pm_fragments);
+            }
+            Ok(_) => {
+                debug!("No proactive memories retrieved");
+            }
+            Err(e) => {
+                warn!("Proactive memory auto_retrieve failed: {e}");
+            }
+        }
+    }
 
     // Fire BeforePromptBuild hook
     let agent_id_str = session.agent_id.0.to_string();
@@ -675,8 +715,33 @@ pub async fn run_agent_loop(
                     "Agent loop completed"
                 );
 
-                // Fire AgentLoopEnd hook
+                // Fire AgentLoopEnd hook with session messages for auto_memorize
                 if let Some(hook_reg) = hooks {
+                    let messages_json: Vec<serde_json::Value> = session
+                        .messages
+                        .iter()
+                        .map(|m| {
+                            let content_str = match &m.content {
+                                librefang_types::message::MessageContent::Text(s) => s.clone(),
+                                librefang_types::message::MessageContent::Blocks(blocks) => {
+                                    blocks.iter()
+                                        .filter_map(|b| {
+                                            if let librefang_types::message::ContentBlock::Text { text, .. } = b {
+                                                Some(text.clone())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                }
+                            };
+                            serde_json::json!({
+                                "role": format!("{:?}", m.role).to_lowercase(),
+                                "content": content_str
+                            })
+                        })
+                        .collect();
                     let ctx = crate::hooks::HookContext {
                         agent_name: &manifest.name,
                         agent_id: agent_id_str.as_str(),
@@ -684,6 +749,7 @@ pub async fn run_agent_loop(
                         data: serde_json::json!({
                             "iterations": iteration + 1,
                             "response_length": final_response.len(),
+                            "messages": messages_json,
                         }),
                     };
                     let _ = hook_reg.fire(&ctx);
@@ -1293,6 +1359,7 @@ pub async fn run_agent_loop_streaming(
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
     user_content_blocks: Option<Vec<ContentBlock>>,
+    proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
 
@@ -2967,6 +3034,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
         )
         .await
         .expect("Loop should complete without error");
@@ -3020,6 +3088,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
         )
         .await
         .expect("Loop should complete without error");
@@ -3073,6 +3142,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
         )
         .await
         .expect("Loop should complete without error");
@@ -3119,6 +3189,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -3246,6 +3317,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
         )
         .await
         .expect("Loop should recover via retry");
@@ -3293,6 +3365,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
         )
         .await
         .expect("Loop should complete with fallback");
@@ -3348,6 +3421,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
         )
         .await
         .expect("Streaming loop should complete without error");
@@ -4125,6 +4199,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
         )
         .await
         .expect("Agent loop should complete");
@@ -4192,6 +4267,7 @@ mod tests {
             None,
             None,
             None, // user_content_blocks
+            None, // proactive_memory
         )
         .await
         .expect("Normal loop should complete");
@@ -4255,6 +4331,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
         )
         .await
         .expect("Streaming loop should complete");

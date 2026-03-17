@@ -73,6 +73,8 @@ pub struct LibreFangKernel {
     pub scheduler: AgentScheduler,
     /// Memory substrate.
     pub memory: Arc<MemorySubstrate>,
+    /// Proactive memory store (mem0-style auto_retrieve/auto_memorize).
+    pub proactive_memory: std::sync::RwLock<Option<Arc<librefang_memory::ProactiveMemoryStore>>>,
     /// Process supervisor.
     pub supervisor: Supervisor,
     /// Workflow engine.
@@ -984,6 +986,7 @@ impl LibreFangKernel {
             event_bus: EventBus::new(),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
+            proactive_memory: std::sync::RwLock::new(None),
             supervisor,
             workflows: WorkflowEngine::new(),
             triggers: TriggerEngine::new(),
@@ -1029,6 +1032,17 @@ impl LibreFangKernel {
             command_queue,
             self_handle: OnceLock::new(),
         };
+
+        // Initialize proactive memory system (mem0-style)
+        // This enables auto_retrieve (before agent execution) and auto_memorize (after agent execution)
+        let proactive_store = librefang_runtime::proactive_memory::init_proactive_memory_with_defaults(
+            &kernel.hooks,
+            Arc::clone(&kernel.memory),
+        );
+        // Store in kernel for direct access from agent_loop
+        if let Some(store) = proactive_store {
+            *kernel.proactive_memory.write().unwrap() = Some(store);
+        }
 
         // Restore persisted agents from SQLite
         match kernel.memory.load_all_agents() {
@@ -1955,6 +1969,7 @@ impl LibreFangKernel {
                 ctx_window,
                 Some(&kernel_clone.process_manager),
                 None, // content_blocks (streaming path uses text only for now)
+                None, // proactive_memory
             )
             .await;
 
@@ -2634,6 +2649,9 @@ impl LibreFangKernel {
             message.to_string()
         };
 
+        // Extract proactive memory before async call (RwLockGuard is not Send)
+        let proactive_memory = self.proactive_memory.read().unwrap().clone();
+
         let result = run_agent_loop(
             &manifest,
             &message_with_links,
@@ -2664,6 +2682,7 @@ impl LibreFangKernel {
             ctx_window,
             Some(&self.process_manager),
             content_blocks,
+            proactive_memory,
         )
         .await
         .map_err(KernelError::LibreFang)?;

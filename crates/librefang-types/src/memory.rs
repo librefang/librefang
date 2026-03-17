@@ -1,4 +1,5 @@
 //! Memory substrate types: fragments, sources, filters, and the unified Memory trait.
+//! Also includes proactive memory types for mem0-style API.
 
 use crate::agent::AgentId;
 use async_trait::async_trait;
@@ -6,6 +7,259 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
+
+/// Memory levels for multi-level memory (User/Session/Agent)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryLevel {
+    /// User-level memory (persistent across sessions)
+    User,
+    /// Session-level memory (current conversation)
+    Session,
+    /// Agent-level memory (agent-specific learned behaviors)
+    Agent,
+}
+
+impl Default for MemoryLevel {
+    fn default() -> Self {
+        Self::Session
+    }
+}
+
+impl From<&str> for MemoryLevel {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "user" | "user_memory" => MemoryLevel::User,
+            "session" | "session_memory" => MemoryLevel::Session,
+            "agent" | "agent_memory" => MemoryLevel::Agent,
+            _ => MemoryLevel::Session,
+        }
+    }
+}
+
+impl std::str::FromStr for MemoryLevel {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(MemoryLevel::from(s))
+    }
+}
+
+/// A simple memory item for mem0-style API.
+/// This is a simplified version of MemoryFragment for external use.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryItem {
+    /// Unique ID.
+    pub id: String,
+    /// The memory content.
+    pub content: String,
+    /// Memory level (user/session/agent).
+    pub level: MemoryLevel,
+    /// Optional category for grouping.
+    pub category: Option<String>,
+    /// Metadata key-value pairs.
+    pub metadata: HashMap<String, serde_json::Value>,
+    /// When this memory was created.
+    pub created_at: DateTime<Utc>,
+}
+
+impl MemoryItem {
+    /// Create a new memory item.
+    pub fn new(content: String, level: MemoryLevel) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            content,
+            level,
+            category: None,
+            metadata: HashMap::new(),
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Create a user-level memory item.
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::new(content.into(), MemoryLevel::User)
+    }
+
+    /// Create a session-level memory item.
+    pub fn session(content: impl Into<String>) -> Self {
+        Self::new(content.into(), MemoryLevel::Session)
+    }
+
+    /// Create an agent-level memory item.
+    pub fn agent(content: impl Into<String>) -> Self {
+        Self::new(content.into(), MemoryLevel::Agent)
+    }
+
+    /// Set category.
+    pub fn with_category(mut self, category: impl Into<String>) -> Self {
+        self.category = Some(category.into());
+        self
+    }
+
+    /// Add metadata.
+    pub fn with_metadata(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
+        self.metadata.insert(key.into(), value);
+        self
+    }
+}
+
+/// Configuration for proactive memory system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProactiveMemoryConfig {
+    /// Enable auto-memorize after agent execution.
+    pub auto_memorize: bool,
+    /// Enable auto-retrieve before agent execution.
+    pub auto_retrieve: bool,
+    /// Maximum memories to retrieve per query.
+    pub max_retrieve: usize,
+    /// Confidence threshold for extraction.
+    pub extraction_threshold: f32,
+    /// LLM model to use for extraction.
+    pub extraction_model: Option<String>,
+    /// Categories to extract from conversations.
+    pub extract_categories: Vec<String>,
+}
+
+impl Default for ProactiveMemoryConfig {
+    fn default() -> Self {
+        Self {
+            auto_memorize: true,
+            auto_retrieve: true,
+            max_retrieve: 10,
+            extraction_threshold: 0.7,
+            extraction_model: None,
+            extract_categories: vec![
+                "user_preference".to_string(),
+                "important_fact".to_string(),
+                "task_context".to_string(),
+                "relationship".to_string(),
+            ],
+        }
+    }
+}
+
+/// Result from LLM-powered memory extraction.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExtractionResult {
+    /// Extracted memory items.
+    pub memories: Vec<MemoryItem>,
+    /// Whether extraction found anything worth remembering.
+    pub has_content: bool,
+    /// Original query that triggered extraction.
+    pub trigger: String,
+}
+
+/// Trait for LLM-powered memory extraction.
+///
+/// This trait allows the runtime to inject an LLM client for memory extraction
+/// without creating circular dependencies between librefang-memory and librefang-runtime.
+///
+/// Implement this trait in the runtime to enable automatic memory extraction.
+#[async_trait]
+pub trait MemoryExtractor: Send + Sync {
+    /// Extract important memories from conversation messages using LLM.
+    ///
+    /// Takes conversation messages and returns extracted memory items.
+    /// The implementation should use an LLM to identify:
+    /// - User preferences
+    /// - Important facts
+    /// - Task context
+    /// - Relationship information
+    async fn extract_memories(
+        &self,
+        messages: &[serde_json::Value],
+    ) -> crate::error::LibreFangResult<ExtractionResult>;
+
+    /// Generate a search context from retrieved memories.
+    ///
+    /// Takes retrieved memory items and formats them for injection
+    /// into the agent's context prompt.
+    fn format_context(&self, memories: &[MemoryItem]) -> String;
+}
+
+/// Default implementation of MemoryExtractor that uses simple rule-based extraction.
+///
+/// This provides basic functionality without requiring an LLM.
+pub struct DefaultMemoryExtractor;
+
+#[async_trait]
+impl MemoryExtractor for DefaultMemoryExtractor {
+    async fn extract_memories(
+        &self,
+        messages: &[serde_json::Value],
+    ) -> crate::error::LibreFangResult<ExtractionResult> {
+        let mut memories = Vec::new();
+
+        // Simple keyword-based extraction (fallback when no LLM available)
+        for message in messages {
+            let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+            let content = message.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+            // Extract preferences (keywords like "prefer", "like", "dislike")
+            if content.to_lowercase().contains("prefer")
+                || content.to_lowercase().contains("like")
+                || content.to_lowercase().contains("dislike")
+            {
+                let mut metadata = HashMap::new();
+                metadata.insert("extracted_from".to_string(), serde_json::json!(role));
+                memories.push(MemoryItem {
+                    id: Uuid::new_v4().to_string(),
+                    content: content.to_string(),
+                    level: MemoryLevel::User,
+                    category: Some("user_preference".to_string()),
+                    metadata,
+                    created_at: Utc::now(),
+                });
+            }
+
+            // Extract important facts (explicit statements)
+            if content.to_lowercase().contains("my name is")
+                || content.to_lowercase().contains("i am ")
+                || content.to_lowercase().contains("i'm ")
+            {
+                let mut metadata = HashMap::new();
+                metadata.insert("extracted_from".to_string(), serde_json::json!(role));
+                memories.push(MemoryItem {
+                    id: Uuid::new_v4().to_string(),
+                    content: content.to_string(),
+                    level: MemoryLevel::User,
+                    category: Some("important_fact".to_string()),
+                    metadata,
+                    created_at: Utc::now(),
+                });
+            }
+        }
+
+        Ok(ExtractionResult {
+            has_content: !memories.is_empty(),
+            memories,
+            trigger: "default_extractor".to_string(),
+        })
+    }
+
+    fn format_context(&self, memories: &[MemoryItem]) -> String {
+        if memories.is_empty() {
+            return String::new();
+        }
+
+        let mut context = String::from("## Relevant Memories\n\n");
+        for mem in memories {
+            let level_str = match mem.level {
+                MemoryLevel::User => "[User Preference]",
+                MemoryLevel::Session => "[Session Context]",
+                MemoryLevel::Agent => "[Agent Learning]",
+            };
+            context.push_str(&format!(
+                "- {} {}\n  {}\n",
+                level_str,
+                mem.category.as_deref().unwrap_or("general"),
+                mem.content
+            ));
+        }
+        context
+    }
+}
 
 /// Unique identifier for a memory fragment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -334,6 +588,72 @@ pub trait Memory: Send + Sync {
     ) -> crate::error::LibreFangResult<ImportReport>;
 }
 
+/// Trait for proactive memory operations (mem0-style API).
+///
+/// This provides a simple, unified API for memory operations similar to mem0:
+/// - search() - semantic search
+/// - add() - store with automatic extraction
+/// - get() - retrieve user preferences
+/// - list() - list memories by category
+#[async_trait]
+pub trait ProactiveMemory: Send + Sync {
+    /// Semantic search for relevant memories.
+    async fn search(
+        &self,
+        query: &str,
+        user_id: &str,
+        limit: usize,
+    ) -> crate::error::LibreFangResult<Vec<MemoryItem>>;
+
+    /// Add memories with automatic extraction (LLM-powered).
+    /// Defaults to Session level storage.
+    async fn add(
+        &self,
+        messages: &[serde_json::Value],
+        user_id: &str,
+    ) -> crate::error::LibreFangResult<()>;
+
+    /// Add memories at a specific memory level (User/Session/Agent).
+    async fn add_with_level(
+        &self,
+        messages: &[serde_json::Value],
+        user_id: &str,
+        level: MemoryLevel,
+    ) -> crate::error::LibreFangResult<()>;
+
+    /// Get user preferences/memories.
+    async fn get(&self, user_id: &str) -> crate::error::LibreFangResult<Vec<MemoryItem>>;
+
+    /// List memories by category.
+    async fn list(
+        &self,
+        user_id: &str,
+        category: Option<&str>,
+    ) -> crate::error::LibreFangResult<Vec<MemoryItem>>;
+}
+
+/// Trait for proactive memory hooks (auto_memorize, auto_retrieve).
+///
+/// This provides hooks for automatic memory extraction and retrieval:
+/// - auto_memorize() - extract important info after agent runs
+/// - auto_retrieve() - proactively load context before agent runs
+#[async_trait]
+pub trait ProactiveMemoryHooks: Send + Sync {
+    /// Extract and store important information after agent execution.
+    async fn auto_memorize(
+        &self,
+        user_id: &str,
+        conversation: &[serde_json::Value],
+    ) -> crate::error::LibreFangResult<ExtractionResult>;
+
+    /// Proactively retrieve relevant context before agent execution.
+    async fn auto_retrieve(
+        &self,
+        user_id: &str,
+        query: &str,
+    ) -> crate::error::LibreFangResult<Vec<MemoryItem>>;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,5 +684,27 @@ mod tests {
         let json = serde_json::to_string(&fragment).unwrap();
         let deserialized: MemoryFragment = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.content, "Test memory");
+    }
+
+    #[test]
+    fn test_memory_item_creation() {
+        let item = MemoryItem::user("Prefers dark mode");
+        assert_eq!(item.level, MemoryLevel::User);
+        assert_eq!(item.content, "Prefers dark mode");
+    }
+
+    #[test]
+    fn test_memory_item_with_category() {
+        let item = MemoryItem::session("User asked about pricing")
+            .with_category("inquiry");
+        assert_eq!(item.category, Some("inquiry".to_string()));
+    }
+
+    #[test]
+    fn test_proactive_memory_config_default() {
+        let config = ProactiveMemoryConfig::default();
+        assert!(config.auto_memorize);
+        assert!(config.auto_retrieve);
+        assert_eq!(config.max_retrieve, 10);
     }
 }
