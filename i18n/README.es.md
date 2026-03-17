@@ -153,7 +153,7 @@ Ver [docs/comparison.md](../docs/comparison.md) para benchmarks y comparación d
 
 - [Documentación](https://docs.librefang.ai) &bull; [Referencia API](../docs/api-reference.md) &bull; [Guía de Inicio](../docs/getting-started.md)
 - [Contribuir](../CONTRIBUTING.md) &bull; [Gobernanza](../GOVERNANCE.md) &bull; [Seguridad](../SECURITY.md)
-- [Discusiones](https://github.com/librefang/librefang/discussions) — Q&A, casos de uso, votaciones, anuncios &bull; [Discord](https://discord.gg/DzTYqAZZmc)
+- Discusiones: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [Casos de Uso](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [Votaciones](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [Anuncios](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## Contribuidores
 

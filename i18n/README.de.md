@@ -153,7 +153,7 @@ Siehe [docs/comparison.md](../docs/comparison.md) für Benchmarks und Feature-Ve
 
 - [Dokumentation](https://docs.librefang.ai) &bull; [API-Referenz](../docs/api-reference.md) &bull; [Erste Schritte](../docs/getting-started.md)
 - [Mitwirken](../CONTRIBUTING.md) &bull; [Governance](../GOVERNANCE.md) &bull; [Sicherheit](../SECURITY.md)
-- [Diskussionen](https://github.com/librefang/librefang/discussions) — Q&A, Anwendungsfälle, Feature-Abstimmungen, Ankündigungen &bull; [Discord](https://discord.gg/DzTYqAZZmc)
+- Diskussionen: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [Anwendungsfälle](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [Feature-Abstimmungen](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [Ankündigungen](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## Mitwirkende
 

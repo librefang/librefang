@@ -153,7 +153,7 @@ cargo fmt --all -- --check                               # 포맷 체크
 
 - [문서](https://docs.librefang.ai) &bull; [API 레퍼런스](../docs/api-reference.md) &bull; [시작 가이드](../docs/getting-started.md)
 - [기여](../CONTRIBUTING.md) &bull; [거버넌스](../GOVERNANCE.md) &bull; [보안](../SECURITY.md)
-- [토론](https://github.com/librefang/librefang/discussions) — Q&A, 유스케이스, 기능 투표, 공지 &bull; [Discord](https://discord.gg/DzTYqAZZmc)
+- 토론: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [유스케이스](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [기능 투표](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [공지](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## 기여자
 

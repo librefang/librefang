@@ -153,7 +153,7 @@ See [docs/comparison.md](docs/comparison.md) for benchmarks and feature-by-featu
 
 - [Documentation](https://docs.librefang.ai) &bull; [API Reference](docs/api-reference.md) &bull; [Getting Started](docs/getting-started.md)
 - [Contributing](CONTRIBUTING.md) &bull; [Governance](GOVERNANCE.md) &bull; [Security](SECURITY.md)
-- [Discussions](https://github.com/librefang/librefang/discussions) — Q&A, use cases, feature votes, announcements &bull; [Discord](https://discord.gg/DzTYqAZZmc)
+- Discussions: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [Use Cases](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [Feature Votes](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [Announcements](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## Contributors
 

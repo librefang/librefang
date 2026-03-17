@@ -153,7 +153,7 @@ cargo fmt --all -- --check                               # フォーマットチ
 
 - [ドキュメント](https://docs.librefang.ai) &bull; [API リファレンス](../docs/api-reference.md) &bull; [入門ガイド](../docs/getting-started.md)
 - [コントリビュート](../CONTRIBUTING.md) &bull; [ガバナンス](../GOVERNANCE.md) &bull; [セキュリティ](../SECURITY.md)
-- [ディスカッション](https://github.com/librefang/librefang/discussions) — Q&A、ユースケース、機能投票、お知らせ &bull; [Discord](https://discord.gg/DzTYqAZZmc)
+- ディスカッション: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [ユースケース](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [機能投票](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [お知らせ](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## コントリビューター
 

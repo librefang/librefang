@@ -153,7 +153,7 @@ cargo fmt --all -- --check                               # 格式化检查
 
 - [文档](https://docs.librefang.ai) &bull; [API 参考](../docs/api-reference.md) &bull; [入门指南](../docs/getting-started.md)
 - [贡献](../CONTRIBUTING.md) &bull; [治理](../GOVERNANCE.md) &bull; [安全](../SECURITY.md)
-- [讨论](https://github.com/librefang/librefang/discussions) — 问答、用例、功能投票、公告 &bull; [Discord](https://discord.gg/DzTYqAZZmc)
+- 讨论: [问答](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [用例展示](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [功能投票](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [公告](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## 贡献者
 
