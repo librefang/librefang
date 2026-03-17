@@ -2338,6 +2338,22 @@ pub(crate) fn remove_channel_config(
 // Integration management endpoints
 // ---------------------------------------------------------------------------
 
+/// Derive a human-readable status string for an integration.
+fn integration_status_str(
+    installed: Option<&librefang_extensions::InstalledIntegration>,
+    health: Option<&librefang_extensions::health::IntegrationHealth>,
+) -> &'static str {
+    match installed {
+        Some(inst) if !inst.enabled => "disabled",
+        Some(_) => match health.map(|h| &h.status) {
+            Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
+            Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
+            _ => "installed",
+        },
+        None => "available",
+    }
+}
+
 /// GET /api/integrations — List installed integrations with status.
 #[utoipa::path(
     get,
@@ -2358,15 +2374,13 @@ pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoR
     let mut entries = Vec::new();
     for info in registry.list_all_info() {
         let h = health.get_health(&info.template.id);
-        let status = match &info.installed {
-            Some(inst) if !inst.enabled => "disabled",
-            Some(_) => match h.as_ref().map(|h| &h.status) {
-                Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
-                Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
-                _ => "installed",
-            },
-            None => continue, // Only show installed
-        };
+        let status = integration_status_str(
+            info.installed.as_ref(),
+            h.as_ref(),
+        );
+        if status == "available" {
+            continue; // Only show installed
+        }
         entries.push(serde_json::json!({
             "id": info.template.id,
             "name": info.template.name,
@@ -2423,15 +2437,7 @@ pub async fn get_integration(
     let installed = registry.get_installed(&id);
     let h = health.get_health(&id);
 
-    let status = match &installed {
-        Some(inst) if !inst.enabled => "disabled",
-        Some(_) => match h.as_ref().map(|h| &h.status) {
-            Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
-            Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
-            _ => "installed",
-        },
-        None => "available",
-    };
+    let status = integration_status_str(installed, h.as_ref());
 
     let error_message = h.as_ref().and_then(|h| match &h.status {
         librefang_extensions::IntegrationStatus::Error(msg) => Some(msg.clone()),
@@ -2450,8 +2456,8 @@ pub async fn get_integration(
             "tags": template.tags,
             "tool_count": h.as_ref().map(|h| h.tool_count).unwrap_or(0),
             "installed": installed.is_some(),
-            "enabled": installed.as_ref().map(|i| i.enabled).unwrap_or(false),
-            "installed_at": installed.as_ref().map(|i| i.installed_at.to_rfc3339()),
+            "enabled": installed.map(|i| i.enabled).unwrap_or(false),
+            "installed_at": installed.map(|i| i.installed_at.to_rfc3339()),
             "has_oauth": template.oauth.is_some(),
             "setup_instructions": template.setup_instructions,
             "required_env": template.required_env.iter().map(|e| serde_json::json!({
