@@ -279,17 +279,19 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// Compute the wait duration for a given attempt (0-indexed).
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
-        // Cap attempt to avoid i32 overflow in powi().
-        let exp = attempt.min(i32::MAX as u32) as i32;
+        // Cap exponent to 63 — beyond that any multiplier >= 2 overflows f64
+        // or produces values so large that Duration::mul_f64 panics.
+        let exp = attempt.min(63) as i32;
         let multiplier = self.backoff_multiplier.powi(exp);
         // Guard against infinity/NaN to prevent Duration::mul_f64 panic.
-        let capped = if multiplier.is_finite() {
-            self.initial_backoff
-                .mul_f64(multiplier)
-                .min(self.max_backoff)
-        } else {
-            self.max_backoff
-        };
+        let capped =
+            if multiplier.is_finite() && multiplier < f64::MAX / self.max_backoff.as_secs_f64() {
+                self.initial_backoff
+                    .mul_f64(multiplier)
+                    .min(self.max_backoff)
+            } else {
+                self.max_backoff
+            };
         if self.jitter {
             // Full jitter: random duration in [0, capped) instead of [capped, 2*capped).
             let capped_ms = capped.as_millis() as u64;
