@@ -73,12 +73,24 @@ pub fn init_proxy(cfg: ProxyConfig) {
     // without going through our builder (e.g. librefang-channels).
     if let Some(ref url) = cfg.http_proxy {
         if !url.is_empty() {
+            if !is_valid_proxy_url(url) {
+                tracing::warn!(
+                    "http_proxy should start with http:// or https://: {}",
+                    librefang_types::config::redact_proxy_url(url)
+                );
+            }
             std::env::set_var("HTTP_PROXY", url);
             std::env::set_var("http_proxy", url);
         }
     }
     if let Some(ref url) = cfg.https_proxy {
         if !url.is_empty() {
+            if !is_valid_proxy_url(url) {
+                tracing::warn!(
+                    "https_proxy should start with http:// or https://: {}",
+                    librefang_types::config::redact_proxy_url(url)
+                );
+            }
             std::env::set_var("HTTPS_PROXY", url);
             std::env::set_var("https_proxy", url);
         }
@@ -90,6 +102,11 @@ pub fn init_proxy(cfg: ProxyConfig) {
         }
     }
     let _ = GLOBAL_PROXY.set(cfg);
+}
+
+/// Check if a proxy URL has a valid scheme.
+fn is_valid_proxy_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://") || url.starts_with("socks5://")
 }
 
 /// Return the active proxy config (global or default-empty).
@@ -107,9 +124,12 @@ fn active_proxy() -> &'static ProxyConfig {
 /// Build a [`reqwest::ClientBuilder`] with proxy settings from the global config
 /// and TLS that works even when system CA certificates are missing.
 ///
-/// Resolution order for each proxy field:
-/// 1. Explicit value from `ProxyConfig` (config.toml `[proxy]` section).
-/// 2. Standard environment variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`).
+/// Proxy resolution:
+/// - Explicit values from `ProxyConfig` (config.toml `[proxy]` section) are applied directly.
+/// - When `ProxyConfig` fields are `None`, reqwest's built-in env var detection
+///   (`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`) provides the fallback automatically.
+/// - `init_proxy()` also exports config values as env vars, ensuring consistency
+///   for crates that don't use this builder (e.g. `librefang-channels`).
 pub fn proxied_client_builder() -> reqwest::ClientBuilder {
     build_http_client(active_proxy())
 }
@@ -132,38 +152,25 @@ pub fn new_client() -> reqwest::Client {
 /// Build a [`reqwest::ClientBuilder`] with the given proxy settings applied
 /// and TLS fallback to bundled Mozilla CA roots.
 ///
+/// Only explicit `ProxyConfig` values are set on the builder. When fields are
+/// `None`, reqwest's built-in env var detection handles the fallback, avoiding
+/// double-application of proxy settings that `init_proxy` already exported.
+///
 /// Prefer [`proxied_client_builder`] which reads the global config automatically.
 pub fn build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder {
     let mut builder = reqwest::Client::builder()
         .use_preconfigured_tls(tls_config())
         .user_agent(crate::USER_AGENT);
 
-    let http_proxy = proxy
-        .http_proxy
-        .clone()
-        .or_else(|| std::env::var("HTTP_PROXY").ok())
-        .or_else(|| std::env::var("http_proxy").ok());
-
-    let https_proxy = proxy
-        .https_proxy
-        .clone()
-        .or_else(|| std::env::var("HTTPS_PROXY").ok())
-        .or_else(|| std::env::var("https_proxy").ok());
-
-    let no_proxy = proxy
+    // Build the NoProxy filter from explicit config only.
+    let no_proxy_filter = proxy
         .no_proxy
-        .clone()
-        .or_else(|| std::env::var("NO_PROXY").ok())
-        .or_else(|| std::env::var("no_proxy").ok());
-
-    // Build the NoProxy filter once so it can be applied to each Proxy instance.
-    let no_proxy_filter = no_proxy
         .as_deref()
         .filter(|s| !s.is_empty())
         .and_then(reqwest::NoProxy::from_string);
 
-    // Apply HTTP proxy.
-    if let Some(ref url) = http_proxy {
+    // Apply HTTP proxy from config. When None, reqwest reads HTTP_PROXY env var.
+    if let Some(ref url) = proxy.http_proxy {
         if !url.is_empty() {
             if let Ok(p) = Proxy::http(url) {
                 builder = builder.proxy(p.no_proxy(no_proxy_filter.clone()));
@@ -176,8 +183,8 @@ pub fn build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder {
         }
     }
 
-    // Apply HTTPS proxy.
-    if let Some(ref url) = https_proxy {
+    // Apply HTTPS proxy from config. When None, reqwest reads HTTPS_PROXY env var.
+    if let Some(ref url) = proxy.https_proxy {
         if !url.is_empty() {
             if let Ok(p) = Proxy::https(url) {
                 builder = builder.proxy(p.no_proxy(no_proxy_filter.clone()));
@@ -220,5 +227,15 @@ mod tests {
         // Before init_proxy is called, should still work (empty config).
         let client = proxied_client();
         drop(client);
+    }
+
+    #[test]
+    fn test_is_valid_proxy_url() {
+        assert!(is_valid_proxy_url("http://proxy:8080"));
+        assert!(is_valid_proxy_url("https://proxy:8080"));
+        assert!(is_valid_proxy_url("socks5://proxy:1080"));
+        assert!(!is_valid_proxy_url("ftp://proxy:21"));
+        assert!(!is_valid_proxy_url("proxy:8080"));
+        assert!(!is_valid_proxy_url(""));
     }
 }
