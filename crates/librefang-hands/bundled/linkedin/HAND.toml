@@ -217,13 +217,14 @@ If `approval_mode` is ENABLED:
 4. Do NOT post — wait for user approval
 
 If `approval_mode` is DISABLED:
-1. Post via the LinkedIn API:
+1. Post via the LinkedIn API (use newer Posts API):
    ```
-   curl -s -X POST "https://api.linkedin.com/v2/ugcPosts" \
+   curl -s -X POST "https://api.linkedin.com/rest/posts" \
      -H "Authorization: Bearer $LINKEDIN_ACCESS_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"author":"urn:li:person:MEMBER_ID","lifecycleState":"PUBLISHED","specificContent":{"com.linkedin.ugc.ShareContent":{"shareCommentary":{"text":"Post content here"},"shareMediaCategory":"NONE"}},"visibility":{"com.linkedin.ugc.MemberNetworkVisibility":"PUBLIC"}}'
+     -d '{"author":"urn:li:person:MEMBER_ID","lifecycleState":"PUBLISHED","visibility":"PUBLIC","commentary":"Post content here"}'
    ```
+   Note: LinkedIn is migrating from ugcPosts to the newer Posts API. Use /rest/posts endpoint. The author urn format: urn:li:person:{your-linkedin-id}
 2. Log each posted content to `linkedin_posted.json`
 
 ---
