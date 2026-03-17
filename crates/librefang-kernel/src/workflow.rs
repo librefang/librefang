@@ -68,6 +68,7 @@ impl std::fmt::Display for WorkflowRunId {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workflow {
     /// Unique identifier.
+    #[serde(default)]
     pub id: WorkflowId,
     /// Human-readable name.
     pub name: String,
@@ -76,6 +77,7 @@ pub struct Workflow {
     /// The steps in execution order.
     pub steps: Vec<WorkflowStep>,
     /// Created at.
+    #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
 }
 
@@ -245,12 +247,47 @@ impl WorkflowEngine {
             }
         };
 
+        // Maximum workflow file size (1 MiB). Files larger than this are
+        // skipped to prevent accidental memory bloat from huge files.
+        const MAX_WORKFLOW_FILE_SIZE: u64 = 1024 * 1024;
+
         let mut count = 0;
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    warn!(dir = %dir.display(), "Failed to read directory entry: {e}");
+                    continue;
+                }
+            };
             let path = entry.path();
             let name = path.file_name().unwrap_or_default().to_string_lossy();
 
-            let workflow = if name.ends_with(".workflow.toml") {
+            let is_toml = name.ends_with(".workflow.toml");
+            let is_json = name.ends_with(".workflow.json");
+            if !is_toml && !is_json {
+                continue;
+            }
+
+            // Check file size before reading into memory.
+            match std::fs::metadata(&path) {
+                Ok(meta) if meta.len() > MAX_WORKFLOW_FILE_SIZE => {
+                    warn!(
+                        path = %path.display(),
+                        size = meta.len(),
+                        max = MAX_WORKFLOW_FILE_SIZE,
+                        "Workflow file exceeds maximum size limit, skipping"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    warn!(path = %path.display(), "Failed to stat workflow file: {e}");
+                    continue;
+                }
+                _ => {}
+            }
+
+            let workflow = if is_toml {
                 match std::fs::read_to_string(&path) {
                     Ok(content) => match toml::from_str::<Workflow>(&content) {
                         Ok(w) => Some(w),
@@ -264,7 +301,7 @@ impl WorkflowEngine {
                         None
                     }
                 }
-            } else if name.ends_with(".workflow.json") {
+            } else {
                 match std::fs::read_to_string(&path) {
                     Ok(content) => match serde_json::from_str::<Workflow>(&content) {
                         Ok(w) => Some(w),
@@ -278,24 +315,21 @@ impl WorkflowEngine {
                         None
                     }
                 }
-            } else {
-                continue;
             };
 
             if let Some(wf) = workflow {
                 let wf_name = wf.name.clone();
                 let wf_id = wf.id;
-                {
-                    let existing = self.workflows.blocking_read();
-                    if existing.contains_key(&wf_id) {
-                        tracing::warn!(
-                            workflow_id = %wf_id,
-                            file = %path.display(),
-                            "Workflow ID already registered — overwriting with file version"
-                        );
-                    }
+                let mut map = self.workflows.blocking_write();
+                if map.contains_key(&wf_id) {
+                    warn!(
+                        workflow_id = %wf_id,
+                        file = %path.display(),
+                        "Workflow ID already registered — overwriting with file version"
+                    );
                 }
-                self.workflows.blocking_write().insert(wf_id, wf);
+                map.insert(wf_id, wf);
+                drop(map);
                 info!(workflow_id = %wf_id, name = %wf_name, path = %path.display(), "Auto-registered workflow from disk");
                 count += 1;
             }
@@ -1554,5 +1588,181 @@ mod tests {
         let json = serde_json::to_string(&mode).unwrap();
         let parsed: StepMode = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, StepMode::Loop { max_iterations: 5, until } if until == "done"));
+    }
+
+    // ---- load_from_dir_sync tests ----
+
+    #[test]
+    fn test_load_from_dir_sync_valid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_content = r#"
+name = "my-workflow"
+description = "a workflow"
+
+[[steps]]
+name = "step1"
+prompt_template = "Do {{input}}"
+[steps.agent]
+name = "agent-a"
+"#;
+        std::fs::write(dir.path().join("wf.workflow.toml"), toml_content).unwrap();
+
+        let engine = WorkflowEngine::new();
+        let loaded = engine.load_from_dir_sync(dir.path());
+        assert_eq!(loaded, 1);
+
+        let workflows = engine.workflows.blocking_read();
+        assert_eq!(workflows.len(), 1);
+        let wf = workflows.values().next().unwrap();
+        assert_eq!(wf.name, "my-workflow");
+        assert_eq!(wf.steps.len(), 1);
+    }
+
+    #[test]
+    fn test_load_from_dir_sync_valid_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let json_content = r#"{
+            "name": "json-workflow",
+            "description": "from json",
+            "steps": [{
+                "name": "s1",
+                "agent": { "name": "agent-b" },
+                "prompt_template": "{{input}}"
+            }]
+        }"#;
+        std::fs::write(dir.path().join("wf.workflow.json"), json_content).unwrap();
+
+        let engine = WorkflowEngine::new();
+        let loaded = engine.load_from_dir_sync(dir.path());
+        assert_eq!(loaded, 1);
+
+        let workflows = engine.workflows.blocking_read();
+        assert_eq!(workflows.len(), 1);
+        let wf = workflows.values().next().unwrap();
+        assert_eq!(wf.name, "json-workflow");
+    }
+
+    #[test]
+    fn test_load_from_dir_sync_invalid_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Write invalid TOML that cannot parse as a Workflow
+        std::fs::write(dir.path().join("bad.workflow.toml"), "not valid {{{{").unwrap();
+
+        let engine = WorkflowEngine::new();
+        let loaded = engine.load_from_dir_sync(dir.path());
+        assert_eq!(loaded, 0);
+        assert!(engine.workflows.blocking_read().is_empty());
+    }
+
+    #[test]
+    fn test_load_from_dir_sync_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let engine = WorkflowEngine::new();
+        let loaded = engine.load_from_dir_sync(dir.path());
+        assert_eq!(loaded, 0);
+        assert!(engine.workflows.blocking_read().is_empty());
+    }
+
+    #[test]
+    fn test_load_from_dir_sync_nonexistent_dir() {
+        let engine = WorkflowEngine::new();
+        let loaded = engine.load_from_dir_sync(Path::new("/tmp/does-not-exist-workflow-dir"));
+        assert_eq!(loaded, 0);
+    }
+
+    #[test]
+    fn test_load_from_dir_sync_duplicate_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let id = Uuid::new_v4();
+        let toml1 = format!(
+            r#"
+[id]
+# WorkflowId is a newtype over Uuid, serialised transparently
+id = "{id}"
+
+[bogus]
+"#
+        );
+        // We need to use JSON for precise control over the id field
+        let json = format!(
+            r#"{{
+                "id": "{id}",
+                "name": "dup-1",
+                "description": "first",
+                "steps": [{{
+                    "name": "s",
+                    "agent": {{"name": "a"}},
+                    "prompt_template": "{{{{input}}}}"
+                }}]
+            }}"#
+        );
+        let json2 = format!(
+            r#"{{
+                "id": "{id}",
+                "name": "dup-2",
+                "description": "second",
+                "steps": [{{
+                    "name": "s",
+                    "agent": {{"name": "a"}},
+                    "prompt_template": "{{{{input}}}}"
+                }}]
+            }}"#
+        );
+        std::fs::write(dir.path().join("a.workflow.json"), &json).unwrap();
+        std::fs::write(dir.path().join("b.workflow.json"), &json2).unwrap();
+
+        let engine = WorkflowEngine::new();
+        let loaded = engine.load_from_dir_sync(dir.path());
+        // Both files load successfully (second overwrites first)
+        assert_eq!(loaded, 2);
+        // But only one entry in the map since they share an ID
+        let workflows = engine.workflows.blocking_read();
+        assert_eq!(workflows.len(), 1);
+    }
+
+    #[test]
+    fn test_load_from_dir_sync_file_size_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create a file larger than 1 MiB
+        let large_content = "x".repeat(1024 * 1024 + 1);
+        std::fs::write(dir.path().join("huge.workflow.toml"), &large_content).unwrap();
+
+        let engine = WorkflowEngine::new();
+        let loaded = engine.load_from_dir_sync(dir.path());
+        assert_eq!(loaded, 0);
+        assert!(engine.workflows.blocking_read().is_empty());
+    }
+
+    #[test]
+    fn test_load_from_dir_sync_ignores_non_workflow_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("readme.txt"), "hello").unwrap();
+        std::fs::write(dir.path().join("config.toml"), "[foo]\nbar = 1").unwrap();
+
+        let engine = WorkflowEngine::new();
+        let loaded = engine.load_from_dir_sync(dir.path());
+        assert_eq!(loaded, 0);
+    }
+
+    #[test]
+    fn test_workflow_deserialize_defaults() {
+        // Verify that id and created_at get default values when omitted
+        let json = r#"{
+            "name": "minimal",
+            "description": "no id or created_at",
+            "steps": [{
+                "name": "s1",
+                "agent": { "name": "a" },
+                "prompt_template": "{{input}}"
+            }]
+        }"#;
+        let wf: Workflow = serde_json::from_str(json).unwrap();
+        assert_eq!(wf.name, "minimal");
+        // id should be a valid (non-nil) UUID
+        assert_ne!(wf.id.0, Uuid::nil());
+        // created_at should be roughly now (within last 5 seconds)
+        let diff = Utc::now() - wf.created_at;
+        assert!(diff.num_seconds() < 5);
     }
 }
