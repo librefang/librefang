@@ -33,10 +33,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Send empty object instead of null for parameterless tool calls (fixes #918) (#1108) (@houko)
 - Add missing TokenUsage fields in token rotation test (#1114) (@houko)
 
-### Other
-
-- V0.5.6-20260317 (#566) (@houko)
-
 ## [0.5.6] - 2026-03-17
 
 ### Added
@@ -49,11 +45,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SDK publish fixes + Bluesky notification + auto Dev.to article (#562) (@houko)
 - YAML syntax error in Bluesky notification workflow (#563) (@houko)
 - Add missing discovered_model_info field in ProbeResult test (#565) (@houko)
-
-### Other
-
-- V0.5.5-20260317 (#559) (@houko)
-
 
 ## [0.5.5] - 2026-03-17
 
@@ -84,10 +75,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Maintenance
 
 - Auto-cancel old release runs when tag is re-pushed (#547) (@houko)
-
-### Other
-
-- V0.5.4-20260317 (#546) (@houko)
 
 ## [0.5.4] - 2026-03-17
 
@@ -125,13 +112,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Move binary size check from PR to release-only (#528) (@houko)
 - Split release workflow into independent parallel pipelines (#533) (@houko)
 
-### Other
-
-- V0.5.2-20260316 (#519) (@houko)
-- V0.5.3-20260317 (#536) (@houko)
-- V0.5.4-20260317 (#538) (@houko)
-
-
 ## [0.5.3] - 2026-03-17
 
 ### Added
@@ -160,10 +140,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Move binary size check from PR to release-only (#528) (@houko)
 - Split release workflow into independent parallel pipelines (#533) (@houko)
 
-### Other
-
-- V0.5.2-20260316 (#519) (@houko)
-
 ## [0.5.2] - 2026-03-16
 
 ### Fixed
@@ -176,20 +152,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Auto-merge release PRs after CI passes (#511) (@houko)
 
-### Other
-
-- V0.5.1-20260316 (#510) (@houko)
-
 ## [0.5.1] - 2026-03-16
 
 ### Fixed
 
 - Improve API version negotiation and local provider detection (#507) (@houko)
 - Inject vault secrets into process env at startup (#509) (@houko)
-
-### Other
-
-- V0.5.0-20260316 (#506) (@houko)
 
 ## [0.5.0] - 2026-03-16
 
@@ -223,12 +191,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Improve CLI --help descriptions for all subcommands (#453) (@houko)
 
-### Other
-
-- V0.4.7-20260315 (#486) (@houko)
-- V0.5.0-20260316 (#499) (@houko)
-
-
 ## [0.4.7] - 2026-03-15
 
 ### Added
@@ -247,10 +209,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Translate getting-started.md to French (#442) (@houko)
 - Translate skill-development.md to Chinese (#447) (@houko)
-
-### Other
-
-- V0.4.6-20260315 (#478) (@houko)
 
 ## [0.4.6] - 2026-03-15
 
@@ -318,22 +276,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
-- Update star history (#463) (@houko)
-- Update star history (#462) (@houko)
-- Update star history (#461) (@houko)
-- Update star history (#460) (@houko)
-- Update star history (#459) (@houko)
-- Update star history (#458) (@houko)
-- Update star history (#457) (@houko)
-- Update star history (#435) (@houko)
-- Update star history (#401) (@houko)
-- Update star history (#378) (@houko)
-- Update star history (#376) (@houko)
-- Update star history (#297) (@houko)
-- Update star history (#293) (@houko)
-- Update star history (#284) (@houko)
-- Update star history (#283) (@houko)
-- Update star history (#282) (@houko)
 - Use docker run across all README translations (#267) (@houko)
 - Separate Fly.io and Render deploy descriptions (#248) (@houko)
 
@@ -348,15 +290,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upgrade wrangler-action to v4 for Node.js 24 (#270) (@houko)
 - Add 'release' to allowed PR title types. (#246) (@houko)
 - Update star history workflow schedule to run hourly. (#245) (@houko)
-
-### Other
-
-- V0.4.4-20260315 (#456) (@houko)
-- V0.4.3-beta4-20260314 (#365) (@houko)
-- V0.4.3-beta3-20260314 (#296) (@houko)
-- V0.4.3-beta2-20260314 (#277) (@houko)
-- V0.4.3-beta-20260314 (#264) (@houko)
-- V0.4.2-20260314 (#244) (@houko)
 
 ## [0.4.4] - 2026-03-15
 
@@ -416,15 +349,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documentation
 
-- Update star history (#435) (@houko)
-- Update star history (#401) (@houko)
-- Update star history (#378) (@houko)
-- Update star history (#376) (@houko)
-- Update star history (#297) (@houko)
-- Update star history (#293) (@houko)
-- Update star history (#284) (@houko)
-- Update star history (#283) (@houko)
-- Update star history (#282) (@houko)
 - Use docker run across all README translations (#267) (@houko)
 - Separate Fly.io and Render deploy descriptions (#248) (@houko)
 
@@ -440,14 +364,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add 'release' to allowed PR title types. (#246) (@houko)
 - Update star history workflow schedule to run hourly. (#245) (@houko)
 
-### Other
-
-- V0.4.3-beta4-20260314 (#365) (@houko)
-- V0.4.3-beta3-20260314 (#296) (@houko)
-- V0.4.3-beta2-20260314 (#277) (@houko)
-- V0.4.3-beta-20260314 (#264) (@houko)
-- V0.4.2-20260314 (#244) (@houko)
-
 ## [0.4.3-beta3] - 2026-03-14
 
 ### Fixed
@@ -457,17 +373,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Auto-merge star history PR after creation (#280) (@houko)
 - Use PR instead of direct push for star history workflow (#279) (@houko)
 - Move Fly.io-specific badges from header to deploy form (#278) (@houko)
-
-### Documentation
-
-- Update star history (#293) (@houko)
-- Update star history (#284) (@houko)
-- Update star history (#283) (@houko)
-- Update star history (#282) (@houko)
-
-### Other
-
-- V0.4.3-beta2-20260314 (#277) (@houko)
 
 ## [0.4.3-beta2] - 2026-03-14
 
@@ -495,10 +400,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add workflow_dispatch to deploy-worker (#273) (@houko)
 - Fix wrangler-action, force Node.js 24 (#271) (@houko)
 - Upgrade wrangler-action to v4 for Node.js 24 (#270) (@houko)
-
-### Other
-
-- V0.4.3-beta-20260314 (#264) (@houko)
 
 ## [0.4.3-beta] - 2026-03-14
 
@@ -529,10 +430,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add 'release' to allowed PR title types. (#246) (@houko)
 - Update star history workflow schedule to run hourly. (#245) (@houko)
-
-### Other
-
-- V0.4.2-20260314 (#244) (@houko)
 
 ## [0.4.2] - 2026-03-14
 
@@ -569,41 +466,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add justfile for unified dev commands (#230) (@houko)
 - Upgrade GitHub Actions for Node.js 24 compatibility (#229) (@houko)
 
-## [0.4.2] - 2026-03-14
-
-### Added
-
-- Add CLI deploy command and FAQ to deploy page (#238) (@houko)
-- Auto-sync model catalog on daemon startup (#237) (@houko)
-- Add channel sidecar protocol for external adapters (#228) (@houko)
-- Integrate model-catalog sync with dashboard UI (#227) (@houko)
-- Add cargo feature flags for channel adapters (#223) (@houko)
-- Improve community organization and version governance (#212) (@houko)
-
-### Fixed
-
-- Daemon env vars, MCP probe, and SSE parsing (#211) (@houko)
-
-### Changed
-
-- Replace hardcoded model catalog with include_str TOML (#235) (@houko)
-- Replace provider match with static registry (#224) (@houko)
-
-### Documentation
-
-- Add integration test writing guide to CONTRIBUTING.md (#232) (@houko)
-- Add channel adapter contribution example (#231) (@houko)
-
-### Maintenance
-
-- Trigger deploy worker auto-deploy (#239) (@houko)
-- Add pre-commit hooks and i18n contribution guide (#233) (@houko)
-- Add justfile for unified dev commands (#230) (@houko)
-- Upgrade GitHub Actions for Node.js 24 compatibility (#229) (@houko)
-
 ## [0.4.0] - 2026-03-14
-
-### Added
 
 #### Authentication & Drivers
 - **ChatGPT Session Auth**: New browser-based OAuth flow for ChatGPT Plus/Ultra subscribers.
@@ -628,8 +491,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Config Hot-Reloading**: Enhanced reliability for runtime configuration updates without daemon restarts.
 
 ## [0.1.0] - 2026-02-24
-
-### Added
 
 #### Core Platform
 - 15-crate Rust workspace: types, memory, runtime, kernel, api, channels, wire, cli, migrate, skills, hands, extensions, desktop, xtask
