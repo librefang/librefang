@@ -29,8 +29,14 @@ const TOKEN_REFRESH_MARGIN_SECS: u64 = 300;
 const DEFAULT_TOKEN_LIFETIME_SECS: u64 = 3600;
 const GOOGLE_CHAT_SCOPE: &str = "https://www.googleapis.com/auth/chat.bot";
 
+/// Allowed token endpoint URL prefixes to prevent SSRF via a crafted `token_uri`.
+const ALLOWED_TOKEN_URI_PREFIXES: &[&str] = &[
+    "https://oauth2.googleapis.com/",
+    "https://accounts.google.com/",
+];
+
 /// Fields extracted from a Google service account JSON key file.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Clone, serde::Deserialize)]
 struct ServiceAccountKey {
     /// Service account email address (used as JWT `iss` and `sub`).
     #[serde(default)]
@@ -44,6 +50,17 @@ struct ServiceAccountKey {
     /// Optional pre-supplied access token (for testing/migration).
     #[serde(default)]
     access_token: Option<String>,
+}
+
+impl std::fmt::Debug for ServiceAccountKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceAccountKey")
+            .field("client_email", &self.client_email)
+            .field("private_key", &"[REDACTED]")
+            .field("token_uri", &self.token_uri)
+            .field("access_token", &self.access_token.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 fn default_token_uri() -> String {
@@ -141,6 +158,18 @@ impl GoogleChatAdapter {
         &self,
         sa_key: &ServiceAccountKey,
     ) -> Result<String, Box<dyn std::error::Error>> {
+        // Validate token_uri against allowlist to prevent SSRF
+        if !ALLOWED_TOKEN_URI_PREFIXES
+            .iter()
+            .any(|prefix| sa_key.token_uri.starts_with(prefix))
+        {
+            return Err(format!(
+                "Untrusted token_uri '{}': must start with one of {:?}",
+                sa_key.token_uri, ALLOWED_TOKEN_URI_PREFIXES
+            )
+            .into());
+        }
+
         let now = Utc::now().timestamp();
 
         // Build JWT header
@@ -602,5 +631,78 @@ mod tests {
         let adapter = GoogleChatAdapter::new(r#"{"access_token":"tok"}"#.to_string(), vec![], 8095)
             .with_account_id(Some("bot-1".to_string()));
         assert_eq!(adapter.account_id, Some("bot-1".to_string()));
+    }
+
+    #[test]
+    fn test_service_account_key_debug_redacts_secrets() {
+        let key = ServiceAccountKey {
+            client_email: "bot@test.iam.gserviceaccount.com".to_string(),
+            private_key: "-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----".to_string(),
+            token_uri: "https://oauth2.googleapis.com/token".to_string(),
+            access_token: Some("super-secret-token".to_string()),
+        };
+        let debug_output = format!("{:?}", key);
+        assert!(
+            !debug_output.contains("SECRET"),
+            "Debug output must not contain the private key"
+        );
+        assert!(
+            !debug_output.contains("super-secret-token"),
+            "Debug output must not contain the access token"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should show [REDACTED]"
+        );
+        assert!(
+            debug_output.contains("bot@test.iam.gserviceaccount.com"),
+            "Debug output should still show client_email"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_uri_ssrf_blocked() {
+        let adapter = GoogleChatAdapter::new(
+            r#"{
+                "client_email": "bot@test.iam.gserviceaccount.com",
+                "private_key": "not-a-valid-pem-key",
+                "token_uri": "https://evil.example.com/steal"
+            }"#
+            .to_string(),
+            vec![],
+            8096,
+        );
+
+        let result = adapter.get_access_token().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Untrusted token_uri"),
+            "Expected SSRF rejection, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_uri_allowed_prefixes() {
+        // Verify that the default token_uri is accepted (will fail at PEM parsing, not at URI check)
+        let adapter = GoogleChatAdapter::new(
+            r#"{
+                "client_email": "bot@test.iam.gserviceaccount.com",
+                "private_key": "not-a-valid-pem-key",
+                "token_uri": "https://oauth2.googleapis.com/token"
+            }"#
+            .to_string(),
+            vec![],
+            8097,
+        );
+
+        let result = adapter.get_access_token().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // Should fail at RSA key parsing, NOT at URI validation
+        assert!(
+            err.contains("Failed to parse RSA private key"),
+            "Expected RSA parse error (URI should be allowed), got: {err}"
+        );
     }
 }
