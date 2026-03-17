@@ -582,6 +582,9 @@ fn ensure_object(v: serde_json::Value) -> serde_json::Value {
     if v.is_object() {
         v
     } else {
+        if !v.is_null() {
+            warn!(value = ?v, "Tool input was not an object or null, replacing with empty object");
+        }
         serde_json::json!({})
     }
 }
@@ -675,6 +678,7 @@ fn convert_response(api: ApiResponse) -> CompletionResponse {
                 });
             }
             ResponseContentBlock::ToolUse { id, name, input } => {
+                let input = ensure_object(input);
                 content.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -788,5 +792,55 @@ mod tests {
         };
         let json = serde_json::to_value(&block).unwrap();
         assert_eq!(json["input"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_convert_message_null_tool_use_input_becomes_empty_object() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "tool_1".to_string(),
+                name: "get_time".to_string(),
+                input: serde_json::Value::Null,
+                provider_metadata: None,
+            }]),
+        };
+        let api_msg = convert_message(&msg);
+        match api_msg.content {
+            ApiContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 1);
+                let json = serde_json::to_value(&blocks[0]).unwrap();
+                assert_eq!(json["input"], serde_json::json!({}));
+            }
+            _ => panic!("Expected Blocks content"),
+        }
+    }
+
+    #[test]
+    fn test_convert_response_null_tool_input_becomes_empty_object() {
+        let api_response = ApiResponse {
+            content: vec![ResponseContentBlock::ToolUse {
+                id: "tool_1".to_string(),
+                name: "get_time".to_string(),
+                input: serde_json::Value::Null,
+            }],
+            stop_reason: "tool_use".to_string(),
+            usage: ApiUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+        };
+
+        let response = convert_response(api_response);
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].input, serde_json::json!({}));
+        match &response.content[0] {
+            ContentBlock::ToolUse { input, .. } => {
+                assert_eq!(*input, serde_json::json!({}));
+            }
+            _ => panic!("Expected ToolUse content block"),
+        }
     }
 }

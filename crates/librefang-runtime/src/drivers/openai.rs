@@ -648,8 +648,9 @@ impl LlmDriver for OpenAIDriver {
 
             if let Some(calls) = choice.message.tool_calls {
                 for call in calls {
-                    let input: serde_json::Value =
-                        serde_json::from_str(&call.function.arguments).unwrap_or_default();
+                    let input: serde_json::Value = ensure_object(
+                        serde_json::from_str(&call.function.arguments).unwrap_or_default(),
+                    );
                     content.push(ContentBlock::ToolUse {
                         id: call.id.clone(),
                         name: call.function.name.clone(),
@@ -1311,7 +1312,8 @@ impl LlmDriver for OpenAIDriver {
             }
 
             for (id, name, arguments) in &tool_accum {
-                let input: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+                let input: serde_json::Value =
+                    ensure_object(serde_json::from_str(arguments).unwrap_or_default());
                 content.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -1321,14 +1323,14 @@ impl LlmDriver for OpenAIDriver {
                 tool_calls.push(ToolCall {
                     id: id.clone(),
                     name: name.clone(),
-                    input,
+                    input: input.clone(),
                 });
 
                 let _ = tx
                     .send(StreamEvent::ToolUseEnd {
                         id: id.clone(),
                         name: name.clone(),
-                        input: serde_json::from_str(arguments).unwrap_or_default(),
+                        input,
                     })
                     .await;
             }
@@ -1565,6 +1567,21 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
             ..Default::default()
         },
     })
+}
+
+/// Ensure a `serde_json::Value` is an object.  OpenAI-compatible APIs expect
+/// tool-call arguments to be a JSON object (`{}`), never `null`.  When a tool
+/// has no parameters the deserialized value may be `null` (e.g. from
+/// `Value::default()` on empty/invalid input); this helper normalises it to `{}`.
+fn ensure_object(v: serde_json::Value) -> serde_json::Value {
+    if v.is_object() {
+        v
+    } else {
+        if !v.is_null() {
+            warn!(value = ?v, "Tool input was not an object or null, replacing with empty object");
+        }
+        serde_json::json!({})
+    }
 }
 
 #[cfg(test)]
