@@ -493,6 +493,15 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::delete(routes::delete_backup),
         )
         .route("/restore", axum::routing::post(routes::restore_backup))
+        // Event webhook subscription endpoints (#185)
+        .route(
+            "/webhooks/events",
+            axum::routing::get(routes::list_event_webhooks).post(routes::create_event_webhook),
+        )
+        .route(
+            "/webhooks/events/{id}",
+            axum::routing::put(routes::update_event_webhook).delete(routes::delete_event_webhook),
+        )
         // Webhook trigger endpoints (external event injection)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))

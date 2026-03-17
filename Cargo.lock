@@ -3623,6 +3623,7 @@ dependencies = [
  "futures",
  "governor",
  "hmac",
+ "http-body-util",
  "jsonwebtoken",
  "librefang-channels",
  "librefang-extensions",

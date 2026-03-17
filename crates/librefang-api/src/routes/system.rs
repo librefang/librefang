@@ -2126,3 +2126,511 @@ pub async fn api_versions() -> impl IntoResponse {
         },
     }))
 }
+
+// ---------------------------------------------------------------------------
+// Event Webhooks — subscribe to system events via HTTP callbacks (#185)
+// ---------------------------------------------------------------------------
+
+/// Supported event types for webhook subscriptions.
+static VALID_EVENT_TYPES: &[&str] = &[
+    "agent.spawned",
+    "agent.terminated",
+    "agent.error",
+    "message.received",
+    "workflow.completed",
+    "workflow.failed",
+];
+
+/// In-memory store for event webhook subscriptions.
+///
+/// NOTE: subscriptions are lost on daemon restart. A future iteration should
+/// persist these to the config/data directory.
+static EVENT_WEBHOOKS: std::sync::LazyLock<
+    tokio::sync::RwLock<HashMap<String, serde_json::Value>>,
+> = std::sync::LazyLock::new(|| tokio::sync::RwLock::new(HashMap::new()));
+
+/// Validate an events JSON array against VALID_EVENT_TYPES.
+fn validate_event_types(
+    arr: &[serde_json::Value],
+) -> Result<Vec<String>, (StatusCode, Json<serde_json::Value>)> {
+    let mut event_list = Vec::new();
+    for ev in arr {
+        match ev.as_str() {
+            Some(s) if VALID_EVENT_TYPES.contains(&s) => {
+                event_list.push(s.to_string());
+            }
+            Some(s) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("Unknown event type: '{s}'. Valid types: {VALID_EVENT_TYPES:?}")
+                    })),
+                ));
+            }
+            None => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": "Event types must be strings"})),
+                ));
+            }
+        }
+    }
+    if event_list.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "At least one event type is required"})),
+        ));
+    }
+    Ok(event_list)
+}
+
+/// Redact the secret field from a webhook JSON value before returning it.
+fn redact_webhook_secret(webhook: &serde_json::Value) -> serde_json::Value {
+    let mut w = webhook.clone();
+    if let Some(obj) = w.as_object_mut() {
+        if obj.contains_key("secret") {
+            obj.insert("secret".to_string(), serde_json::json!("***"));
+        }
+    }
+    w
+}
+
+/// GET /api/webhooks/events — List all event webhook subscriptions.
+pub async fn list_event_webhooks() -> impl IntoResponse {
+    let store = EVENT_WEBHOOKS.read().await;
+    let list: Vec<serde_json::Value> = store.values().map(redact_webhook_secret).collect();
+    Json(list)
+}
+
+/// POST /api/webhooks/events — Create a new event webhook subscription.
+pub async fn create_event_webhook(Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+    let url = match req["url"].as_str() {
+        Some(u) if !u.is_empty() => u.to_string(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing or empty 'url'"})),
+            );
+        }
+    };
+
+    if url::Url::parse(&url).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid URL format"})),
+        );
+    }
+
+    let events = match req.get("events").and_then(|v| v.as_array()) {
+        Some(arr) => match validate_event_types(arr) {
+            Ok(ev) => ev,
+            Err(e) => return e,
+        },
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Missing 'events' array"})),
+            );
+        }
+    };
+
+    let secret = req["secret"].as_str().map(|s| s.to_string());
+    let enabled = req["enabled"].as_bool().unwrap_or(true);
+    let id = uuid::Uuid::new_v4().to_string();
+
+    let webhook = serde_json::json!({
+        "id": id,
+        "url": url,
+        "events": events,
+        "secret": secret,
+        "enabled": enabled,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+    });
+
+    EVENT_WEBHOOKS
+        .write()
+        .await
+        .insert(id.clone(), webhook.clone());
+
+    (StatusCode::CREATED, Json(redact_webhook_secret(&webhook)))
+}
+
+/// PUT /api/webhooks/events/{id} — Update an event webhook subscription.
+pub async fn update_event_webhook(
+    Path(id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let mut store = EVENT_WEBHOOKS.write().await;
+    let existing = match store.get(&id) {
+        Some(w) => w.clone(),
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Webhook not found"})),
+            );
+        }
+    };
+
+    let mut updated = existing;
+
+    if let Some(url_val) = req.get("url").and_then(|v| v.as_str()) {
+        if url::Url::parse(url_val).is_err() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid URL format"})),
+            );
+        }
+        updated["url"] = serde_json::json!(url_val);
+    }
+
+    if let Some(arr) = req.get("events").and_then(|v| v.as_array()) {
+        match validate_event_types(arr) {
+            Ok(ev) => updated["events"] = serde_json::json!(ev),
+            Err(e) => return e,
+        }
+    }
+
+    if let Some(enabled) = req.get("enabled").and_then(|v| v.as_bool()) {
+        updated["enabled"] = serde_json::json!(enabled);
+    }
+
+    if let Some(secret) = req.get("secret") {
+        updated["secret"] = secret.clone();
+    }
+
+    store.insert(id, updated.clone());
+
+    (StatusCode::OK, Json(redact_webhook_secret(&updated)))
+}
+
+/// DELETE /api/webhooks/events/{id} — Remove an event webhook subscription.
+pub async fn delete_event_webhook(Path(id): Path<String>) -> impl IntoResponse {
+    let mut store = EVENT_WEBHOOKS.write().await;
+    if store.remove(&id).is_some() {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "removed", "id": id})),
+        )
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Webhook not found"})),
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Event Webhook Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod event_webhook_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::Router;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    /// Serialize all webhook tests to avoid races on the shared EVENT_WEBHOOKS store.
+    static TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn webhook_router() -> Router {
+        Router::new()
+            .route(
+                "/api/webhooks/events",
+                axum::routing::get(list_event_webhooks).post(create_event_webhook),
+            )
+            .route(
+                "/api/webhooks/events/{id}",
+                axum::routing::put(update_event_webhook).delete(delete_event_webhook),
+            )
+    }
+
+    async fn clear_webhooks() {
+        EVENT_WEBHOOKS.write().await.clear();
+    }
+
+    #[tokio::test]
+    async fn test_list_empty() {
+        let _guard = TEST_LOCK.lock().await;
+        clear_webhooks().await;
+        let app = webhook_router();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/webhooks/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_create_and_list() {
+        let _guard = TEST_LOCK.lock().await;
+        clear_webhooks().await;
+        let app = webhook_router();
+
+        let payload = serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["agent.spawned", "agent.error"],
+            "secret": "my-secret-key",
+        });
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/webhooks/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(created["id"].as_str().is_some());
+        assert_eq!(created["url"], "https://example.com/hook");
+        assert_eq!(created["enabled"], true);
+        // Secret must be redacted in responses
+        assert_eq!(created["secret"], "***");
+
+        // List should contain the webhook with redacted secret
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/webhooks/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let list: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["secret"], "***");
+    }
+
+    #[tokio::test]
+    async fn test_create_invalid_event() {
+        let _guard = TEST_LOCK.lock().await;
+        clear_webhooks().await;
+        let app = webhook_router();
+
+        let payload = serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["nonexistent.event"],
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/webhooks/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_create_missing_url() {
+        let _guard = TEST_LOCK.lock().await;
+        clear_webhooks().await;
+        let app = webhook_router();
+
+        let payload = serde_json::json!({
+            "events": ["agent.spawned"],
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/webhooks/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_create_invalid_url() {
+        let _guard = TEST_LOCK.lock().await;
+        clear_webhooks().await;
+        let app = webhook_router();
+
+        let payload = serde_json::json!({
+            "url": "not a valid url",
+            "events": ["agent.spawned"],
+        });
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/webhooks/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_update_webhook() {
+        let _guard = TEST_LOCK.lock().await;
+        clear_webhooks().await;
+        let app = webhook_router();
+
+        let payload = serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["agent.spawned"],
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/webhooks/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        let update_payload = serde_json::json!({
+            "enabled": false,
+            "events": ["agent.spawned", "workflow.completed"],
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri(format!("/api/webhooks/events/{id}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&update_payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let updated: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(updated["enabled"], false);
+        assert_eq!(updated["events"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_delete_webhook() {
+        let _guard = TEST_LOCK.lock().await;
+        clear_webhooks().await;
+        let app = webhook_router();
+
+        let payload = serde_json::json!({
+            "url": "https://example.com/hook",
+            "events": ["agent.spawned"],
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/webhooks/events")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let id = created["id"].as_str().unwrap();
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/webhooks/events/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/webhooks/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let list: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_not_found() {
+        let _guard = TEST_LOCK.lock().await;
+        clear_webhooks().await;
+        let app = webhook_router();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/webhooks/events/nonexistent-id")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_update_not_found() {
+        let _guard = TEST_LOCK.lock().await;
+        clear_webhooks().await;
+        let app = webhook_router();
+
+        let payload = serde_json::json!({"enabled": false});
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/webhooks/events/nonexistent-id")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+}
