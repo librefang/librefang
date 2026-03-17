@@ -2374,10 +2374,7 @@ pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoR
     let mut entries = Vec::new();
     for info in registry.list_all_info() {
         let h = health.get_health(&info.template.id);
-        let status = integration_status_str(
-            info.installed.as_ref(),
-            h.as_ref(),
-        );
+        let status = integration_status_str(info.installed.as_ref(), h.as_ref());
         if status == "available" {
             continue; // Only show installed
         }
