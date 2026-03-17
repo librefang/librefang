@@ -348,6 +348,19 @@ impl WorkflowEngine {
         self.workflows.read().await.get(&id).cloned()
     }
 
+    /// Update an existing workflow definition in place.
+    /// Returns `true` if the workflow existed and was updated.
+    pub async fn update_workflow(&self, id: WorkflowId, mut workflow: Workflow) -> bool {
+        let mut workflows = self.workflows.write().await;
+        if workflows.contains_key(&id) {
+            workflow.id = id; // ensure ID stays the same
+            workflows.insert(id, workflow);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Remove a workflow definition.
     pub async fn remove_workflow(&self, id: WorkflowId) -> bool {
         self.workflows.write().await.remove(&id).is_some()
