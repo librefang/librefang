@@ -291,6 +291,7 @@ impl FeishuAdapter {
             url::form_urlencoded::byte_serialize(receive_id_type.as_bytes()).collect();
         let url = format!("{}?receive_id_type={}", FEISHU_SEND_URL, encoded_type);
 
+        // Feishu API requires `content` to be a JSON-encoded string, not a nested object.
         let body = serde_json::json!({
             "receive_id": receive_id,
             "msg_type": "interactive",
@@ -510,7 +511,9 @@ fn parse_card_action(event: &serde_json::Value) -> Option<ChannelMessage> {
         channel: ChannelType::Custom("feishu".to_string()),
         platform_message_id: open_message_id,
         sender: ChannelUser {
-            platform_id: open_chat_id,
+            // Use operator open_id as platform_id so downstream approval
+            // routing can identify *who* clicked the button.
+            platform_id: open_id.clone(),
             display_name: open_id,
             librefang_user: None,
         },
@@ -1189,7 +1192,7 @@ mod tests {
             other => panic!("Expected Command, got {other:?}"),
         }
         assert_eq!(msg.sender.display_name, "ou_user1");
-        assert_eq!(msg.sender.platform_id, "oc_chat1");
+        assert_eq!(msg.sender.platform_id, "ou_user1");
         assert_eq!(
             msg.metadata.get("card_action"),
             Some(&serde_json::Value::Bool(true))
