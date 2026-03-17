@@ -349,8 +349,8 @@ impl ProactiveMemoryStore {
 
     /// Store extracted relation triples into the knowledge graph.
     ///
-    /// For each triple, creates entities (upsert) and a relation between them.
-    fn store_relations(&self, triples: &[RelationTriple]) {
+    /// Deduplicates: skips if an identical (source, relation, target) already exists.
+    pub fn store_relations(&self, triples: &[RelationTriple]) {
         for triple in triples {
             let source_type = parse_entity_type(&triple.subject_type);
             let target_type = parse_entity_type(&triple.object_type);
@@ -387,59 +387,95 @@ impl ProactiveMemoryStore {
                 }
             };
 
-            // Add relation
+            // Add relation (skip if already exists)
             let relation_type = parse_relation_type(&triple.relation);
-            if let Err(e) = self.knowledge.add_relation(Relation {
-                source: source_id,
-                relation: relation_type,
-                target: target_id,
-                properties: HashMap::new(),
-                confidence: 0.9,
-                created_at: chrono::Utc::now(),
-            }) {
-                tracing::warn!(
-                    "Failed to add relation '{}' -> '{}': {}",
-                    triple.subject,
-                    triple.object,
-                    e
-                );
+            match self
+                .knowledge
+                .has_relation(&source_id, &relation_type, &target_id)
+            {
+                Ok(true) => {
+                    tracing::debug!(
+                        "Skipping duplicate relation: {} -> {} -> {}",
+                        triple.subject,
+                        triple.relation,
+                        triple.object,
+                    );
+                }
+                Ok(false) => {
+                    if let Err(e) = self.knowledge.add_relation(Relation {
+                        source: source_id,
+                        relation: relation_type,
+                        target: target_id,
+                        properties: HashMap::new(),
+                        confidence: 0.9,
+                        created_at: chrono::Utc::now(),
+                    }) {
+                        tracing::warn!(
+                            "Failed to add relation '{}' -> '{}': {}",
+                            triple.subject,
+                            triple.object,
+                            e
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("Relation dedup check failed (non-fatal): {}", e);
+                }
             }
         }
     }
 
     /// Query the knowledge graph for entities mentioned in a query.
     ///
-    /// Returns formatted context string with related entities and relationships.
+    /// Extracts candidate entity names from the query, then does targeted
+    /// graph lookups instead of loading all relations.
     fn graph_context(&self, query: &str) -> Option<String> {
-        // Search for entities whose names appear in the query
-        let query_lower = query.to_lowercase();
+        // Extract capitalized words and significant terms as entity candidates
+        let candidates = extract_entity_candidates(query);
+        if candidates.is_empty() {
+            return None;
+        }
 
-        // Query graph for relations where source or target name matches
-        let matches = self
-            .knowledge
-            .query_graph(GraphPattern {
-                source: None,
+        let mut all_matches = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for candidate in &candidates {
+            // Query as source
+            if let Ok(matches) = self.knowledge.query_graph(GraphPattern {
+                source: Some(candidate.clone()),
                 relation: None,
                 target: None,
                 max_depth: 1,
-            })
-            .unwrap_or_default();
+            }) {
+                for m in matches {
+                    let key = format!("{}-{:?}-{}", m.source.id, m.relation.relation, m.target.id);
+                    if seen.insert(key) {
+                        all_matches.push(m);
+                    }
+                }
+            }
+            // Query as target
+            if let Ok(matches) = self.knowledge.query_graph(GraphPattern {
+                source: None,
+                relation: None,
+                target: Some(candidate.clone()),
+                max_depth: 1,
+            }) {
+                for m in matches {
+                    let key = format!("{}-{:?}-{}", m.source.id, m.relation.relation, m.target.id);
+                    if seen.insert(key) {
+                        all_matches.push(m);
+                    }
+                }
+            }
+        }
 
-        // Filter to matches relevant to the query
-        let relevant: Vec<_> = matches
-            .iter()
-            .filter(|m| {
-                query_lower.contains(&m.source.name.to_lowercase())
-                    || query_lower.contains(&m.target.name.to_lowercase())
-            })
-            .collect();
-
-        if relevant.is_empty() {
+        if all_matches.is_empty() {
             return None;
         }
 
         let mut context = String::from("## Knowledge Graph\n\n");
-        for m in relevant.iter().take(10) {
+        for m in all_matches.iter().take(10) {
             context.push_str(&format!(
                 "- {} ({:?}) → {:?} → {} ({:?})\n",
                 m.source.name,
@@ -561,6 +597,47 @@ impl ProactiveMemoryStore {
         Ok(history)
     }
 
+    /// Consolidate memories: merge near-duplicates and remove stale entries.
+    ///
+    /// This is the mem0-style maintenance operation that keeps memory clean:
+    /// 1. Find duplicate groups using semantic similarity
+    /// 2. Merge each group into the most recently accessed memory
+    /// 3. Soft-delete the older duplicates
+    ///
+    /// Returns the number of memories merged (soft-deleted).
+    pub async fn consolidate(&self, user_id: &str) -> LibreFangResult<u64> {
+        let groups = self.find_duplicates(user_id, None).await?;
+        let mut merged_count = 0u64;
+
+        for group in groups {
+            if group.len() < 2 {
+                continue;
+            }
+
+            // Keep the most recently created one as the "winner"
+            let winner = group.iter().max_by_key(|m| m.created_at).cloned().unwrap();
+
+            // Soft-delete all others
+            for item in &group {
+                if item.id != winner.id {
+                    if let Ok(uuid) = uuid::Uuid::parse_str(&item.id) {
+                        let mid = MemoryId(uuid);
+                        if self.semantic.forget(mid).is_ok() {
+                            merged_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        tracing::info!(
+            "Memory consolidation for {}: merged {} duplicates",
+            user_id,
+            merged_count
+        );
+        Ok(merged_count)
+    }
+
     /// Count memories for a user/agent, optionally filtered by level.
     pub fn count(&self, user_id: &str, level: Option<MemoryLevel>) -> LibreFangResult<u64> {
         let agent_id = Self::parse_agent_id(user_id)?;
@@ -572,14 +649,42 @@ impl ProactiveMemoryStore {
     ///
     /// Uses both substring containment and word-overlap (Jaccard) similarity
     /// to detect semantic duplicates that simple exact-match would miss.
-    /// Threshold: items with Jaccard similarity > 0.5 are grouped together.
+    /// Uses configurable `duplicate_threshold` from config.
     pub async fn find_duplicates(
         &self,
         user_id: &str,
         level: Option<MemoryLevel>,
     ) -> LibreFangResult<Vec<Vec<MemoryItem>>> {
         let agent_id = Self::parse_agent_id(user_id)?;
-        let all_items = self.retrieve_memory_items(agent_id, level, None)?;
+
+        // Try structured store first, fall back to semantic store
+        let mut all_items = self.retrieve_memory_items(agent_id, level, None)?;
+
+        // Also search semantic store if structured store returned nothing
+        if all_items.is_empty() {
+            let scope_filter = level.map(|l| {
+                let mut f = MemoryFilter::agent(agent_id);
+                f.scope = Some(l.scope_str().to_string());
+                f
+            });
+            let filter = scope_filter.unwrap_or_else(|| MemoryFilter::agent(agent_id));
+            let frags = self.semantic.recall("", 500, Some(filter))?;
+            all_items = frags
+                .into_iter()
+                .map(|frag| MemoryItem {
+                    id: frag.id.to_string(),
+                    content: frag.content,
+                    level: MemoryLevel::from(frag.scope.as_str()),
+                    category: frag
+                        .metadata
+                        .get("category")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    metadata: frag.metadata,
+                    created_at: frag.created_at,
+                })
+                .collect();
+        }
 
         let mut used = vec![false; all_items.len()];
         let mut groups: Vec<Vec<MemoryItem>> = Vec::new();
@@ -851,6 +956,41 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
         Ok(true)
     }
+}
+
+/// Extract entity-like candidates from a query for knowledge graph lookup.
+///
+/// Looks for capitalized words (likely proper nouns), normalized entity IDs,
+/// and significant multi-word terms.
+fn extract_entity_candidates(query: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    // Capitalized words (proper nouns): "Alice", "Google", "Python"
+    for word in query.split_whitespace() {
+        let trimmed = word.trim_matches(|c: char| !c.is_alphanumeric());
+        if trimmed.len() >= 2 {
+            if let Some(first) = trimmed.chars().next() {
+                if first.is_uppercase() {
+                    candidates.push(trimmed.to_string());
+                    // Also try normalized form (for entity ID matching)
+                    candidates.push(normalize_entity_id(trimmed));
+                }
+            }
+        }
+    }
+
+    // Also try "User" as it's a common entity in proactive memory
+    if query.to_lowercase().contains("my ")
+        || query.to_lowercase().contains("i ")
+        || query.to_lowercase().starts_with("what did i")
+    {
+        candidates.push("User".to_string());
+        candidates.push("user".to_string());
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
 }
 
 /// Extract significant keywords from content for broader LIKE search.
@@ -1504,5 +1644,177 @@ mod tests {
             parse_relation_type("custom_rel"),
             RelationType::Custom("custom_rel".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn test_update_preserves_version_history() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new().to_string();
+
+        // Add initial memory
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "I prefer dark mode"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+
+        let results = store.search("dark mode", &agent_id, 10).await.unwrap();
+        assert!(!results.is_empty());
+        let mem_id = results[0].id.clone();
+
+        // Update it
+        store
+            .update(&mem_id, &agent_id, "I prefer light mode now")
+            .await
+            .unwrap();
+
+        // Check version history
+        let history = store.history(&mem_id).unwrap();
+        assert_eq!(history.len(), 1);
+        let prev = history[0].get("content").and_then(|v| v.as_str()).unwrap();
+        assert!(prev.contains("dark mode"));
+
+        // Update again
+        store
+            .update(&mem_id, &agent_id, "I prefer auto mode")
+            .await
+            .unwrap();
+
+        let history2 = store.history(&mem_id).unwrap();
+        assert_eq!(history2.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_default_extractor_extracts_relations() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new().to_string();
+
+        // "I work at" should extract a works_at relation
+        let result = store
+            .auto_memorize(
+                &agent_id,
+                &[serde_json::json!({
+                    "role": "user",
+                    "content": "I work at Google"
+                })],
+            )
+            .await
+            .unwrap();
+
+        assert!(result.has_content);
+        assert!(!result.relations.is_empty());
+        assert_eq!(result.relations[0].relation, "works_at");
+        assert_eq!(result.relations[0].object, "Google");
+    }
+
+    #[tokio::test]
+    async fn test_default_extractor_i_use_pattern() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new().to_string();
+
+        let result = store
+            .auto_memorize(
+                &agent_id,
+                &[serde_json::json!({
+                    "role": "user",
+                    "content": "I use vim for editing"
+                })],
+            )
+            .await
+            .unwrap();
+
+        assert!(result.has_content);
+        assert!(!result.relations.is_empty());
+        assert_eq!(result.relations[0].relation, "uses");
+        assert_eq!(result.relations[0].object, "Vim for editing");
+    }
+
+    #[tokio::test]
+    async fn test_store_relations_dedup() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate.clone());
+
+        let triples = vec![librefang_types::memory::RelationTriple {
+            subject: "Bob".to_string(),
+            subject_type: "person".to_string(),
+            relation: "works_at".to_string(),
+            object: "Acme".to_string(),
+            object_type: "organization".to_string(),
+        }];
+
+        // Store twice
+        store.store_relations(&triples);
+        store.store_relations(&triples);
+
+        // Should only have 1 relation (deduped)
+        let matches = substrate
+            .knowledge()
+            .query_graph(GraphPattern {
+                source: Some("bob".to_string()),
+                relation: None,
+                target: None,
+                max_depth: 1,
+            })
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_consolidate_merges_duplicates() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new().to_string();
+        let agent_id_parsed =
+            AgentId(uuid::Uuid::parse_str(&agent_id).unwrap_or_else(|_| uuid::Uuid::new_v4()));
+
+        // Store two identical memories directly in semantic store (bypassing dedup)
+        store
+            .semantic
+            .remember(
+                agent_id_parsed,
+                "User prefers dark mode in editor",
+                MemorySource::Conversation,
+                scopes::USER,
+                HashMap::new(),
+            )
+            .unwrap();
+        store
+            .semantic
+            .remember(
+                agent_id_parsed,
+                "User prefers dark mode in editor",
+                MemorySource::Conversation,
+                scopes::USER,
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let count_before = store.count(&agent_id, None).unwrap();
+        assert_eq!(count_before, 2);
+
+        // find_duplicates should detect these via semantic store fallback
+        let groups = store.find_duplicates(&agent_id, None).await.unwrap();
+        assert!(!groups.is_empty());
+        assert!(groups[0].len() >= 2);
+
+        // Consolidate should merge them
+        let merged = store.consolidate(&agent_id).await.unwrap();
+        assert_eq!(merged, 1);
+
+        let count_after = store.count(&agent_id, None).unwrap();
+        assert_eq!(count_after, 1);
+    }
+
+    #[test]
+    fn test_extract_entity_candidates() {
+        let candidates = extract_entity_candidates("What does Alice know about Rust?");
+        assert!(candidates.contains(&"Alice".to_string()));
+        assert!(candidates.contains(&"Rust".to_string()));
+        assert!(candidates.contains(&"alice".to_string())); // normalized
     }
 }

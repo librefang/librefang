@@ -529,3 +529,39 @@ pub async fn memory_history(
         ),
     }
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/memory/agents/:agent_id/consolidate
+// ---------------------------------------------------------------------------
+
+/// Consolidate memories for an agent: merge duplicates, cleanup stale entries.
+#[utoipa::path(
+    post,
+    path = "/api/memory/agents/{agent_id}/consolidate",
+    tag = "memory",
+    params(("agent_id" = String, Path, description = "Agent ID")),
+    responses((status = 200, description = "Consolidation result", body = serde_json::Value))
+)]
+pub async fn memory_consolidate(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    let store = match get_pm_store(&state) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    match store.consolidate(&agent_id).await {
+        Ok(merged) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "consolidated": true,
+                "merged_count": merged,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}

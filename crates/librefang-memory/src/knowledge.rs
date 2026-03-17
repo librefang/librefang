@@ -79,6 +79,29 @@ impl KnowledgeStore {
         Ok(id)
     }
 
+    /// Check if a relation already exists between two entities with a given type.
+    pub fn has_relation(
+        &self,
+        source_id: &str,
+        relation_type: &RelationType,
+        target_id: &str,
+    ) -> LibreFangResult<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let rel_str = serde_json::to_string(relation_type)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM relations WHERE source_entity = ?1 AND relation_type = ?2 AND target_entity = ?3",
+                rusqlite::params![source_id, rel_str, target_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(count > 0)
+    }
+
     /// Query the knowledge graph with a pattern.
     pub fn query_graph(&self, pattern: GraphPattern) -> LibreFangResult<Vec<GraphMatch>> {
         let conn = self

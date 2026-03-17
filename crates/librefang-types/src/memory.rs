@@ -454,6 +454,39 @@ impl MemoryExtractor for DefaultMemoryExtractor {
                     });
                 }
             }
+
+            // Extract tool/technology usage: "I use X"
+            if lower.contains("i use ") || lower.contains("i'm using ") {
+                let mut metadata = HashMap::new();
+                metadata.insert("extracted_from".to_string(), serde_json::json!(role));
+                memories.push(MemoryItem {
+                    id: Uuid::new_v4().to_string(),
+                    content: content.to_string(),
+                    level: MemoryLevel::User,
+                    category: Some("user_preference".to_string()),
+                    metadata,
+                    created_at: Utc::now(),
+                });
+
+                if let Some(tool) = extract_after_pattern(&lower, "i use ") {
+                    relations.push(RelationTriple {
+                        subject: "User".to_string(),
+                        subject_type: "person".to_string(),
+                        relation: "uses".to_string(),
+                        object: capitalize_first(&tool),
+                        object_type: "tool".to_string(),
+                    });
+                }
+                if let Some(tool) = extract_after_pattern(&lower, "i'm using ") {
+                    relations.push(RelationTriple {
+                        subject: "User".to_string(),
+                        subject_type: "person".to_string(),
+                        relation: "uses".to_string(),
+                        object: capitalize_first(&tool),
+                        object_type: "tool".to_string(),
+                    });
+                }
+            }
         }
 
         Ok(ExtractionResult {

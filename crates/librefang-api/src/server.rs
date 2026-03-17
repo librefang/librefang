@@ -251,6 +251,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::get(routes::memory_duplicates),
         )
         .route(
+            "/memory/agents/{id}/consolidate",
+            axum::routing::post(routes::memory_consolidate),
+        )
+        .route(
             "/triggers",
             axum::routing::get(routes::list_triggers).post(routes::create_trigger),
         )
