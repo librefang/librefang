@@ -1,5 +1,6 @@
 //! Tool definition and result types.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Definition of a tool that an agent can use.
@@ -33,6 +34,37 @@ pub struct ToolResult {
     pub content: String,
     /// Whether the tool execution resulted in an error.
     pub is_error: bool,
+}
+
+/// A structured trace of a tool selection decision during agent execution.
+///
+/// Captures why a tool was selected (the LLM's reasoning), what input was provided,
+/// how long execution took, and whether it succeeded. Useful for debugging,
+/// auditing, and optimizing agent behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionTrace {
+    /// Unique ID of the tool call (matches the LLM's tool_use ID).
+    pub tool_use_id: String,
+    /// Name of the tool that was selected.
+    pub tool_name: String,
+    /// The input parameters the LLM provided for the tool call.
+    pub input: serde_json::Value,
+    /// The LLM's reasoning text from the same response that triggered this tool call.
+    /// This is the assistant text that accompanied the tool_use blocks, providing
+    /// insight into why the tool was selected.
+    pub rationale: Option<String>,
+    /// Whether this tool was recovered from text output (non-native tool calling).
+    pub recovered_from_text: bool,
+    /// Wall-clock execution duration in milliseconds.
+    pub execution_ms: u64,
+    /// Whether the tool execution resulted in an error.
+    pub is_error: bool,
+    /// Truncated summary of the tool output (first 200 chars).
+    pub output_summary: String,
+    /// The loop iteration in which this tool was called.
+    pub iteration: u32,
+    /// Timestamp when the tool execution started.
+    pub timestamp: DateTime<Utc>,
 }
 
 /// Normalize a JSON Schema for cross-provider compatibility.
@@ -281,6 +313,50 @@ fn try_flatten_any_of(any_of: &serde_json::Value) -> Option<Vec<(String, serde_j
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_decision_trace_serialization_roundtrip() {
+        let trace = DecisionTrace {
+            tool_use_id: "toolu_abc123".to_string(),
+            tool_name: "web_search".to_string(),
+            input: serde_json::json!({"query": "rust async"}),
+            rationale: Some("I need to search for information about Rust async".to_string()),
+            recovered_from_text: false,
+            execution_ms: 150,
+            is_error: false,
+            output_summary: "Found 10 results about Rust async programming".to_string(),
+            iteration: 0,
+            timestamp: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&trace).unwrap();
+        let deserialized: DecisionTrace = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.tool_name, "web_search");
+        assert_eq!(deserialized.tool_use_id, "toolu_abc123");
+        assert_eq!(deserialized.execution_ms, 150);
+        assert!(!deserialized.is_error);
+        assert!(!deserialized.recovered_from_text);
+        assert!(deserialized.rationale.is_some());
+    }
+
+    #[test]
+    fn test_decision_trace_without_rationale() {
+        let trace = DecisionTrace {
+            tool_use_id: "toolu_xyz".to_string(),
+            tool_name: "file_read".to_string(),
+            input: serde_json::json!({"path": "/tmp/test.txt"}),
+            rationale: None,
+            recovered_from_text: true,
+            execution_ms: 5,
+            is_error: true,
+            output_summary: "File not found".to_string(),
+            iteration: 2,
+            timestamp: chrono::Utc::now(),
+        };
+        let json = serde_json::to_string(&trace).unwrap();
+        assert!(json.contains("\"rationale\":null"));
+        assert!(json.contains("\"recovered_from_text\":true"));
+        assert!(json.contains("\"is_error\":true"));
+    }
 
     #[test]
     fn test_tool_definition_serialization() {

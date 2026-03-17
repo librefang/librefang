@@ -4,22 +4,27 @@ use crate::types::ChannelType;
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
 use librefang_types::config::{AgentBinding, BroadcastConfig, BroadcastStrategy};
+use smallvec::SmallVec;
+use std::borrow::Cow;
 use std::sync::Mutex;
 use tracing::warn;
 
 /// Context for evaluating binding match rules against incoming messages.
+///
+/// Uses `Cow<str>` and `SmallVec` to avoid heap allocations on the hot dispatch path
+/// when fields can borrow from the incoming `ChannelMessage`.
 #[derive(Debug, Default)]
-pub struct BindingContext {
+pub struct BindingContext<'a> {
     /// Channel type string (e.g., "telegram", "discord").
-    pub channel: String,
+    pub channel: Cow<'a, str>,
     /// Account/bot ID within the channel.
-    pub account_id: Option<String>,
+    pub account_id: Option<Cow<'a, str>>,
     /// Peer/user ID (platform_user_id).
-    pub peer_id: String,
+    pub peer_id: Cow<'a, str>,
     /// Guild/server ID.
-    pub guild_id: Option<String>,
-    /// User's roles.
-    pub roles: Vec<String>,
+    pub guild_id: Option<Cow<'a, str>>,
+    /// User's roles. SmallVec avoids heap allocation for typical role counts (0-4).
+    pub roles: SmallVec<[Cow<'a, str>; 4]>,
 }
 
 /// Routes incoming messages to the correct agent.
@@ -155,11 +160,11 @@ impl AgentRouter {
 
         // 0. Check bindings (most specific first)
         let ctx = BindingContext {
-            channel: channel_type_to_str(channel_type).to_string(),
+            channel: Cow::Borrowed(channel_type_to_str(channel_type)),
             account_id: None,
-            peer_id: platform_user_id.to_string(),
+            peer_id: Cow::Borrowed(platform_user_id),
             guild_id: None,
-            roles: Vec::new(),
+            roles: SmallVec::new(),
         };
         if let Some(agent_id) = self.resolve_binding(&ctx) {
             return Some(agent_id);
@@ -199,7 +204,7 @@ impl AgentRouter {
         channel_type: &ChannelType,
         platform_user_id: &str,
         user_key: Option<&str>,
-        ctx: &BindingContext,
+        ctx: &BindingContext<'_>,
     ) -> Option<AgentId> {
         // 0. Check bindings first
         if let Some(agent_id) = self.resolve_binding(ctx) {
@@ -294,7 +299,7 @@ impl AgentRouter {
     }
 
     /// Evaluate bindings against a context, returning the first matching agent ID.
-    fn resolve_binding(&self, ctx: &BindingContext) -> Option<AgentId> {
+    fn resolve_binding(&self, ctx: &BindingContext<'_>) -> Option<AgentId> {
         let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
         for (binding, _agent_name) in bindings.iter() {
             if self.binding_matches(binding, ctx) {
@@ -312,33 +317,47 @@ impl AgentRouter {
     }
 
     /// Check if a single binding's match_rule matches the context.
-    fn binding_matches(&self, binding: &AgentBinding, ctx: &BindingContext) -> bool {
+    #[inline]
+    fn binding_matches(&self, binding: &AgentBinding, ctx: &BindingContext<'_>) -> bool {
         let rule = &binding.match_rule;
 
         // All specified fields must match
         if let Some(ref ch) = rule.channel {
-            if ch != &ctx.channel {
+            if ch.as_str() != &*ctx.channel {
                 return false;
             }
         }
         if let Some(ref acc) = rule.account_id {
-            if ctx.account_id.as_ref() != Some(acc) {
-                return false;
+            match ctx.account_id {
+                Some(ref ctx_acc) => {
+                    if acc.as_str() != &**ctx_acc {
+                        return false;
+                    }
+                }
+                None => return false,
             }
         }
         if let Some(ref pid) = rule.peer_id {
-            if pid != &ctx.peer_id {
+            if pid.as_str() != &*ctx.peer_id {
                 return false;
             }
         }
         if let Some(ref gid) = rule.guild_id {
-            if ctx.guild_id.as_ref() != Some(gid) {
-                return false;
+            match ctx.guild_id {
+                Some(ref ctx_gid) => {
+                    if gid.as_str() != &**ctx_gid {
+                        return false;
+                    }
+                }
+                None => return false,
             }
         }
         if !rule.roles.is_empty() {
             // User must have at least one of the specified roles
-            let has_role = rule.roles.iter().any(|r| ctx.roles.contains(r));
+            let has_role = rule
+                .roles
+                .iter()
+                .any(|r| ctx.roles.iter().any(|cr| cr.as_ref() == r.as_str()));
             if !has_role {
                 return false;
             }
@@ -348,6 +367,7 @@ impl AgentRouter {
 }
 
 /// Convert ChannelType to lowercase string for binding matching.
+#[inline]
 pub fn channel_type_to_str(ct: &ChannelType) -> &str {
     match ct {
         ChannelType::Telegram => "telegram",
@@ -492,10 +512,10 @@ mod tests {
         }]);
 
         let ctx = BindingContext {
-            channel: "discord".to_string(),
-            peer_id: "user1".to_string(),
-            guild_id: Some("guild_123".to_string()),
-            roles: vec!["admin".to_string(), "user".to_string()],
+            channel: Cow::Borrowed("discord"),
+            peer_id: Cow::Borrowed("user1"),
+            guild_id: Some(Cow::Borrowed("guild_123")),
+            roles: smallvec::smallvec![Cow::Borrowed("admin"), Cow::Borrowed("user")],
             ..Default::default()
         };
         let resolved = router.resolve_with_context(&ChannelType::Discord, "user1", None, &ctx);
@@ -503,10 +523,10 @@ mod tests {
 
         // Wrong guild
         let ctx2 = BindingContext {
-            channel: "discord".to_string(),
-            peer_id: "user1".to_string(),
-            guild_id: Some("guild_999".to_string()),
-            roles: vec!["admin".to_string()],
+            channel: Cow::Borrowed("discord"),
+            peer_id: Cow::Borrowed("user1"),
+            guild_id: Some(Cow::Borrowed("guild_999")),
+            roles: smallvec::smallvec![Cow::Borrowed("admin")],
             ..Default::default()
         };
         let resolved = router.resolve_with_context(&ChannelType::Discord, "user1", None, &ctx2);
@@ -543,9 +563,9 @@ mod tests {
 
         // More specific binding should win despite being loaded second
         let ctx = BindingContext {
-            channel: "discord".to_string(),
-            peer_id: "user1".to_string(),
-            guild_id: Some("guild_1".to_string()),
+            channel: Cow::Borrowed("discord"),
+            peer_id: Cow::Borrowed("user1"),
+            guild_id: Some(Cow::Borrowed("guild_1")),
             ..Default::default()
         };
         let resolved = router.resolve_with_context(&ChannelType::Discord, "user1", None, &ctx);

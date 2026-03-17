@@ -18,6 +18,8 @@ ed25519-dalek = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
+fluent = { workspace = true }
+unic-langid = { workspace = true }
 
 [dev-dependencies]
 rmp-serde = { workspace = true }

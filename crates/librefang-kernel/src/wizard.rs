@@ -169,6 +169,7 @@ impl SetupWizard {
             capabilities: caps,
             tools: HashMap::new(),
             skills: intent.skills.clone(),
+            skills_disabled: false,
             mcp_servers: vec![],
             metadata: HashMap::new(),
             tags: vec![],
@@ -182,6 +183,7 @@ impl SetupWizard {
             exec_policy: None,
             tool_allowlist: vec![],
             tool_blocklist: vec![],
+            tools_disabled: false,
         };
 
         let skills_to_install: Vec<String> = intent

@@ -40,8 +40,10 @@ impl AnthropicDriver {
 struct ApiRequest {
     model: String,
     max_tokens: u32,
+    /// System prompt — either a plain string or structured blocks with
+    /// `cache_control` for prompt caching.
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<serde_json::Value>,
     messages: Vec<ApiMessage>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<ApiTool>,
@@ -128,6 +130,12 @@ enum ResponseContentBlock {
 struct ApiUsage {
     input_tokens: u64,
     output_tokens: u64,
+    /// Tokens written to the prompt cache on this request.
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
+    /// Tokens read from the prompt cache on this request.
+    #[serde(default)]
+    cache_read_input_tokens: u64,
 }
 
 /// Anthropic API error response.
@@ -156,7 +164,7 @@ enum ContentBlockAccum {
 impl LlmDriver for AnthropicDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         // Extract system prompt from messages or use the provided one
-        let system = request.system.clone().or_else(|| {
+        let system_text = request.system.clone().or_else(|| {
             request.messages.iter().find_map(|m| {
                 if m.role == Role::System {
                     match &m.content {
@@ -168,6 +176,10 @@ impl LlmDriver for AnthropicDriver {
                 }
             })
         });
+
+        // Build the system field: structured blocks with cache_control when
+        // prompt caching is enabled, plain string otherwise.
+        let system = system_text.map(|text| build_system_value(&text, request.prompt_caching));
 
         // Build API messages, filtering out system messages
         let api_messages: Vec<ApiMessage> = request
@@ -265,7 +277,7 @@ impl LlmDriver for AnthropicDriver {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
         // Build request (same as complete but with stream: true)
-        let system = request.system.clone().or_else(|| {
+        let system_text = request.system.clone().or_else(|| {
             request.messages.iter().find_map(|m| {
                 if m.role == Role::System {
                     match &m.content {
@@ -277,6 +289,8 @@ impl LlmDriver for AnthropicDriver {
                 }
             })
         });
+
+        let system = system_text.map(|text| build_system_value(&text, request.prompt_caching));
 
         let api_messages: Vec<ApiMessage> = request
             .messages
@@ -386,8 +400,15 @@ impl LlmDriver for AnthropicDriver {
 
                     match event_type.as_str() {
                         "message_start" => {
-                            if let Some(it) = json["message"]["usage"]["input_tokens"].as_u64() {
+                            let u = &json["message"]["usage"];
+                            if let Some(it) = u["input_tokens"].as_u64() {
                                 usage.input_tokens = it;
+                            }
+                            if let Some(ct) = u["cache_creation_input_tokens"].as_u64() {
+                                usage.cache_creation_input_tokens = ct;
+                            }
+                            if let Some(cr) = u["cache_read_input_tokens"].as_u64() {
+                                usage.cache_read_input_tokens = cr;
                             }
                         }
                         "content_block_start" => {
@@ -552,6 +573,26 @@ impl LlmDriver for AnthropicDriver {
     }
 }
 
+/// Build the `system` field value for the Anthropic API request.
+///
+/// When prompt caching is enabled, returns a JSON array of content blocks
+/// with `cache_control: {"type": "ephemeral"}` on the last block so that
+/// Anthropic caches the system prompt prefix.  When disabled, returns a
+/// plain JSON string.
+fn build_system_value(text: &str, prompt_caching: bool) -> serde_json::Value {
+    if prompt_caching {
+        serde_json::json!([
+            {
+                "type": "text",
+                "text": text,
+                "cache_control": {"type": "ephemeral"}
+            }
+        ])
+    } else {
+        serde_json::Value::String(text.to_string())
+    }
+}
+
 /// Convert an LibreFang Message to an Anthropic API message.
 fn convert_message(msg: &Message) -> ApiMessage {
     let role = match msg.role {
@@ -650,6 +691,8 @@ fn convert_response(api: ApiResponse) -> CompletionResponse {
         usage: TokenUsage {
             input_tokens: api.usage.input_tokens,
             output_tokens: api.usage.output_tokens,
+            cache_creation_input_tokens: api.usage.cache_creation_input_tokens,
+            cache_read_input_tokens: api.usage.cache_read_input_tokens,
         },
     }
 }
@@ -682,6 +725,8 @@ mod tests {
             usage: ApiUsage {
                 input_tokens: 100,
                 output_tokens: 50,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             },
         };
 
@@ -690,5 +735,21 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "web_search");
         assert_eq!(response.usage.total(), 150);
+    }
+
+    #[test]
+    fn test_build_system_value_plain() {
+        let val = build_system_value("You are helpful.", false);
+        assert_eq!(val.as_str().unwrap(), "You are helpful.");
+    }
+
+    #[test]
+    fn test_build_system_value_cached() {
+        let val = build_system_value("You are helpful.", true);
+        let arr = val.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], "You are helpful.");
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
     }
 }

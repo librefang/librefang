@@ -41,6 +41,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
 
+const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
+
 /// The main LibreFang kernel — coordinates all subsystems.
 /// Stub LLM driver used when no providers are configured.
 /// Returns a helpful error so the dashboard still boots and users can configure providers.
@@ -141,10 +143,10 @@ pub struct LibreFangKernel {
     pub hooks: librefang_runtime::hooks::HookRegistry,
     /// Persistent process manager for interactive sessions (REPLs, servers).
     pub process_manager: Arc<librefang_runtime::process_manager::ProcessManager>,
-    /// OFP peer registry — tracks connected peers.
-    pub peer_registry: Option<librefang_wire::PeerRegistry>,
-    /// OFP peer node — the local networking node.
-    pub peer_node: Option<Arc<librefang_wire::PeerNode>>,
+    /// OFP peer registry — tracks connected peers (set once during OFP startup).
+    pub peer_registry: OnceLock<librefang_wire::PeerRegistry>,
+    /// OFP peer node — the local networking node (set once during OFP startup).
+    pub peer_node: OnceLock<Arc<librefang_wire::PeerNode>>,
     /// Boot timestamp for uptime calculation.
     pub booted_at: std::time::Instant,
     /// WhatsApp Web gateway child process PID (for shutdown cleanup).
@@ -159,6 +161,11 @@ pub struct LibreFangKernel {
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
     agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// Per-agent decision traces from the most recent message exchange.
+    /// Stored for retrieval via `/api/agents/{id}/traces`.
+    pub decision_traces: dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
+    /// Command queue with lane-based concurrency control.
+    pub command_queue: librefang_runtime::command_lane::CommandQueue,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
 }
@@ -574,6 +581,7 @@ impl LibreFangKernel {
                     .get(&config.default_model.provider)
                     .cloned()
             }),
+            vertex_ai: config.vertex_ai.clone(),
             skip_permissions: true,
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
@@ -595,6 +603,7 @@ impl LibreFangKernel {
                         provider: provider.to_string(),
                         api_key: std::env::var(env_var).ok(),
                         base_url: config.provider_urls.get(provider).cloned(),
+                        vertex_ai: config.vertex_ai.clone(),
                         skip_permissions: true,
                     };
                     match drivers::create_driver(&auto_config) {
@@ -640,6 +649,7 @@ impl LibreFangKernel {
                     .base_url
                     .clone()
                     .or_else(|| config.provider_urls.get(&fb.provider).cloned()),
+                vertex_ai: config.vertex_ai.clone(),
                 skip_permissions: true,
             };
             match drivers::create_driver(&fb_config) {
@@ -960,6 +970,13 @@ impl LibreFangKernel {
         let initial_broadcast = config.broadcast.clone();
         let auto_reply_engine = crate::auto_reply::AutoReplyEngine::new(config.auto_reply.clone());
 
+        // Initialize command queue with configured concurrency limits
+        let command_queue = librefang_runtime::command_lane::CommandQueue::with_capacities(
+            config.queue.concurrency.main_lane as u32,
+            config.queue.concurrency.cron_lane as u32,
+            config.queue.concurrency.subagent_lane as u32,
+        );
+
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1001,13 +1018,15 @@ impl LibreFangKernel {
             auto_reply_engine,
             hooks: librefang_runtime::hooks::HookRegistry::new(),
             process_manager: Arc::new(librefang_runtime::process_manager::ProcessManager::new(5)),
-            peer_registry: None,
-            peer_node: None,
+            peer_registry: OnceLock::new(),
+            peer_node: OnceLock::new(),
             booted_at: std::time::Instant::now(),
             whatsapp_gateway_pid: Arc::new(std::sync::Mutex::new(None)),
             channel_adapters: dashmap::DashMap::new(),
             default_model_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
+            decision_traces: dashmap::DashMap::new(),
+            command_queue,
             self_handle: OnceLock::new(),
         };
 
@@ -1231,7 +1250,18 @@ impl LibreFangKernel {
         parent: Option<AgentId>,
         source_toml_path: Option<PathBuf>,
     ) -> KernelResult<AgentId> {
-        let agent_id = AgentId::new();
+        self.spawn_agent_inner(manifest, parent, source_toml_path, None)
+    }
+
+    /// Spawn a new agent with all options including a predetermined ID.
+    fn spawn_agent_inner(
+        &self,
+        manifest: AgentManifest,
+        parent: Option<AgentId>,
+        source_toml_path: Option<PathBuf>,
+        predetermined_id: Option<AgentId>,
+    ) -> KernelResult<AgentId> {
+        let agent_id = predetermined_id.unwrap_or_default();
         let session_id = SessionId::new();
         let name = manifest.name.clone();
 
@@ -1515,6 +1545,12 @@ impl LibreFangKernel {
                 // Update last active time
                 let _ = self.registry.set_state(agent_id, AgentState::Running);
 
+                // Store decision traces for API retrieval
+                if !result.decision_traces.is_empty() {
+                    self.decision_traces
+                        .insert(agent_id, result.decision_traces.clone());
+                }
+
                 // SECURITY: Record successful message in audit trail
                 self.audit_log.record(
                     agent_id.to_string(),
@@ -1693,6 +1729,7 @@ impl LibreFangKernel {
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
+            let stable_prefix_mode = self.config.stable_prefix_mode;
             let user_name = self
                 .memory
                 .structured_get(shared_id, "user_name")
@@ -1719,8 +1756,16 @@ impl LibreFangKernel {
                 base_system_prompt: manifest.model.system_prompt.clone(),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
                 recalled_memories: vec![],
-                skill_summary: self.build_skill_summary(&manifest.skills),
-                skill_prompt_context: self.collect_prompt_context(&manifest.skills),
+                skill_summary: if manifest.skills_disabled {
+                    String::new()
+                } else {
+                    self.build_skill_summary(&manifest.skills)
+                },
+                skill_prompt_context: if manifest.skills_disabled {
+                    String::new()
+                } else {
+                    self.collect_prompt_context(&manifest.skills)
+                },
                 mcp_summary: if mcp_tool_count > 0 {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
@@ -1739,11 +1784,14 @@ impl LibreFangKernel {
                     .workspace
                     .as_ref()
                     .and_then(|w| read_identity_file(w, "MEMORY.md")),
-                canonical_context: self
-                    .memory
-                    .canonical_context(agent_id, None)
-                    .ok()
-                    .and_then(|(s, _)| s),
+                canonical_context: if stable_prefix_mode {
+                    None
+                } else {
+                    self.memory
+                        .canonical_context(agent_id, None)
+                        .ok()
+                        .and_then(|(s, _)| s)
+                },
                 user_name,
                 channel_type: None,
                 is_subagent: manifest
@@ -1786,6 +1834,11 @@ impl LibreFangKernel {
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+            // Pass stable_prefix_mode flag to the agent loop via metadata
+            manifest.metadata.insert(
+                STABLE_PREFIX_MODE_METADATA_KEY.to_string(),
+                serde_json::json!(stable_prefix_mode),
+            );
             // Store canonical context separately for injection as user message
             // (keeps system prompt stable across turns for provider prompt caching)
             if let Some(cc_msg) =
@@ -1796,6 +1849,12 @@ impl LibreFangKernel {
                     serde_json::Value::String(cc_msg),
                 );
             }
+
+            // Pass prompt_caching config to the agent loop via metadata.
+            manifest.metadata.insert(
+                "prompt_caching".to_string(),
+                serde_json::Value::Bool(self.config.prompt_caching),
+            );
         }
 
         let memory = Arc::clone(&self.memory);
@@ -2040,11 +2099,13 @@ impl LibreFangKernel {
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             iterations: 1,
             cost_usd: None,
             silent: false,
             directives: Default::default(),
+            decision_traces: Vec::new(),
         })
     }
 
@@ -2100,11 +2161,13 @@ impl LibreFangKernel {
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             cost_usd: None,
             iterations: 1,
             silent: false,
             directives: Default::default(),
+            decision_traces: Vec::new(),
         })
     }
 
@@ -2293,11 +2356,13 @@ impl LibreFangKernel {
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             iterations: result.iterations,
             cost_usd: None,
             silent: result.silent,
             directives: result.directives,
+            decision_traces: result.decision_traces,
         }
     }
 
@@ -2361,6 +2426,7 @@ impl LibreFangKernel {
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
+            let stable_prefix_mode = self.config.stable_prefix_mode;
             let user_name = self
                 .memory
                 .structured_get(shared_id, "user_name")
@@ -2387,8 +2453,16 @@ impl LibreFangKernel {
                 base_system_prompt: manifest.model.system_prompt.clone(),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
                 recalled_memories: vec![], // Recalled in agent_loop, not here
-                skill_summary: self.build_skill_summary(&manifest.skills),
-                skill_prompt_context: self.collect_prompt_context(&manifest.skills),
+                skill_summary: if manifest.skills_disabled {
+                    String::new()
+                } else {
+                    self.build_skill_summary(&manifest.skills)
+                },
+                skill_prompt_context: if manifest.skills_disabled {
+                    String::new()
+                } else {
+                    self.collect_prompt_context(&manifest.skills)
+                },
                 mcp_summary: if mcp_tool_count > 0 {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
@@ -2407,11 +2481,14 @@ impl LibreFangKernel {
                     .workspace
                     .as_ref()
                     .and_then(|w| read_identity_file(w, "MEMORY.md")),
-                canonical_context: self
-                    .memory
-                    .canonical_context(agent_id, None)
-                    .ok()
-                    .and_then(|(s, _)| s),
+                canonical_context: if stable_prefix_mode {
+                    None
+                } else {
+                    self.memory
+                        .canonical_context(agent_id, None)
+                        .ok()
+                        .and_then(|(s, _)| s)
+                },
                 user_name,
                 channel_type: None,
                 is_subagent: manifest
@@ -2454,6 +2531,11 @@ impl LibreFangKernel {
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+            // Pass stable_prefix_mode flag to the agent loop via metadata
+            manifest.metadata.insert(
+                STABLE_PREFIX_MODE_METADATA_KEY.to_string(),
+                serde_json::json!(stable_prefix_mode),
+            );
             // Store canonical context separately for injection as user message
             // (keeps system prompt stable across turns for provider prompt caching)
             if let Some(cc_msg) =
@@ -2464,6 +2546,12 @@ impl LibreFangKernel {
                     serde_json::Value::String(cc_msg),
                 );
             }
+
+            // Pass prompt_caching config to the agent loop via metadata.
+            manifest.metadata.insert(
+                "prompt_caching".to_string(),
+                serde_json::Value::Bool(self.config.prompt_caching),
+            );
         }
 
         let is_stable = self.config.mode == librefang_types::config::KernelMode::Stable;
@@ -2491,6 +2579,7 @@ impl LibreFangKernel {
                 temperature: manifest.model.temperature,
                 system: Some(manifest.model.system_prompt.clone()),
                 thinking: None,
+                prompt_caching: false,
             };
             let (complexity, routed_model) = router.select_model(&probe);
             info!(
@@ -3429,7 +3518,16 @@ impl LibreFangKernel {
             }
         }
 
-        let agent_id = self.spawn_agent_with_source(manifest, Some(hand_manifest_path.clone()))?;
+        // Use a deterministic UUID derived from the hand_id so the same hand
+        // always gets the same agent ID across daemon restarts.  This keeps
+        // triggers and cron jobs that reference the UUID stable (#313).
+        let deterministic_id = AgentId::from_hand_id(hand_id);
+        let agent_id = self.spawn_agent_inner(
+            manifest,
+            None,
+            Some(hand_manifest_path.clone()),
+            Some(deterministic_id),
+        )?;
 
         // Restore triggers from the old agent under the new agent ID (#519).
         if !saved_triggers.is_empty() {
@@ -3901,7 +3999,10 @@ impl LibreFangKernel {
                     catalog
                         .list_providers()
                         .iter()
-                        .filter(|p| !p.key_required)
+                        .filter(|p| {
+                            librefang_runtime::provider_health::is_local_provider(&p.id)
+                                && !p.base_url.is_empty()
+                        })
                         .map(|p| (p.id.clone(), p.base_url.clone()))
                         .collect()
                 };
@@ -3958,6 +4059,60 @@ impl LibreFangKernel {
                     }
                 }
             });
+        }
+
+        // Periodic session retention cleanup (prune expired / excess sessions)
+        {
+            let session_cfg = self.config.session.clone();
+            let needs_cleanup =
+                session_cfg.retention_days > 0 || session_cfg.max_sessions_per_agent > 0;
+            if needs_cleanup && session_cfg.cleanup_interval_hours > 0 {
+                let kernel = Arc::clone(self);
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                        u64::from(session_cfg.cleanup_interval_hours) * 3600,
+                    ));
+                    interval.tick().await; // Skip first immediate tick
+                    loop {
+                        interval.tick().await;
+                        if kernel.supervisor.is_shutting_down() {
+                            break;
+                        }
+                        let mut total = 0u64;
+                        if session_cfg.retention_days > 0 {
+                            match kernel
+                                .memory
+                                .cleanup_expired_sessions(session_cfg.retention_days)
+                            {
+                                Ok(n) => total += n,
+                                Err(e) => {
+                                    warn!("Session retention cleanup (expired) failed: {e}");
+                                }
+                            }
+                        }
+                        if session_cfg.max_sessions_per_agent > 0 {
+                            match kernel
+                                .memory
+                                .cleanup_excess_sessions(session_cfg.max_sessions_per_agent)
+                            {
+                                Ok(n) => total += n,
+                                Err(e) => {
+                                    warn!("Session retention cleanup (excess) failed: {e}");
+                                }
+                            }
+                        }
+                        if total > 0 {
+                            info!("Session retention cleanup: removed {total} session(s)");
+                        }
+                    }
+                });
+                info!(
+                    "Session retention cleanup scheduled every {} hour(s) (retention_days={}, max_per_agent={})",
+                    session_cfg.cleanup_interval_hours,
+                    session_cfg.retention_days,
+                    session_cfg.max_sessions_per_agent,
+                );
+            }
         }
 
         // Periodic memory consolidation (decays stale memory confidence)
@@ -4205,14 +4360,9 @@ impl LibreFangKernel {
                     "OFP peer node started"
                 );
 
-                // SAFETY: These fields are only written once during startup.
-                // We use unsafe to set them because start_background_agents runs
-                // after the Arc is created and the kernel is otherwise immutable.
-                let self_ptr = Arc::as_ptr(self) as *mut LibreFangKernel;
-                unsafe {
-                    (*self_ptr).peer_registry = Some(registry.clone());
-                    (*self_ptr).peer_node = Some(node.clone());
-                }
+                // Safe one-time initialization via OnceLock (replaces previous unsafe pointer mutation).
+                let _ = self.peer_registry.set(registry.clone());
+                let _ = self.peer_node.set(node.clone());
 
                 // Connect to bootstrap peers
                 for peer_addr_str in &self.config.network.bootstrap_peers {
@@ -4487,6 +4637,7 @@ impl LibreFangKernel {
                 provider: agent_provider.clone(),
                 api_key,
                 base_url,
+                vertex_ai: self.config.vertex_ai.clone(),
                 skip_permissions: true,
             };
 
@@ -4535,6 +4686,7 @@ impl LibreFangKernel {
                         .base_url
                         .clone()
                         .or_else(|| self.lookup_provider_url(&fb.provider)),
+                    vertex_ai: self.config.vertex_ai.clone(),
                     skip_permissions: true,
                 };
                 match drivers::create_driver(&config) {
@@ -4906,13 +5058,17 @@ impl LibreFangKernel {
 
         // Look up agent entry for profile, skill/MCP allowlists, and declared tools
         let entry = self.registry.get(agent_id);
-        let (skill_allowlist, mcp_allowlist, tool_profile) = entry
+        if entry.as_ref().is_some_and(|e| e.manifest.tools_disabled) {
+            return Vec::new();
+        }
+        let (skill_allowlist, mcp_allowlist, tool_profile, skills_disabled) = entry
             .as_ref()
             .map(|e| {
                 (
                     e.manifest.skills.clone(),
                     e.manifest.mcp_servers.clone(),
                     e.manifest.profile.clone(),
+                    e.manifest.skills_disabled,
                 )
             })
             .unwrap_or_default();
@@ -4961,8 +5117,10 @@ impl LibreFangKernel {
         };
 
         // Step 2: Add skill-provided tools (filtered by agent's skill allowlist,
-        // then by declared tools).
-        let skill_tools = {
+        // then by declared tools). Skip entirely when skills are disabled.
+        let skill_tools = if skills_disabled {
+            vec![]
+        } else {
             let registry = self
                 .skill_registry
                 .read()
@@ -5398,8 +5556,12 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
             | "moonshot" | "openrouter" | "volcengine" | "doubao" | "dashscope" => {
                 return Some(prefix.to_string());
             }
-            // "kimi" is a brand alias for moonshot
-            "kimi" => {
+            // "z.ai" is a domain alias for the zai provider
+            "z.ai" => {
+                return Some("zai".to_string());
+            }
+            // "kimi" / "kimi2" are brand aliases for moonshot
+            "kimi" | "kimi2" => {
                 return Some("moonshot".to_string());
             }
             _ => {}
@@ -5667,6 +5829,20 @@ impl KernelHandle for LibreFangKernel {
             .task_list(status)
             .await
             .map_err(|e| format!("Task list failed: {e}"))
+    }
+
+    async fn task_delete(&self, task_id: &str) -> Result<bool, String> {
+        self.memory
+            .task_delete(task_id)
+            .await
+            .map_err(|e| format!("Task delete failed: {e}"))
+    }
+
+    async fn task_retry(&self, task_id: &str) -> Result<bool, String> {
+        self.memory
+            .task_retry(task_id)
+            .await
+            .map_err(|e| format!("Task retry failed: {e}"))
     }
 
     async fn publish_event(
@@ -6458,6 +6634,43 @@ mod tests {
         assert!(
             entry.manifest.tool_blocklist.is_empty(),
             "hand activation should not set a runtime blocklist by default"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn test_available_tools_returns_empty_when_tools_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-tools-disabled-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+        let manifest = AgentManifest {
+            name: "no-tools".to_string(),
+            description: "agent with tools disabled".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            profile: Some(librefang_types::agent::ToolProfile::Full),
+            capabilities: ManifestCapabilities {
+                tools: vec!["file_read".to_string(), "web_fetch".to_string()],
+                ..Default::default()
+            },
+            tools_disabled: true,
+            ..Default::default()
+        };
+
+        let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+        let tools = kernel.available_tools(agent_id);
+        assert!(
+            tools.is_empty(),
+            "disabled tools should suppress all builtin, skill, and MCP tools"
         );
 
         kernel.shutdown();

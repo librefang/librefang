@@ -1,5 +1,6 @@
 # Build
 /target
+/target-isolated
 **/*.rs.bk
 *.pdb
 
@@ -41,6 +42,10 @@ node_modules/
 # OS
 .DS_Store
 Thumbs.db
+
+# Nix
+result
+.direnv/
 
 # IDE & tools
 .idea/

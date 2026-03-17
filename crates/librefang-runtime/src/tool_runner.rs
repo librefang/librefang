@@ -3318,6 +3318,14 @@ mod tests {
             Err("not used".to_string())
         }
 
+        async fn task_delete(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+
+        async fn task_retry(&self, _task_id: &str) -> Result<bool, String> {
+            Err("not used".to_string())
+        }
+
         async fn publish_event(
             &self,
             _event_type: &str,

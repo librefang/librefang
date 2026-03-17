@@ -3,7 +3,7 @@
  *
  * Usage:
  *   const { LibreFang } = require("@librefang/sdk");
- *   const client = new LibreFang("http://localhost:3000");
+ *   const client = new LibreFang("http://localhost:4545");
  *
  *   const agent = await client.agents.create({ template: "assistant" });
  *   const reply = await client.agents.message(agent.id, "Hello!");
@@ -28,7 +28,7 @@ class LibreFangError extends Error {
 
 class LibreFang {
   /**
-   * @param {string} baseUrl - LibreFang server URL (e.g. "http://localhost:3000")
+   * @param {string} baseUrl - LibreFang server URL (e.g. "http://localhost:4545")
    * @param {object} [opts]
    * @param {Record<string, string>} [opts.headers] - Extra headers for every request
    */

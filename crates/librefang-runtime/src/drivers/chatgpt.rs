@@ -430,10 +430,12 @@ impl ChatGptDriver {
             TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             |u| TokenUsage {
                 input_tokens: u.input_tokens,
                 output_tokens: u.output_tokens,
+                ..Default::default()
             },
         );
 
@@ -637,6 +639,7 @@ mod tests {
             temperature: 0.7,
             system: Some("You are helpful.".to_string()),
             thinking: None,
+            prompt_caching: false,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.model, "gpt-4o");
@@ -665,6 +668,7 @@ mod tests {
             temperature: 1.0,
             system: None,
             thinking: None,
+            prompt_caching: false,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.instructions.as_deref(), Some("System prompt."));

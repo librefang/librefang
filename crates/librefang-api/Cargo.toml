@@ -38,6 +38,10 @@ reqwest = { workspace = true }
 url = { workspace = true }
 zip = { workspace = true }
 walkdir = { workspace = true }
+jsonwebtoken = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+utoipa = { version = "5", features = ["axum_extras"] }
 
 [features]
 default = ["all-channels"]
@@ -111,3 +115,4 @@ mini = [
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
 uuid = { workspace = true }
+http-body-util = "0.1"

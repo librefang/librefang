@@ -450,6 +450,13 @@ fn check_python3_available() -> bool {
     if run_returns_python3("python") {
         return true;
     }
+    // Fallback: try well-known absolute paths (handles cases where PATH is
+    // minimal, e.g. inside Docker containers or cron jobs on Linux).
+    for path in &["/usr/bin/python3", "/usr/local/bin/python3"] {
+        if run_returns_python3(path) {
+            return true;
+        }
+    }
     false
 }
 

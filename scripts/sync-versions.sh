@@ -11,6 +11,8 @@
 #   - crates/librefang-desktop/tauri.conf.json
 #   - sdk/javascript/package.json
 #   - sdk/python/setup.py
+#   - sdk/rust/Cargo.toml
+#   - sdk/rust/README.md
 #   - packages/whatsapp-gateway/package.json
 
 set -euo pipefail
@@ -65,6 +67,21 @@ if [ -f "$JS_PKG" ]; then
     echo "  Updated sdk/javascript/package.json"
 fi
 
+# --- Rust SDK ---
+RS_CARGO="$REPO_ROOT/sdk/rust/Cargo.toml"
+if [ -f "$RS_CARGO" ]; then
+    sed -i.bak '/^\[package\]/,/^\[/ s/^version = "[^"]*"/version = "'"$VERSION"'"/' "$RS_CARGO" && rm -f "$RS_CARGO.bak"
+    echo "  Updated sdk/rust/Cargo.toml"
+fi
+
+# --- Rust SDK README (dependency version uses MAJOR.MINOR) ---
+RS_README="$REPO_ROOT/sdk/rust/README.md"
+if [ -f "$RS_README" ]; then
+    MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+    sed -i.bak '/^\[dependencies\]/,/^```/ s/librefang = "[^"]*"/librefang = "'"$MAJOR_MINOR"'"/' "$RS_README" && rm -f "$RS_README.bak"
+    echo "  Updated sdk/rust/README.md"
+fi
+
 # --- Python SDK ---
 PY_SETUP="$REPO_ROOT/sdk/python/setup.py"
 if [ -f "$PY_SETUP" ]; then
@@ -92,5 +109,6 @@ echo "Verification:"
 echo "  Cargo.toml:      $(current_version)"
 grep '"version"' "$JS_PKG" 2>/dev/null | head -1 | sed 's/^[[:space:]]*/  JS SDK:          /'
 grep 'version=' "$PY_SETUP" 2>/dev/null | head -1 | sed 's/^[[:space:]]*/  Python SDK:      /'
+grep '^version' "$RS_CARGO" 2>/dev/null | head -1 | sed 's/^[[:space:]]*/  Rust SDK:        /'
 echo ""
 echo "Done. Run 'git diff' to review changes."

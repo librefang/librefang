@@ -1,0 +1,74 @@
+# LibreFang i18n — English (en)
+#
+# This file provides a TOML key-value reference for all translatable
+# error messages. The runtime uses Fluent (.ftl) files under
+# crates/librefang-types/locales/ for actual translation lookup.
+# This TOML file serves as a human-readable catalog and can be used
+# by external tooling or future TOML-based i18n backends.
+
+[agent]
+not-found        = "Agent not found"
+spawn-failed     = "Agent spawn failed"
+invalid-id       = "Invalid agent ID"
+already-exists   = "Agent already exists"
+
+[message]
+too-large        = "Message too large (max 64KB)"
+delivery-failed  = "Message delivery failed: {reason}"
+
+[template]
+invalid-name     = "Invalid template name"
+not-found        = "Template '{name}' not found"
+parse-failed     = "Failed to parse template: {error}"
+required         = "Either 'manifest_toml' or 'template' is required"
+
+[manifest]
+too-large            = "Manifest too large (max 1MB)"
+invalid-format       = "Invalid manifest format"
+signature-mismatch   = "Signed manifest content does not match manifest_toml"
+signature-failed     = "Manifest signature verification failed"
+
+[auth]
+invalid-key      = "Invalid API key"
+missing-header   = "Missing Authorization: Bearer <api_key> header"
+
+[session]
+load-failed      = "Session load failed"
+not-found        = "Session not found"
+
+[workflow]
+missing-steps       = "Missing 'steps' array"
+step-needs-agent    = "Step '{step}' needs 'agent_id' or 'agent_name'"
+invalid-id          = "Invalid workflow ID"
+execution-failed    = "Workflow execution failed"
+
+[trigger]
+missing-agent-id      = "Missing 'agent_id'"
+invalid-agent-id      = "Invalid agent_id"
+invalid-pattern       = "Invalid trigger pattern"
+missing-pattern       = "Missing 'pattern'"
+registration-failed   = "Trigger registration failed (agent not found?)"
+invalid-id            = "Invalid trigger ID"
+not-found             = "Trigger not found"
+
+[budget]
+invalid-amount   = "Invalid budget amount"
+update-failed    = "Budget update failed"
+
+[config]
+parse-failed     = "Failed to parse configuration: {error}"
+write-failed     = "Failed to write configuration: {error}"
+
+[profile]
+not-found        = "Profile '{name}' not found"
+
+[cron]
+invalid-id       = "Invalid cron job ID"
+not-found        = "Cron job not found"
+create-failed    = "Failed to create cron job: {error}"
+
+[general]
+not-found        = "Resource not found"
+internal         = "Internal server error"
+bad-request      = "Bad request: {reason}"
+rate-limited     = "Rate limit exceeded. Try again later."

@@ -214,6 +214,7 @@ impl AgentRegistry {
             .get_mut(&id)
             .ok_or_else(|| LibreFangError::AgentNotFound(id.to_string()))?;
         entry.manifest.skills = skills;
+        entry.manifest.skills_disabled = false;
         entry.last_active = chrono::Utc::now();
         Ok(())
     }
@@ -246,6 +247,7 @@ impl AgentRegistry {
         if let Some(bl) = blocklist {
             entry.manifest.tool_blocklist = bl;
         }
+        entry.manifest.tools_disabled = false;
         entry.last_active = chrono::Utc::now();
         Ok(())
     }
@@ -404,5 +406,48 @@ mod tests {
         registry.register(entry).unwrap();
         registry.remove(id).unwrap();
         assert!(registry.get(id).is_none());
+    }
+
+    #[test]
+    fn test_update_skills_reenables_disabled_skills() {
+        let registry = AgentRegistry::new();
+        let mut entry = test_entry("skills-disabled");
+        entry.manifest.skills_disabled = true;
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        registry
+            .update_skills(id, vec!["review".to_string()])
+            .expect("update should succeed");
+
+        let updated = registry.get(id).expect("agent should exist");
+        assert_eq!(updated.manifest.skills, vec!["review".to_string()]);
+        assert!(
+            !updated.manifest.skills_disabled,
+            "updating skills should re-enable skill resolution"
+        );
+    }
+
+    #[test]
+    fn test_update_tool_filters_reenables_disabled_tools() {
+        let registry = AgentRegistry::new();
+        let mut entry = test_entry("tools-disabled");
+        entry.manifest.tools_disabled = true;
+        let id = entry.id;
+        registry.register(entry).unwrap();
+
+        registry
+            .update_tool_filters(id, Some(vec!["file_read".to_string()]), None)
+            .expect("update should succeed");
+
+        let updated = registry.get(id).expect("agent should exist");
+        assert_eq!(
+            updated.manifest.tool_allowlist,
+            vec!["file_read".to_string()]
+        );
+        assert!(
+            !updated.manifest.tools_disabled,
+            "updating tool filters should re-enable tool resolution"
+        );
     }
 }
