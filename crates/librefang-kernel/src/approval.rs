@@ -396,6 +396,36 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // get_pending
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_get_pending_not_found() {
+        let mgr = default_manager();
+        assert!(mgr.get_pending(Uuid::new_v4()).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_pending_found() {
+        let mgr = Arc::new(default_manager());
+        let req = make_request("agent-1", "shell_exec", 300);
+        let id = req.id;
+
+        let mgr2 = Arc::clone(&mgr);
+        tokio::spawn(async move {
+            mgr2.request_approval(req).await;
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let found = mgr.get_pending(id);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, id);
+
+        // Cleanup
+        let _ = mgr.resolve(id, ApprovalDecision::Denied, None);
+    }
+
+    // -----------------------------------------------------------------------
     // policy defaults
     // -----------------------------------------------------------------------
 

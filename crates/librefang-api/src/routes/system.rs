@@ -914,6 +914,34 @@ pub async fn session_cleanup(State(state): State<Arc<AppState>>) -> impl IntoRes
 // Execution Approval System — backed by kernel.approval_manager
 // ---------------------------------------------------------------------------
 
+/// Serialize an [`ApprovalRequest`] to the JSON shape expected by the dashboard.
+///
+/// Adds alias fields: `action` (= `action_summary`), `agent_name`, `created_at` (= `requested_at`).
+fn approval_to_json(
+    a: &librefang_types::approval::ApprovalRequest,
+    registry_agents: &[librefang_types::agent::AgentEntry],
+) -> serde_json::Value {
+    let agent_name = registry_agents
+        .iter()
+        .find(|ag| ag.id.to_string() == a.agent_id || ag.name == a.agent_id)
+        .map(|ag| ag.name.as_str())
+        .unwrap_or(&a.agent_id);
+    serde_json::json!({
+        "id": a.id,
+        "agent_id": a.agent_id,
+        "agent_name": agent_name,
+        "tool_name": a.tool_name,
+        "description": a.description,
+        "action_summary": a.action_summary,
+        "action": a.action_summary,
+        "risk_level": a.risk_level,
+        "requested_at": a.requested_at,
+        "created_at": a.requested_at,
+        "timeout_secs": a.timeout_secs,
+        "status": "pending"
+    })
+}
+
 /// GET /api/approvals — List pending approval requests.
 ///
 /// Transforms field names to match the dashboard template expectations:
@@ -923,32 +951,10 @@ pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResp
     let pending = state.kernel.approval_manager.list_pending();
     let total = pending.len();
 
-    // Resolve agent names for display
     let registry_agents = state.kernel.registry.list();
-
     let approvals: Vec<serde_json::Value> = pending
-        .into_iter()
-        .map(|a| {
-            let agent_name = registry_agents
-                .iter()
-                .find(|ag| ag.id.to_string() == a.agent_id || ag.name == a.agent_id)
-                .map(|ag| ag.name.as_str())
-                .unwrap_or(&a.agent_id);
-            serde_json::json!({
-                "id": a.id,
-                "agent_id": a.agent_id,
-                "agent_name": agent_name,
-                "tool_name": a.tool_name,
-                "description": a.description,
-                "action_summary": a.action_summary,
-                "action": a.action_summary,
-                "risk_level": a.risk_level,
-                "requested_at": a.requested_at,
-                "created_at": a.requested_at,
-                "timeout_secs": a.timeout_secs,
-                "status": "pending"
-            })
-        })
+        .iter()
+        .map(|a| approval_to_json(a, &registry_agents))
         .collect();
 
     Json(serde_json::json!({"approvals": approvals, "total": total}))
@@ -973,27 +979,9 @@ pub async fn get_approval(
     match state.kernel.approval_manager.get_pending(uuid) {
         Some(a) => {
             let registry_agents = state.kernel.registry.list();
-            let agent_name = registry_agents
-                .iter()
-                .find(|ag| ag.id.to_string() == a.agent_id || ag.name == a.agent_id)
-                .map(|ag| ag.name.as_str())
-                .unwrap_or(&a.agent_id);
             (
                 StatusCode::OK,
-                Json(serde_json::json!({
-                    "id": a.id,
-                    "agent_id": a.agent_id,
-                    "agent_name": agent_name,
-                    "tool_name": a.tool_name,
-                    "description": a.description,
-                    "action_summary": a.action_summary,
-                    "action": a.action_summary,
-                    "risk_level": a.risk_level,
-                    "requested_at": a.requested_at,
-                    "created_at": a.requested_at,
-                    "timeout_secs": a.timeout_secs,
-                    "status": "pending"
-                })),
+                Json(approval_to_json(&a, &registry_agents)),
             )
         }
         None => (
