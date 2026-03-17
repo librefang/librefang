@@ -1066,6 +1066,75 @@ pub async fn list_channels(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "configured_count": configured_count,
     }))
 }
+
+/// GET /api/channels/{name} — Return a single channel's config, status, and field metadata.
+#[utoipa::path(
+    get,
+    path = "/api/channels/{name}",
+    tag = "channels",
+    params(
+        ("name" = String, Path, description = "Channel adapter name (e.g. telegram, discord)")
+    ),
+    responses(
+        (status = 200, description = "Channel details", body = serde_json::Value),
+        (status = 404, description = "Unknown channel", body = serde_json::Value)
+    )
+)]
+pub async fn get_channel(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let meta = match find_channel_meta(&name) {
+        Some(m) => m,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Unknown channel: {name}")})),
+            )
+        }
+    };
+
+    let live_channels = state.channels_config.read().await;
+    let configured = is_channel_configured(&live_channels, meta.name);
+
+    let has_token = meta
+        .fields
+        .iter()
+        .filter(|f| f.required && f.env_var.is_some())
+        .all(|f| {
+            f.env_var
+                .map(|ev| std::env::var(ev).map(|v| !v.is_empty()).unwrap_or(false))
+                .unwrap_or(true)
+        });
+
+    let config_vals = channel_config_values(&live_channels, meta.name);
+    let fields: Vec<serde_json::Value> = meta
+        .fields
+        .iter()
+        .map(|f| build_field_json(f, config_vals.as_ref()))
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "name": meta.name,
+            "display_name": meta.display_name,
+            "icon": meta.icon,
+            "description": meta.description,
+            "category": meta.category,
+            "difficulty": meta.difficulty,
+            "setup_time": meta.setup_time,
+            "quick_setup": meta.quick_setup,
+            "setup_type": meta.setup_type,
+            "configured": configured,
+            "has_token": has_token,
+            "fields": fields,
+            "setup_steps": meta.setup_steps,
+            "config_template": meta.config_template,
+        })),
+    )
+}
+
 #[utoipa::path(
     post,
     path = "/api/channels/{name}/configure",

@@ -169,6 +169,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::get(routes::serve_upload),
         )
         .route("/channels", axum::routing::get(routes::list_channels))
+        .route("/channels/{name}", axum::routing::get(routes::get_channel))
         .route(
             "/channels/{name}/configure",
             axum::routing::post(routes::configure_channel).delete(routes::remove_channel),
