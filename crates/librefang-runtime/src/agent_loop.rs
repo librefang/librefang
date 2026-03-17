@@ -400,18 +400,6 @@ pub async fn run_agent_loop(
     // Validate and repair session history (drop orphans, merge consecutive)
     let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
 
-    // Inject canonical context as the first user message (not in system prompt)
-    // to keep the system prompt stable across turns for provider prompt caching.
-    if let Some(cc_msg) = manifest
-        .metadata
-        .get("canonical_context_msg")
-        .and_then(|v| v.as_str())
-    {
-        if !cc_msg.is_empty() {
-            messages.insert(0, Message::user(cc_msg));
-        }
-    }
-
     let mut total_usage = TokenUsage::default();
     let final_response;
 
@@ -424,6 +412,20 @@ pub async fn run_agent_loop(
             messages = crate::topic_isolation::apply_topic_isolation(messages, &ti_config);
             // Re-validate after topic isolation may have changed boundaries.
             messages = crate::session_repair::validate_and_repair(&messages);
+        }
+    }
+
+    // Inject canonical context as the first user message (not in system prompt)
+    // to keep the system prompt stable across turns for provider prompt caching.
+    // NOTE: This must happen AFTER topic isolation so the canonical context is not
+    // sliced away when the topic boundary trims earlier messages.
+    if let Some(cc_msg) = manifest
+        .metadata
+        .get("canonical_context_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !cc_msg.is_empty() {
+            messages.insert(0, Message::user(cc_msg));
         }
     }
 
@@ -1414,18 +1416,6 @@ pub async fn run_agent_loop_streaming(
     // Validate and repair session history (drop orphans, merge consecutive)
     let mut messages = crate::session_repair::validate_and_repair(&llm_messages);
 
-    // Inject canonical context as the first user message (not in system prompt)
-    // to keep the system prompt stable across turns for provider prompt caching.
-    if let Some(cc_msg) = manifest
-        .metadata
-        .get("canonical_context_msg")
-        .and_then(|v| v.as_str())
-    {
-        if !cc_msg.is_empty() {
-            messages.insert(0, Message::user(cc_msg));
-        }
-    }
-
     let mut total_usage = TokenUsage::default();
     let final_response;
 
@@ -1436,6 +1426,20 @@ pub async fn run_agent_loop_streaming(
         {
             messages = crate::topic_isolation::apply_topic_isolation(messages, &ti_config);
             messages = crate::session_repair::validate_and_repair(&messages);
+        }
+    }
+
+    // Inject canonical context as the first user message (not in system prompt)
+    // to keep the system prompt stable across turns for provider prompt caching.
+    // NOTE: This must happen AFTER topic isolation so the canonical context is not
+    // sliced away when the topic boundary trims earlier messages.
+    if let Some(cc_msg) = manifest
+        .metadata
+        .get("canonical_context_msg")
+        .and_then(|v| v.as_str())
+    {
+        if !cc_msg.is_empty() {
+            messages.insert(0, Message::user(cc_msg));
         }
     }
 

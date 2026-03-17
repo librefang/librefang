@@ -99,18 +99,28 @@ fn word_overlap_ratio(a: &str, b: &str) -> f64 {
 }
 
 /// Extract significant (non-stop) words from text, lowercased.
+///
+/// NOTE: Stop-word filtering and whitespace-based tokenisation only work well
+/// for Latin/ASCII text (primarily English).  For non-ASCII input (e.g. CJK,
+/// Cyrillic, Arabic) we skip stop-word filtering entirely so that the overlap
+/// ratio still produces a reasonable signal — at the cost of slightly noisier
+/// word sets.
 fn significant_words(text: &str) -> HashSet<String> {
+    let is_ascii_text = text.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_ascii());
     text.split_whitespace()
         .map(|w| {
             w.to_lowercase()
                 .trim_matches(|c: char| !c.is_alphanumeric())
                 .to_string()
         })
-        .filter(|w| w.len() > 2 && !is_stop_word(w))
+        .filter(|w| w.len() > 2 && (if is_ascii_text { !is_stop_word(w) } else { true }))
         .collect()
 }
 
 /// Check if a word is a common English stop word.
+///
+/// This list only covers English.  For non-English text the caller should skip
+/// stop-word filtering (see `significant_words`).
 fn is_stop_word(word: &str) -> bool {
     matches!(
         word,
@@ -225,13 +235,10 @@ pub fn apply_topic_isolation(
             topic_messages.to_vec()
         }
     } else {
-        // No topic shift detected — apply max_topic_messages cap from end.
-        if messages.len() > config.max_topic_messages {
-            let start = messages.len() - config.max_topic_messages;
-            messages[start..].to_vec()
-        } else {
-            messages
-        }
+        // No topic shift detected — all messages belong to the same topic.
+        // Return the full history; the safety valve in agent_loop handles
+        // the overall length cap, so we should not truncate here.
+        messages
     }
 }
 
@@ -360,10 +367,11 @@ mod tests {
     }
 
     #[test]
-    fn test_max_topic_messages_cap() {
+    fn test_no_shift_preserves_full_history() {
         let mut config = cfg();
         config.max_topic_messages = 4;
-        // All same topic, but more than max_topic_messages
+        // All same topic, but more than max_topic_messages — should NOT truncate
+        // when there is no topic shift.
         let msgs: Vec<Message> = (0..8)
             .flat_map(|i| {
                 vec![
@@ -372,8 +380,35 @@ mod tests {
                 ]
             })
             .collect();
+        let result = apply_topic_isolation(msgs.clone(), &config);
+        assert_eq!(result.len(), msgs.len(), "No topic shift should preserve full history");
+    }
+
+    #[test]
+    fn test_max_topic_messages_cap_within_topic() {
+        let mut config = cfg();
+        config.max_topic_messages = 4;
+        // First topic (Rust), then explicit topic shift to cooking with many messages.
+        // The cooking topic alone exceeds max_topic_messages, so it should be capped.
+        let mut msgs = vec![
+            Message::user("Tell me about Rust programming language features"),
+            Message::assistant("Rust is a systems programming language..."),
+            Message::user("New topic: how do I cook pasta perfectly?"),
+            Message::assistant("Boil water, add salt..."),
+            Message::user("How long should I cook the pasta al dente?"),
+            Message::assistant("About 8-10 minutes..."),
+            Message::user("Should I add olive oil to the pasta water?"),
+            Message::assistant("It's not necessary..."),
+            Message::user("What is the best sauce for fresh pasta?"),
+            Message::assistant("Marinara, alfredo, pesto..."),
+        ];
+        // Ensure we exceed max_topic_messages threshold for the early-return guard
+        while msgs.len() <= config.max_topic_messages {
+            msgs.push(Message::user("More pasta questions for padding"));
+            msgs.push(Message::assistant("More pasta answers for padding"));
+        }
         let result = apply_topic_isolation(msgs, &config);
-        assert!(result.len() <= 4, "Should cap at max_topic_messages");
+        assert!(result.len() <= 4, "Should cap at max_topic_messages within detected topic");
     }
 
     #[test]

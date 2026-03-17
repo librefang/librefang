@@ -1577,7 +1577,6 @@ fn default_topic_change_phrases() -> Vec<String> {
         "switch topic".to_string(),
         "unrelated question".to_string(),
         "another thing".to_string(),
-        "by the way".to_string(),
         "on a different note".to_string(),
     ]
 }
