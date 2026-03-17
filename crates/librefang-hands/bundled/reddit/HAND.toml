@@ -88,20 +88,6 @@ steps = [
 # ─── Configurable settings ───────────────────────────────────────────────────
 
 [[settings]]
-key = "reddit_client_id"
-label = "Reddit Client ID"
-description = "OAuth2 client ID from your Reddit app."
-setting_type = "text"
-default = ""
-
-[[settings]]
-key = "reddit_client_secret"
-label = "Reddit Client Secret"
-description = "OAuth2 client secret from your Reddit app."
-setting_type = "text"
-default = ""
-
-[[settings]]
 key = "subreddits"
 label = "Subreddits"
 description = "Comma-separated list of subreddits to monitor (e.g. rust,programming,machinelearning)"

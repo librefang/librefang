@@ -20,20 +20,13 @@ estimated_time = "10-15 min"
 steps = [
     "Go to linkedin.com/developers/apps and sign in",
     "Create a new app (requires a LinkedIn Page for verification)",
-    "Request the w_member_social and r_liteprofile OAuth scopes",
+    "Request the w_member_social, profile, and openid OAuth scopes",
     "Complete OAuth 2.0 authorization code flow to obtain an access token",
     "Set LINKEDIN_ACCESS_TOKEN as an environment variable",
     "Restart LibreFang or reload config for the change to take effect",
 ]
 
 # ─── Configurable settings ───────────────────────────────────────────────────
-
-[[settings]]
-key = "linkedin_access_token"
-label = "LinkedIn Access Token"
-description = "OAuth 2.0 access token from the LinkedIn Developer Portal."
-setting_type = "text"
-default = ""
 
 [[settings]]
 key = "content_style"

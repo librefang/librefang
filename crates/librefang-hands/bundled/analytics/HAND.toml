@@ -5,6 +5,19 @@ category = "data"
 icon = "\U0001F4CA"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
+[[requires]]
+key = "python3"
+label = "Python 3"
+requirement_type = "binary"
+check_value = "python3"
+description = "Python 3 interpreter. Required for data analysis with pandas, matplotlib, and seaborn."
+
+[requires.install]
+macos = "brew install python3"
+windows = "winget install Python.Python.3.12"
+linux = "sudo apt install python3 python3-pip"
+pip = "python3 --version"
+
 # ─── Configurable settings ───────────────────────────────────────────────────
 
 [[settings]]

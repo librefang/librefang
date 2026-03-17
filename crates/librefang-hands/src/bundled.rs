@@ -257,6 +257,123 @@ mod tests {
     }
 
     #[test]
+    fn parse_reddit_hand() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "reddit")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        assert_eq!(def.id, "reddit");
+        assert_eq!(def.name, "Reddit Hand");
+        assert_eq!(def.category, crate::HandCategory::Communication);
+        assert!(def.skill_content.is_some());
+        assert!(!def.requires.is_empty());
+        assert_eq!(def.requires.len(), 4); // CLIENT_ID, CLIENT_SECRET, USERNAME, PASSWORD
+        assert!(def.tools.contains(&"event_publish".to_string()));
+        assert!(!def.settings.is_empty());
+        assert!(!def.dashboard.metrics.is_empty());
+        assert!((def.agent.temperature - 0.7).abs() < f32::EPSILON);
+        assert_eq!(def.agent.max_iterations, Some(50));
+    }
+
+    #[test]
+    fn parse_linkedin_hand() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "linkedin")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        assert_eq!(def.id, "linkedin");
+        assert_eq!(def.name, "LinkedIn Hand");
+        assert_eq!(def.category, crate::HandCategory::Communication);
+        assert!(def.skill_content.is_some());
+        assert!(!def.requires.is_empty());
+        assert_eq!(def.requires.len(), 1); // LINKEDIN_ACCESS_TOKEN
+        assert!(def.tools.contains(&"event_publish".to_string()));
+        assert!(!def.settings.is_empty());
+        assert!(!def.dashboard.metrics.is_empty());
+        assert!((def.agent.temperature - 0.7).abs() < f32::EPSILON);
+        assert_eq!(def.agent.max_iterations, Some(50));
+    }
+
+    #[test]
+    fn parse_strategist_hand() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "strategist")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        assert_eq!(def.id, "strategist");
+        assert_eq!(def.name, "Strategist Hand");
+        assert_eq!(def.category, crate::HandCategory::Productivity);
+        assert!(def.skill_content.is_some());
+        assert!(def.requires.is_empty());
+        assert!(def.tools.contains(&"event_publish".to_string()));
+        assert!(!def.settings.is_empty());
+        assert!(!def.dashboard.metrics.is_empty());
+        assert!((def.agent.temperature - 0.5).abs() < f32::EPSILON);
+        assert_eq!(def.agent.max_iterations, Some(60));
+    }
+
+    #[test]
+    fn parse_apitester_hand() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "apitester")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        assert_eq!(def.id, "apitester");
+        assert_eq!(def.name, "API Tester Hand");
+        assert_eq!(def.category, crate::HandCategory::Development);
+        assert!(def.skill_content.is_some());
+        assert!(def.requires.is_empty());
+        assert!(def.tools.contains(&"event_publish".to_string()));
+        assert!(!def.settings.is_empty());
+        assert!(!def.dashboard.metrics.is_empty());
+        assert!((def.agent.temperature - 0.2).abs() < f32::EPSILON);
+        assert_eq!(def.agent.max_iterations, Some(60));
+    }
+
+    #[test]
+    fn parse_devops_hand() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "devops")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        assert_eq!(def.id, "devops");
+        assert_eq!(def.name, "DevOps Hand");
+        assert_eq!(def.category, crate::HandCategory::Development);
+        assert!(def.skill_content.is_some());
+        assert!(def.requires.is_empty());
+        assert!(def.tools.contains(&"event_publish".to_string()));
+        assert!(!def.settings.is_empty());
+        assert!(!def.dashboard.metrics.is_empty());
+        assert!((def.agent.temperature - 0.2).abs() < f32::EPSILON);
+        assert_eq!(def.agent.max_iterations, Some(60));
+    }
+
+    #[test]
+    fn parse_analytics_hand() {
+        let (id, toml_content, skill_content) = bundled_hands()
+            .into_iter()
+            .find(|(id, _, _)| *id == "analytics")
+            .unwrap();
+        let def = parse_bundled(id, toml_content, skill_content).unwrap();
+        assert_eq!(def.id, "analytics");
+        assert_eq!(def.name, "Analytics Hand");
+        assert_eq!(def.category, crate::HandCategory::Data);
+        assert!(def.skill_content.is_some());
+        assert!(!def.requires.is_empty()); // requires python3
+        assert_eq!(def.requires.len(), 1);
+        assert!(def.tools.contains(&"event_publish".to_string()));
+        assert!(!def.settings.is_empty());
+        assert!(!def.dashboard.metrics.is_empty());
+        assert!((def.agent.temperature - 0.3).abs() < f32::EPSILON);
+        assert_eq!(def.agent.max_iterations, Some(60));
+    }
+
+    #[test]
     fn all_bundled_hands_parse() {
         for (id, toml_content, skill_content) in bundled_hands() {
             let def = parse_bundled(id, toml_content, skill_content)
@@ -278,6 +395,12 @@ mod tests {
             "researcher",
             "twitter",
             "trader",
+            "reddit",
+            "linkedin",
+            "strategist",
+            "apitester",
+            "devops",
+            "analytics",
         ];
         for (id, toml_content, skill_content) in bundled_hands() {
             if einstein_ids.contains(&id) {
@@ -310,6 +433,12 @@ mod tests {
             "researcher",
             "twitter",
             "trader",
+            "reddit",
+            "linkedin",
+            "strategist",
+            "apitester",
+            "devops",
+            "analytics",
         ];
         for (id, toml_content, skill_content) in bundled_hands() {
             if einstein_ids.contains(&id) {
@@ -337,6 +466,12 @@ mod tests {
             "researcher",
             "twitter",
             "trader",
+            "reddit",
+            "linkedin",
+            "strategist",
+            "apitester",
+            "devops",
+            "analytics",
         ];
         for (id, toml_content, skill_content) in bundled_hands() {
             if einstein_ids.contains(&id) {
