@@ -18,7 +18,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.4.7-20260315"
+version = "0.5.6-20260317"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/librefang/librefang"
@@ -53,7 +53,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 
 # IDs
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 # Database
 rusqlite = { version = "0.38.0", features = ["bundled", "serde_json"] }
@@ -113,6 +113,9 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 
+# JWT validation
+jsonwebtoken = "9"
+
 # Rate limiting
 governor = "0.10.4"
 
@@ -138,13 +141,21 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 
 # Email (SMTP + IMAP)
 lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1", "tokio1-rustls-tls"] }
-imap = "2"
-native-tls = { version = "0.2", features = ["vendored"] }
+imap = { version = "2", default-features = false }
+rustls-connector = "0.22"
 mailparse = "0.16"
+
+# Internationalization (i18n)
+fluent = "0.17"
+unic-langid = "0.9"
 
 # Testing
 tokio-test = "0.4"
 tempfile = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Performance
+smallvec = "1"
 
 [profile.release]
 lto = true

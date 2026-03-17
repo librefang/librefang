@@ -321,6 +321,12 @@ impl ChannelAdapter for MastodonAdapter {
         ChannelType::Custom("mastodon".to_string())
     }
 
+    /// Mastodon replies are visible to all followers, so suppress error
+    /// messages to avoid posting internal errors publicly.
+    fn suppress_error_responses(&self) -> bool {
+        true
+    }
+
     async fn start(
         &self,
     ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
@@ -472,10 +478,14 @@ impl ChannelAdapter for MastodonAdapter {
                 let notifications: Vec<serde_json::Value> =
                     poll_resp.json().await.unwrap_or_default();
 
+                // Mastodon returns notifications newest-first. Capture the
+                // first (newest) ID *before* iterating so the next poll
+                // uses the true high-water mark and avoids re-delivery.
+                if let Some(newest) = notifications.first().and_then(|n| n["id"].as_str()) {
+                    last_notification_id = Some(newest.to_string());
+                }
+
                 for notif in &notifications {
-                    if let Some(nid) = notif["id"].as_str() {
-                        last_notification_id = Some(nid.to_string());
-                    }
                     if let Some(mut msg) = parse_mastodon_notification(notif, &own_account_id) {
                         // Inject account_id for multi-bot routing
                         if let Some(ref aid) = account_id {
@@ -713,6 +723,18 @@ mod tests {
         assert_eq!(
             msg.metadata.get("visibility").and_then(|v| v.as_str()),
             Some("direct")
+        );
+    }
+
+    #[test]
+    fn test_mastodon_suppress_error_responses() {
+        let adapter = MastodonAdapter::new(
+            "https://mastodon.social".to_string(),
+            "access-token-123".to_string(),
+        );
+        assert!(
+            adapter.suppress_error_responses(),
+            "MastodonAdapter should suppress error responses to avoid posting them publicly"
         );
     }
 }

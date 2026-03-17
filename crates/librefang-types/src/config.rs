@@ -1069,6 +1069,103 @@ pub struct SidecarChannelConfig {
     pub channel_type: Option<String>,
 }
 
+/// Session retention policy configuration.
+///
+/// Controls automatic cleanup of idle or excess sessions.
+/// Configure in `config.toml`:
+/// ```toml
+/// [session]
+/// retention_days = 30
+/// max_sessions_per_agent = 100
+/// cleanup_interval_hours = 24
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionConfig {
+    /// Maximum age for idle sessions before automatic cleanup (days, 0 = unlimited).
+    pub retention_days: u32,
+    /// Maximum number of sessions per agent (oldest pruned first, 0 = unlimited).
+    pub max_sessions_per_agent: u32,
+    /// How often the cleanup job runs (in hours).
+    pub cleanup_interval_hours: u32,
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            retention_days: 0,
+            max_sessions_per_agent: 0,
+            cleanup_interval_hours: 24,
+        }
+    }
+}
+
+/// Message queue configuration.
+///
+/// Controls queue depth limits and task TTL for the agent command queue.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [queue]
+/// max_depth_per_agent = 100
+/// max_depth_global = 1000
+/// task_ttl_secs = 3600
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueueConfig {
+    /// Max queue depth per agent (0 = unlimited).
+    pub max_depth_per_agent: u32,
+    /// Max queue depth globally (0 = unlimited).
+    pub max_depth_global: u32,
+    /// Task TTL in seconds (unprocessed tasks expire, 0 = unlimited).
+    pub task_ttl_secs: u64,
+    /// Per-lane concurrency limits.
+    #[serde(default)]
+    pub concurrency: QueueConcurrencyConfig,
+}
+
+impl Default for QueueConfig {
+    fn default() -> Self {
+        Self {
+            max_depth_per_agent: 0,
+            max_depth_global: 0,
+            task_ttl_secs: 3600,
+            concurrency: QueueConcurrencyConfig::default(),
+        }
+    }
+}
+
+/// Per-lane concurrency limits for the command queue.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [queue.concurrency]
+/// main_lane = 3
+/// cron_lane = 2
+/// subagent_lane = 3
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QueueConcurrencyConfig {
+    /// Main lane concurrent limit (user messages).
+    pub main_lane: usize,
+    /// Cron lane concurrent limit (scheduled jobs).
+    pub cron_lane: usize,
+    /// Subagent lane concurrent limit (child agents).
+    pub subagent_lane: usize,
+}
+
+impl Default for QueueConcurrencyConfig {
+    fn default() -> Self {
+        Self {
+            main_lane: 3,
+            cron_lane: 2,
+            subagent_lane: 3,
+        }
+    }
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1114,6 +1211,13 @@ pub struct KernelConfig {
     /// Usage footer mode (what to show after each response).
     #[serde(default)]
     pub usage_footer: UsageFooterMode,
+    /// Cost optimization mode for stable prompt prefixes.
+    ///
+    /// When enabled, LibreFang avoids volatile system-prompt additions that
+    /// change every turn (for example recalled memory append and canonical
+    /// context injection), improving provider-side prompt cache hit rates.
+    #[serde(default)]
+    pub stable_prefix_mode: bool,
     /// Web tools configuration (search + fetch).
     #[serde(default)]
     pub web: WebConfig,
@@ -1199,12 +1303,222 @@ pub struct KernelConfig {
     /// If not set, the convention `{PROVIDER_UPPER}_API_KEY` is used automatically.
     #[serde(default)]
     pub provider_api_keys: HashMap<String, String>,
+    /// Vertex AI provider configuration.
+    #[serde(default)]
+    pub vertex_ai: VertexAiConfig,
     /// OAuth client ID overrides for PKCE flows.
     #[serde(default)]
     pub oauth: OAuthConfig,
     /// Sidecar channel adapters (external process-based).
     #[serde(default)]
     pub sidecar_channels: Vec<SidecarChannelConfig>,
+    /// Enable LLM provider prompt caching (default: true).
+    ///
+    /// When enabled, the runtime adds provider-specific cache hints to system
+    /// prompts and tool definitions so that repeated prefixes are cached:
+    /// - **Anthropic**: `cache_control: {"type": "ephemeral"}` on system blocks.
+    /// - **OpenAI**: automatic prefix caching (response cache stats are parsed).
+    #[serde(default = "default_prompt_caching")]
+    pub prompt_caching: bool,
+    /// Session retention policy (automatic cleanup of old/excess sessions).
+    #[serde(default)]
+    pub session: SessionConfig,
+    /// Message queue configuration (depth limits, TTL, concurrency).
+    #[serde(default)]
+    pub queue: QueueConfig,
+    /// External authentication provider configuration (OAuth2/OIDC).
+    #[serde(default)]
+    pub external_auth: ExternalAuthConfig,
+}
+
+/// Vertex AI provider configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [vertex_ai]
+/// project_id = "my-gcp-project"
+/// region = "us-central1"
+/// credentials_path = "/path/to/service-account.json"
+/// ```
+///
+/// Credentials resolution order:
+/// 1. `credentials_path` in config (JSON string or file path)
+/// 2. `VERTEX_AI_SERVICE_ACCOUNT_JSON` env var
+/// 3. `GOOGLE_APPLICATION_CREDENTIALS` env var (file path)
+/// 4. `gcloud auth print-access-token` CLI fallback
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VertexAiConfig {
+    /// GCP project ID. Falls back to `VERTEX_AI_PROJECT_ID`,
+    /// `GOOGLE_CLOUD_PROJECT`, or the `project_id` field in the service account JSON.
+    pub project_id: Option<String>,
+    /// GCP region for the Vertex AI endpoint (default: "us-central1").
+    /// Falls back to `VERTEX_AI_REGION` or `GOOGLE_CLOUD_REGION` env var.
+    pub region: Option<String>,
+    /// Path to a GCP service account JSON key file, or the raw JSON string.
+    /// Falls back to `VERTEX_AI_SERVICE_ACCOUNT_JSON` or
+    /// `GOOGLE_APPLICATION_CREDENTIALS` env var.
+    pub credentials_path: Option<String>,
+}
+
+/// External authentication provider configuration (OAuth2/OIDC).
+///
+/// Allows delegating user authentication to an external identity provider
+/// (Okta, Auth0, Keycloak, Google, GitHub, Microsoft, etc.).
+///
+/// Single provider (backward-compatible):
+/// ```toml
+/// [external_auth]
+/// enabled = true
+/// issuer_url = "https://accounts.google.com"
+/// client_id = "your-client-id.apps.googleusercontent.com"
+/// client_secret_env = "LIBREFANG_OAUTH_CLIENT_SECRET"
+/// redirect_url = "http://127.0.0.1:4545/api/auth/callback"
+/// scopes = ["openid", "profile", "email"]
+/// ```
+///
+/// Multiple providers:
+/// ```toml
+/// [external_auth]
+/// enabled = true
+///
+/// [[external_auth.providers]]
+/// id = "google"
+/// display_name = "Google"
+/// issuer_url = "https://accounts.google.com"
+/// client_id = "your-google-client-id"
+/// client_secret_env = "GOOGLE_OAUTH_CLIENT_SECRET"
+///
+/// [[external_auth.providers]]
+/// id = "github"
+/// display_name = "GitHub"
+/// issuer_url = "https://token.actions.githubusercontent.com"
+/// auth_url = "https://github.com/login/oauth/authorize"
+/// token_url = "https://github.com/login/oauth/access_token"
+/// userinfo_url = "https://api.github.com/user"
+/// client_id = "your-github-client-id"
+/// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"
+/// scopes = ["read:user", "user:email"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExternalAuthConfig {
+    /// Whether external auth is enabled.
+    pub enabled: bool,
+    /// OIDC issuer URL (e.g., `https://accounts.google.com`).
+    /// Used to discover the OIDC configuration at `{issuer_url}/.well-known/openid-configuration`.
+    pub issuer_url: String,
+    /// OAuth2 client ID registered with the identity provider.
+    pub client_id: String,
+    /// Environment variable holding the OAuth2 client secret.
+    /// The secret itself is never stored in config.
+    #[serde(default = "default_oauth_client_secret_env")]
+    pub client_secret_env: String,
+    /// Redirect URL for the OAuth2 authorization code flow callback.
+    /// Defaults to `http://127.0.0.1:4545/api/auth/callback`.
+    #[serde(default = "default_redirect_url")]
+    pub redirect_url: String,
+    /// OAuth2 scopes to request.
+    #[serde(default = "default_oauth_scopes")]
+    pub scopes: Vec<String>,
+    /// Allowed email domains for authorization (empty = allow all).
+    /// e.g., `["example.com", "corp.example.com"]`
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// JWT audience claim to validate (defaults to `client_id` if empty).
+    #[serde(default)]
+    pub audience: String,
+    /// Session token lifetime in seconds. Default: 86400 (24 hours).
+    #[serde(default = "default_session_ttl")]
+    pub session_ttl_secs: u64,
+    /// Multiple OIDC/OAuth2 providers.
+    /// When configured, these take precedence over the top-level single-provider fields.
+    #[serde(default)]
+    pub providers: Vec<OidcProvider>,
+}
+
+/// Configuration for a single OIDC/OAuth2 provider.
+///
+/// Supports standard OIDC providers (Google, Azure AD, Keycloak) that use
+/// `.well-known/openid-configuration` discovery, as well as non-OIDC OAuth2
+/// providers (GitHub) where explicit `auth_url`, `token_url`, and `userinfo_url`
+/// are specified.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcProvider {
+    /// Unique identifier for this provider (e.g., "google", "github", "keycloak").
+    pub id: String,
+    /// Human-readable display name (e.g., "Google", "GitHub", "Corporate SSO").
+    #[serde(default)]
+    pub display_name: String,
+    /// OIDC issuer URL for discovery. Leave empty for non-OIDC providers (e.g., GitHub).
+    #[serde(default)]
+    pub issuer_url: String,
+    /// Explicit authorization endpoint (overrides OIDC discovery).
+    #[serde(default)]
+    pub auth_url: String,
+    /// Explicit token endpoint (overrides OIDC discovery).
+    #[serde(default)]
+    pub token_url: String,
+    /// Explicit userinfo endpoint (overrides OIDC discovery).
+    #[serde(default)]
+    pub userinfo_url: String,
+    /// Explicit JWKS URI (overrides OIDC discovery).
+    #[serde(default)]
+    pub jwks_uri: String,
+    /// OAuth2 client ID.
+    pub client_id: String,
+    /// Environment variable name holding the client secret.
+    #[serde(default = "default_oauth_client_secret_env")]
+    pub client_secret_env: String,
+    /// OAuth2 redirect URI. Defaults to `http://127.0.0.1:4545/api/auth/callback`.
+    #[serde(default = "default_redirect_url")]
+    pub redirect_url: String,
+    /// OAuth2 scopes to request.
+    #[serde(default = "default_oauth_scopes")]
+    pub scopes: Vec<String>,
+    /// Allowed email domains (empty = allow all).
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+    /// JWT audience claim to validate.
+    #[serde(default)]
+    pub audience: String,
+}
+
+fn default_oauth_client_secret_env() -> String {
+    "LIBREFANG_OAUTH_CLIENT_SECRET".to_string()
+}
+
+fn default_redirect_url() -> String {
+    "http://127.0.0.1:4545/api/auth/callback".to_string()
+}
+
+fn default_oauth_scopes() -> Vec<String> {
+    vec![
+        "openid".to_string(),
+        "profile".to_string(),
+        "email".to_string(),
+    ]
+}
+
+fn default_session_ttl() -> u64 {
+    86400
+}
+
+impl Default for ExternalAuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            issuer_url: String::new(),
+            client_id: String::new(),
+            client_secret_env: default_oauth_client_secret_env(),
+            redirect_url: default_redirect_url(),
+            scopes: default_oauth_scopes(),
+            allowed_domains: Vec::new(),
+            audience: String::new(),
+            session_ttl_secs: default_session_ttl(),
+            providers: Vec::new(),
+        }
+    }
 }
 
 /// OAuth client ID overrides for PKCE flows.
@@ -1262,6 +1576,10 @@ impl Default for BudgetConfig {
 
 fn default_max_cron_jobs() -> usize {
     500
+}
+
+fn default_prompt_caching() -> bool {
+    true
 }
 
 /// Configuration entry for an MCP server.
@@ -1425,6 +1743,7 @@ impl Default for KernelConfig {
             mcp_servers: Vec::new(),
             a2a: None,
             usage_footer: UsageFooterMode::default(),
+            stable_prefix_mode: false,
             web: WebConfig::default(),
             fallback_providers: Vec::new(),
             browser: BrowserConfig::default(),
@@ -1451,8 +1770,13 @@ impl Default for KernelConfig {
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
             provider_api_keys: HashMap::new(),
+            vertex_ai: VertexAiConfig::default(),
             oauth: OAuthConfig::default(),
             sidecar_channels: Vec::new(),
+            prompt_caching: default_prompt_caching(),
+            session: SessionConfig::default(),
+            queue: QueueConfig::default(),
+            external_auth: ExternalAuthConfig::default(),
         }
     }
 }
@@ -1517,6 +1841,7 @@ impl std::fmt::Debug for KernelConfig {
             )
             .field("a2a", &self.a2a.as_ref().map(|a| a.enabled))
             .field("usage_footer", &self.usage_footer)
+            .field("stable_prefix_mode", &self.stable_prefix_mode)
             .field("web", &self.web)
             .field(
                 "fallback_providers",
@@ -1569,6 +1894,12 @@ impl std::fmt::Debug for KernelConfig {
             .field(
                 "provider_api_keys",
                 &format!("{} mapping(s)", self.provider_api_keys.len()),
+            )
+            .field("session", &self.session)
+            .field("queue", &self.queue)
+            .field(
+                "external_auth",
+                &format!("enabled={}", self.external_auth.enabled),
             )
             .finish()
     }
@@ -2627,10 +2958,10 @@ pub struct WeComConfig {
     pub secret_env: String,
     /// Port for the incoming webhook.
     pub webhook_port: u16,
-    /// Callback verification token (optional, for URL verification).
-    pub token: Option<String>,
-    /// Encoding AES key for callback (optional, for encrypted mode).
-    pub encoding_aes_key: Option<String>,
+    /// Env var name holding the callback verification token (optional).
+    pub token_env: Option<String>,
+    /// Env var name holding the encoding AES key (optional).
+    pub encoding_aes_key_env: Option<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
     pub account_id: Option<String>,
@@ -2648,8 +2979,8 @@ impl Default for WeComConfig {
             agent_id: String::new(),
             secret_env: "WECOM_SECRET".to_string(),
             webhook_port: 8454,
-            token: None,
-            encoding_aes_key: None,
+            token_env: None,
+            encoding_aes_key_env: None,
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
@@ -3754,6 +4085,17 @@ impl KernelConfig {
         } else if self.web.fetch.timeout_secs > 120 {
             self.web.fetch.timeout_secs = 120;
         }
+
+        // Queue concurrency: min 1 per lane (0 would deadlock)
+        if self.queue.concurrency.main_lane == 0 {
+            self.queue.concurrency.main_lane = 1;
+        }
+        if self.queue.concurrency.cron_lane == 0 {
+            self.queue.concurrency.cron_lane = 1;
+        }
+        if self.queue.concurrency.subagent_lane == 0 {
+            self.queue.concurrency.subagent_lane = 1;
+        }
     }
 }
 
@@ -3860,6 +4202,23 @@ mod tests {
         };
         assert_eq!(config.mode, KernelMode::Stable);
         assert_eq!(config.language, "ar");
+    }
+
+    #[test]
+    fn test_stable_prefix_mode_default_false() {
+        let config = KernelConfig::default();
+        assert!(!config.stable_prefix_mode);
+    }
+
+    #[test]
+    fn test_stable_prefix_mode_toml_roundtrip() {
+        let config = KernelConfig {
+            stable_prefix_mode: true,
+            ..Default::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let back: KernelConfig = toml::from_str(&toml_str).unwrap();
+        assert!(back.stable_prefix_mode);
     }
 
     #[test]

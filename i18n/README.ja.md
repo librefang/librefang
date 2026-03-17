@@ -272,7 +272,7 @@ MITライセンス。LICENSEファイルを参照してください。
 LibreFangに貢献してくださった皆様に感謝します！
 
 <a href="https://github.com/librefang/librefang/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+  <img src="../public/assets/contributors.svg" alt="Contributors" />
 </a>
 
 > 参加しませんか？[コントリビューションガイド](../CONTRIBUTING.md)をご覧ください — 多くのタスクはRustの経験不要です。

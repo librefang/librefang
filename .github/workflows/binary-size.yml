@@ -1,15 +1,12 @@
 name: Binary Size
 
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
+  push:
+    tags:
+      - "v*"
 
 permissions:
-  pull-requests: write
+  contents: read
 
 jobs:
   size:
@@ -17,46 +14,68 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: main
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build main binary
+      - name: Build current release binary
         run: |
           cargo build --release --bin librefang 2>/dev/null
-          MAIN_SIZE=$(stat -c%s target/release/librefang 2>/dev/null || echo 0)
-          echo "main_size=$MAIN_SIZE" >> "$GITHUB_ENV"
+          SIZE=$(stat -c%s target/release/librefang 2>/dev/null || echo 0)
+          echo "current_size=$SIZE" >> "$GITHUB_ENV"
 
-      - uses: actions/checkout@v6
-
-      - name: Build PR binary and compare
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build previous release binary
         run: |
-          cargo build --release --bin librefang 2>/dev/null
-          PR_SIZE=$(stat -c%s target/release/librefang 2>/dev/null || echo 0)
-          MAIN_SIZE="${{ env.main_size }}"
+          CURRENT_TAG="${GITHUB_REF#refs/tags/}"
+          PREV_TAG=$(git tag --sort=-v:refname | grep '^v' | grep -v "^${CURRENT_TAG}$" | head -1)
 
-          if [ "$MAIN_SIZE" -eq 0 ] || [ "$PR_SIZE" -eq 0 ]; then
+          if [ -z "$PREV_TAG" ]; then
+            echo "prev_size=0" >> "$GITHUB_ENV"
+            echo "prev_tag=none" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          echo "prev_tag=$PREV_TAG" >> "$GITHUB_ENV"
+          git checkout "$PREV_TAG"
+          cargo build --release --bin librefang 2>/dev/null
+          PREV_SIZE=$(stat -c%s target/release/librefang 2>/dev/null || echo 0)
+          echo "prev_size=$PREV_SIZE" >> "$GITHUB_ENV"
+
+      - name: Report size comparison
+        run: |
+          CURRENT="${{ env.current_size }}"
+          PREV="${{ env.prev_size }}"
+          PREV_TAG="${{ env.prev_tag }}"
+          TAG="${GITHUB_REF#refs/tags/}"
+
+          if [ "$CURRENT" -eq 0 ]; then
             echo "Could not measure binary size"
             exit 0
           fi
 
-          DIFF=$((PR_SIZE - MAIN_SIZE))
-          MAIN_MB=$(echo "scale=2; $MAIN_SIZE / 1048576" | bc)
-          PR_MB=$(echo "scale=2; $PR_SIZE / 1048576" | bc)
-          DIFF_KB=$(echo "scale=1; $DIFF / 1024" | bc)
+          CUR_MB=$(echo "scale=2; $CURRENT / 1048576" | bc)
 
-          if [ "$DIFF" -gt 524288 ]; then
-            EMOJI="⚠️"
-          elif [ "$DIFF" -lt -524288 ]; then
-            EMOJI="🎉"
+          echo "## Binary Size" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$PREV" -eq 0 ] || [ "$PREV_TAG" = "none" ]; then
+            echo "| Version | Size |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---------|------|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| ${TAG} | ${CUR_MB} MB |" >> "$GITHUB_STEP_SUMMARY"
           else
-            EMOJI="✅"
+            PREV_MB=$(echo "scale=2; $PREV / 1048576" | bc)
+            DIFF=$((CURRENT - PREV))
+            DIFF_KB=$(echo "scale=1; $DIFF / 1024" | bc)
+
+            if [ "$DIFF" -gt 524288 ]; then
+              EMOJI="⚠️"
+            elif [ "$DIFF" -lt -524288 ]; then
+              EMOJI="🎉"
+            else
+              EMOJI="✅"
+            fi
+
+            echo "| Version | Size | Delta |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---------|------|-------|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| ${TAG} | ${CUR_MB} MB | ${EMOJI} ${DIFF_KB} KB vs ${PREV_TAG} (${PREV_MB} MB) |" >> "$GITHUB_STEP_SUMMARY"
           fi
-
-          COMMENT="$EMOJI **Binary Size:** ${PR_MB}MB (${DIFF_KB:+${DIFF_KB}}KB vs main ${MAIN_MB}MB)"
-
-          gh pr comment ${{ github.event.pull_request.number }} \
-            --repo ${{ github.repository }} \
-            --body "$COMMENT"

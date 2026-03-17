@@ -2,7 +2,7 @@
 //!
 //! Routes different types of work through separate lanes with independent
 //! concurrency limits to prevent starvation:
-//! - Main: user messages (serialized, 1 at a time)
+//! - Main: user messages (3 concurrent by default)
 //! - Cron: scheduled jobs (2 concurrent)
 //! - Subagent: spawned child agents (3 concurrent)
 
@@ -12,7 +12,7 @@ use tokio::sync::Semaphore;
 /// Command lane type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
-    /// User-facing message processing (1 concurrent).
+    /// User-facing message processing (3 concurrent by default).
     Main,
     /// Cron/scheduled job execution (2 concurrent).
     Cron,
@@ -56,10 +56,10 @@ impl CommandQueue {
     /// Create a new command queue with default capacities.
     pub fn new() -> Self {
         Self {
-            main_sem: Arc::new(Semaphore::new(1)),
+            main_sem: Arc::new(Semaphore::new(3)),
             cron_sem: Arc::new(Semaphore::new(2)),
             subagent_sem: Arc::new(Semaphore::new(3)),
-            main_capacity: 1,
+            main_capacity: 3,
             cron_capacity: 2,
             subagent_capacity: 3,
         }
@@ -147,11 +147,11 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     #[tokio::test]
-    async fn test_main_lane_serialization() {
+    async fn test_main_lane_submit() {
         let queue = CommandQueue::new();
         let counter = Arc::new(AtomicU32::new(0));
 
-        // Main lane has capacity 1 — tasks should serialize
+        // Main lane accepts and executes tasks
         let c1 = counter.clone();
         let result = queue
             .submit(Lane::Main, async move {
@@ -194,7 +194,7 @@ mod tests {
         let occ = queue.occupancy();
         assert_eq!(occ.len(), 3);
         assert_eq!(occ[0].active, 0);
-        assert_eq!(occ[0].capacity, 1);
+        assert_eq!(occ[0].capacity, 3);
         assert_eq!(occ[1].capacity, 2);
         assert_eq!(occ[2].capacity, 3);
     }

@@ -218,12 +218,15 @@ fn fetch_unseen_emails(
     password: &str,
     folders: &[String],
 ) -> Result<Vec<(String, String, String, String)>, String> {
-    let tls = native_tls::TlsConnector::builder()
-        .build()
+    let tcp = std::net::TcpStream::connect((host, port))
+        .map_err(|e| format!("TCP connect failed: {e}"))?;
+    let tls = rustls_connector::RustlsConnector::new_with_native_certs()
         .map_err(|e| format!("TLS connector error: {e}"))?;
+    let tls_stream = tls
+        .connect(host, tcp)
+        .map_err(|e| format!("TLS handshake failed: {e}"))?;
 
-    let client =
-        imap::connect((host, port), host, &tls).map_err(|e| format!("IMAP connect failed: {e}"))?;
+    let client = imap::Client::new(tls_stream);
 
     // Try LOGIN first; fall back to AUTHENTICATE PLAIN for servers like Lark
     // that reject LOGIN and only support AUTH=PLAIN (SASL).

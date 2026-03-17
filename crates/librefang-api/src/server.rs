@@ -29,6 +29,614 @@ pub struct DaemonInfo {
     pub platform: String,
 }
 
+/// Current API version. Bump when introducing a new version.
+pub const API_VERSION_LATEST: &str = crate::versioning::CURRENT_VERSION;
+
+/// All available API versions with their status.
+pub const API_VERSIONS: &[(&str, &str)] = &[("v1", "stable")];
+
+/// Build the v1 API route tree.
+///
+/// Returns a `Router` with paths relative to the mount point (e.g. `/health`,
+/// `/agents`, etc.). The caller nests this under `/api` and `/api/v1`.
+///
+/// Adding a future v2 is straightforward: create `api_v2_routes()` and nest it
+/// at `/api/v2`, then update `API_VERSION_LATEST` and `API_VERSIONS`.
+fn api_v1_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/metrics", axum::routing::get(routes::prometheus_metrics))
+        .route("/health", axum::routing::get(routes::health))
+        .route("/health/detail", axum::routing::get(routes::health_detail))
+        .route("/status", axum::routing::get(routes::status))
+        .route("/version", axum::routing::get(routes::version))
+        .route(
+            "/agents",
+            axum::routing::get(routes::list_agents).post(routes::spawn_agent),
+        )
+        // Bulk agent operations (before /agents/{id} to avoid path conflicts)
+        .route(
+            "/agents/bulk",
+            axum::routing::post(routes::bulk_create_agents).delete(routes::bulk_delete_agents),
+        )
+        .route(
+            "/agents/bulk/start",
+            axum::routing::post(routes::bulk_start_agents),
+        )
+        .route(
+            "/agents/bulk/stop",
+            axum::routing::post(routes::bulk_stop_agents),
+        )
+        .route(
+            "/agents/{id}",
+            axum::routing::get(routes::get_agent)
+                .delete(routes::kill_agent)
+                .patch(routes::patch_agent),
+        )
+        .route(
+            "/agents/{id}/mode",
+            axum::routing::put(routes::set_agent_mode),
+        )
+        .route("/profiles", axum::routing::get(routes::list_profiles))
+        .route("/profiles/{name}", axum::routing::get(routes::get_profile))
+        .route(
+            "/agents/{id}/message",
+            axum::routing::post(routes::send_message),
+        )
+        .route(
+            "/agents/{id}/message/stream",
+            axum::routing::post(routes::send_message_stream),
+        )
+        .route(
+            "/agents/{id}/session",
+            axum::routing::get(routes::get_agent_session),
+        )
+        .route(
+            "/agents/{id}/sessions",
+            axum::routing::get(routes::list_agent_sessions).post(routes::create_agent_session),
+        )
+        .route(
+            "/agents/{id}/sessions/{session_id}/switch",
+            axum::routing::post(routes::switch_agent_session),
+        )
+        .route(
+            "/agents/{id}/session/reset",
+            axum::routing::post(routes::reset_session),
+        )
+        .route(
+            "/agents/{id}/history",
+            axum::routing::delete(routes::clear_agent_history),
+        )
+        .route(
+            "/agents/{id}/session/compact",
+            axum::routing::post(routes::compact_session),
+        )
+        .route("/agents/{id}/stop", axum::routing::post(routes::stop_agent))
+        .route("/agents/{id}/model", axum::routing::put(routes::set_model))
+        .route(
+            "/agents/{id}/traces",
+            axum::routing::get(routes::get_agent_traces),
+        )
+        .route(
+            "/agents/{id}/tools",
+            axum::routing::get(routes::get_agent_tools).put(routes::set_agent_tools),
+        )
+        .route(
+            "/agents/{id}/skills",
+            axum::routing::get(routes::get_agent_skills).put(routes::set_agent_skills),
+        )
+        .route(
+            "/agents/{id}/mcp_servers",
+            axum::routing::get(routes::get_agent_mcp_servers).put(routes::set_agent_mcp_servers),
+        )
+        .route(
+            "/agents/{id}/identity",
+            axum::routing::patch(routes::update_agent_identity),
+        )
+        .route(
+            "/agents/{id}/config",
+            axum::routing::patch(routes::patch_agent_config),
+        )
+        .route(
+            "/agents/{id}/clone",
+            axum::routing::post(routes::clone_agent),
+        )
+        .route(
+            "/agents/{id}/files",
+            axum::routing::get(routes::list_agent_files),
+        )
+        .route(
+            "/agents/{id}/files/{filename}",
+            axum::routing::get(routes::get_agent_file).put(routes::set_agent_file),
+        )
+        .route(
+            "/agents/{id}/deliveries",
+            axum::routing::get(routes::get_agent_deliveries),
+        )
+        .route(
+            "/agents/{id}/upload",
+            axum::routing::post(routes::upload_file),
+        )
+        .route("/agents/{id}/ws", axum::routing::get(ws::agent_ws))
+        .route(
+            "/uploads/{file_id}",
+            axum::routing::get(routes::serve_upload),
+        )
+        .route("/channels", axum::routing::get(routes::list_channels))
+        .route(
+            "/channels/{name}/configure",
+            axum::routing::post(routes::configure_channel).delete(routes::remove_channel),
+        )
+        .route(
+            "/channels/{name}/test",
+            axum::routing::post(routes::test_channel),
+        )
+        .route(
+            "/channels/reload",
+            axum::routing::post(routes::reload_channels),
+        )
+        .route(
+            "/channels/whatsapp/qr/start",
+            axum::routing::post(routes::whatsapp_qr_start),
+        )
+        .route(
+            "/channels/whatsapp/qr/status",
+            axum::routing::get(routes::whatsapp_qr_status),
+        )
+        .route("/templates", axum::routing::get(routes::list_templates))
+        .route(
+            "/templates/{name}",
+            axum::routing::get(routes::get_template),
+        )
+        .route(
+            "/memory/agents/{id}/kv",
+            axum::routing::get(routes::get_agent_kv),
+        )
+        .route(
+            "/memory/agents/{id}/kv/{key}",
+            axum::routing::get(routes::get_agent_kv_key)
+                .put(routes::set_agent_kv_key)
+                .delete(routes::delete_agent_kv_key),
+        )
+        .route(
+            "/agents/{id}/memory/export",
+            axum::routing::get(routes::export_agent_memory),
+        )
+        .route(
+            "/agents/{id}/memory/import",
+            axum::routing::post(routes::import_agent_memory),
+        )
+        .route(
+            "/triggers",
+            axum::routing::get(routes::list_triggers).post(routes::create_trigger),
+        )
+        .route(
+            "/triggers/{id}",
+            axum::routing::delete(routes::delete_trigger).put(routes::update_trigger),
+        )
+        .route(
+            "/schedules",
+            axum::routing::get(routes::list_schedules).post(routes::create_schedule),
+        )
+        .route(
+            "/schedules/{id}",
+            axum::routing::get(routes::get_schedule)
+                .delete(routes::delete_schedule)
+                .put(routes::update_schedule),
+        )
+        .route(
+            "/schedules/{id}/run",
+            axum::routing::post(routes::run_schedule),
+        )
+        .route(
+            "/workflows",
+            axum::routing::get(routes::list_workflows).post(routes::create_workflow),
+        )
+        .route(
+            "/workflows/{id}/run",
+            axum::routing::post(routes::run_workflow),
+        )
+        .route(
+            "/workflows/{id}/runs",
+            axum::routing::get(routes::list_workflow_runs),
+        )
+        .route("/skills", axum::routing::get(routes::list_skills))
+        .route(
+            "/skills/install",
+            axum::routing::post(routes::install_skill),
+        )
+        .route(
+            "/skills/uninstall",
+            axum::routing::post(routes::uninstall_skill),
+        )
+        .route(
+            "/marketplace/search",
+            axum::routing::get(routes::marketplace_search),
+        )
+        .route(
+            "/clawhub/search",
+            axum::routing::get(routes::clawhub_search),
+        )
+        .route(
+            "/clawhub/browse",
+            axum::routing::get(routes::clawhub_browse),
+        )
+        .route(
+            "/clawhub/skill/{slug}",
+            axum::routing::get(routes::clawhub_skill_detail),
+        )
+        .route(
+            "/clawhub/skill/{slug}/code",
+            axum::routing::get(routes::clawhub_skill_code),
+        )
+        .route(
+            "/clawhub/install",
+            axum::routing::post(routes::clawhub_install),
+        )
+        .route("/hands", axum::routing::get(routes::list_hands))
+        .route("/hands/install", axum::routing::post(routes::install_hand))
+        .route(
+            "/hands/active",
+            axum::routing::get(routes::list_active_hands),
+        )
+        .route("/hands/{hand_id}", axum::routing::get(routes::get_hand))
+        .route(
+            "/hands/{hand_id}/activate",
+            axum::routing::post(routes::activate_hand),
+        )
+        .route(
+            "/hands/{hand_id}/check-deps",
+            axum::routing::post(routes::check_hand_deps),
+        )
+        .route(
+            "/hands/{hand_id}/install-deps",
+            axum::routing::post(routes::install_hand_deps),
+        )
+        .route(
+            "/hands/{hand_id}/settings",
+            axum::routing::get(routes::get_hand_settings).put(routes::update_hand_settings),
+        )
+        .route(
+            "/hands/instances/{id}/pause",
+            axum::routing::post(routes::pause_hand),
+        )
+        .route(
+            "/hands/instances/{id}/resume",
+            axum::routing::post(routes::resume_hand),
+        )
+        .route(
+            "/hands/instances/{id}",
+            axum::routing::delete(routes::deactivate_hand),
+        )
+        .route(
+            "/hands/instances/{id}/stats",
+            axum::routing::get(routes::hand_stats),
+        )
+        .route(
+            "/hands/instances/{id}/browser",
+            axum::routing::get(routes::hand_instance_browser),
+        )
+        .route(
+            "/mcp/servers",
+            axum::routing::get(routes::list_mcp_servers).post(routes::add_mcp_server),
+        )
+        .route(
+            "/mcp/servers/{name}",
+            axum::routing::put(routes::update_mcp_server).delete(routes::delete_mcp_server),
+        )
+        .route("/audit/recent", axum::routing::get(routes::audit_recent))
+        .route("/audit/verify", axum::routing::get(routes::audit_verify))
+        .route("/logs/stream", axum::routing::get(routes::logs_stream))
+        .route("/peers", axum::routing::get(routes::list_peers))
+        .route("/peers/{id}", axum::routing::get(routes::get_peer))
+        .route(
+            "/network/status",
+            axum::routing::get(routes::network_status),
+        )
+        .route(
+            "/comms/topology",
+            axum::routing::get(routes::comms_topology),
+        )
+        .route("/comms/events", axum::routing::get(routes::comms_events))
+        .route(
+            "/comms/events/stream",
+            axum::routing::get(routes::comms_events_stream),
+        )
+        .route("/comms/send", axum::routing::post(routes::comms_send))
+        .route("/comms/task", axum::routing::post(routes::comms_task))
+        .route("/tools", axum::routing::get(routes::list_tools))
+        .route("/tools/{name}", axum::routing::get(routes::get_tool))
+        .route("/config", axum::routing::get(routes::get_config))
+        .route("/config/schema", axum::routing::get(routes::config_schema))
+        .route("/config/set", axum::routing::post(routes::config_set))
+        .route(
+            "/approvals",
+            axum::routing::get(routes::list_approvals).post(routes::create_approval),
+        )
+        .route(
+            "/approvals/{id}/approve",
+            axum::routing::post(routes::approve_request),
+        )
+        .route(
+            "/approvals/{id}/reject",
+            axum::routing::post(routes::reject_request),
+        )
+        .route("/usage", axum::routing::get(routes::usage_stats))
+        .route("/usage/summary", axum::routing::get(routes::usage_summary))
+        .route(
+            "/usage/by-model",
+            axum::routing::get(routes::usage_by_model),
+        )
+        .route("/usage/daily", axum::routing::get(routes::usage_daily))
+        .route(
+            "/budget",
+            axum::routing::get(routes::budget_status).put(routes::update_budget),
+        )
+        .route(
+            "/budget/agents",
+            axum::routing::get(routes::agent_budget_ranking),
+        )
+        .route(
+            "/budget/agents/{id}",
+            axum::routing::get(routes::agent_budget_status).put(routes::update_agent_budget),
+        )
+        .route("/sessions", axum::routing::get(routes::list_sessions))
+        .route(
+            "/sessions/cleanup",
+            axum::routing::post(routes::session_cleanup),
+        )
+        .route(
+            "/sessions/{id}",
+            axum::routing::delete(routes::delete_session),
+        )
+        .route(
+            "/sessions/{id}/label",
+            axum::routing::put(routes::set_session_label),
+        )
+        .route(
+            "/agents/{id}/sessions/by-label/{label}",
+            axum::routing::get(routes::find_session_by_label),
+        )
+        .route(
+            "/agents/{id}/update",
+            axum::routing::put(routes::update_agent),
+        )
+        .route("/security", axum::routing::get(routes::security_status))
+        .route("/models", axum::routing::get(routes::list_models))
+        .route(
+            "/models/aliases",
+            axum::routing::get(routes::list_aliases).post(routes::create_alias),
+        )
+        .route(
+            "/models/aliases/{alias}",
+            axum::routing::delete(routes::delete_alias),
+        )
+        .route(
+            "/models/custom",
+            axum::routing::post(routes::add_custom_model),
+        )
+        .route(
+            "/models/custom/{*id}",
+            axum::routing::delete(routes::remove_custom_model),
+        )
+        .route("/models/{*id}", axum::routing::get(routes::get_model))
+        .route("/providers", axum::routing::get(routes::list_providers))
+        .route(
+            "/catalog/update",
+            axum::routing::post(routes::catalog_update),
+        )
+        .route(
+            "/catalog/status",
+            axum::routing::get(routes::catalog_status),
+        )
+        .route(
+            "/providers/github-copilot/oauth/start",
+            axum::routing::post(routes::copilot_oauth_start),
+        )
+        .route(
+            "/providers/github-copilot/oauth/poll/{poll_id}",
+            axum::routing::get(routes::copilot_oauth_poll),
+        )
+        .route(
+            "/providers/{name}/key",
+            axum::routing::post(routes::set_provider_key).delete(routes::delete_provider_key),
+        )
+        .route(
+            "/providers/{name}/test",
+            axum::routing::post(routes::test_provider),
+        )
+        .route(
+            "/providers/{name}/url",
+            axum::routing::put(routes::set_provider_url),
+        )
+        .route("/skills/create", axum::routing::post(routes::create_skill))
+        .route("/extensions", axum::routing::get(routes::list_extensions))
+        .route(
+            "/extensions/install",
+            axum::routing::post(routes::install_extension),
+        )
+        .route(
+            "/extensions/uninstall",
+            axum::routing::post(routes::uninstall_extension),
+        )
+        .route(
+            "/extensions/{name}",
+            axum::routing::get(routes::get_extension),
+        )
+        .route(
+            "/migrate/detect",
+            axum::routing::get(routes::migrate_detect),
+        )
+        .route("/migrate/scan", axum::routing::post(routes::migrate_scan))
+        .route("/migrate", axum::routing::post(routes::run_migrate))
+        .route(
+            "/cron/jobs",
+            axum::routing::get(routes::list_cron_jobs).post(routes::create_cron_job),
+        )
+        .route(
+            "/cron/jobs/{id}",
+            axum::routing::delete(routes::delete_cron_job).put(routes::update_cron_job),
+        )
+        .route(
+            "/cron/jobs/{id}/enable",
+            axum::routing::put(routes::toggle_cron_job),
+        )
+        .route(
+            "/cron/jobs/{id}/status",
+            axum::routing::get(routes::cron_job_status),
+        )
+        // Queue status endpoint
+        .route("/queue/status", axum::routing::get(routes::queue_status))
+        // Backup / Restore endpoints
+        .route("/backup", axum::routing::post(routes::create_backup))
+        .route("/backups", axum::routing::get(routes::list_backups))
+        .route(
+            "/backups/{filename}",
+            axum::routing::delete(routes::delete_backup),
+        )
+        .route("/restore", axum::routing::post(routes::restore_backup))
+        // Task queue management endpoints (#184)
+        .route(
+            "/tasks/status",
+            axum::routing::get(routes::task_queue_status),
+        )
+        .route("/tasks/list", axum::routing::get(routes::task_queue_list))
+        .route(
+            "/tasks/{id}",
+            axum::routing::delete(routes::task_queue_delete),
+        )
+        .route(
+            "/tasks/{id}/retry",
+            axum::routing::post(routes::task_queue_retry),
+        )
+        // Event webhook subscription endpoints (#185)
+        .route(
+            "/webhooks/events",
+            axum::routing::get(routes::list_event_webhooks).post(routes::create_event_webhook),
+        )
+        .route(
+            "/webhooks/events/{id}",
+            axum::routing::put(routes::update_event_webhook).delete(routes::delete_event_webhook),
+        )
+        // Outbound webhook management endpoints (#179)
+        .route(
+            "/webhooks",
+            axum::routing::get(routes::list_webhooks).post(routes::create_webhook),
+        )
+        .route(
+            "/webhooks/{id}",
+            axum::routing::get(routes::get_webhook)
+                .put(routes::update_webhook)
+                .delete(routes::delete_webhook),
+        )
+        .route(
+            "/webhooks/{id}/test",
+            axum::routing::post(routes::test_webhook),
+        )
+        // Webhook trigger endpoints (external event injection)
+        .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
+        .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
+        .route("/shutdown", axum::routing::post(routes::shutdown))
+        // Chat commands endpoint (dynamic slash menu)
+        .route("/commands", axum::routing::get(routes::list_commands))
+        .route("/commands/{name}", axum::routing::get(routes::get_command))
+        .route("/config/reload", axum::routing::post(routes::config_reload))
+        .route(
+            "/bindings",
+            axum::routing::get(routes::list_bindings).post(routes::add_binding),
+        )
+        .route(
+            "/bindings/{index}",
+            axum::routing::delete(routes::remove_binding),
+        )
+        .route(
+            "/a2a/agents",
+            axum::routing::get(routes::a2a_list_external_agents),
+        )
+        .route(
+            "/a2a/agents/{id}",
+            axum::routing::get(routes::a2a_get_external_agent),
+        )
+        .route(
+            "/a2a/discover",
+            axum::routing::post(routes::a2a_discover_external),
+        )
+        .route("/a2a/send", axum::routing::post(routes::a2a_send_external))
+        .route(
+            "/a2a/tasks/{id}/status",
+            axum::routing::get(routes::a2a_external_task_status),
+        )
+        .route(
+            "/integrations",
+            axum::routing::get(routes::list_integrations),
+        )
+        .route(
+            "/integrations/available",
+            axum::routing::get(routes::list_available_integrations),
+        )
+        .route(
+            "/integrations/add",
+            axum::routing::post(routes::add_integration),
+        )
+        .route(
+            "/integrations/{id}",
+            axum::routing::delete(routes::remove_integration),
+        )
+        .route(
+            "/integrations/{id}/reconnect",
+            axum::routing::post(routes::reconnect_integration),
+        )
+        .route(
+            "/integrations/health",
+            axum::routing::get(routes::integrations_health),
+        )
+        .route(
+            "/integrations/reload",
+            axum::routing::post(routes::reload_integrations),
+        )
+        .route(
+            "/pairing/request",
+            axum::routing::post(routes::pairing_request),
+        )
+        .route(
+            "/pairing/complete",
+            axum::routing::post(routes::pairing_complete),
+        )
+        .route(
+            "/pairing/devices",
+            axum::routing::get(routes::pairing_devices),
+        )
+        .route(
+            "/pairing/devices/{id}",
+            axum::routing::delete(routes::pairing_remove_device),
+        )
+        .route(
+            "/pairing/notify",
+            axum::routing::post(routes::pairing_notify),
+        )
+        // OAuth/OIDC external authentication endpoints
+        .route(
+            "/auth/providers",
+            axum::routing::get(crate::oauth::auth_providers),
+        )
+        .route("/auth/login", axum::routing::get(crate::oauth::auth_login))
+        .route(
+            "/auth/login/{provider}",
+            axum::routing::get(crate::oauth::auth_login_provider),
+        )
+        .route(
+            "/auth/callback",
+            axum::routing::get(crate::oauth::auth_callback).post(crate::oauth::auth_callback_post),
+        )
+        .route(
+            "/auth/userinfo",
+            axum::routing::get(crate::oauth::auth_userinfo),
+        )
+        .route(
+            "/auth/introspect",
+            axum::routing::post(crate::oauth::auth_introspect),
+        )
+}
+
 /// Build the full API router with all routes, middleware, and state.
 ///
 /// This is extracted from `run_daemon()` so that embedders (e.g. librefang-desktop)
@@ -47,18 +655,21 @@ pub async fn build_router(
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
-        peer_registry: kernel.peer_registry.as_ref().map(|r| Arc::new(r.clone())),
+        peer_registry: kernel.peer_registry.get().map(|r| Arc::new(r.clone())),
         bridge_manager: tokio::sync::Mutex::new(bridge),
         channels_config: tokio::sync::RwLock::new(channels_config),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: crate::webhook_store::WebhookStore::load(
+            kernel.config.home_dir.join("webhooks.json"),
+        ),
     });
 
     // CORS: allow localhost origins by default. If API key is set, the API
     // is protected anyway. For development, permissive CORS is convenient.
     let cors = if state.kernel.config.api_key.trim().is_empty() {
-        // No auth → restrict CORS to localhost origins (include both 127.0.0.1 and localhost)
+        // No auth -> restrict CORS to localhost origins (include both 127.0.0.1 and localhost)
         let port = listen_addr.port();
         let mut origins: Vec<axum::http::HeaderValue> = vec![
             format!("http://{listen_addr}").parse().unwrap(),
@@ -80,8 +691,8 @@ pub async fn build_router(
             .allow_methods(tower_http::cors::Any)
             .allow_headers(tower_http::cors::Any)
     } else {
-        // Auth enabled → restrict CORS to localhost + configured origins.
-        // SECURITY: CorsLayer::permissive() is dangerous — any website could
+        // Auth enabled -> restrict CORS to localhost + configured origins.
+        // SECURITY: CorsLayer::permissive() is dangerous - any website could
         // make cross-origin requests. Restrict to known origins instead.
         let mut origins: Vec<axum::http::HeaderValue> = vec![
             format!("http://{listen_addr}").parse().unwrap(),
@@ -113,6 +724,11 @@ pub async fn build_router(
     let api_key = state.kernel.config.api_key.trim().to_string();
     let gcra_limiter = rate_limiter::create_rate_limiter();
 
+    // Build the versioned API routes. All /api/* endpoints are defined once
+    // in api_v1_routes() and mounted at both /api and /api/v1 for backward
+    // compatibility. Future versions (v2, v3) can be added as separate routers.
+    let v1_routes = api_v1_routes();
+
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
         .route("/logo.png", axum::routing::get(webchat::logo_png))
@@ -122,530 +738,21 @@ pub async fn build_router(
             "/locales/zh-CN.json",
             axum::routing::get(webchat::locale_zh_cn),
         )
-        .route(
-            "/api/metrics",
-            axum::routing::get(routes::prometheus_metrics),
-        )
-        .route("/api/health", axum::routing::get(routes::health))
-        .route(
-            "/api/health/detail",
-            axum::routing::get(routes::health_detail),
-        )
-        .route("/api/status", axum::routing::get(routes::status))
-        .route("/api/version", axum::routing::get(routes::version))
-        .route(
-            "/api/agents",
-            axum::routing::get(routes::list_agents).post(routes::spawn_agent),
-        )
-        .route(
-            "/api/agents/{id}",
-            axum::routing::get(routes::get_agent)
-                .delete(routes::kill_agent)
-                .patch(routes::patch_agent),
-        )
-        .route(
-            "/api/agents/{id}/mode",
-            axum::routing::put(routes::set_agent_mode),
-        )
-        .route("/api/profiles", axum::routing::get(routes::list_profiles))
-        .route(
-            "/api/profiles/{name}",
-            axum::routing::get(routes::get_profile),
-        )
-        .route(
-            "/api/agents/{id}/message",
-            axum::routing::post(routes::send_message),
-        )
-        .route(
-            "/api/agents/{id}/message/stream",
-            axum::routing::post(routes::send_message_stream),
-        )
-        .route(
-            "/api/agents/{id}/session",
-            axum::routing::get(routes::get_agent_session),
-        )
-        .route(
-            "/api/agents/{id}/sessions",
-            axum::routing::get(routes::list_agent_sessions).post(routes::create_agent_session),
-        )
-        .route(
-            "/api/agents/{id}/sessions/{session_id}/switch",
-            axum::routing::post(routes::switch_agent_session),
-        )
-        .route(
-            "/api/agents/{id}/session/reset",
-            axum::routing::post(routes::reset_session),
-        )
-        .route(
-            "/api/agents/{id}/history",
-            axum::routing::delete(routes::clear_agent_history),
-        )
-        .route(
-            "/api/agents/{id}/session/compact",
-            axum::routing::post(routes::compact_session),
-        )
-        .route(
-            "/api/agents/{id}/stop",
-            axum::routing::post(routes::stop_agent),
-        )
-        .route(
-            "/api/agents/{id}/model",
-            axum::routing::put(routes::set_model),
-        )
-        .route(
-            "/api/agents/{id}/tools",
-            axum::routing::get(routes::get_agent_tools).put(routes::set_agent_tools),
-        )
-        .route(
-            "/api/agents/{id}/skills",
-            axum::routing::get(routes::get_agent_skills).put(routes::set_agent_skills),
-        )
-        .route(
-            "/api/agents/{id}/mcp_servers",
-            axum::routing::get(routes::get_agent_mcp_servers).put(routes::set_agent_mcp_servers),
-        )
-        .route(
-            "/api/agents/{id}/identity",
-            axum::routing::patch(routes::update_agent_identity),
-        )
-        .route(
-            "/api/agents/{id}/config",
-            axum::routing::patch(routes::patch_agent_config),
-        )
-        .route(
-            "/api/agents/{id}/clone",
-            axum::routing::post(routes::clone_agent),
-        )
-        .route(
-            "/api/agents/{id}/files",
-            axum::routing::get(routes::list_agent_files),
-        )
-        .route(
-            "/api/agents/{id}/files/{filename}",
-            axum::routing::get(routes::get_agent_file).put(routes::set_agent_file),
-        )
-        .route(
-            "/api/agents/{id}/deliveries",
-            axum::routing::get(routes::get_agent_deliveries),
-        )
-        .route(
-            "/api/agents/{id}/upload",
-            axum::routing::post(routes::upload_file),
-        )
-        .route("/api/agents/{id}/ws", axum::routing::get(ws::agent_ws))
-        // Upload serving
-        .route(
-            "/api/uploads/{file_id}",
-            axum::routing::get(routes::serve_upload),
-        )
-        // Channel endpoints
-        .route("/api/channels", axum::routing::get(routes::list_channels))
-        .route(
-            "/api/channels/{name}/configure",
-            axum::routing::post(routes::configure_channel).delete(routes::remove_channel),
-        )
-        .route(
-            "/api/channels/{name}/test",
-            axum::routing::post(routes::test_channel),
-        )
-        .route(
-            "/api/channels/reload",
-            axum::routing::post(routes::reload_channels),
-        )
-        // WhatsApp QR login flow
-        .route(
-            "/api/channels/whatsapp/qr/start",
-            axum::routing::post(routes::whatsapp_qr_start),
-        )
-        .route(
-            "/api/channels/whatsapp/qr/status",
-            axum::routing::get(routes::whatsapp_qr_status),
-        )
-        // Template endpoints
-        .route("/api/templates", axum::routing::get(routes::list_templates))
-        .route(
-            "/api/templates/{name}",
-            axum::routing::get(routes::get_template),
-        )
-        // Memory endpoints
-        .route(
-            "/api/memory/agents/{id}/kv",
-            axum::routing::get(routes::get_agent_kv),
-        )
-        .route(
-            "/api/memory/agents/{id}/kv/{key}",
-            axum::routing::get(routes::get_agent_kv_key)
-                .put(routes::set_agent_kv_key)
-                .delete(routes::delete_agent_kv_key),
-        )
-        // Memory export/import endpoints
-        .route(
-            "/api/agents/{id}/memory/export",
-            axum::routing::get(routes::export_agent_memory),
-        )
-        .route(
-            "/api/agents/{id}/memory/import",
-            axum::routing::post(routes::import_agent_memory),
-        )
-        // Trigger endpoints
-        .route(
-            "/api/triggers",
-            axum::routing::get(routes::list_triggers).post(routes::create_trigger),
-        )
-        .route(
-            "/api/triggers/{id}",
-            axum::routing::delete(routes::delete_trigger).put(routes::update_trigger),
-        )
-        // Schedule (cron job) endpoints
-        .route(
-            "/api/schedules",
-            axum::routing::get(routes::list_schedules).post(routes::create_schedule),
-        )
-        .route(
-            "/api/schedules/{id}",
-            axum::routing::get(routes::get_schedule)
-                .delete(routes::delete_schedule)
-                .put(routes::update_schedule),
-        )
-        .route(
-            "/api/schedules/{id}/run",
-            axum::routing::post(routes::run_schedule),
-        )
-        // Workflow endpoints
-        .route(
-            "/api/workflows",
-            axum::routing::get(routes::list_workflows).post(routes::create_workflow),
-        )
-        .route(
-            "/api/workflows/{id}/run",
-            axum::routing::post(routes::run_workflow),
-        )
-        .route(
-            "/api/workflows/{id}/runs",
-            axum::routing::get(routes::list_workflow_runs),
-        )
-        // Skills endpoints
-        .route("/api/skills", axum::routing::get(routes::list_skills))
-        .route(
-            "/api/skills/install",
-            axum::routing::post(routes::install_skill),
-        )
-        .route(
-            "/api/skills/uninstall",
-            axum::routing::post(routes::uninstall_skill),
-        )
-        .route(
-            "/api/marketplace/search",
-            axum::routing::get(routes::marketplace_search),
-        )
-        // ClawHub (OpenClaw ecosystem) endpoints
-        .route(
-            "/api/clawhub/search",
-            axum::routing::get(routes::clawhub_search),
-        )
-        .route(
-            "/api/clawhub/browse",
-            axum::routing::get(routes::clawhub_browse),
-        )
-        .route(
-            "/api/clawhub/skill/{slug}",
-            axum::routing::get(routes::clawhub_skill_detail),
-        )
-        .route(
-            "/api/clawhub/skill/{slug}/code",
-            axum::routing::get(routes::clawhub_skill_code),
-        )
-        .route(
-            "/api/clawhub/install",
-            axum::routing::post(routes::clawhub_install),
-        )
-        // Hands endpoints
-        .route("/api/hands", axum::routing::get(routes::list_hands))
-        .route(
-            "/api/hands/install",
-            axum::routing::post(routes::install_hand),
-        )
-        .route(
-            "/api/hands/active",
-            axum::routing::get(routes::list_active_hands),
-        )
-        .route("/api/hands/{hand_id}", axum::routing::get(routes::get_hand))
-        .route(
-            "/api/hands/{hand_id}/activate",
-            axum::routing::post(routes::activate_hand),
-        )
-        .route(
-            "/api/hands/{hand_id}/check-deps",
-            axum::routing::post(routes::check_hand_deps),
-        )
-        .route(
-            "/api/hands/{hand_id}/install-deps",
-            axum::routing::post(routes::install_hand_deps),
-        )
-        .route(
-            "/api/hands/{hand_id}/settings",
-            axum::routing::get(routes::get_hand_settings).put(routes::update_hand_settings),
-        )
-        .route(
-            "/api/hands/instances/{id}/pause",
-            axum::routing::post(routes::pause_hand),
-        )
-        .route(
-            "/api/hands/instances/{id}/resume",
-            axum::routing::post(routes::resume_hand),
-        )
-        .route(
-            "/api/hands/instances/{id}",
-            axum::routing::delete(routes::deactivate_hand),
-        )
-        .route(
-            "/api/hands/instances/{id}/stats",
-            axum::routing::get(routes::hand_stats),
-        )
-        .route(
-            "/api/hands/instances/{id}/browser",
-            axum::routing::get(routes::hand_instance_browser),
-        )
-        // MCP server endpoints
-        .route(
-            "/api/mcp/servers",
-            axum::routing::get(routes::list_mcp_servers).post(routes::add_mcp_server),
-        )
-        .route(
-            "/api/mcp/servers/{name}",
-            axum::routing::put(routes::update_mcp_server).delete(routes::delete_mcp_server),
-        )
-        // Audit endpoints
-        .route(
-            "/api/audit/recent",
-            axum::routing::get(routes::audit_recent),
-        )
-        .route(
-            "/api/audit/verify",
-            axum::routing::get(routes::audit_verify),
-        )
-        // Live log streaming (SSE)
-        .route("/api/logs/stream", axum::routing::get(routes::logs_stream))
-        // Peer/Network endpoints
-        .route("/api/peers", axum::routing::get(routes::list_peers))
-        .route(
-            "/api/network/status",
-            axum::routing::get(routes::network_status),
-        )
-        // Agent communication (Comms) endpoints
-        .route(
-            "/api/comms/topology",
-            axum::routing::get(routes::comms_topology),
-        )
-        .route(
-            "/api/comms/events",
-            axum::routing::get(routes::comms_events),
-        )
-        .route(
-            "/api/comms/events/stream",
-            axum::routing::get(routes::comms_events_stream),
-        )
-        .route("/api/comms/send", axum::routing::post(routes::comms_send))
-        .route("/api/comms/task", axum::routing::post(routes::comms_task))
-        // Tools endpoints
-        .route("/api/tools", axum::routing::get(routes::list_tools))
-        .route("/api/tools/{name}", axum::routing::get(routes::get_tool))
-        // Config endpoints
-        .route("/api/config", axum::routing::get(routes::get_config))
-        .route(
-            "/api/config/schema",
-            axum::routing::get(routes::config_schema),
-        )
-        .route("/api/config/set", axum::routing::post(routes::config_set))
-        // Approval endpoints
-        .route(
-            "/api/approvals",
-            axum::routing::get(routes::list_approvals).post(routes::create_approval),
-        )
-        .route(
-            "/api/approvals/{id}/approve",
-            axum::routing::post(routes::approve_request),
-        )
-        .route(
-            "/api/approvals/{id}/reject",
-            axum::routing::post(routes::reject_request),
-        )
-        // Usage endpoints
-        .route("/api/usage", axum::routing::get(routes::usage_stats))
-        .route(
-            "/api/usage/summary",
-            axum::routing::get(routes::usage_summary),
-        )
-        .route(
-            "/api/usage/by-model",
-            axum::routing::get(routes::usage_by_model),
-        )
-        .route("/api/usage/daily", axum::routing::get(routes::usage_daily))
-        // Budget endpoints
-        .route(
-            "/api/budget",
-            axum::routing::get(routes::budget_status).put(routes::update_budget),
-        )
-        .route(
-            "/api/budget/agents",
-            axum::routing::get(routes::agent_budget_ranking),
-        )
-        .route(
-            "/api/budget/agents/{id}",
-            axum::routing::get(routes::agent_budget_status).put(routes::update_agent_budget),
-        )
-        // Session endpoints
-        .route("/api/sessions", axum::routing::get(routes::list_sessions))
-        .route(
-            "/api/sessions/{id}",
-            axum::routing::delete(routes::delete_session),
-        )
-        .route(
-            "/api/sessions/{id}/label",
-            axum::routing::put(routes::set_session_label),
-        )
-        .route(
-            "/api/agents/{id}/sessions/by-label/{label}",
-            axum::routing::get(routes::find_session_by_label),
-        )
-        // Agent update
-        .route(
-            "/api/agents/{id}/update",
-            axum::routing::put(routes::update_agent),
-        )
-        // Security dashboard endpoint
-        .route("/api/security", axum::routing::get(routes::security_status))
-        // Model catalog endpoints
-        .route("/api/models", axum::routing::get(routes::list_models))
-        .route(
-            "/api/models/aliases",
-            axum::routing::get(routes::list_aliases).post(routes::create_alias),
-        )
-        .route(
-            "/api/models/aliases/{alias}",
-            axum::routing::delete(routes::delete_alias),
-        )
-        .route(
-            "/api/models/custom",
-            axum::routing::post(routes::add_custom_model),
-        )
-        .route(
-            "/api/models/custom/{*id}",
-            axum::routing::delete(routes::remove_custom_model),
-        )
-        .route("/api/models/{*id}", axum::routing::get(routes::get_model))
-        .route("/api/providers", axum::routing::get(routes::list_providers))
-        // Catalog sync
-        .route(
-            "/api/catalog/update",
-            axum::routing::post(routes::catalog_update),
-        )
-        .route(
-            "/api/catalog/status",
-            axum::routing::get(routes::catalog_status),
-        )
-        // Copilot OAuth (must be before parametric {name} routes)
-        .route(
-            "/api/providers/github-copilot/oauth/start",
-            axum::routing::post(routes::copilot_oauth_start),
-        )
-        .route(
-            "/api/providers/github-copilot/oauth/poll/{poll_id}",
-            axum::routing::get(routes::copilot_oauth_poll),
-        )
-        .route(
-            "/api/providers/{name}/key",
-            axum::routing::post(routes::set_provider_key).delete(routes::delete_provider_key),
-        )
-        .route(
-            "/api/providers/{name}/test",
-            axum::routing::post(routes::test_provider),
-        )
-        .route(
-            "/api/providers/{name}/url",
-            axum::routing::put(routes::set_provider_url),
-        )
-        .route(
-            "/api/skills/create",
-            axum::routing::post(routes::create_skill),
-        )
-        // Extension management endpoints
-        .route(
-            "/api/extensions",
-            axum::routing::get(routes::list_extensions),
-        )
-        .route(
-            "/api/extensions/install",
-            axum::routing::post(routes::install_extension),
-        )
-        .route(
-            "/api/extensions/uninstall",
-            axum::routing::post(routes::uninstall_extension),
-        )
-        .route(
-            "/api/extensions/{name}",
-            axum::routing::get(routes::get_extension),
-        )
-        // Migration endpoints
-        .route(
-            "/api/migrate/detect",
-            axum::routing::get(routes::migrate_detect),
-        )
-        .route(
-            "/api/migrate/scan",
-            axum::routing::post(routes::migrate_scan),
-        )
-        .route("/api/migrate", axum::routing::post(routes::run_migrate))
-        // Cron job management endpoints
-        .route(
-            "/api/cron/jobs",
-            axum::routing::get(routes::list_cron_jobs).post(routes::create_cron_job),
-        )
-        .route(
-            "/api/cron/jobs/{id}",
-            axum::routing::delete(routes::delete_cron_job).put(routes::update_cron_job),
-        )
-        .route(
-            "/api/cron/jobs/{id}/enable",
-            axum::routing::put(routes::toggle_cron_job),
-        )
-        .route(
-            "/api/cron/jobs/{id}/status",
-            axum::routing::get(routes::cron_job_status),
-        )
-        // Backup / Restore endpoints
-        .route("/api/backup", axum::routing::post(routes::create_backup))
-        .route("/api/backups", axum::routing::get(routes::list_backups))
-        .route(
-            "/api/backups/{filename}",
-            axum::routing::delete(routes::delete_backup),
-        )
-        .route("/api/restore", axum::routing::post(routes::restore_backup))
-        // Webhook trigger endpoints (external event injection)
+        // API version discovery endpoint (not versioned itself)
+        .route("/api/versions", axum::routing::get(routes::api_versions))
+        // Auto-generated OpenAPI specification
+        .route(
+            "/api/openapi.json",
+            axum::routing::get(crate::openapi::openapi_spec),
+        )
+        // Mount v1 routes at /api/v1 (explicit version)
+        .nest("/api/v1", v1_routes.clone())
+        // Mount the same routes at /api (latest version alias for backward compat)
+        .nest("/api", v1_routes)
+        // Webhook trigger endpoints (not versioned - external callers use fixed URLs)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
-        .route("/api/shutdown", axum::routing::post(routes::shutdown))
-        // Chat commands endpoint (dynamic slash menu)
-        .route("/api/commands", axum::routing::get(routes::list_commands))
-        .route(
-            "/api/commands/{name}",
-            axum::routing::get(routes::get_command),
-        )
-        // Config reload endpoint
-        .route(
-            "/api/config/reload",
-            axum::routing::post(routes::config_reload),
-        )
-        // Agent binding routes
-        .route(
-            "/api/bindings",
-            axum::routing::get(routes::list_bindings).post(routes::add_binding),
-        )
-        .route(
-            "/api/bindings/{index}",
-            axum::routing::delete(routes::remove_binding),
-        )
-        // A2A (Agent-to-Agent) Protocol endpoints
+        // A2A (Agent-to-Agent) Protocol endpoints (protocol-level, not versioned)
         .route(
             "/.well-known/agent.json",
             axum::routing::get(routes::a2a_agent_card),
@@ -660,80 +767,9 @@ pub async fn build_router(
             "/a2a/tasks/{id}/cancel",
             axum::routing::post(routes::a2a_cancel_task),
         )
-        // A2A management (outbound) endpoints
-        .route(
-            "/api/a2a/agents",
-            axum::routing::get(routes::a2a_list_external_agents),
-        )
-        .route(
-            "/api/a2a/agents/{id}",
-            axum::routing::get(routes::a2a_get_external_agent),
-        )
-        .route(
-            "/api/a2a/discover",
-            axum::routing::post(routes::a2a_discover_external),
-        )
-        .route(
-            "/api/a2a/send",
-            axum::routing::post(routes::a2a_send_external),
-        )
-        .route(
-            "/api/a2a/tasks/{id}/status",
-            axum::routing::get(routes::a2a_external_task_status),
-        )
-        // Integration management endpoints
-        .route(
-            "/api/integrations",
-            axum::routing::get(routes::list_integrations),
-        )
-        .route(
-            "/api/integrations/available",
-            axum::routing::get(routes::list_available_integrations),
-        )
-        .route(
-            "/api/integrations/add",
-            axum::routing::post(routes::add_integration),
-        )
-        .route(
-            "/api/integrations/{id}",
-            axum::routing::delete(routes::remove_integration),
-        )
-        .route(
-            "/api/integrations/{id}/reconnect",
-            axum::routing::post(routes::reconnect_integration),
-        )
-        .route(
-            "/api/integrations/health",
-            axum::routing::get(routes::integrations_health),
-        )
-        .route(
-            "/api/integrations/reload",
-            axum::routing::post(routes::reload_integrations),
-        )
-        // Device pairing endpoints
-        .route(
-            "/api/pairing/request",
-            axum::routing::post(routes::pairing_request),
-        )
-        .route(
-            "/api/pairing/complete",
-            axum::routing::post(routes::pairing_complete),
-        )
-        .route(
-            "/api/pairing/devices",
-            axum::routing::get(routes::pairing_devices),
-        )
-        .route(
-            "/api/pairing/devices/{id}",
-            axum::routing::delete(routes::pairing_remove_device),
-        )
-        .route(
-            "/api/pairing/notify",
-            axum::routing::post(routes::pairing_notify),
-        )
-        // MCP HTTP endpoint (exposes MCP protocol over HTTP)
+        // MCP HTTP endpoint (protocol-level, not versioned)
         .route("/mcp", axum::routing::post(routes::mcp_http))
-        // OpenAI-compatible API
+        // OpenAI-compatible API (follows OpenAI versioning, not ours)
         .route(
             "/v1/chat/completions",
             axum::routing::post(crate::openai_compat::chat_completions),
@@ -746,10 +782,16 @@ pub async fn build_router(
             api_key,
             middleware::auth,
         ))
+        .layer(axum::middleware::from_fn(middleware::accept_language))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::oauth::oidc_auth_middleware,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             gcra_limiter,
             rate_limiter::gcra_rate_limit,
         ))
+        .layer(axum::middleware::from_fn(middleware::api_version_headers))
         .layer(axum::middleware::from_fn(middleware::security_headers))
         .layer(axum::middleware::from_fn(middleware::request_logging))
         .layer(RequestBodyLimitLayer::new(

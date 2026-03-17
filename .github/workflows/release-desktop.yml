@@ -1,0 +1,204 @@
+name: "Release / Desktop"
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-desktop-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Wait for the GitHub Release to be created ────────────────────────────
+  wait_for_release:
+    name: Wait for Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Wait for release or create fallback
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          for i in $(seq 1 12); do
+            if gh release view "$TAG" --repo "${{ github.repository }}" &>/dev/null; then
+              echo "✓ Release $TAG found"
+              exit 0
+            fi
+            echo "Waiting for release $TAG to be created... ($i/12)"
+            sleep 5
+          done
+
+          # Fallback: create a minimal release so builds can proceed
+          echo "::warning::Release not found after 60s, creating fallback release"
+          VERSION="${TAG#v}"
+          VERSION="${VERSION%-*}"
+          CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)
+          if [ -z "$CHANGES" ]; then
+            CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
+          fi
+          gh release create "$TAG" \
+            --title "LibreFang $TAG" \
+            --notes "$CHANGES" \
+            --repo "${{ github.repository }}" || true
+
+  # ── Tauri Desktop App (Windows + macOS + Linux) ───────────────────────────
+  desktop:
+    name: Desktop / ${{ matrix.platform.name }}
+    needs: [wait_for_release]
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: Linux x86_64
+            os: ubuntu-22.04
+            args: "--target x86_64-unknown-linux-gnu"
+            rust_target: x86_64-unknown-linux-gnu
+
+          - name: macOS x86_64
+            os: macos-latest
+            args: "--target x86_64-apple-darwin"
+            rust_target: x86_64-apple-darwin
+
+          - name: macOS ARM64
+            os: macos-latest
+            args: "--target aarch64-apple-darwin"
+            rust_target: aarch64-apple-darwin
+
+          - name: Windows x86_64
+            os: windows-latest
+            args: "--target x86_64-pc-windows-msvc"
+            rust_target: x86_64-pc-windows-msvc
+
+          - name: Windows ARM64
+            os: windows-latest
+            args: "--target aarch64-pc-windows-msvc"
+            rust_target: aarch64-pc-windows-msvc
+
+    runs-on: ${{ matrix.platform.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.rust_target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-${{ matrix.platform.rust_target }}-${{ github.ref_name }}
+
+      - name: Import macOS signing certificate
+        if: runner.os == 'macOS'
+        env:
+          MAC_CERT_BASE64: ${{ secrets.MAC_CERT_BASE64 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          if [ -z "$MAC_CERT_BASE64" ]; then
+            echo "No certificate configured, skipping..."
+            exit 0
+          fi
+          echo "$MAC_CERT_BASE64" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import $RUNNER_TEMP/certificate.p12 -P "$MAC_CERT_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+          echo "Using signing identity: $IDENTITY"
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> $GITHUB_ENV
+          rm -f $RUNNER_TEMP/certificate.p12
+
+      - name: Check notarization readiness
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
+        env:
+          TEAM_ID: ${{ secrets.MAC_NOTARIZE_TEAM_ID }}
+        run: |
+          if [ -z "$TEAM_ID" ] || [ ${#TEAM_ID} -lt 3 ]; then
+            echo "::warning::MAC_NOTARIZE_TEAM_ID is missing or invalid, falling back to unsigned build"
+            echo "APPLE_SIGNING_IDENTITY=" >> $GITHUB_ENV
+          fi
+
+      - name: Strip date suffix from Tauri version (MSI requires pre-release id ≤ 65535)
+        shell: bash
+        run: |
+          cd crates/librefang-desktop
+          # 0.4.6-20260315 → 0.4.6 (MSI version components must be ≤ 65535)
+          sed -i.bak 's/"version": "\([0-9]*\.[0-9]*\.[0-9]*\)-[^"]*"/"version": "\1"/' tauri.conf.json
+          rm -f tauri.conf.json.bak
+          echo "Tauri version: $(grep '"version"' tauri.conf.json)"
+
+      - name: Delete existing assets for this target (allows re-release)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          # List assets and delete any matching this target
+          gh release view "$TAG" --json assets --jq '.assets[].name' 2>/dev/null | while read -r name; do
+            case "$name" in
+              *${{ matrix.platform.rust_target }}*|*latest.json)
+                echo "Deleting existing asset: $name"
+                gh release delete-asset "$TAG" "$name" --yes 2>/dev/null || true
+                ;;
+            esac
+          done
+
+      - name: Build and bundle Tauri desktop app
+        if: runner.os != 'macOS' || env.APPLE_SIGNING_IDENTITY == ''
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "LibreFang ${{ github.ref_name }}"
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          projectPath: crates/librefang-desktop
+          args: ${{ matrix.platform.args }}
+
+      - name: Build and bundle Tauri desktop app (signed macOS)
+        if: runner.os == 'macOS' && env.APPLE_SIGNING_IDENTITY != ''
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.MAC_NOTARIZE_APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.MAC_NOTARIZE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.MAC_NOTARIZE_TEAM_ID }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "LibreFang ${{ github.ref_name }}"
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          projectPath: crates/librefang-desktop
+          args: ${{ matrix.platform.args }}

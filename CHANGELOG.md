@@ -5,6 +5,198 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-03-17
+
+### Added
+
+- Add multi-language support for CLI and API error messages (#449) (@houko)
+- Add truncation and metadata for Telegram reply-to-message (#560) (@SenZhangAI)
+
+### Fixed
+
+- SDK publish fixes + Bluesky notification + auto Dev.to article (#562) (@houko)
+- YAML syntax error in Bluesky notification workflow (#563) (@houko)
+- Add missing discovered_model_info field in ProbeResult test (#565) (@houko)
+
+### Other
+
+- V0.5.5-20260317 (#559) (@houko)
+
+
+## [0.5.5] - 2026-03-17
+
+### Added
+
+- Add Telegram reply-to-message context (#553) (@SenZhangAI)
+- Enrich Ollama model discovery with metadata (#554) (@SenZhangAI)
+- Add GET /api/peers/{id} endpoint (#557) (@SenZhangAI)
+
+### Fixed
+
+- Improve Telegram markdown formatting for headings, lists, code blocks and blockquotes (#405) (@houko)
+- Normalize OpenRouter model IDs to prevent 400 errors (#408) (@houko)
+- Improve python3 detection and Chromium sandbox handling for Linux (#410) (@houko)
+- Prevent Mastodon adapter from re-delivering old notifications and posting errors publicly (#411) (@houko)
+- Replace unsafe pointer mutation with OnceLock for peer_registry/peer_node (#414) (@houko)
+- Raise main_lane default concurrency from 1 to 3 (#552) (@SenZhangAI)
+- Update static linking check to match static-pie binaries (#558) (@houko)
+
+### Performance
+
+- Optimize channel hot-path with reduced allocations and Criterion benchmarks (#451) (@houko)
+
+### Documentation
+
+- Update contributors (#555) (@houko)
+
+### Maintenance
+
+- Auto-cancel old release runs when tag is re-pushed (#547) (@houko)
+
+### Other
+
+- V0.5.4-20260317 (#546) (@houko)
+
+## [0.5.4] - 2026-03-17
+
+### Added
+
+- Add bulk operations API for agents (#397) (@houko)
+- Add Z.AI and Kimi 2 model support (#409) (@houko)
+- Add static Linux binary builds with musl target (#438) (@houko)
+- Add multi-provider OAuth/OIDC authentication support (#454) (@houko)
+- Add session retention policy with automatic cleanup (#516) (@houko)
+- Add configurable message queue with concurrency settings (#517) (@houko)
+- Add multi-language SDKs (JavaScript, Python, Go, Rust) (#531) (@houko)
+- Auto-generate OpenAPI spec with utoipa (#534) (@houko)
+
+### Fixed
+
+- Complete vertex ai config wiring (#498) (@houko)
+- Trim message history at safe turn boundaries (#521) (@houko)
+- Add logging for X-API-Version header insertion failures (#524) (@houko)
+- Fix SDK publishing (PyPI, npm, crates.io, GHCR) (#537) (@houko)
+- Make release creation idempotent (#539) (@houko)
+- Force-push tag in release.sh to handle re-releases (#540) (@houko)
+- Use file instead of ldd to verify static linking (#541) (@houko)
+- Allow re-release to overwrite existing assets (#542) (@houko)
+- Allow desktop re-release to overwrite existing assets (#543) (@houko)
+- Make SDK publishing idempotent for re-releases (#544) (@houko)
+- Re-fetch PREV_TAG after deleting old tag in release.sh (#545) (@houko)
+
+### Changed
+
+- Split monolithic routes.rs into domain-specific modules (#452) (@houko)
+
+### Maintenance
+
+- Move binary size check from PR to release-only (#528) (@houko)
+- Split release workflow into independent parallel pipelines (#533) (@houko)
+
+### Other
+
+- V0.5.2-20260316 (#519) (@houko)
+- V0.5.3-20260317 (#536) (@houko)
+- V0.5.4-20260317 (#538) (@houko)
+
+
+## [0.5.3] - 2026-03-17
+
+### Added
+
+- Add bulk operations API for agents (#397) (@houko)
+- Add Z.AI and Kimi 2 model support (#409) (@houko)
+- Add static Linux binary builds with musl target (#438) (@houko)
+- Add multi-provider OAuth/OIDC authentication support (#454) (@houko)
+- Add session retention policy with automatic cleanup (#516) (@houko)
+- Add configurable message queue with concurrency settings (#517) (@houko)
+- Add multi-language SDKs (JavaScript, Python, Go, Rust) (#531) (@houko)
+- Auto-generate OpenAPI spec with utoipa (#534) (@houko)
+
+### Fixed
+
+- Complete vertex ai config wiring (#498) (@houko)
+- Trim message history at safe turn boundaries (#521) (@houko)
+- Add logging for X-API-Version header insertion failures (#524) (@houko)
+
+### Changed
+
+- Split monolithic routes.rs into domain-specific modules (#452) (@houko)
+
+### Maintenance
+
+- Move binary size check from PR to release-only (#528) (@houko)
+- Split release workflow into independent parallel pipelines (#533) (@houko)
+
+### Other
+
+- V0.5.2-20260316 (#519) (@houko)
+
+## [0.5.2] - 2026-03-16
+
+### Fixed
+
+- Auto-update contributors list from GitHub API (#512) (@houko)
+- Use local SVG for contributors with circular avatars (#513) (@houko)
+- WeCom secret env pattern + add pre-commit fmt hook (#518) (@houko)
+
+### Maintenance
+
+- Auto-merge release PRs after CI passes (#511) (@houko)
+
+### Other
+
+- V0.5.1-20260316 (#510) (@houko)
+
+## [0.5.1] - 2026-03-16
+
+### Fixed
+
+- Improve API version negotiation and local provider detection (#507) (@houko)
+- Inject vault secrets into process env at startup (#509) (@houko)
+
+### Other
+
+- V0.5.0-20260316 (#506) (@houko)
+
+## [0.5.0] - 2026-03-16
+
+### Added
+
+- Add GET /api/commands/:name endpoint (#369) (@houko)
+- Add recipe-assistant agent template (#393) (@houko)
+- Add Nix flake support (#412) (@houko)
+- Add Qwen Code CLI as LLM provider (#417) (@houko)
+- Add LLM provider prompt caching support (#381) (#424) (@houko)
+- Add decision trace layer for tool selection reasoning (#426) (@houko)
+- Add stable_prefix_mode for cache-friendly prompts (#427) (@houko)
+- Replace native-tls with rustls for IMAP channel (#432) (@houko)
+- Add API endpoint versioning support (#450) (@houko)
+- Generate versioned homebrew formula on release (#503) (@houko)
+
+### Fixed
+
+- Use default_model from config in Web UI agent creation (#402) (@houko)
+- Apply log_level from config.toml to tracing subscriber (#404) (@houko)
+- Correctly read nested tokens.id_token for Codex CLI OAuth (#406) (@houko)
+- Use deterministic UUIDs for hand agents to persist across restarts (#407) (@houko)
+- Update nix flake for nixpkgs darwin SDK migration (#491) (@houko)
+- Update nix flake for darwin SDK and crane warnings (#493) (@houko)
+- Add git to devShell and preserve user PATH (#494) (@houko)
+- Remove duplicate `/api/versions` route causing panic on startup (#501) (@houko)
+- Use Render API for heartbeat + release script improvements (#504) (@houko)
+- Allow re-release by replacing existing changelog entry (#505) (@houko)
+
+### Documentation
+
+- Improve CLI --help descriptions for all subcommands (#453) (@houko)
+
+### Other
+
+- V0.4.7-20260315 (#486) (@houko)
+- V0.5.0-20260316 (#499) (@houko)
+
+
 ## [0.4.7] - 2026-03-15
 
 ### Added

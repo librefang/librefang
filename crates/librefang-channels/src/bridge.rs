@@ -503,7 +503,9 @@ async fn handle_send_error<F, Fut>(
                 send_lifecycle_reaction(adapter, sender, msg_id, AgentPhase::Error).await;
                 warn!("Agent error for {new_id} (after re-resolution): {e2}");
                 let err_msg = format!("Agent error: {e2}");
-                send_response(adapter, sender, err_msg.clone(), thread_id, output_format).await;
+                if !adapter.suppress_error_responses() {
+                    send_response(adapter, sender, err_msg.clone(), thread_id, output_format).await;
+                }
                 handle
                     .record_delivery(
                         new_id,
@@ -523,7 +525,9 @@ async fn handle_send_error<F, Fut>(
     send_lifecycle_reaction(adapter, sender, msg_id, AgentPhase::Error).await;
     warn!("Agent error for {agent_id}: {error}");
     let err_msg = format!("Agent error: {error}");
-    send_response(adapter, sender, err_msg.clone(), thread_id, output_format).await;
+    if !adapter.suppress_error_responses() {
+        send_response(adapter, sender, err_msg.clone(), thread_id, output_format).await;
+    }
     handle
         .record_delivery(
             agent_id,
@@ -809,19 +813,19 @@ async fn dispatch_message(
 
     // Route to agent (standard path) — use resolve_with_context to support account_id
     let ctx = crate::router::BindingContext {
-        channel: crate::router::channel_type_to_str(&message.channel).to_string(),
+        channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(&message.channel)),
         account_id: message
             .metadata
             .get("account_id")
             .and_then(|v| v.as_str())
-            .map(String::from),
-        peer_id: message.sender.platform_id.clone(),
+            .map(std::borrow::Cow::Borrowed),
+        peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
         guild_id: message
             .metadata
             .get("guild_id")
             .and_then(|v| v.as_str())
-            .map(String::from),
-        roles: Vec::new(),
+            .map(std::borrow::Cow::Borrowed),
+        roles: smallvec::SmallVec::new(),
     };
     let agent_id = router.resolve_with_context(
         &message.channel,
@@ -1084,19 +1088,19 @@ async fn dispatch_with_blocks(
 ) {
     // Route to agent (same logic as text path) — use resolve_with_context for account_id
     let ctx = crate::router::BindingContext {
-        channel: crate::router::channel_type_to_str(&message.channel).to_string(),
+        channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(&message.channel)),
         account_id: message
             .metadata
             .get("account_id")
             .and_then(|v| v.as_str())
-            .map(String::from),
-        peer_id: message.sender.platform_id.clone(),
+            .map(std::borrow::Cow::Borrowed),
+        peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
         guild_id: message
             .metadata
             .get("guild_id")
             .and_then(|v| v.as_str())
-            .map(String::from),
-        roles: Vec::new(),
+            .map(std::borrow::Cow::Borrowed),
+        roles: smallvec::SmallVec::new(),
     };
     let agent_id = router.resolve_with_context(
         &message.channel,

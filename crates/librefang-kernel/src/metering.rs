@@ -3,7 +3,11 @@
 use librefang_memory::usage::{ModelUsage, UsageRecord, UsageStore, UsageSummary};
 use librefang_types::agent::{AgentId, ResourceQuota};
 use librefang_types::error::{LibreFangError, LibreFangResult};
+use librefang_types::model_catalog::ModelCatalogEntry;
 use std::sync::Arc;
+
+const DEFAULT_INPUT_COST_PER_M: f64 = 1.0;
+const DEFAULT_OUTPUT_COST_PER_M: f64 = 3.0;
 
 /// The metering engine tracks usage cost and enforces quota limits.
 pub struct MeteringEngine {
@@ -200,16 +204,57 @@ impl MeteringEngine {
         input_tokens: u64,
         output_tokens: u64,
     ) -> f64 {
-        let (input_per_m, output_per_m) = catalog.pricing(model).unwrap_or((1.0, 3.0));
-        let input_cost = (input_tokens as f64 / 1_000_000.0) * input_per_m;
-        let output_cost = (output_tokens as f64 / 1_000_000.0) * output_per_m;
-        input_cost + output_cost
+        if let Some(entry) = catalog.find_model(model) {
+            let input_per_m = entry.input_cost_per_m;
+            let output_per_m = entry.output_cost_per_m;
+
+            // ChatGPT session-auth models do not expose billable catalog pricing,
+            // but budgets still need a conservative non-zero estimate.
+            if input_per_m == 0.0 && output_per_m == 0.0 && should_use_legacy_budget_estimate(entry)
+            {
+                return estimate_cost_from_rates(
+                    input_tokens,
+                    output_tokens,
+                    DEFAULT_INPUT_COST_PER_M,
+                    DEFAULT_OUTPUT_COST_PER_M,
+                );
+            }
+
+            return estimate_cost_from_rates(
+                input_tokens,
+                output_tokens,
+                input_per_m,
+                output_per_m,
+            );
+        }
+
+        estimate_cost_from_rates(
+            input_tokens,
+            output_tokens,
+            DEFAULT_INPUT_COST_PER_M,
+            DEFAULT_OUTPUT_COST_PER_M,
+        )
     }
 
     /// Clean up old usage records.
     pub fn cleanup(&self, days: u32) -> LibreFangResult<usize> {
         self.store.cleanup_old(days)
     }
+}
+
+fn should_use_legacy_budget_estimate(entry: &ModelCatalogEntry) -> bool {
+    entry.provider == "chatgpt"
+}
+
+fn estimate_cost_from_rates(
+    input_tokens: u64,
+    output_tokens: u64,
+    input_per_m: f64,
+    output_per_m: f64,
+) -> f64 {
+    let input_cost = (input_tokens as f64 / 1_000_000.0) * input_per_m;
+    let output_cost = (output_tokens as f64 / 1_000_000.0) * output_per_m;
+    input_cost + output_cost
 }
 
 /// Budget status snapshot — current spend vs limits for all time windows.
@@ -773,6 +818,26 @@ mod tests {
             1_000_000,
         );
         assert!((cost - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_estimate_cost_with_catalog_chatgpt_zero_price_uses_legacy_budget_rate() {
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let cost = MeteringEngine::estimate_cost_with_catalog(
+            &catalog,
+            "gpt-5.1-codex-mini",
+            1_000_000,
+            1_000_000,
+        );
+        assert!((cost - 4.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_estimate_cost_with_catalog_local_zero_price_stays_zero() {
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let cost =
+            MeteringEngine::estimate_cost_with_catalog(&catalog, "llama3.2", 1_000_000, 1_000_000);
+        assert!(cost.abs() < f64::EPSILON);
     }
 
     #[test]

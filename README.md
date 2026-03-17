@@ -506,7 +506,7 @@ MIT License. See the LICENSE file for details.
 Thanks to everyone who has contributed to LibreFang!
 
 <a href="https://github.com/librefang/librefang/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
+  <img src="public/assets/contributors.svg" alt="Contributors" />
 </a>
 
 > Want to join? Check out our [Contributing Guide](CONTRIBUTING.md) — no Rust experience required for many tasks.

@@ -218,6 +218,16 @@ impl MemorySubstrate {
         self.sessions.create_session_with_label(agent_id, label)
     }
 
+    /// Delete sessions older than `retention_days`. Returns count deleted.
+    pub fn cleanup_expired_sessions(&self, retention_days: u32) -> LibreFangResult<u64> {
+        self.sessions.cleanup_expired_sessions(retention_days)
+    }
+
+    /// For each agent, keep only the newest `max_per_agent` sessions. Returns count deleted.
+    pub fn cleanup_excess_sessions(&self, max_per_agent: u32) -> LibreFangResult<u64> {
+        self.sessions.cleanup_excess_sessions(max_per_agent)
+    }
+
     /// Load canonical session context for cross-channel memory.
     ///
     /// Returns the compacted summary (if any) and recent messages from the
@@ -520,6 +530,52 @@ impl MemorySubstrate {
                 return Err(LibreFangError::Internal(format!("Task not found: {task_id}")));
             }
             Ok(())
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Delete a task by ID. Returns true if a row was deleted.
+    pub async fn task_delete(&self, task_id: &str) -> LibreFangResult<bool> {
+        let conn = Arc::clone(&self.conn);
+        let task_id = task_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            let rows = db
+                .execute(
+                    "DELETE FROM task_queue WHERE id = ?1",
+                    rusqlite::params![task_id],
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            Ok(rows > 0)
+        })
+        .await
+        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+    }
+
+    /// Retry a failed or completed task by resetting it to pending.
+    /// Only resets tasks with status 'completed' or 'failed' — in_progress
+    /// tasks are excluded to prevent duplicate execution.
+    pub async fn task_retry(&self, task_id: &str) -> LibreFangResult<bool> {
+        let conn = Arc::clone(&self.conn);
+        let task_id = task_id.to_string();
+
+        tokio::task::spawn_blocking(move || {
+            let db = conn
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            let rows = db
+                .execute(
+                    "UPDATE task_queue \
+                     SET status = 'pending', result = NULL, completed_at = NULL \
+                     WHERE id = ?1 AND status IN ('completed', 'failed')",
+                    rusqlite::params![task_id],
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            Ok(rows > 0)
         })
         .await
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
