@@ -346,8 +346,20 @@ impl TelegramAdapter {
 
         match self.client.post(&url).json(&body).send().await {
             Ok(resp) if resp.status().is_success() => {
-                let json: serde_json::Value = resp.json().await.ok()?;
-                json["result"]["message_id"].as_i64()
+                let json: serde_json::Value = match resp.json().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!("Telegram sendMessage (streaming init): failed to parse response JSON: {e}");
+                        return None;
+                    }
+                };
+                let msg_id = json["result"]["message_id"].as_i64();
+                if msg_id.is_none() {
+                    warn!(
+                        "Telegram sendMessage (streaming init): response missing result.message_id"
+                    );
+                }
+                msg_id
             }
             Ok(resp) => {
                 let body_text = resp.text().await.unwrap_or_default();
@@ -765,10 +777,15 @@ impl ChannelAdapter for TelegramAdapter {
         while let Some(delta) = delta_rx.recv().await {
             full_text.push_str(&delta);
 
+            // Format intermediate text so the user sees proper Telegram HTML
+            // (not raw markdown) even during streaming.
+            let intermediate =
+                formatter::format_for_channel(&full_text, OutputFormat::TelegramHtml);
+
             // Send the initial message on the first token.
             if sent_message_id.is_none() {
                 if let Some(msg_id) = self
-                    .api_send_message_returning_id(chat_id, &full_text, tid)
+                    .api_send_message_returning_id(chat_id, &intermediate, tid)
                     .await
                 {
                     sent_message_id = Some(msg_id);
@@ -780,14 +797,13 @@ impl ChannelAdapter for TelegramAdapter {
             // Throttle edits to respect Telegram rate limits.
             if last_edit.elapsed() >= STREAMING_EDIT_INTERVAL {
                 if let Some(msg_id) = sent_message_id {
-                    let _ = self.api_edit_message(chat_id, msg_id, &full_text).await;
+                    let _ = self.api_edit_message(chat_id, msg_id, &intermediate).await;
                     last_edit = Instant::now();
                 }
             }
         }
 
         // Final edit with the complete, formatted text to ensure nothing is lost.
-        // During streaming we sent raw text; the final edit applies Telegram HTML formatting.
         let formatted = formatter::format_for_channel(&full_text, OutputFormat::TelegramHtml);
 
         if let Some(msg_id) = sent_message_id {

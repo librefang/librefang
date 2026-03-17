@@ -184,10 +184,19 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             }
         });
 
-        // Spawn a supervisor that awaits both handles and logs panics.
+        // Spawn a supervisor that awaits both handles and logs panics / errors.
         tokio::spawn(async move {
-            if let Err(e) = kernel_handle.await {
-                error!("Streaming kernel task panicked: {e}");
+            match kernel_handle.await {
+                Err(e) => error!("Streaming kernel task panicked: {e}"),
+                Ok(Err(e)) => error!("Streaming kernel task returned error: {e}"),
+                Ok(Ok(result)) => {
+                    debug!(
+                        input_tokens = result.total_usage.input_tokens,
+                        output_tokens = result.total_usage.output_tokens,
+                        iterations = result.iterations,
+                        "Streaming kernel task completed"
+                    );
+                }
             }
             if let Err(e) = bridge_handle.await {
                 error!("Streaming bridge task panicked: {e}");

@@ -299,6 +299,11 @@ pub trait ChannelAdapter: Send + Sync {
     /// placeholder message, then edits it in-place as new tokens arrive. The
     /// `thread_id` is used for forum-topic replies on supported platforms.
     ///
+    /// The `delta_rx` receiver is consumed (ownership transfer) — the adapter
+    /// reads deltas until the channel closes. On error, delivery is partial:
+    /// tokens already sent to the user are not retracted. The stream cannot be
+    /// retried after failure; the caller should fall back to a non-streaming send.
+    ///
     /// Default implementation collects all deltas and sends as a single message.
     async fn send_streaming(
         &self,

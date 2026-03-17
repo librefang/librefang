@@ -230,9 +230,9 @@ pub trait ChannelBridgeHandle: Send + Sync {
 
     /// Send a message to an agent and stream text deltas back.
     ///
-    /// Returns a receiver of incremental text chunks and a join handle for the
-    /// final complete response. Adapters that support streaming (e.g. Telegram)
-    /// can display tokens progressively instead of waiting for the full response.
+    /// Returns a receiver of incremental text chunks. Adapters that support
+    /// streaming (e.g. Telegram) can display tokens progressively instead of
+    /// waiting for the full response.
     ///
     /// Default implementation falls back to `send_message()` and emits the
     /// complete response as a single chunk.
