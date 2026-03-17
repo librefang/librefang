@@ -759,15 +759,17 @@ pub async fn get_session(
         }
     };
 
-    match state.kernel.memory.get_session(session_id) {
-        Ok(Some(session)) => (
+    match state.kernel.memory.get_session_with_created_at(session_id) {
+        Ok(Some((session, created_at))) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "session_id": session.id.0.to_string(),
                 "agent_id": session.agent_id.0.to_string(),
+                "message_count": session.messages.len(),
                 "messages": session.messages,
                 "context_window_tokens": session.context_window_tokens,
                 "label": session.label,
+                "created_at": created_at,
             })),
         ),
         Ok(None) => (

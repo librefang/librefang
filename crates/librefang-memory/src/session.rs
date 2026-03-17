@@ -74,6 +74,51 @@ impl SessionStore {
         }
     }
 
+    /// Load a session from the database along with its `created_at` timestamp.
+    pub fn get_session_with_created_at(
+        &self,
+        session_id: SessionId,
+    ) -> LibreFangResult<Option<(Session, String)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at FROM sessions WHERE id = ?1")
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
+            let agent_str: String = row.get(0)?;
+            let messages_blob: Vec<u8> = row.get(1)?;
+            let tokens: i64 = row.get(2)?;
+            let label: Option<String> = row.get(3).unwrap_or(None);
+            let created_at: String = row.get(4)?;
+            Ok((agent_str, messages_blob, tokens, label, created_at))
+        });
+
+        match result {
+            Ok((agent_str, messages_blob, tokens, label, created_at)) => {
+                let agent_id = uuid::Uuid::parse_str(&agent_str)
+                    .map(AgentId)
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let messages: Vec<Message> = rmp_serde::from_slice(&messages_blob)
+                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                Ok(Some((
+                    Session {
+                        id: session_id,
+                        agent_id,
+                        messages,
+                        context_window_tokens: tokens as u64,
+                        label,
+                    },
+                    created_at,
+                )))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LibreFangError::Memory(e.to_string())),
+        }
+    }
+
     /// Save a session to the database.
     pub fn save_session(&self, session: &Session) -> LibreFangResult<()> {
         let conn = self
