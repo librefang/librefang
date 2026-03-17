@@ -21,6 +21,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/librefang/librefang/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/librefang/librefang/ci.yml?style=flat-square&label=CI" alt="CI" /></a>
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
@@ -103,6 +104,8 @@ librefang hand status researcher     # Ver progreso
 librefang hand list                  # Ver todos los Hands
 ```
 
+Crea el tuyo: define un `HAND.toml` + prompt de sistema + `SKILL.md`. [Guía](../docs/skill-development.md)
+
 ## Arquitectura
 
 14 crates de Rust, diseño de kernel modular.
@@ -133,6 +136,8 @@ xtask                 Automatización de build
 **16 Capas de Seguridad** — Sandbox WASM, auditoría Merkle, seguimiento de taint, firma Ed25519, protección SSRF, zeroización de secretos y más. [Detalles](../docs/comparison.md#16-security-systems--defense-in-depth)
 
 **API Compatible con OpenAI** — Endpoint drop-in `/v1/chat/completions`. 140+ endpoints REST/WS/SSE. [Referencia API](../docs/api-reference.md)
+
+**SDKs de Cliente** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — cliente REST completo con soporte de streaming.
 
 **Migración desde OpenClaw** — `librefang migrate --from openclaw` importa agentes, historial, skills y configuración.
 

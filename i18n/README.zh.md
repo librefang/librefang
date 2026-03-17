@@ -21,6 +21,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/librefang/librefang/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/librefang/librefang/ci.yml?style=flat-square&label=CI" alt="CI" /></a>
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
@@ -103,6 +104,8 @@ librefang hand status researcher     # 查看进度
 librefang hand list                  # 查看所有 Hands
 ```
 
+自定义 Hand：定义 `HAND.toml` + 系统提示词 + `SKILL.md`。[指南](../docs/skill-development.md)
+
 ## 架构
 
 14 个 Rust crate，模块化内核设计。
@@ -133,6 +136,8 @@ xtask                 构建自动化
 **16 层安全体系** — WASM 沙箱、Merkle 审计链、污点追踪、Ed25519 签名、SSRF 防护、密钥清零等。[详情](../docs/comparison.md#16-security-systems--defense-in-depth)
 
 **OpenAI 兼容 API** — 即插即用的 `/v1/chat/completions` 端点。140+ REST/WS/SSE 端点。[API 参考](../docs/api-reference.md)
+
+**客户端 SDK** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — 完整 REST 客户端，支持流式传输。
 
 **OpenClaw 迁移** — `librefang migrate --from openclaw` 导入智能体、历史、技能和配置。
 

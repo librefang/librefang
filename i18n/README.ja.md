@@ -21,6 +21,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/librefang/librefang/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/librefang/librefang/ci.yml?style=flat-square&label=CI" alt="CI" /></a>
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
@@ -103,6 +104,8 @@ librefang hand status researcher     # 進捗確認
 librefang hand list                  # 全 Hands を表示
 ```
 
+独自の Hand を作成: `HAND.toml` + システムプロンプト + `SKILL.md` を定義。[ガイド](../docs/skill-development.md)
+
 ## アーキテクチャ
 
 14 の Rust クレート、モジュラーカーネル設計。
@@ -133,6 +136,8 @@ xtask                 ビルド自動化
 **16 セキュリティレイヤー** — WASM サンドボックス、Merkle 監査証跡、テイント追跡、Ed25519 署名、SSRF 保護、シークレットゼロ化他。[詳細](../docs/comparison.md#16-security-systems--defense-in-depth)
 
 **OpenAI 互換 API** — ドロップインの `/v1/chat/completions` エンドポイント。140+ REST/WS/SSE エンドポイント。[API リファレンス](../docs/api-reference.md)
+
+**クライアント SDK** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — ストリーミング対応の完全な REST クライアント。
 
 **OpenClaw マイグレーション** — `librefang migrate --from openclaw` でエージェント、履歴、スキル、設定をインポート。
 

@@ -21,6 +21,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/librefang/librefang/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/librefang/librefang/ci.yml?style=flat-square&label=CI" alt="CI" /></a>
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT" />
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
@@ -103,6 +104,8 @@ librefang hand status researcher     # 진행 상황 확인
 librefang hand list                  # 모든 Hands 보기
 ```
 
+나만의 Hand 만들기: `HAND.toml` + 시스템 프롬프트 + `SKILL.md`를 정의하세요. [가이드](../docs/skill-development.md)
+
 ## 아키텍처
 
 14개 Rust 크레이트, 모듈러 커널 설계.
@@ -133,6 +136,8 @@ xtask                 빌드 자동화
 **16 보안 레이어** — WASM 샌드박스, Merkle 감사 추적, 테인트 추적, Ed25519 서명, SSRF 보호, 시크릿 제로화 등. [상세](../docs/comparison.md#16-security-systems--defense-in-depth)
 
 **OpenAI 호환 API** — 드롭인 `/v1/chat/completions` 엔드포인트. 140+ REST/WS/SSE 엔드포인트. [API 레퍼런스](../docs/api-reference.md)
+
+**클라이언트 SDK** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — 스트리밍 지원 완전한 REST 클라이언트.
 
 **OpenClaw 마이그레이션** — `librefang migrate --from openclaw`로 에이전트, 히스토리, 스킬, 설정을 가져옵니다.
 
