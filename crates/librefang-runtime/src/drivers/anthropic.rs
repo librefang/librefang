@@ -492,8 +492,9 @@ impl LlmDriver for AnthropicDriver {
                                 input_json,
                             }) = blocks.get(block_idx)
                             {
-                                let input: serde_json::Value =
-                                    serde_json::from_str(input_json).unwrap_or_default();
+                                let input: serde_json::Value = ensure_object(
+                                    serde_json::from_str(input_json).unwrap_or_default(),
+                                );
                                 let _ = tx
                                     .send(StreamEvent::ToolUseEnd {
                                         id: id.clone(),
@@ -542,7 +543,7 @@ impl LlmDriver for AnthropicDriver {
                         input_json,
                     } => {
                         let input: serde_json::Value =
-                            serde_json::from_str(&input_json).unwrap_or_default();
+                            ensure_object(serde_json::from_str(&input_json).unwrap_or_default());
                         content.push(ContentBlock::ToolUse {
                             id: id.clone(),
                             name: name.clone(),
@@ -570,6 +571,18 @@ impl LlmDriver for AnthropicDriver {
             status: 0,
             message: "Max retries exceeded".to_string(),
         })
+    }
+}
+
+/// Ensure a `serde_json::Value` is an object.  The Anthropic API requires the
+/// `input` field of `tool_use` blocks to be a JSON object (`{}`), never `null`.
+/// When a tool has no parameters the value may be `null` (e.g. from
+/// `Value::default()` or a missing field); this helper normalises it to `{}`.
+fn ensure_object(v: serde_json::Value) -> serde_json::Value {
+    if v.is_object() {
+        v
+    } else {
+        serde_json::json!({})
     }
 }
 
@@ -622,7 +635,7 @@ fn convert_message(msg: &Message) -> ApiMessage {
                     } => Some(ApiContentBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
-                        input: input.clone(),
+                        input: ensure_object(input.clone()),
                     }),
                     ContentBlock::ToolResult {
                         tool_use_id,
@@ -751,5 +764,29 @@ mod tests {
         assert_eq!(arr[0]["type"], "text");
         assert_eq!(arr[0]["text"], "You are helpful.");
         assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn test_ensure_object_null_becomes_empty_object() {
+        let result = ensure_object(serde_json::Value::Null);
+        assert_eq!(result, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_ensure_object_preserves_existing_object() {
+        let input = serde_json::json!({"query": "rust lang"});
+        let result = ensure_object(input.clone());
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_parameterless_tool_use_serializes_empty_object() {
+        let block = ApiContentBlock::ToolUse {
+            id: "tool_1".to_string(),
+            name: "get_time".to_string(),
+            input: ensure_object(serde_json::Value::Null),
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["input"], serde_json::json!({}));
     }
 }
