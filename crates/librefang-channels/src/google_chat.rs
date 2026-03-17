@@ -421,9 +421,7 @@ impl ChannelAdapter for GoogleChatAdapter {
                     let read_len = content_length.min(65536);
                     let mut body_buf = vec![0u8; read_len];
                     use tokio::io::AsyncReadExt;
-                    if read_len > 0
-                        && reader.read_exact(&mut body_buf).await.is_err()
-                    {
+                    if read_len > 0 && reader.read_exact(&mut body_buf).await.is_err() {
                         return;
                     }
 
@@ -433,11 +431,10 @@ impl ChannelAdapter for GoogleChatAdapter {
                     let _ = reader.get_mut().write_all(resp).await;
 
                     // Parse the Google Chat event payload
-                    let payload: serde_json::Value =
-                        match serde_json::from_slice(&body_buf) {
-                            Ok(v) => v,
-                            Err(_) => return,
-                        };
+                    let payload: serde_json::Value = match serde_json::from_slice(&body_buf) {
+                        Ok(v) => v,
+                        Err(_) => return,
+                    };
 
                     let event_type = payload["type"].as_str().unwrap_or("");
                     if event_type != "MESSAGE" {
@@ -671,7 +668,9 @@ mod tests {
     fn test_service_account_key_debug_redacts_secrets() {
         let key = ServiceAccountKey {
             client_email: "bot@test.iam.gserviceaccount.com".to_string(),
-            private_key: Zeroizing::new("-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----".to_string()),
+            private_key: Zeroizing::new(
+                "-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----".to_string(),
+            ),
             token_uri: "https://oauth2.googleapis.com/token".to_string(),
             access_token: Some("super-secret-token".to_string()),
         };
