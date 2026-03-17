@@ -285,6 +285,16 @@ impl WorkflowEngine {
             if let Some(wf) = workflow {
                 let wf_name = wf.name.clone();
                 let wf_id = wf.id;
+                {
+                    let existing = self.workflows.blocking_read();
+                    if existing.contains_key(&wf_id) {
+                        tracing::warn!(
+                            workflow_id = %wf_id,
+                            file = %path.display(),
+                            "Workflow ID already registered — overwriting with file version"
+                        );
+                    }
+                }
                 self.workflows.blocking_write().insert(wf_id, wf);
                 info!(workflow_id = %wf_id, name = %wf_name, path = %path.display(), "Auto-registered workflow from disk");
                 count += 1;
