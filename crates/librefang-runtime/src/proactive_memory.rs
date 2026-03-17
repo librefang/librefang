@@ -16,6 +16,8 @@ use std::sync::Arc;
 use tracing::warn;
 
 /// Build a context string with proactive memory for prompt injection.
+///
+/// Includes both semantic memory matches and relevant knowledge graph relations.
 pub async fn build_prompt_context_with_memory(
     memory: &ProactiveMemoryStore,
     user_id: &str,
@@ -24,7 +26,9 @@ pub async fn build_prompt_context_with_memory(
     let result: Result<Vec<librefang_memory::MemoryItem>, LibreFangError> =
         memory.auto_retrieve(user_id, user_message).await;
     match result {
-        Ok(memories) if !memories.is_empty() => Some(memory.format_context(&memories)),
+        Ok(memories) if !memories.is_empty() => {
+            Some(memory.format_context_with_query(&memories, user_message))
+        }
         Ok(_) => None,
         Err(e) => {
             warn!("Failed to retrieve proactive memories: {}", e);
@@ -90,20 +94,27 @@ const EXTRACTION_SYSTEM_PROMPT: &str = r#"You are a memory extraction system. An
 
 Extract ONLY clearly stated facts, preferences, and important context. Do NOT infer or assume.
 
-Categories:
-- user_preference: Explicit preferences (e.g., "I prefer dark mode", "I always use Python")
-- important_fact: Personal facts (e.g., "My name is John", "I work at Acme Corp")
-- task_context: Project or task context (e.g., "We're migrating to PostgreSQL")
+Respond with a JSON object containing two arrays:
 
-Respond with a JSON array of objects, each with:
-- "content": the extracted memory (concise, one sentence)
-- "category": one of the categories above
-- "level": "user" for personal info, "session" for task context, "agent" for agent-specific
+1. "memories" - Facts and preferences to remember:
+   - "content": the extracted memory (concise, one sentence)
+   - "category": one of: user_preference, important_fact, task_context
+   - "level": "user" for personal info, "session" for task context, "agent" for agent-specific
 
-Example response:
-[{"content": "User prefers Rust over Go", "category": "user_preference", "level": "user"}]
+2. "relations" - Entity relationships (knowledge graph triples):
+   - "subject": entity name (e.g., "Alice")
+   - "subject_type": person, organization, project, concept, location, tool
+   - "relation": works_at, uses, prefers, knows_about, located_in, part_of, depends_on
+   - "object": related entity name (e.g., "Acme Corp")
+   - "object_type": same types as subject_type
 
-If nothing worth remembering, respond with: []"#;
+Example:
+{
+  "memories": [{"content": "User prefers Rust over Go", "category": "user_preference", "level": "user"}],
+  "relations": [{"subject": "User", "subject_type": "person", "relation": "prefers", "object": "Rust", "object_type": "tool"}]
+}
+
+If nothing worth extracting: {"memories": [], "relations": []}"#;
 
 const DECISION_SYSTEM_PROMPT: &str = r#"You are a memory conflict resolution system. Given a NEW memory and a list of EXISTING memories, decide what action to take.
 
@@ -156,6 +167,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             return Ok(ExtractionResult {
                 has_content: false,
                 memories: Vec::new(),
+                relations: Vec::new(),
                 trigger: "llm_extractor".to_string(),
             });
         }
@@ -312,10 +324,16 @@ fn parse_decision_response(
 }
 
 /// Parse the LLM's JSON response into an ExtractionResult.
+///
+/// Handles two formats:
+/// - New: `{"memories": [...], "relations": [...]}`
+/// - Legacy: `[...]` (array of memory items, no relations)
 fn parse_llm_extraction_response(
     text: &str,
 ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
-    // Try to extract JSON array from the response (may be wrapped in markdown code blocks)
+    use librefang_types::memory::RelationTriple;
+
+    // Strip markdown code blocks
     let json_str = text
         .trim()
         .strip_prefix("```json")
@@ -323,9 +341,18 @@ fn parse_llm_extraction_response(
         .unwrap_or(text.trim());
     let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
 
-    let items: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap_or_default();
+    let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
 
-    let memories: Vec<MemoryItem> = items
+    // Extract memories (from object or legacy array)
+    let memory_items = if let Some(arr) = parsed.get("memories").and_then(|v| v.as_array()) {
+        arr.clone()
+    } else if let Some(arr) = parsed.as_array() {
+        arr.clone()
+    } else {
+        Vec::new()
+    };
+
+    let memories: Vec<MemoryItem> = memory_items
         .into_iter()
         .filter_map(|item| {
             let content = item.get("content")?.as_str()?.to_string();
@@ -354,9 +381,37 @@ fn parse_llm_extraction_response(
         })
         .collect();
 
+    // Extract relations (knowledge graph triples)
+    let relations: Vec<RelationTriple> = parsed
+        .get("relations")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    Some(RelationTriple {
+                        subject: item.get("subject")?.as_str()?.to_string(),
+                        subject_type: item
+                            .get("subject_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("concept")
+                            .to_string(),
+                        relation: item.get("relation")?.as_str()?.to_string(),
+                        object: item.get("object")?.as_str()?.to_string(),
+                        object_type: item
+                            .get("object_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("concept")
+                            .to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     Ok(ExtractionResult {
-        has_content: !memories.is_empty(),
+        has_content: !memories.is_empty() || !relations.is_empty(),
         memories,
+        relations,
         trigger: "llm_extractor".to_string(),
     })
 }

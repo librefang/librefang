@@ -30,7 +30,7 @@ pub use substrate::MemorySubstrate;
 pub use librefang_types::memory::{
     ExtractionResult, MemoryAction, MemoryAddResult, MemoryFilter, MemoryFragment, MemoryId,
     MemoryItem, MemoryLevel, MemorySource, ProactiveMemory, ProactiveMemoryConfig,
-    ProactiveMemoryHooks,
+    ProactiveMemoryHooks, RelationTriple,
 };
 
 // Re-export proactive memory store

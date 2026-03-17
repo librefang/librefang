@@ -21,6 +21,7 @@
 //! +-------------------+
 //! ```
 
+use crate::knowledge::KnowledgeStore;
 use crate::semantic::SemanticStore;
 use crate::structured::StructuredStore;
 use crate::MemorySubstrate;
@@ -29,9 +30,10 @@ use async_trait::async_trait;
 use librefang_types::agent::AgentId;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
-    DefaultMemoryExtractor, ExtractionResult, MemoryAction, MemoryAddResult, MemoryExtractor,
-    MemoryFilter, MemoryId, MemoryItem, MemoryLevel, MemorySource, ProactiveMemory,
-    ProactiveMemoryConfig, ProactiveMemoryHooks,
+    DefaultMemoryExtractor, Entity, EntityType, ExtractionResult, GraphPattern, MemoryAction,
+    MemoryAddResult, MemoryExtractor, MemoryFilter, MemoryId, MemoryItem, MemoryLevel,
+    MemorySource, ProactiveMemory, ProactiveMemoryConfig, ProactiveMemoryHooks, Relation,
+    RelationTriple, RelationType,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -94,6 +96,7 @@ pub struct ProactiveMemoryStore {
     substrate: Arc<MemorySubstrate>,
     structured: StructuredStore,
     semantic: SemanticStore,
+    knowledge: KnowledgeStore,
     config: ProactiveMemoryConfig,
     /// Memory extractor for LLM-powered extraction
     extractor: Arc<dyn MemoryExtractor>,
@@ -103,9 +106,11 @@ impl ProactiveMemoryStore {
     /// Create a new proactive memory store with default extractor.
     pub fn new(substrate: Arc<MemorySubstrate>, config: ProactiveMemoryConfig) -> Self {
         let conn = substrate.usage_conn();
+        let knowledge = substrate.knowledge().clone();
         Self {
             structured: StructuredStore::new(Arc::clone(&conn)),
             semantic: SemanticStore::new(conn),
+            knowledge,
             substrate,
             config,
             extractor: Arc::new(DefaultMemoryExtractor),
@@ -119,9 +124,11 @@ impl ProactiveMemoryStore {
         extractor: Arc<dyn MemoryExtractor>,
     ) -> Self {
         let conn = substrate.usage_conn();
+        let knowledge = substrate.knowledge().clone();
         Self {
             structured: StructuredStore::new(Arc::clone(&conn)),
             semantic: SemanticStore::new(conn),
+            knowledge,
             substrate,
             config,
             extractor,
@@ -289,6 +296,127 @@ impl ProactiveMemoryStore {
                 }))
             }
         }
+    }
+
+    /// Store extracted relation triples into the knowledge graph.
+    ///
+    /// For each triple, creates entities (upsert) and a relation between them.
+    fn store_relations(&self, triples: &[RelationTriple]) {
+        for triple in triples {
+            let source_type = parse_entity_type(&triple.subject_type);
+            let target_type = parse_entity_type(&triple.object_type);
+
+            // Upsert source entity
+            let source_id = match self.knowledge.add_entity(Entity {
+                id: normalize_entity_id(&triple.subject),
+                entity_type: source_type,
+                name: triple.subject.clone(),
+                properties: HashMap::new(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }) {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!("Failed to add entity '{}': {}", triple.subject, e);
+                    continue;
+                }
+            };
+
+            // Upsert target entity
+            let target_id = match self.knowledge.add_entity(Entity {
+                id: normalize_entity_id(&triple.object),
+                entity_type: target_type,
+                name: triple.object.clone(),
+                properties: HashMap::new(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }) {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::warn!("Failed to add entity '{}': {}", triple.object, e);
+                    continue;
+                }
+            };
+
+            // Add relation
+            let relation_type = parse_relation_type(&triple.relation);
+            if let Err(e) = self.knowledge.add_relation(Relation {
+                source: source_id,
+                relation: relation_type,
+                target: target_id,
+                properties: HashMap::new(),
+                confidence: 0.9,
+                created_at: chrono::Utc::now(),
+            }) {
+                tracing::warn!(
+                    "Failed to add relation '{}' -> '{}': {}",
+                    triple.subject,
+                    triple.object,
+                    e
+                );
+            }
+        }
+    }
+
+    /// Query the knowledge graph for entities mentioned in a query.
+    ///
+    /// Returns formatted context string with related entities and relationships.
+    fn graph_context(&self, query: &str) -> Option<String> {
+        // Search for entities whose names appear in the query
+        let query_lower = query.to_lowercase();
+
+        // Query graph for relations where source or target name matches
+        let matches = self
+            .knowledge
+            .query_graph(GraphPattern {
+                source: None,
+                relation: None,
+                target: None,
+                max_depth: 1,
+            })
+            .unwrap_or_default();
+
+        // Filter to matches relevant to the query
+        let relevant: Vec<_> = matches
+            .iter()
+            .filter(|m| {
+                query_lower.contains(&m.source.name.to_lowercase())
+                    || query_lower.contains(&m.target.name.to_lowercase())
+            })
+            .collect();
+
+        if relevant.is_empty() {
+            return None;
+        }
+
+        let mut context = String::from("## Knowledge Graph\n\n");
+        for m in relevant.iter().take(10) {
+            context.push_str(&format!(
+                "- {} ({:?}) → {:?} → {} ({:?})\n",
+                m.source.name,
+                m.source.entity_type,
+                m.relation.relation,
+                m.target.name,
+                m.target.entity_type,
+            ));
+        }
+        Some(context)
+    }
+
+    /// Format retrieved memories into a context string for prompt injection.
+    ///
+    /// Also includes relevant knowledge graph relations if any entity
+    /// names appear in the memory content.
+    pub fn format_context_with_query(&self, memories: &[MemoryItem], query: &str) -> String {
+        let mut context = self.extractor.format_context(memories);
+
+        // Append knowledge graph context if relevant
+        if let Some(graph_ctx) = self.graph_context(query) {
+            context.push('\n');
+            context.push_str(&graph_ctx);
+        }
+
+        context
     }
 
     /// Format retrieved memories into a context string for prompt injection.
@@ -513,6 +641,11 @@ impl ProactiveMemory for ProactiveMemoryStore {
             }
         }
 
+        // Step 5: Store extracted relations in knowledge graph
+        if !extraction.relations.is_empty() {
+            self.store_relations(&extraction.relations);
+        }
+
         Ok(results)
     }
 
@@ -598,6 +731,43 @@ impl ProactiveMemory for ProactiveMemoryStore {
     }
 }
 
+/// Normalize an entity name into a stable ID (lowercase, spaces → underscores).
+fn normalize_entity_id(name: &str) -> String {
+    name.to_lowercase().replace(' ', "_")
+}
+
+/// Parse entity type string from LLM into EntityType enum.
+fn parse_entity_type(s: &str) -> EntityType {
+    match s.to_lowercase().as_str() {
+        "person" => EntityType::Person,
+        "organization" | "company" | "org" => EntityType::Organization,
+        "project" => EntityType::Project,
+        "concept" | "idea" => EntityType::Concept,
+        "event" => EntityType::Event,
+        "location" | "place" => EntityType::Location,
+        "document" | "doc" => EntityType::Document,
+        "tool" | "language" | "framework" => EntityType::Tool,
+        other => EntityType::Custom(other.to_string()),
+    }
+}
+
+/// Parse relation type string from LLM into RelationType enum.
+fn parse_relation_type(s: &str) -> RelationType {
+    match s.to_lowercase().as_str() {
+        "works_at" | "employed_at" => RelationType::WorksAt,
+        "knows_about" | "knows" => RelationType::KnowsAbout,
+        "related_to" => RelationType::RelatedTo,
+        "depends_on" => RelationType::DependsOn,
+        "owned_by" => RelationType::OwnedBy,
+        "created_by" => RelationType::CreatedBy,
+        "located_in" | "lives_in" => RelationType::LocatedIn,
+        "part_of" => RelationType::PartOf,
+        "uses" | "prefers" => RelationType::Uses,
+        "produces" => RelationType::Produces,
+        other => RelationType::Custom(other.to_string()),
+    }
+}
+
 /// Truncate a string for log messages.
 fn truncate_for_log(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -623,6 +793,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         if !self.config.auto_memorize || conversation.is_empty() {
             return Ok(ExtractionResult {
                 memories: Vec::new(),
+                relations: Vec::new(),
                 has_content: false,
                 trigger: "auto_memorize_disabled".to_string(),
             });
@@ -651,9 +822,15 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
             }
         }
 
+        // Store extracted relations in knowledge graph
+        if !extraction_result.relations.is_empty() {
+            self.store_relations(&extraction_result.relations);
+        }
+
         Ok(ExtractionResult {
             has_content: !stored_memories.is_empty(),
             memories: stored_memories,
+            relations: extraction_result.relations,
             trigger: extraction_result.trigger,
         })
     }

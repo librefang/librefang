@@ -160,11 +160,30 @@ impl Default for ProactiveMemoryConfig {
     }
 }
 
+/// A relationship triple extracted from conversation (subject, relation, object).
+///
+/// Example: ("Alice", "works_at", "Acme Corp")
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelationTriple {
+    /// Subject entity name.
+    pub subject: String,
+    /// Subject entity type (person, organization, project, etc.).
+    pub subject_type: String,
+    /// Relationship type.
+    pub relation: String,
+    /// Object entity name.
+    pub object: String,
+    /// Object entity type.
+    pub object_type: String,
+}
+
 /// Result from LLM-powered memory extraction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtractionResult {
     /// Extracted memory items.
     pub memories: Vec<MemoryItem>,
+    /// Extracted relationship triples for knowledge graph.
+    pub relations: Vec<RelationTriple>,
     /// Whether extraction found anything worth remembering.
     pub has_content: bool,
     /// Original query that triggered extraction.
@@ -369,6 +388,7 @@ impl MemoryExtractor for DefaultMemoryExtractor {
         Ok(ExtractionResult {
             has_content: !memories.is_empty(),
             memories,
+            relations: Vec::new(),
             trigger: "default_extractor".to_string(),
         })
     }

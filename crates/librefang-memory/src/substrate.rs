@@ -78,6 +78,11 @@ impl MemorySubstrate {
         &self.usage
     }
 
+    /// Get a reference to the knowledge graph store.
+    pub fn knowledge(&self) -> &KnowledgeStore {
+        &self.knowledge
+    }
+
     /// Get the shared database connection (for constructing stores from outside).
     pub fn usage_conn(&self) -> Arc<Mutex<Connection>> {
         Arc::clone(&self.conn)
