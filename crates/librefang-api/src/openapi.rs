@@ -221,6 +221,7 @@ use crate::types;
         // ── Approvals ──
         routes::list_approvals,
         routes::create_approval,
+        routes::get_approval,
         routes::approve_request,
         routes::reject_request,
 

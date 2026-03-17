@@ -108,6 +108,11 @@ impl ApprovalManager {
             .collect()
     }
 
+    /// Get a single pending request by ID.
+    pub fn get_pending(&self, id: Uuid) -> Option<ApprovalRequest> {
+        self.pending.get(&id).map(|r| r.request.clone())
+    }
+
     /// Number of pending requests.
     pub fn pending_count(&self) -> usize {
         self.pending.len()

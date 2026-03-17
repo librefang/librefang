@@ -954,6 +954,55 @@ pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResp
     Json(serde_json::json!({"approvals": approvals, "total": total}))
 }
 
+/// GET /api/approvals/{id} — Get a single approval request by ID.
+#[utoipa::path(get, path = "/api/approvals/{id}", tag = "approvals", params(("id" = String, Path, description = "Approval ID")), responses((status = 200, description = "Single approval request", body = serde_json::Value), (status = 404, description = "Approval not found")))]
+pub async fn get_approval(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let uuid = match uuid::Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid approval ID"})),
+            );
+        }
+    };
+
+    match state.kernel.approval_manager.get_pending(uuid) {
+        Some(a) => {
+            let registry_agents = state.kernel.registry.list();
+            let agent_name = registry_agents
+                .iter()
+                .find(|ag| ag.id.to_string() == a.agent_id || ag.name == a.agent_id)
+                .map(|ag| ag.name.as_str())
+                .unwrap_or(&a.agent_id);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": a.id,
+                    "agent_id": a.agent_id,
+                    "agent_name": agent_name,
+                    "tool_name": a.tool_name,
+                    "description": a.description,
+                    "action_summary": a.action_summary,
+                    "action": a.action_summary,
+                    "risk_level": a.risk_level,
+                    "requested_at": a.requested_at,
+                    "created_at": a.requested_at,
+                    "timeout_secs": a.timeout_secs,
+                    "status": "pending"
+                })),
+            )
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("No pending approval request with id {id}")})),
+        ),
+    }
+}
+
 /// POST /api/approvals — Create a manual approval request (for external systems).
 ///
 /// Note: Most approval requests are created automatically by the tool_runner
