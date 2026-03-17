@@ -63,12 +63,9 @@ impl ValidationError {
 
 // ── ValidatedJson extractor ─────────────────────────────────────────
 
-/// Drop-in replacement for `axum::Json<T>` that:
-///
-/// 1. Returns a consistent `{"error": "...", "type": "validation_error"}` on
-///    deserialization failure instead of axum's default plain-text rejection.
-/// 2. Checks JSON nesting depth on the raw value to prevent stack-overflow
-///    attacks from deeply-nested payloads.
+/// Drop-in replacement for `axum::Json<T>` that returns a consistent
+/// `{"error": "...", "type": "validation_error"}` on deserialization failure
+/// instead of axum's default plain-text rejection.
 ///
 /// Route handlers can swap `Json<T>` → `ValidatedJson<T>` with no other changes.
 pub struct ValidatedJson<T>(pub T);
@@ -115,7 +112,7 @@ pub fn check_string_length(
     value: &str,
     max_len: usize,
 ) -> Result<(), ValidationError> {
-    if value.len() > max_len {
+    if value.chars().count() > max_len {
         Err(ValidationError::bad_request(format!(
             "Field '{field_name}' exceeds maximum length of {max_len} characters"
         )))
@@ -141,18 +138,39 @@ pub fn check_json_depth(
     value: &serde_json::Value,
     max_depth: usize,
 ) -> Result<(), ValidationError> {
-    fn depth(v: &serde_json::Value) -> usize {
+    // Iterative depth check using an explicit stack to avoid stack overflow
+    // on adversarial input with extreme nesting.
+    let mut stack: Vec<(&serde_json::Value, usize)> = vec![(value, 0)];
+    let mut max_seen: usize = 0;
+
+    while let Some((v, current_depth)) = stack.pop() {
+        if current_depth > max_seen {
+            max_seen = current_depth;
+        }
+        // Early exit as soon as we exceed the limit.
+        if max_seen > max_depth {
+            return Err(ValidationError::bad_request(format!(
+                "JSON nesting depth exceeds maximum of {max_depth}"
+            )));
+        }
         match v {
-            serde_json::Value::Array(arr) => 1 + arr.iter().map(depth).max().unwrap_or(0),
-            serde_json::Value::Object(map) => 1 + map.values().map(depth).max().unwrap_or(0),
-            _ => 0,
+            serde_json::Value::Array(arr) => {
+                for item in arr {
+                    stack.push((item, current_depth + 1));
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for item in map.values() {
+                    stack.push((item, current_depth + 1));
+                }
+            }
+            _ => {}
         }
     }
 
-    let d = depth(value);
-    if d > max_depth {
+    if max_seen > max_depth {
         Err(ValidationError::bad_request(format!(
-            "JSON nesting depth {d} exceeds maximum of {max_depth}"
+            "JSON nesting depth exceeds maximum of {max_depth}"
         )))
     } else {
         Ok(())
