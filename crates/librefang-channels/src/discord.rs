@@ -587,8 +587,20 @@ fn parse_discord_attachment(
     companion_text: &str,
 ) -> ChannelContent {
     // Take the first attachment (most common case; multi-attachment is rare for bots).
-    let att = &attachments[0];
+    let att = match attachments.first() {
+        Some(a) => a,
+        None => {
+            // Defensive: caller checks has_attachments but guard against empty slice.
+            return ChannelContent::Text(companion_text.to_string());
+        }
+    };
+
     let url = att["url"].as_str().unwrap_or("").to_string();
+    if url.is_empty() {
+        warn!("Discord attachment has empty URL, falling back to text");
+        return ChannelContent::Text(companion_text.to_string());
+    }
+
     let filename = att["filename"].as_str().unwrap_or("attachment").to_string();
     let content_type = att["content_type"].as_str().unwrap_or("");
 
@@ -609,6 +621,12 @@ fn parse_discord_attachment(
             filename: Some(filename),
         }
     } else if content_type.starts_with("audio/") {
+        if !companion_text.is_empty() {
+            warn!(
+                "Discord audio attachment has companion text that cannot be sent as caption: {:?}",
+                companion_text
+            );
+        }
         ChannelContent::Voice {
             url,
             duration_seconds: 0,

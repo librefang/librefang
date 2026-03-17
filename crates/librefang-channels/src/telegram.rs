@@ -273,7 +273,8 @@ impl TelegramAdapter {
             "video": video_url,
         });
         if let Some(cap) = caption {
-            body["caption"] = serde_json::json!(cap);
+            body["caption"] = serde_json::Value::String(cap.to_string());
+            body["parse_mode"] = serde_json::Value::String("HTML".to_string());
         }
         if let Some(tid) = thread_id {
             body["message_thread_id"] = serde_json::json!(tid);
