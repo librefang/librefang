@@ -1464,7 +1464,20 @@ pub async fn start_channel_bridge_with_config(
     // Google Chat
     #[cfg(feature = "channel-google-chat")]
     for gc_config in config.google_chat.iter() {
-        if let Some(key) = read_token(&gc_config.service_account_env, "Google Chat") {
+        // Try service_account_key_path first, then fall back to env var
+        let key = gc_config
+            .service_account_key_path
+            .as_ref()
+            .filter(|p| !p.is_empty())
+            .and_then(|path| match std::fs::read_to_string(path) {
+                Ok(contents) => Some(contents),
+                Err(e) => {
+                    warn!("Google Chat: failed to read service account key from {path}: {e}");
+                    None
+                }
+            })
+            .or_else(|| read_token(&gc_config.service_account_env, "Google Chat"));
+        if let Some(key) = key {
             let adapter = Arc::new(
                 GoogleChatAdapter::new(key, gc_config.space_ids.clone(), gc_config.webhook_port)
                     .with_account_id(gc_config.account_id.clone()),
@@ -1474,6 +1487,8 @@ pub async fn start_channel_bridge_with_config(
                 gc_config.default_agent.clone(),
                 gc_config.account_id.clone(),
             ));
+        } else {
+            warn!("Google Chat configured but no credentials found (neither service_account_key_path nor {} env var), skipping", gc_config.service_account_env);
         }
     }
 

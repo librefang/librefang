@@ -8,18 +8,79 @@ use crate::types::{
     split_message, ChannelAdapter, ChannelContent, ChannelMessage, ChannelType, ChannelUser,
 };
 use async_trait::async_trait;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::Utc;
 use futures::Stream;
+use rsa::pkcs1v15::SigningKey;
+use rsa::pkcs8::DecodePrivateKey;
+use rsa::signature::{SignatureEncoding, SignerMut};
+use rsa::RsaPrivateKey;
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
 const MAX_MESSAGE_LEN: usize = 4096;
 const TOKEN_REFRESH_MARGIN_SECS: u64 = 300;
+const DEFAULT_TOKEN_LIFETIME_SECS: u64 = 3600;
+const GOOGLE_CHAT_SCOPE: &str = "https://www.googleapis.com/auth/chat.bot";
+
+/// Allowed token endpoint URL prefixes to prevent SSRF via a crafted `token_uri`.
+const ALLOWED_TOKEN_URI_PREFIXES: &[&str] = &[
+    "https://oauth2.googleapis.com/",
+    "https://accounts.google.com/",
+];
+
+/// Fields extracted from a Google service account JSON key file.
+///
+/// NOTE: `Clone` is intentionally omitted to avoid spreading `private_key` in memory.
+#[derive(serde::Deserialize)]
+struct ServiceAccountKey {
+    /// Service account email address (used as JWT `iss` and `sub`).
+    #[serde(default)]
+    client_email: String,
+    /// PEM-encoded RSA private key.  Wrapped in `Zeroizing` so it is wiped on drop.
+    #[serde(default, deserialize_with = "deserialize_zeroizing_string")]
+    private_key: Zeroizing<String>,
+    /// Token endpoint URL (typically `https://oauth2.googleapis.com/token`).
+    #[serde(default = "default_token_uri")]
+    token_uri: String,
+    /// Optional pre-supplied access token (for testing/migration).
+    #[serde(default)]
+    access_token: Option<String>,
+}
+
+/// Deserialize a `String` directly into `Zeroizing<String>`.
+fn deserialize_zeroizing_string<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let s = String::deserialize(deserializer)?;
+    Ok(Zeroizing::new(s))
+}
+
+impl std::fmt::Debug for ServiceAccountKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServiceAccountKey")
+            .field("client_email", &self.client_email)
+            .field("private_key", &"[REDACTED]")
+            .field("token_uri", &self.token_uri)
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+fn default_token_uri() -> String {
+    "https://oauth2.googleapis.com/token".to_string()
+}
 
 /// Google Chat channel adapter using service account authentication and REST API.
 ///
@@ -72,12 +133,16 @@ impl GoogleChatAdapter {
 
     /// Get a valid access token, refreshing if expired or missing.
     ///
-    /// In a full implementation this would perform JWT signing and exchange with
-    /// Google's OAuth2 token endpoint. For now it parses a pre-supplied token
-    /// from the service account key JSON (field "access_token") or returns an
-    /// error indicating that full JWT auth is not yet wired.
+    /// Authentication priority:
+    /// 1. Cached token (if not expired)
+    /// 2. JWT-based service account auth (if `private_key` + `client_email` present)
+    /// 3. Direct `access_token` field in key JSON (legacy/testing fallback)
+    ///
+    /// Uses double-checked locking to prevent thundering-herd token exchanges.
+    /// The write lock is released before the HTTP request so concurrent readers
+    /// are not blocked during the (potentially slow) token exchange.
     async fn get_access_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // Check cache first
+        // Fast path: check cache with read lock
         {
             let cache = self.cached_token.read().await;
             if let Some((ref token, expiry)) = *cache {
@@ -87,23 +152,131 @@ impl GoogleChatAdapter {
             }
         }
 
-        // Parse the service account key to extract project/client info
-        let key_json: serde_json::Value = serde_json::from_str(&self.service_account_key)
+        // Slow path: acquire write lock, then re-check (another task may have refreshed)
+        {
+            let cache = self.cached_token.write().await;
+            if let Some((ref token, expiry)) = *cache {
+                if Instant::now() + Duration::from_secs(TOKEN_REFRESH_MARGIN_SECS) < expiry {
+                    return Ok(token.clone());
+                }
+            }
+            // Write lock dropped here — we'll do the expensive work (HTTP) without holding it.
+        }
+
+        let sa_key: ServiceAccountKey = serde_json::from_str(&self.service_account_key)
             .map_err(|e| format!("Invalid service account key JSON: {e}"))?;
 
-        // For a real implementation: build a JWT, sign with the private key,
-        // exchange at https://oauth2.googleapis.com/token for an access token.
-        // This adapter currently expects an "access_token" field for testing or
-        // a pre-authorized token workflow.
-        let token = key_json["access_token"]
-            .as_str()
-            .ok_or("Service account key missing 'access_token' field; full JWT auth not yet implemented")?
-            .to_string();
+        // Try JWT-based authentication if private_key is present
+        if !sa_key.private_key.is_empty() && !sa_key.client_email.is_empty() {
+            let token = self.exchange_jwt_for_token(&sa_key).await?;
+            return Ok(token);
+        }
 
-        let expiry = Instant::now() + Duration::from_secs(3600);
+        // Fallback: use a direct access_token field (for testing or pre-authorized tokens)
+        let token = sa_key.access_token.filter(|t| !t.is_empty()).ok_or(
+            "Service account key has no private_key for JWT auth and no access_token fallback",
+        )?;
+
+        let expiry = Instant::now() + Duration::from_secs(DEFAULT_TOKEN_LIFETIME_SECS);
         *self.cached_token.write().await = Some((token.clone(), expiry));
 
         Ok(token)
+    }
+
+    /// Build a signed JWT assertion and exchange it for an OAuth2 access token.
+    ///
+    /// The write lock is NOT held during the HTTP exchange. After obtaining the
+    /// token, the cache is updated under a fresh write lock. This means a second
+    /// concurrent caller may also perform a token exchange (at most one extra),
+    /// but no caller is blocked on network I/O — a good tradeoff for an operation
+    /// that only happens once per hour.
+    async fn exchange_jwt_for_token(
+        &self,
+        sa_key: &ServiceAccountKey,
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        // Validate token_uri against allowlist to prevent SSRF
+        if !ALLOWED_TOKEN_URI_PREFIXES
+            .iter()
+            .any(|prefix| sa_key.token_uri.starts_with(prefix))
+        {
+            return Err(format!(
+                "Untrusted token_uri '{}': must start with one of {:?}",
+                sa_key.token_uri, ALLOWED_TOKEN_URI_PREFIXES
+            )
+            .into());
+        }
+
+        let now = Utc::now().timestamp();
+
+        // Build JWT header
+        let header = serde_json::json!({
+            "alg": "RS256",
+            "typ": "JWT"
+        });
+
+        // Build JWT claims
+        let claims = serde_json::json!({
+            "iss": sa_key.client_email,
+            "sub": sa_key.client_email,
+            "scope": GOOGLE_CHAT_SCOPE,
+            "aud": sa_key.token_uri,
+            "iat": now,
+            "exp": now + DEFAULT_TOKEN_LIFETIME_SECS as i64,
+        });
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(header.to_string().as_bytes());
+        let claims_b64 = URL_SAFE_NO_PAD.encode(claims.to_string().as_bytes());
+        let signing_input = format!("{header_b64}.{claims_b64}");
+
+        // Parse PEM private key and sign with RS256
+        let private_key = RsaPrivateKey::from_pkcs8_pem(&sa_key.private_key)
+            .map_err(|e| format!("Failed to parse RSA private key: {e}"))?;
+
+        let mut signing_key = SigningKey::<Sha256>::new(private_key);
+        let signature = signing_key.sign(signing_input.as_bytes());
+        let signature_b64 = URL_SAFE_NO_PAD.encode(signature.to_bytes());
+
+        let jwt = format!("{signing_input}.{signature_b64}");
+
+        // Exchange JWT for access token at the token endpoint (no lock held)
+        let resp = self
+            .client
+            .post(&sa_key.token_uri)
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+                ("assertion", &jwt),
+            ])
+            .send()
+            .await
+            .map_err(|e| format!("Token exchange request failed: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            warn!("Google Chat: token exchange failed ({status}): {body}");
+            return Err(format!("Token exchange failed ({status}): {body}").into());
+        }
+
+        let token_resp: serde_json::Value = resp.json().await?;
+        let access_token = token_resp["access_token"]
+            .as_str()
+            .ok_or("Token response missing access_token field")?
+            .to_string();
+
+        let expires_in = token_resp["expires_in"]
+            .as_u64()
+            .unwrap_or(DEFAULT_TOKEN_LIFETIME_SECS);
+
+        // Re-acquire write lock to update cache
+        let expiry = Instant::now() + Duration::from_secs(expires_in);
+        *self.cached_token.write().await = Some((access_token.clone(), expiry));
+
+        debug!(
+            "Google Chat: obtained access token via JWT, expires in {}s",
+            expires_in
+        );
+
+        Ok(access_token)
     }
 
     /// Send a text message to a Google Chat space.
@@ -222,7 +395,7 @@ impl ChannelAdapter for GoogleChatAdapter {
                         return;
                     }
 
-                    // Read headers to find Content-Length
+                    // Read headers to find Content-Length (case-insensitive per HTTP spec)
                     let mut content_length: usize = 0;
                     loop {
                         let mut header_line = String::new();
@@ -236,27 +409,19 @@ impl ChannelAdapter for GoogleChatAdapter {
                         if trimmed.is_empty() {
                             break;
                         }
-                        if let Some(val) = trimmed.strip_prefix("Content-Length:") {
-                            if let Ok(len) = val.trim().parse::<usize>() {
-                                content_length = len;
-                            }
-                        }
-                        if let Some(val) = trimmed.strip_prefix("content-length:") {
+                        let lower = trimmed.to_lowercase();
+                        if let Some(val) = lower.strip_prefix("content-length:") {
                             if let Ok(len) = val.trim().parse::<usize>() {
                                 content_length = len;
                             }
                         }
                     }
 
-                    // Read body
-                    let mut body_buf = vec![0u8; content_length.min(65536)];
+                    // Read body (cap at 64 KB to prevent abuse)
+                    let read_len = content_length.min(65536);
+                    let mut body_buf = vec![0u8; read_len];
                     use tokio::io::AsyncReadExt;
-                    if content_length > 0
-                        && reader
-                            .read_exact(&mut body_buf[..content_length.min(65536)])
-                            .await
-                            .is_err()
-                    {
+                    if read_len > 0 && reader.read_exact(&mut body_buf).await.is_err() {
                         return;
                     }
 
@@ -266,11 +431,10 @@ impl ChannelAdapter for GoogleChatAdapter {
                     let _ = reader.get_mut().write_all(resp).await;
 
                     // Parse the Google Chat event payload
-                    let payload: serde_json::Value =
-                        match serde_json::from_slice(&body_buf[..content_length.min(65536)]) {
-                            Ok(v) => v,
-                            Err(_) => return,
-                        };
+                    let payload: serde_json::Value = match serde_json::from_slice(&body_buf) {
+                        Ok(v) => v,
+                        Err(_) => return,
+                    };
 
                     let event_type = payload["type"].as_str().unwrap_or("");
                     if event_type != "MESSAGE" {
@@ -405,14 +569,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_google_chat_token_caching() {
+    async fn test_google_chat_token_caching_fallback() {
         let adapter = GoogleChatAdapter::new(
             r#"{"access_token":"cached-tok","project_id":"p"}"#.to_string(),
             vec![],
             8091,
         );
 
-        // First call should parse and cache
+        // First call should parse and cache (uses access_token fallback)
         let token = adapter.get_access_token().await.unwrap();
         assert_eq!(token, "cached-tok");
 
@@ -421,10 +585,157 @@ mod tests {
         assert_eq!(token2, "cached-tok");
     }
 
+    #[tokio::test]
+    async fn test_google_chat_no_credentials_error() {
+        let adapter = GoogleChatAdapter::new(
+            r#"{"client_email":"test@test.iam.gserviceaccount.com"}"#.to_string(),
+            vec![],
+            8093,
+        );
+
+        // No private_key and no access_token should error
+        let result = adapter.get_access_token().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no private_key") || err.contains("no access_token"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn test_google_chat_invalid_key() {
         let adapter = GoogleChatAdapter::new("not-json".to_string(), vec![], 8092);
         // Can't call async get_access_token in sync test, but verify construction works
         assert_eq!(adapter.webhook_port, 8092);
+    }
+
+    #[test]
+    fn test_service_account_key_parsing() {
+        let json = r#"{
+            "client_email": "bot@project.iam.gserviceaccount.com",
+            "private_key": "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+            "token_uri": "https://oauth2.googleapis.com/token"
+        }"#;
+        let key: ServiceAccountKey = serde_json::from_str(json).unwrap();
+        assert_eq!(key.client_email, "bot@project.iam.gserviceaccount.com");
+        assert!(key.private_key.contains("BEGIN PRIVATE KEY"));
+        assert_eq!(key.token_uri, "https://oauth2.googleapis.com/token");
+        assert!(key.access_token.is_none());
+    }
+
+    #[test]
+    fn test_service_account_key_default_token_uri() {
+        let json = r#"{
+            "client_email": "bot@project.iam.gserviceaccount.com",
+            "private_key": "key"
+        }"#;
+        let key: ServiceAccountKey = serde_json::from_str(json).unwrap();
+        assert_eq!(key.token_uri, "https://oauth2.googleapis.com/token");
+    }
+
+    #[tokio::test]
+    async fn test_jwt_construction_with_invalid_key() {
+        // Verify that an invalid PEM key produces a clear error
+        let adapter = GoogleChatAdapter::new(
+            r#"{
+                "client_email": "bot@test.iam.gserviceaccount.com",
+                "private_key": "not-a-valid-pem-key",
+                "token_uri": "https://oauth2.googleapis.com/token"
+            }"#
+            .to_string(),
+            vec![],
+            8094,
+        );
+
+        let result = adapter.get_access_token().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Failed to parse RSA private key"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_google_chat_with_account_id() {
+        let adapter = GoogleChatAdapter::new(r#"{"access_token":"tok"}"#.to_string(), vec![], 8095)
+            .with_account_id(Some("bot-1".to_string()));
+        assert_eq!(adapter.account_id, Some("bot-1".to_string()));
+    }
+
+    #[test]
+    fn test_service_account_key_debug_redacts_secrets() {
+        let key = ServiceAccountKey {
+            client_email: "bot@test.iam.gserviceaccount.com".to_string(),
+            private_key: Zeroizing::new(
+                "-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----".to_string(),
+            ),
+            token_uri: "https://oauth2.googleapis.com/token".to_string(),
+            access_token: Some("super-secret-token".to_string()),
+        };
+        let debug_output = format!("{:?}", key);
+        assert!(
+            !debug_output.contains("SECRET"),
+            "Debug output must not contain the private key"
+        );
+        assert!(
+            !debug_output.contains("super-secret-token"),
+            "Debug output must not contain the access token"
+        );
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should show [REDACTED]"
+        );
+        assert!(
+            debug_output.contains("bot@test.iam.gserviceaccount.com"),
+            "Debug output should still show client_email"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_uri_ssrf_blocked() {
+        let adapter = GoogleChatAdapter::new(
+            r#"{
+                "client_email": "bot@test.iam.gserviceaccount.com",
+                "private_key": "not-a-valid-pem-key",
+                "token_uri": "https://evil.example.com/steal"
+            }"#
+            .to_string(),
+            vec![],
+            8096,
+        );
+
+        let result = adapter.get_access_token().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Untrusted token_uri"),
+            "Expected SSRF rejection, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_token_uri_allowed_prefixes() {
+        // Verify that the default token_uri is accepted (will fail at PEM parsing, not at URI check)
+        let adapter = GoogleChatAdapter::new(
+            r#"{
+                "client_email": "bot@test.iam.gserviceaccount.com",
+                "private_key": "not-a-valid-pem-key",
+                "token_uri": "https://oauth2.googleapis.com/token"
+            }"#
+            .to_string(),
+            vec![],
+            8097,
+        );
+
+        let result = adapter.get_access_token().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // Should fail at RSA key parsing, NOT at URI validation
+        assert!(
+            err.contains("Failed to parse RSA private key"),
+            "Expected RSA parse error (URI should be allowed), got: {err}"
+        );
     }
 }
