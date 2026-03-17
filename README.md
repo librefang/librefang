@@ -79,17 +79,24 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 ## Hands: Agents That Work for You
 
-**Hands** are pre-built autonomous capability packages that run independently, on schedules, without prompting.
+**Hands** are pre-built autonomous capability packages that run independently, on schedules, without prompting. 14 bundled:
 
 | Hand | What It Does |
 |------|-------------|
-| **Clip** | YouTube to vertical shorts — downloads, cuts best moments, adds captions/voice-over, publishes |
-| **Lead** | Daily prospect discovery — web research, scoring, dedup, delivers qualified leads |
-| **Collector** | OSINT monitoring — change detection, sentiment tracking, knowledge graph, critical alerts |
-| **Predictor** | Superforecasting — calibrated predictions with confidence intervals, Brier score tracking |
 | **Researcher** | Deep research — multi-source, credibility scoring (CRAAP), cited reports |
-| **Twitter** | Autonomous X/Twitter — content creation, scheduling, engagement tracking, approval queue |
-| **Browser** | Web automation — Playwright-based, session persistence, mandatory purchase approval gate |
+| **Collector** | OSINT monitoring — change detection, sentiment tracking, knowledge graph |
+| **Predictor** | Superforecasting — calibrated predictions with confidence intervals |
+| **Strategist** | Strategy analysis — market research, competitive intel, business planning |
+| **Analytics** | Data analytics — collection, analysis, visualization, automated reporting |
+| **Trader** | Market intelligence — multi-signal analysis, risk management, portfolio analytics |
+| **Lead** | Prospect discovery — web research, scoring, dedup, qualified lead delivery |
+| **Twitter** | Autonomous X/Twitter — content creation, scheduling, approval queue |
+| **Reddit** | Reddit manager — subreddit monitoring, posting, engagement tracking |
+| **LinkedIn** | LinkedIn manager — content creation, networking, professional engagement |
+| **Clip** | YouTube to vertical shorts — cuts best moments, captions, voice-over |
+| **Browser** | Web automation — Playwright-based, mandatory purchase approval gate |
+| **API Tester** | API testing — endpoint discovery, validation, load testing, regression detection |
+| **DevOps** | DevOps automation — CI/CD, infrastructure monitoring, incident response |
 
 ```bash
 librefang hand activate researcher   # Starts working immediately

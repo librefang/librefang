@@ -75,7 +75,7 @@ AutoGen    ███████████░░░░░░░░░░░░
 | Feature | LibreFang | OpenClaw | ZeroClaw | CrewAI | AutoGen | LangGraph |
 |---------|----------|----------|----------|--------|---------|-----------|
 | **Language** | **Rust** | TypeScript | **Rust** | Python | Python | Python |
-| **Autonomous Hands** | **7 built-in** | None | None | None | None | None |
+| **Autonomous Hands** | **14 built-in** | None | None | None | None | None |
 | **Security Layers** | **16 discrete** | 3 basic | 6 layers | 1 basic | Docker | AES enc. |
 | **Agent Sandbox** | **WASM dual-metered** | None | Allowlists | None | Docker | None |
 | **Channel Adapters** | **40** | 13 | 15 | 0 | 0 | 0 |
