@@ -6,7 +6,7 @@
 use librefang_channels::bridge::{BridgeManager, ChannelBridgeHandle};
 use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
-use librefang_channels::types::ChannelAdapter;
+use librefang_channels::types::{ChannelAdapter, SenderContext};
 
 // Feature-gated adapter imports
 #[cfg(feature = "channel-discord")]
@@ -225,6 +225,47 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         });
 
         Ok(rx)
+    }
+
+    async fn send_message_with_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> Result<String, String> {
+        let result = self
+            .kernel
+            .send_message_with_sender_context(agent_id, message, sender)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(result.response)
+    }
+
+    async fn send_message_with_blocks_and_sender(
+        &self,
+        agent_id: AgentId,
+        blocks: Vec<librefang_types::message::ContentBlock>,
+        sender: &SenderContext,
+    ) -> Result<String, String> {
+        let text: String = blocks
+            .iter()
+            .filter_map(|b| match b {
+                librefang_types::message::ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = if text.is_empty() {
+            "[Image]".to_string()
+        } else {
+            text
+        };
+        let result = self
+            .kernel
+            .send_message_with_blocks_and_sender(agent_id, &text, blocks, sender)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(result.response)
     }
 
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {

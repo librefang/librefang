@@ -37,6 +37,10 @@ pub struct PromptContext {
     pub user_name: Option<String>,
     /// Channel type (telegram, discord, web, etc.).
     pub channel_type: Option<String>,
+    /// Sender's display name (from channel message).
+    pub sender_display_name: Option<String>,
+    /// Sender's platform user ID (from channel message).
+    pub sender_user_id: Option<String>,
     /// Whether this agent was spawned as a subagent.
     pub is_subagent: bool,
     /// Whether this agent has autonomous config.
@@ -144,7 +148,11 @@ pub fn build_system_prompt(ctx: &PromptContext) -> String {
     // Section 9 — Channel Awareness (skip for subagents)
     if !ctx.is_subagent {
         if let Some(ref channel) = ctx.channel_type {
-            sections.push(build_channel_section(channel));
+            sections.push(build_channel_section(
+                channel,
+                ctx.sender_display_name.as_deref(),
+                ctx.sender_user_id.as_deref(),
+            ));
         }
     }
 
@@ -407,7 +415,11 @@ fn build_user_section(user_name: Option<&str>) -> String {
     }
 }
 
-fn build_channel_section(channel: &str) -> String {
+fn build_channel_section(
+    channel: &str,
+    sender_name: Option<&str>,
+    sender_id: Option<&str>,
+) -> String {
     let (limit, hints) = match channel {
         "telegram" => (
             "4096",
@@ -436,11 +448,27 @@ fn build_channel_section(channel: &str) -> String {
         "teams" => ("28000", "Use Teams-compatible markdown."),
         _ => ("4096", "Use markdown formatting where supported."),
     };
-    format!(
+    let mut section = format!(
         "## Channel\n\
          You are responding via {channel}. Keep messages under {limit} chars.\n\
          {hints}"
-    )
+    );
+    // Append sender identity when available from channel bridge
+    match (sender_name, sender_id) {
+        (Some(name), Some(id)) => {
+            section.push_str(&format!(
+                "\nThe current message is from user \"{name}\" (platform ID: {id})."
+            ));
+        }
+        (Some(name), None) => {
+            section.push_str(&format!("\nThe current message is from user \"{name}\"."));
+        }
+        (None, Some(id)) => {
+            section.push_str(&format!("\nThe current message is from platform ID: {id}."));
+        }
+        (None, None) => {}
+    }
+    section
 }
 
 fn build_peer_agents_section(self_name: &str, peers: &[(String, String, String)]) -> String {

@@ -102,6 +102,26 @@ pub struct ChannelMessage {
     pub metadata: HashMap<String, serde_json::Value>,
 }
 
+/// Sender identity context passed from channels to the kernel.
+///
+/// Carries enough information for agents to know who is talking to them
+/// and from which channel, without depending on kernel-level types.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SenderContext {
+    /// Channel name (e.g. "telegram", "discord", "slack").
+    pub channel: String,
+    /// Platform-specific user ID.
+    pub user_id: String,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Whether the message came from a group chat (vs DM).
+    #[serde(default)]
+    pub is_group: bool,
+    /// Thread ID for threaded conversations (platform-specific).
+    #[serde(default)]
+    pub thread_id: Option<String>,
+}
+
 /// Agent lifecycle phase for UX indicators.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
