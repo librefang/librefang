@@ -27,6 +27,64 @@ steps = [
     "Restart LibreFang or reload config for the change to take effect",
 ]
 
+[[requires]]
+key = "REDDIT_CLIENT_SECRET"
+label = "Reddit API Client Secret"
+requirement_type = "api_key"
+check_value = "REDDIT_CLIENT_SECRET"
+description = "OAuth2 client secret from a Reddit app. Used together with the client ID for API authentication."
+
+[requires.install]
+signup_url = "https://www.reddit.com/prefs/apps"
+docs_url = "https://www.reddit.com/dev/api/"
+env_example = "REDDIT_CLIENT_SECRET=your_client_secret_here"
+estimated_time = "5-10 min"
+steps = [
+    "Go to reddit.com/prefs/apps and sign in",
+    "Click 'create another app...' at the bottom",
+    "Select 'script' as the app type",
+    "Fill in name and redirect URI (http://localhost:8080)",
+    "Copy the secret shown below the app description",
+    "Set REDDIT_CLIENT_SECRET as an environment variable",
+    "Restart LibreFang or reload config for the change to take effect",
+]
+
+[[requires]]
+key = "REDDIT_USERNAME"
+label = "Reddit Username"
+requirement_type = "api_key"
+check_value = "REDDIT_USERNAME"
+description = "Reddit account username. Required for OAuth2 password-grant authentication to post and comment."
+
+[requires.install]
+signup_url = "https://www.reddit.com/register"
+docs_url = "https://www.reddit.com/dev/api/"
+env_example = "REDDIT_USERNAME=your_reddit_username"
+estimated_time = "1-2 min"
+steps = [
+    "Use the Reddit account username you want the hand to act as",
+    "Set REDDIT_USERNAME as an environment variable",
+    "Restart LibreFang or reload config for the change to take effect",
+]
+
+[[requires]]
+key = "REDDIT_PASSWORD"
+label = "Reddit Password"
+requirement_type = "api_key"
+check_value = "REDDIT_PASSWORD"
+description = "Reddit account password. Required for OAuth2 password-grant authentication to post and comment."
+
+[requires.install]
+signup_url = "https://www.reddit.com/register"
+docs_url = "https://www.reddit.com/dev/api/"
+env_example = "REDDIT_PASSWORD=your_reddit_password"
+estimated_time = "1-2 min"
+steps = [
+    "Use the password for the Reddit account configured in REDDIT_USERNAME",
+    "Set REDDIT_PASSWORD as an environment variable",
+    "Restart LibreFang or reload config for the change to take effect",
+]
+
 # ─── Configurable settings ───────────────────────────────────────────────────
 
 [[settings]]
