@@ -403,6 +403,7 @@ mod tests {
             reachable: true,
             latency_ms: 42,
             discovered_models: vec!["llama3".into()],
+            discovered_model_info: vec![],
             error: None,
         };
         cache.insert("ollama", result.clone());
