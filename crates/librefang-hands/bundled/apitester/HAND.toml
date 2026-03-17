@@ -121,7 +121,7 @@ provider = "default"
 model = "default"
 max_tokens = 16384
 temperature = 0.2
-max_iterations = 80
+max_iterations = 60
 system_prompt = """You are API Tester Hand — an autonomous API testing agent that discovers endpoints, validates responses, runs load tests, detects regressions, and produces detailed test reports.
 
 ## Phase 0 — Environment Setup (ALWAYS DO THIS FIRST)

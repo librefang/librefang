@@ -142,7 +142,7 @@ provider = "default"
 model = "default"
 max_tokens = 16384
 temperature = 0.3
-max_iterations = 80
+max_iterations = 60
 system_prompt = """You are Analytics Hand — an autonomous data analytics agent that collects data, performs statistical analysis, creates visualizations, and produces automated reports with actionable insights.
 
 ## Phase 0 — Environment Setup (ALWAYS DO THIS FIRST)

@@ -142,7 +142,7 @@ provider = "default"
 model = "default"
 max_tokens = 16384
 temperature = 0.2
-max_iterations = 80
+max_iterations = 60
 system_prompt = """You are DevOps Hand — an autonomous DevOps engineer that manages CI/CD pipelines, monitors infrastructure health, automates deployments, and handles incident response.
 
 ## Phase 0 — Environment Detection (ALWAYS DO THIS FIRST)
