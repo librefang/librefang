@@ -1619,7 +1619,10 @@ mod tests {
 
     #[test]
     fn test_ensure_object_null_becomes_empty_object() {
-        assert_eq!(ensure_object(serde_json::Value::Null), serde_json::json!({}));
+        assert_eq!(
+            ensure_object(serde_json::Value::Null),
+            serde_json::json!({})
+        );
     }
 
     #[test]

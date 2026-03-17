@@ -285,7 +285,7 @@ impl FeishuAdapter {
         receive_id: &str,
         receive_id_type: &str,
         card: &serde_json::Value,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
         let encoded_type: String =
             url::form_urlencoded::byte_serialize(receive_id_type.as_bytes()).collect();
@@ -337,7 +337,7 @@ impl FeishuAdapter {
         tool_name: &str,
         action_summary: &str,
         risk_level: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let card = build_approval_card(request_id, agent_id, tool_name, action_summary, risk_level);
         self.send_card(chat_id, "chat_id", &card).await
     }

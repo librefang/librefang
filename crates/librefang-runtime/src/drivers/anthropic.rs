@@ -785,9 +785,15 @@ mod tests {
 
     #[test]
     fn test_ensure_object_non_object_becomes_empty_object() {
-        assert_eq!(ensure_object(serde_json::json!("string")), serde_json::json!({}));
+        assert_eq!(
+            ensure_object(serde_json::json!("string")),
+            serde_json::json!({})
+        );
         assert_eq!(ensure_object(serde_json::json!(42)), serde_json::json!({}));
-        assert_eq!(ensure_object(serde_json::json!([1, 2, 3])), serde_json::json!({}));
+        assert_eq!(
+            ensure_object(serde_json::json!([1, 2, 3])),
+            serde_json::json!({})
+        );
     }
 
     #[test]
