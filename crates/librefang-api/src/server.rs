@@ -210,6 +210,42 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/agents/{id}/memory/import",
             axum::routing::post(routes::import_agent_memory),
         )
+        // Proactive memory (mem0-style) endpoints
+        .route(
+            "/memory",
+            axum::routing::get(routes::memory_list).post(routes::memory_add),
+        )
+        .route("/memory/search", axum::routing::get(routes::memory_search))
+        .route("/memory/stats", axum::routing::get(routes::memory_stats))
+        .route(
+            "/memory/{memory_id}",
+            axum::routing::put(routes::memory_update).delete(routes::memory_delete),
+        )
+        .route(
+            "/memory/user/{user_id}",
+            axum::routing::get(routes::memory_get_user),
+        )
+        // Per-agent proactive memory endpoints
+        .route(
+            "/memory/agents/{id}",
+            axum::routing::delete(routes::memory_reset_agent),
+        )
+        .route(
+            "/memory/agents/{id}/search",
+            axum::routing::get(routes::memory_search_agent),
+        )
+        .route(
+            "/memory/agents/{id}/stats",
+            axum::routing::get(routes::memory_stats_agent),
+        )
+        .route(
+            "/memory/agents/{id}/level/{level}",
+            axum::routing::delete(routes::memory_clear_level),
+        )
+        .route(
+            "/memory/agents/{id}/duplicates",
+            axum::routing::get(routes::memory_duplicates),
+        )
         .route(
             "/triggers",
             axum::routing::get(routes::list_triggers).post(routes::create_trigger),

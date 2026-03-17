@@ -85,7 +85,7 @@ pub mod categories {
 /// let results = store.search("preferences", user_id, 10).await.unwrap();
 ///
 /// // Auto-retrieve before agent execution
-/// let context = store.auto_retrieve("What did I tell you about my preferences?").await.unwrap();
+/// let context = store.auto_retrieve("user123", "What did I tell you about my preferences?").await.unwrap();
 /// ```
 #[derive(Clone)]
 pub struct ProactiveMemoryStore {
@@ -137,18 +137,11 @@ impl ProactiveMemoryStore {
         &self.config
     }
 
-    /// Update the config.
-    pub fn update_config(&self, config: ProactiveMemoryConfig) {
-        // Note: this would need interior mutability in production
-        // For now, config is set at creation time
-        let _ = config;
-    }
-
     /// Parse user_id string into AgentId.
     fn parse_agent_id(user_id: &str) -> LibreFangResult<AgentId> {
-        user_id.parse().map_err(|e| {
-            LibreFangError::Internal(format!("Failed to parse user_id: {}", e))
-        })
+        user_id
+            .parse()
+            .map_err(|e| LibreFangError::Internal(format!("Failed to parse user_id: {}", e)))
     }
 
     /// Retrieve memory items from storage.
@@ -224,75 +217,136 @@ impl ProactiveMemoryStore {
         Ok(items)
     }
 
-    /// Build extraction prompt for LLM.
-    #[allow(dead_code)]
-    fn build_extraction_prompt(&self, messages: &[serde_json::Value]) -> String {
-        let messages_text: Vec<String> = messages
-            .iter()
-            .filter_map(|m| {
-                let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-                let content = m.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                if content.is_empty() {
-                    None
-                } else {
-                    Some(format!("{}: {}", role, content))
-                }
-            })
-            .collect();
-
-        format!(
-            r#"Extract important information from this conversation that should be remembered.
-
-Categories to extract:
-- user_preference: User's stated preferences, likes, dislikes
-- important_fact: Factual information the user shared
-- task_context: Context about ongoing tasks or projects
-- relationship: Information about relationships or interactions
-
-Conversation:
-{}
-
-Extract each piece of important information as a JSON array with format:
-{{"content": "...", "level": "user|session|agent", "category": "..."}}
-
-Only extract information worth remembering (confidence > 0.7).
-Return an empty array if nothing important was discussed."#,
-            messages_text.join("\n")
-        )
+    /// Format retrieved memories into a context string for prompt injection.
+    pub fn format_context(&self, memories: &[MemoryItem]) -> String {
+        self.extractor.format_context(memories)
     }
 
-    /// Parse LLM extraction response.
-    #[allow(dead_code)]
-    fn parse_extraction_response(&self, response: &str) -> Vec<MemoryItem> {
-        // Try to parse as JSON array
-        if let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(response) {
-            items
-                .into_iter()
-                .filter_map(|item| {
-                    let content = item.get("content")?.as_str()?.to_string();
-                    let level_str = item
-                        .get("level")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("session");
-                    let category = item
-                        .get("category")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
+    /// Get memory statistics for a user/agent.
+    ///
+    /// Uses efficient SQL COUNT queries instead of loading all items.
+    pub async fn stats(&self, user_id: &str) -> LibreFangResult<MemoryStats> {
+        let agent_id = Self::parse_agent_id(user_id)?;
 
-                    let level = MemoryLevel::from(level_str);
+        let user_count = self.semantic.count(agent_id, Some(scopes::USER))? as usize;
+        let session_count = self.semantic.count(agent_id, Some(scopes::SESSION))? as usize;
+        let agent_count = self.semantic.count(agent_id, Some(scopes::AGENT))? as usize;
+        let total = user_count + session_count + agent_count;
 
-                    let mut memory_item = MemoryItem::new(content, level);
-                    if let Some(cat) = category {
-                        memory_item = memory_item.with_category(cat);
-                    }
-
-                    Some(memory_item)
-                })
-                .collect()
-        } else {
-            Vec::new()
+        // For category breakdown, still need to load items (categories are in metadata)
+        let all_items = self.retrieve_memory_items(agent_id, None, None)?;
+        let mut categories: HashMap<String, usize> = HashMap::new();
+        for item in &all_items {
+            if let Some(ref cat) = item.category {
+                *categories.entry(cat.clone()).or_default() += 1;
+            }
         }
+
+        Ok(MemoryStats {
+            total,
+            user_count,
+            session_count,
+            agent_count,
+            categories,
+            auto_memorize_enabled: self.config.auto_memorize,
+            auto_retrieve_enabled: self.config.auto_retrieve,
+            llm_extraction: self.config.extraction_model.is_some(),
+        })
     }
+
+    /// Reset (soft-delete) ALL memories for a user/agent.
+    pub fn reset(&self, user_id: &str) -> LibreFangResult<u64> {
+        let agent_id = Self::parse_agent_id(user_id)?;
+        self.semantic.forget_by_agent(agent_id)
+    }
+
+    /// Clear memories at a specific level for a user/agent.
+    ///
+    /// Useful for clearing session memories while preserving user preferences.
+    pub fn clear_level(&self, user_id: &str, level: MemoryLevel) -> LibreFangResult<u64> {
+        let agent_id = Self::parse_agent_id(user_id)?;
+        self.semantic.forget_by_scope(agent_id, level.scope_str())
+    }
+
+    /// Clean up expired session memories older than the given duration.
+    ///
+    /// Call this periodically (e.g., on agent loop start) to prevent session
+    /// memories from accumulating indefinitely.
+    pub fn cleanup_expired_sessions(
+        &self,
+        user_id: &str,
+        max_age: chrono::Duration,
+    ) -> LibreFangResult<u64> {
+        let agent_id = Self::parse_agent_id(user_id)?;
+        let cutoff = chrono::Utc::now() - max_age;
+        self.semantic
+            .forget_older_than(agent_id, scopes::SESSION, cutoff)
+    }
+
+    /// Count memories for a user/agent, optionally filtered by level.
+    pub fn count(&self, user_id: &str, level: Option<MemoryLevel>) -> LibreFangResult<u64> {
+        let agent_id = Self::parse_agent_id(user_id)?;
+        let scope = level.map(|l| l.scope_str());
+        self.semantic.count(agent_id, scope)
+    }
+
+    /// Find duplicate/near-duplicate memories for a user/agent.
+    ///
+    /// Returns groups of memories that have identical or very similar content,
+    /// useful for manual review or automated consolidation.
+    pub async fn find_duplicates(
+        &self,
+        user_id: &str,
+        level: Option<MemoryLevel>,
+    ) -> LibreFangResult<Vec<Vec<MemoryItem>>> {
+        let agent_id = Self::parse_agent_id(user_id)?;
+        let all_items = self.retrieve_memory_items(agent_id, level, None)?;
+
+        // Group by substring containment (simple O(n^2) approach, fine for small N)
+        let mut used = vec![false; all_items.len()];
+        let mut groups: Vec<Vec<MemoryItem>> = Vec::new();
+
+        for i in 0..all_items.len() {
+            if used[i] {
+                continue;
+            }
+            let mut group = vec![all_items[i].clone()];
+            let a_lower = all_items[i].content.to_lowercase();
+
+            for j in (i + 1)..all_items.len() {
+                if used[j] {
+                    continue;
+                }
+                let b_lower = all_items[j].content.to_lowercase();
+                if a_lower.contains(&b_lower) || b_lower.contains(&a_lower) || a_lower == b_lower {
+                    group.push(all_items[j].clone());
+                    used[j] = true;
+                }
+            }
+
+            if group.len() > 1 {
+                groups.push(group);
+            }
+        }
+
+        Ok(groups)
+    }
+}
+
+/// Memory usage statistics.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MemoryStats {
+    pub total: usize,
+    pub user_count: usize,
+    pub session_count: usize,
+    pub agent_count: usize,
+    pub categories: HashMap<String, usize>,
+    /// Whether auto-memorize is enabled.
+    pub auto_memorize_enabled: bool,
+    /// Whether auto-retrieve is enabled.
+    pub auto_retrieve_enabled: bool,
+    /// Whether LLM-powered extraction is active.
+    pub llm_extraction: bool,
 }
 
 #[async_trait]
@@ -304,10 +358,11 @@ impl ProactiveMemory for ProactiveMemoryStore {
         user_id: &str,
         limit: usize,
     ) -> LibreFangResult<Vec<MemoryItem>> {
-        let _agent_id = Self::parse_agent_id(user_id)?;
+        let agent_id = Self::parse_agent_id(user_id)?;
 
-        // Use the semantic store directly
-        let results = self.semantic.recall(query, limit, None)?;
+        // Filter by agent to avoid cross-agent leakage
+        let filter = Some(MemoryFilter::agent(agent_id));
+        let results = self.semantic.recall(query, limit, filter)?;
 
         Ok(results
             .into_iter()
@@ -332,45 +387,60 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
     /// Add memories with automatic extraction.
     ///
-    /// Note: This is a simplified implementation. In production, this would:
-    /// 1. Send messages to LLM for extraction
-    /// 2. Parse extraction results
-    /// 3. Store extracted memories
-    async fn add(&self, messages: &[serde_json::Value], user_id: &str) -> LibreFangResult<()> {
+    /// Uses the configured extractor to break down messages into individual memories.
+    /// Returns the extracted items so the caller knows what was stored.
+    async fn add(
+        &self,
+        messages: &[serde_json::Value],
+        user_id: &str,
+    ) -> LibreFangResult<Vec<MemoryItem>> {
         if messages.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let agent_id = Self::parse_agent_id(user_id)?;
 
-        // For now, store the raw messages as session memory
-        // In production, we'd use LLM extraction here
-        let content = messages
-            .iter()
-            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Try to extract structured memories first
+        let extraction = self.extractor.extract_memories(messages).await?;
+        if extraction.has_content {
+            for item in &extraction.memories {
+                let mut metadata = item.metadata.clone();
+                metadata.insert("category".to_string(), serde_json::json!(&item.category));
+                self.semantic.remember(
+                    agent_id,
+                    &item.content,
+                    MemorySource::Conversation,
+                    item.level.scope_str(),
+                    metadata,
+                )?;
+            }
+            Ok(extraction.memories)
+        } else {
+            // Fallback: store raw message content as session memory
+            let content = messages
+                .iter()
+                .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
+                .collect::<Vec<_>>()
+                .join("\n");
 
-        if content.is_empty() {
-            return Ok(());
+            if content.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            self.semantic.remember(
+                agent_id,
+                &content,
+                MemorySource::Conversation,
+                scopes::SESSION,
+                HashMap::new(),
+            )?;
+
+            // Return a synthetic MemoryItem for the raw content
+            Ok(vec![MemoryItem::new(content, MemoryLevel::Session)])
         }
-
-        // Store as session memory using semantic store directly
-        self.semantic.remember(
-            agent_id,
-            &content,
-            MemorySource::Conversation,
-            scopes::SESSION,
-            HashMap::new(),
-        )?;
-
-        Ok(())
     }
 
     /// Add memories at a specific memory level.
-    ///
-    /// This allows storing memories at User (persistent), Session (current conversation),
-    /// or Agent (agent-specific) levels.
     async fn add_with_level(
         &self,
         messages: &[serde_json::Value],
@@ -383,7 +453,6 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
         let agent_id = Self::parse_agent_id(user_id)?;
 
-        // Extract content from messages
         let content = messages
             .iter()
             .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
@@ -394,19 +463,11 @@ impl ProactiveMemory for ProactiveMemoryStore {
             return Ok(());
         }
 
-        // Map MemoryLevel to scope string
-        let scope = match level {
-            MemoryLevel::User => scopes::USER,
-            MemoryLevel::Session => scopes::SESSION,
-            MemoryLevel::Agent => scopes::AGENT,
-        };
-
-        // Store with the specified scope
         self.semantic.remember(
             agent_id,
             &content,
             MemorySource::Conversation,
-            scope,
+            level.scope_str(),
             HashMap::new(),
         )?;
 
@@ -420,20 +481,44 @@ impl ProactiveMemory for ProactiveMemoryStore {
     }
 
     /// List memories by category.
-    async fn list(&self, user_id: &str, category: Option<&str>) -> LibreFangResult<Vec<MemoryItem>> {
+    async fn list(
+        &self,
+        user_id: &str,
+        category: Option<&str>,
+    ) -> LibreFangResult<Vec<MemoryItem>> {
         let agent_id = Self::parse_agent_id(user_id)?;
         self.retrieve_memory_items(agent_id, None, category)
     }
-}
 
-/// Additional methods for ProactiveMemoryStore
-impl ProactiveMemoryStore {
-    /// Format retrieved memories into a context string for prompt injection.
-    ///
-    /// This is useful for auto_retrieve - after getting memories, you can
-    /// format them into a string to inject into the agent's system prompt.
-    pub fn format_context(&self, memories: &[MemoryItem]) -> String {
-        self.extractor.format_context(memories)
+    /// Delete a specific memory by ID.
+    async fn delete(&self, memory_id: &str, _user_id: &str) -> LibreFangResult<bool> {
+        let uuid = uuid::Uuid::parse_str(memory_id)
+            .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
+        let mid = librefang_types::memory::MemoryId(uuid);
+        self.semantic.forget(mid)?;
+        Ok(true)
+    }
+
+    /// Update a memory's content by deleting the old one and storing new content.
+    async fn update(&self, memory_id: &str, user_id: &str, content: &str) -> LibreFangResult<bool> {
+        let agent_id = Self::parse_agent_id(user_id)?;
+
+        // Delete old
+        let uuid = uuid::Uuid::parse_str(memory_id)
+            .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
+        let mid = librefang_types::memory::MemoryId(uuid);
+        self.semantic.forget(mid)?;
+
+        // Store updated content as session memory
+        self.semantic.remember(
+            agent_id,
+            content,
+            MemorySource::Conversation,
+            scopes::SESSION,
+            HashMap::new(),
+        )?;
+
+        Ok(true)
     }
 }
 
@@ -441,9 +526,8 @@ impl ProactiveMemoryStore {
 impl ProactiveMemoryHooks for ProactiveMemoryStore {
     /// Extract and store important information after agent execution.
     ///
-    /// This is a simplified implementation that stores conversation content.
-    /// In production, this would use LLM extraction to identify important
-    /// information worth remembering.
+    /// Uses the configured MemoryExtractor (default: rule-based, can be LLM-powered)
+    /// to identify important information, then stores extracted items.
     async fn auto_memorize(
         &self,
         user_id: &str,
@@ -462,13 +546,29 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         // Use the extractor to extract memories (LLM-powered if configured)
         let extraction_result = self.extractor.extract_memories(conversation).await?;
 
-        // Store the extracted memories
+        // Store extracted memories, skipping near-duplicates.
         for item in &extraction_result.memories {
-            let scope = match item.level {
-                MemoryLevel::User => scopes::USER,
-                MemoryLevel::Session => scopes::SESSION,
-                MemoryLevel::Agent => scopes::AGENT,
-            };
+            // Dedup: check if very similar content already exists for this agent.
+            // Uses text search to find potential duplicates, then checks similarity.
+            let existing =
+                self.semantic
+                    .recall(&item.content, 1, Some(MemoryFilter::agent(agent_id)))?;
+            if let Some(top) = existing.first() {
+                // Exact match — skip
+                if top.content == item.content {
+                    continue;
+                }
+                // Substring containment — if existing memory contains this or vice versa
+                let new_lower = item.content.to_lowercase();
+                let old_lower = top.content.to_lowercase();
+                if old_lower.contains(&new_lower) || new_lower.contains(&old_lower) {
+                    tracing::debug!(
+                        "Skipping near-duplicate memory (substring match): {}",
+                        item.content
+                    );
+                    continue;
+                }
+            }
 
             let mut metadata = item.metadata.clone();
             metadata.insert("memory_id".to_string(), serde_json::json!(&item.id));
@@ -479,39 +579,12 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
                 agent_id,
                 &item.content,
                 MemorySource::Inference,
-                scope,
+                item.level.scope_str(),
                 metadata,
             )?;
         }
 
-        // Also store the full conversation as session memory for reference
-        let content = conversation
-            .iter()
-            .filter_map(|m| m.get("content").and_then(|c| c.as_str()))
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        if !content.is_empty() {
-            let mut metadata = HashMap::new();
-            metadata.insert("auto_memorize".to_string(), serde_json::json!(true));
-            metadata.insert(
-                "extraction_performed".to_string(),
-                serde_json::json!(extraction_result.has_content),
-            );
-            self.semantic.remember(
-                agent_id,
-                &content,
-                MemorySource::Conversation,
-                scopes::SESSION,
-                metadata,
-            )?;
-        }
-
-        Ok(ExtractionResult {
-            memories: Vec::new(), // Would be populated by LLM extraction in production
-            has_content: !content.is_empty(),
-            trigger: "conversation".to_string(),
-        })
+        Ok(extraction_result)
     }
 
     /// Proactively retrieve relevant context before agent execution.
@@ -564,9 +637,7 @@ mod tests {
         let agent_id = AgentId::new().to_string();
         store
             .add(
-                &[
-                    serde_json::json!({"role": "user", "content": "I prefer dark mode"})
-                ],
+                &[serde_json::json!({"role": "user", "content": "I prefer dark mode"})],
                 &agent_id,
             )
             .await
@@ -596,19 +667,48 @@ mod tests {
 
         let agent_id = AgentId::new().to_string();
 
-        // Run auto_memorize
+        // Run auto_memorize with content matching DefaultMemoryExtractor patterns
         let result = store
             .auto_memorize(
                 &agent_id,
                 &[serde_json::json!({
                     "role": "user",
-                    "content": "Remember that I prefer dark mode"
+                    "content": "I prefer dark mode for all my editors"
                 })],
             )
             .await
             .unwrap();
 
         assert!(result.has_content);
+        // DefaultMemoryExtractor should extract "I prefer" as user_preference
+        assert!(!result.memories.is_empty());
+        assert_eq!(
+            result.memories[0].category,
+            Some("user_preference".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auto_memorize_skips_assistant() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+
+        let agent_id = AgentId::new().to_string();
+
+        // Assistant messages should not be extracted
+        let result = store
+            .auto_memorize(
+                &agent_id,
+                &[serde_json::json!({
+                    "role": "assistant",
+                    "content": "I prefer to help you with that"
+                })],
+            )
+            .await
+            .unwrap();
+
+        assert!(!result.has_content);
+        assert!(result.memories.is_empty());
     }
 
     #[tokio::test]
@@ -622,18 +722,69 @@ mod tests {
         let msg = serde_json::json!({"role": "user", "content": "My name is John"});
         store.add(&[msg], &agent_id).await.unwrap();
 
-        // Also add using the search method to verify storage works
         let msg2 = serde_json::json!({"role": "user", "content": "I prefer dark mode"});
         store.add(&[msg2], &agent_id).await.unwrap();
 
         // Retrieve - should find content from this agent
         let results = store.auto_retrieve(&agent_id, "dark mode").await.unwrap();
+        assert!(!results.is_empty());
+    }
 
-        // Print for debugging
-        println!("Auto-retrieve results: {:?}", results.len());
+    #[tokio::test]
+    async fn test_delete_memory() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
 
-        // Should find at least one result
-        assert!(results.len() > 0);
+        let agent_id = AgentId::new().to_string();
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "Remember this fact"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+
+        // Search to get the memory ID
+        let results = store
+            .search("Remember this fact", &agent_id, 10)
+            .await
+            .unwrap();
+        assert!(!results.is_empty());
+        let mem_id = &results[0].id;
+
+        // Delete it
+        let deleted = store.delete(mem_id, &agent_id).await.unwrap();
+        assert!(deleted);
+    }
+
+    #[tokio::test]
+    async fn test_update_memory() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+
+        let agent_id = AgentId::new().to_string();
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "Old content"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+
+        let results = store.search("Old content", &agent_id, 10).await.unwrap();
+        assert!(!results.is_empty());
+        let mem_id = results[0].id.clone();
+
+        // Update it
+        let updated = store
+            .update(&mem_id, &agent_id, "New content")
+            .await
+            .unwrap();
+        assert!(updated);
+
+        // Search should find new content
+        let new_results = store.search("New content", &agent_id, 10).await.unwrap();
+        assert!(!new_results.is_empty());
     }
 
     #[test]
@@ -642,5 +793,92 @@ mod tests {
         assert_eq!(MemoryLevel::from("session"), MemoryLevel::Session);
         assert_eq!(MemoryLevel::from("agent"), MemoryLevel::Agent);
         assert_eq!(MemoryLevel::from("unknown"), MemoryLevel::Session);
+    }
+
+    #[test]
+    fn test_memory_level_scope_str() {
+        assert_eq!(MemoryLevel::User.scope_str(), "user_memory");
+        assert_eq!(MemoryLevel::Session.scope_str(), "session_memory");
+        assert_eq!(MemoryLevel::Agent.scope_str(), "agent_memory");
+    }
+
+    #[tokio::test]
+    async fn test_reset_agent_memories() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+
+        let agent_id = AgentId::new().to_string();
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "First memory"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "Second memory"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+
+        // Verify memories exist
+        let count = store.count(&agent_id, None).unwrap();
+        assert!(count >= 2);
+
+        // Reset all
+        let deleted = store.reset(&agent_id).unwrap();
+        assert!(deleted >= 2);
+
+        // Verify memories are gone
+        let count_after = store.count(&agent_id, None).unwrap();
+        assert_eq!(count_after, 0);
+    }
+
+    #[tokio::test]
+    async fn test_clear_level() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+
+        let agent_id = AgentId::new().to_string();
+
+        // Add session-level memory (default)
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "Session info"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+
+        // Add user-level memory
+        store
+            .add_with_level(
+                &[serde_json::json!({"role": "user", "content": "User preference"})],
+                &agent_id,
+                MemoryLevel::User,
+            )
+            .await
+            .unwrap();
+
+        // Clear only session level
+        let deleted = store.clear_level(&agent_id, MemoryLevel::Session).unwrap();
+        assert!(deleted >= 1);
+
+        // User-level should still exist
+        let user_count = store.count(&agent_id, Some(MemoryLevel::User)).unwrap();
+        assert!(user_count >= 1);
+    }
+
+    #[test]
+    fn test_count_memories() {
+        // Sync test since count is a sync method
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+
+        let agent_id = AgentId::new().to_string();
+        let count = store.count(&agent_id, None).unwrap();
+        assert_eq!(count, 0);
     }
 }

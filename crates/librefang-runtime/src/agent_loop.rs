@@ -16,11 +16,11 @@ use crate::tool_runner;
 use crate::web_search::WebToolsContext;
 use librefang_memory::session::Session;
 use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
-use librefang_types::memory::{MemoryFragment, MemoryId};
 use librefang_skills::registry::SkillRegistry;
 use librefang_types::agent::AgentManifest;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{Memory, MemoryFilter, MemorySource};
+use librefang_types::memory::{MemoryFragment, MemoryId};
 use librefang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
 };
@@ -263,6 +263,47 @@ fn sanitize_tool_result_content(content: &str, context_budget: &ContextBudget) -
     truncate_tool_result_dynamic(&stripped, context_budget)
 }
 
+/// Convert a proactive `MemoryItem` into the `MemoryFragment` format used by the agent loop.
+fn proactive_item_to_fragment(
+    item: librefang_types::memory::MemoryItem,
+    agent_id: librefang_types::agent::AgentId,
+) -> MemoryFragment {
+    MemoryFragment {
+        id: MemoryId::new(),
+        agent_id,
+        content: item.content,
+        embedding: None,
+        metadata: item.metadata,
+        source: librefang_types::memory::MemorySource::Conversation,
+        confidence: 1.0,
+        created_at: item.created_at,
+        accessed_at: chrono::Utc::now(),
+        access_count: 0,
+        scope: item.level.scope_str().to_string(),
+    }
+}
+
+/// Serialize session messages into a JSON array for auto_memorize.
+fn serialize_session_messages(
+    messages: &[librefang_types::message::Message],
+) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|m| {
+            let content_str = m.content.text_content();
+            let role = match m.role {
+                librefang_types::message::Role::System => "system",
+                librefang_types::message::Role::User => "user",
+                librefang_types::message::Role::Assistant => "assistant",
+            };
+            serde_json::json!({
+                "role": role,
+                "content": content_str
+            })
+        })
+        .collect()
+}
+
 /// Run the agent execution loop for a single user message.
 ///
 /// This is the core of LibreFang: it loads session context, recalls memories,
@@ -353,32 +394,24 @@ pub async fn run_agent_loop(
             .unwrap_or_default()
     };
 
-    // Add proactive memory retrieval results (mem0-style auto_retrieve)
+    // Proactive memory: clean up expired session memories, then auto-retrieve
     if let Some(ref pm_store_arc) = proactive_memory {
         let user_id = session.agent_id.0.to_string();
+
+        // Clean up session memories older than 24 hours to prevent unbounded growth
+        let ttl_hours = pm_store_arc.config().session_ttl_hours as i64;
+        if let Err(e) =
+            pm_store_arc.cleanup_expired_sessions(&user_id, chrono::Duration::hours(ttl_hours))
+        {
+            debug!("Session memory cleanup skipped: {e}");
+        }
+
         match pm_store_arc.auto_retrieve(&user_id, user_message).await {
             Ok(pm_memories) if !pm_memories.is_empty() => {
                 debug!("Proactive memory retrieved {} items", pm_memories.len());
-                // Convert MemoryItem to MemoryFragment format and append
                 let pm_fragments: Vec<_> = pm_memories
                     .into_iter()
-                    .map(|item| MemoryFragment {
-                        id: MemoryId::new(),
-                        agent_id: session.agent_id,
-                        content: item.content,
-                        embedding: None,
-                        metadata: item.metadata,
-                        source: librefang_types::memory::MemorySource::Conversation,
-                        confidence: 1.0,
-                        created_at: chrono::Utc::now(),
-                        accessed_at: chrono::Utc::now(),
-                        access_count: 0,
-                        scope: match item.level {
-                            librefang_types::memory::MemoryLevel::User => "user_memory".to_string(),
-                            librefang_types::memory::MemoryLevel::Session => "session_memory".to_string(),
-                            librefang_types::memory::MemoryLevel::Agent => "agent_memory".to_string(),
-                        },
-                    })
+                    .map(|item| proactive_item_to_fragment(item, session.agent_id))
                     .collect();
                 memories.extend(pm_fragments);
             }
@@ -715,33 +748,17 @@ pub async fn run_agent_loop(
                     "Agent loop completed"
                 );
 
-                // Fire AgentLoopEnd hook with session messages for auto_memorize
+                // Run auto_memorize directly (not via hook) for proper result handling
+                if let Some(ref pm_store) = proactive_memory {
+                    let user_id = session.agent_id.0.to_string();
+                    let messages_json = serialize_session_messages(&session.messages);
+                    if let Err(e) = pm_store.auto_memorize(&user_id, &messages_json).await {
+                        warn!("Proactive memory auto_memorize failed: {e}");
+                    }
+                }
+
+                // Fire AgentLoopEnd hook
                 if let Some(hook_reg) = hooks {
-                    let messages_json: Vec<serde_json::Value> = session
-                        .messages
-                        .iter()
-                        .map(|m| {
-                            let content_str = match &m.content {
-                                librefang_types::message::MessageContent::Text(s) => s.clone(),
-                                librefang_types::message::MessageContent::Blocks(blocks) => {
-                                    blocks.iter()
-                                        .filter_map(|b| {
-                                            if let librefang_types::message::ContentBlock::Text { text, .. } = b {
-                                                Some(text.clone())
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .collect::<Vec<_>>()
-                                        .join("\n")
-                                }
-                            };
-                            serde_json::json!({
-                                "role": format!("{:?}", m.role).to_lowercase(),
-                                "content": content_str
-                            })
-                        })
-                        .collect();
                     let ctx = crate::hooks::HookContext {
                         agent_name: &manifest.name,
                         agent_id: agent_id_str.as_str(),
@@ -749,7 +766,6 @@ pub async fn run_agent_loop(
                         data: serde_json::json!({
                             "iterations": iteration + 1,
                             "response_length": final_response.len(),
-                            "messages": messages_json,
                         }),
                     };
                     let _ = hook_reg.fire(&ctx);
@@ -1374,7 +1390,7 @@ pub async fn run_agent_loop_streaming(
 
     // Recall relevant memories — prefer vector similarity search when embedding driver is available
     // In stable_prefix_mode, skip memory recall to keep the system prompt prefix stable for caching.
-    let memories = if stable_prefix_mode {
+    let mut memories = if stable_prefix_mode {
         Vec::new()
     } else if let Some(emb) = embedding_driver {
         match emb.embed_one(user_message).await {
@@ -1421,6 +1437,38 @@ pub async fn run_agent_loop_streaming(
             .await
             .unwrap_or_default()
     };
+
+    // Proactive memory: clean up expired session memories, then auto-retrieve (streaming)
+    if let Some(ref pm_store_arc) = proactive_memory {
+        let user_id = session.agent_id.0.to_string();
+
+        let ttl_hours = pm_store_arc.config().session_ttl_hours as i64;
+        if let Err(e) =
+            pm_store_arc.cleanup_expired_sessions(&user_id, chrono::Duration::hours(ttl_hours))
+        {
+            debug!("Session memory cleanup skipped (streaming): {e}");
+        }
+
+        match pm_store_arc.auto_retrieve(&user_id, user_message).await {
+            Ok(pm_memories) if !pm_memories.is_empty() => {
+                debug!(
+                    "Proactive memory (streaming) retrieved {} items",
+                    pm_memories.len()
+                );
+                let pm_fragments: Vec<_> = pm_memories
+                    .into_iter()
+                    .map(|item| proactive_item_to_fragment(item, session.agent_id))
+                    .collect();
+                memories.extend(pm_fragments);
+            }
+            Ok(_) => {
+                debug!("No proactive memories retrieved (streaming)");
+            }
+            Err(e) => {
+                warn!("Proactive memory auto_retrieve failed (streaming): {e}");
+            }
+        }
+    }
 
     // Fire BeforePromptBuild hook
     let agent_id_str = session.agent_id.0.to_string();
@@ -1760,6 +1808,15 @@ pub async fn run_agent_loop_streaming(
                     tokens = total_usage.total(),
                     "Streaming agent loop completed"
                 );
+
+                // Run auto_memorize directly for streaming path
+                if let Some(ref pm_store) = proactive_memory {
+                    let user_id = session.agent_id.0.to_string();
+                    let messages_json = serialize_session_messages(&session.messages);
+                    if let Err(e) = pm_store.auto_memorize(&user_id, &messages_json).await {
+                        warn!("Proactive memory auto_memorize failed (streaming): {e}");
+                    }
+                }
 
                 // Fire AgentLoopEnd hook
                 if let Some(hook_reg) = hooks {

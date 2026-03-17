@@ -1329,6 +1329,9 @@ pub struct KernelConfig {
     /// External authentication provider configuration (OAuth2/OIDC).
     #[serde(default)]
     pub external_auth: ExternalAuthConfig,
+    /// Proactive memory (mem0-style) configuration.
+    #[serde(default)]
+    pub proactive_memory: crate::memory::ProactiveMemoryConfig,
 }
 
 /// Vertex AI provider configuration.
@@ -1777,6 +1780,7 @@ impl Default for KernelConfig {
             session: SessionConfig::default(),
             queue: QueueConfig::default(),
             external_auth: ExternalAuthConfig::default(),
+            proactive_memory: crate::memory::ProactiveMemoryConfig::default(),
         }
     }
 }

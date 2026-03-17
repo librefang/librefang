@@ -304,6 +304,79 @@ impl SemanticStore {
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(())
     }
+
+    /// Soft-delete all memories for a specific agent.
+    pub fn forget_by_agent(&self, agent_id: AgentId) -> LibreFangResult<u64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let count = conn
+            .execute(
+                "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND deleted = 0",
+                rusqlite::params![agent_id.0.to_string()],
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(count as u64)
+    }
+
+    /// Soft-delete all memories for a specific agent and scope.
+    pub fn forget_by_scope(&self, agent_id: AgentId, scope: &str) -> LibreFangResult<u64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let count = conn
+            .execute(
+                "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND scope = ?2 AND deleted = 0",
+                rusqlite::params![agent_id.0.to_string(), scope],
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(count as u64)
+    }
+
+    /// Soft-delete memories older than a given timestamp for a specific agent and scope.
+    pub fn forget_older_than(
+        &self,
+        agent_id: AgentId,
+        scope: &str,
+        before: chrono::DateTime<Utc>,
+    ) -> LibreFangResult<u64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let count = conn
+            .execute(
+                "UPDATE memories SET deleted = 1 WHERE agent_id = ?1 AND scope = ?2 AND created_at < ?3 AND deleted = 0",
+                rusqlite::params![agent_id.0.to_string(), scope, before.to_rfc3339()],
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(count as u64)
+    }
+
+    /// Count non-deleted memories for a specific agent, optionally filtered by scope.
+    pub fn count(&self, agent_id: AgentId, scope: Option<&str>) -> LibreFangResult<u64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let count: i64 = if let Some(s) = scope {
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories WHERE agent_id = ?1 AND scope = ?2 AND deleted = 0",
+                rusqlite::params![agent_id.0.to_string(), s],
+                |row| row.get(0),
+            )
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories WHERE agent_id = ?1 AND deleted = 0",
+                rusqlite::params![agent_id.0.to_string()],
+                |row| row.get(0),
+            )
+        }
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(count as u64)
+    }
 }
 
 /// Compute cosine similarity between two vectors.
@@ -552,5 +625,122 @@ mod tests {
         assert_eq!(results.len(), 2);
         // Embedded memory should rank first
         assert_eq!(results[0].content, "Has embedding");
+    }
+
+    #[test]
+    fn test_forget_by_agent() {
+        let store = setup();
+        let agent_a = AgentId::new();
+        let agent_b = AgentId::new();
+
+        store
+            .remember(
+                agent_a,
+                "Agent A memory 1",
+                MemorySource::Conversation,
+                "session_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+        store
+            .remember(
+                agent_a,
+                "Agent A memory 2",
+                MemorySource::Conversation,
+                "session_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+        store
+            .remember(
+                agent_b,
+                "Agent B memory",
+                MemorySource::Conversation,
+                "session_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let deleted = store.forget_by_agent(agent_a).unwrap();
+        assert_eq!(deleted, 2);
+
+        // Agent A memories should be gone
+        let results = store
+            .recall("Agent A", 10, Some(MemoryFilter::agent(agent_a)))
+            .unwrap();
+        assert!(results.is_empty());
+
+        // Agent B memory should remain
+        let results = store
+            .recall("Agent B", 10, Some(MemoryFilter::agent(agent_b)))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_forget_by_scope() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        store
+            .remember(
+                agent_id,
+                "Session mem",
+                MemorySource::Conversation,
+                "session_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+        store
+            .remember(
+                agent_id,
+                "User mem",
+                MemorySource::Conversation,
+                "user_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        let deleted = store.forget_by_scope(agent_id, "session_memory").unwrap();
+        assert_eq!(deleted, 1);
+
+        // User memory should remain
+        let results = store
+            .recall("User mem", 10, Some(MemoryFilter::agent(agent_id)))
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].scope, "user_memory");
+    }
+
+    #[test]
+    fn test_count() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        assert_eq!(store.count(agent_id, None).unwrap(), 0);
+
+        store
+            .remember(
+                agent_id,
+                "Mem 1",
+                MemorySource::Conversation,
+                "session_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+        store
+            .remember(
+                agent_id,
+                "Mem 2",
+                MemorySource::Conversation,
+                "user_memory",
+                HashMap::new(),
+            )
+            .unwrap();
+
+        assert_eq!(store.count(agent_id, None).unwrap(), 2);
+        assert_eq!(store.count(agent_id, Some("session_memory")).unwrap(), 1);
+        assert_eq!(store.count(agent_id, Some("user_memory")).unwrap(), 1);
+        assert_eq!(store.count(agent_id, Some("agent_memory")).unwrap(), 0);
     }
 }

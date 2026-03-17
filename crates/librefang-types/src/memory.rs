@@ -9,20 +9,26 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// Memory levels for multi-level memory (User/Session/Agent)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryLevel {
     /// User-level memory (persistent across sessions)
     User,
     /// Session-level memory (current conversation)
+    #[default]
     Session,
     /// Agent-level memory (agent-specific learned behaviors)
     Agent,
 }
 
-impl Default for MemoryLevel {
-    fn default() -> Self {
-        Self::Session
+impl MemoryLevel {
+    /// Return the scope string used in storage.
+    pub fn scope_str(&self) -> &'static str {
+        match self {
+            MemoryLevel::User => "user_memory",
+            MemoryLevel::Session => "session_memory",
+            MemoryLevel::Agent => "agent_memory",
+        }
     }
 }
 
@@ -105,7 +111,18 @@ impl MemoryItem {
 }
 
 /// Configuration for proactive memory system.
+///
+/// Example in config.toml:
+/// ```toml
+/// [proactive_memory]
+/// auto_memorize = true
+/// auto_retrieve = true
+/// max_retrieve = 10
+/// session_ttl_hours = 24
+/// extraction_model = "gpt-4o-mini"  # optional, enables LLM-powered extraction
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProactiveMemoryConfig {
     /// Enable auto-memorize after agent execution.
     pub auto_memorize: bool,
@@ -113,12 +130,15 @@ pub struct ProactiveMemoryConfig {
     pub auto_retrieve: bool,
     /// Maximum memories to retrieve per query.
     pub max_retrieve: usize,
-    /// Confidence threshold for extraction.
+    /// Confidence threshold for near-duplicate detection (0.0 - 1.0).
     pub extraction_threshold: f32,
-    /// LLM model to use for extraction.
+    /// LLM model to use for extraction. If None, uses rule-based extraction.
     pub extraction_model: Option<String>,
     /// Categories to extract from conversations.
     pub extract_categories: Vec<String>,
+    /// Session memory TTL in hours. Memories older than this are cleaned up
+    /// automatically before each agent execution. Default: 24 hours.
+    pub session_ttl_hours: u32,
 }
 
 impl Default for ProactiveMemoryConfig {
@@ -135,6 +155,7 @@ impl Default for ProactiveMemoryConfig {
                 "task_context".to_string(),
                 "relationship".to_string(),
             ],
+            session_ttl_hours: 24,
         }
     }
 }
@@ -191,15 +212,28 @@ impl MemoryExtractor for DefaultMemoryExtractor {
     ) -> crate::error::LibreFangResult<ExtractionResult> {
         let mut memories = Vec::new();
 
-        // Simple keyword-based extraction (fallback when no LLM available)
+        // Simple keyword-based extraction (fallback when no LLM available).
+        // Only extract from user messages to avoid assistant echo.
         for message in messages {
-            let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-            let content = message.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let role = message
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user");
+            if role != "user" {
+                continue;
+            }
+            let content = message
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let lower = content.to_lowercase();
 
-            // Extract preferences (keywords like "prefer", "like", "dislike")
-            if content.to_lowercase().contains("prefer")
-                || content.to_lowercase().contains("like")
-                || content.to_lowercase().contains("dislike")
+            // Extract preferences — use strict patterns to avoid false positives
+            if lower.contains("i prefer ")
+                || lower.contains("i always ")
+                || lower.contains("i never ")
+                || lower.contains("i dislike ")
+                || lower.contains("my favorite ")
             {
                 let mut metadata = HashMap::new();
                 metadata.insert("extracted_from".to_string(), serde_json::json!(role));
@@ -213,10 +247,11 @@ impl MemoryExtractor for DefaultMemoryExtractor {
                 });
             }
 
-            // Extract important facts (explicit statements)
-            if content.to_lowercase().contains("my name is")
-                || content.to_lowercase().contains("i am ")
-                || content.to_lowercase().contains("i'm ")
+            // Extract important facts (explicit identity statements)
+            if lower.contains("my name is")
+                || lower.contains("i work at ")
+                || lower.contains("i live in ")
+                || lower.contains("my job is ")
             {
                 let mut metadata = HashMap::new();
                 metadata.insert("extracted_from".to_string(), serde_json::json!(role));
@@ -607,11 +642,12 @@ pub trait ProactiveMemory: Send + Sync {
 
     /// Add memories with automatic extraction (LLM-powered).
     /// Defaults to Session level storage.
+    /// Returns the list of memories that were stored.
     async fn add(
         &self,
         messages: &[serde_json::Value],
         user_id: &str,
-    ) -> crate::error::LibreFangResult<()>;
+    ) -> crate::error::LibreFangResult<Vec<MemoryItem>>;
 
     /// Add memories at a specific memory level (User/Session/Agent).
     async fn add_with_level(
@@ -630,6 +666,17 @@ pub trait ProactiveMemory: Send + Sync {
         user_id: &str,
         category: Option<&str>,
     ) -> crate::error::LibreFangResult<Vec<MemoryItem>>;
+
+    /// Delete a specific memory by ID.
+    async fn delete(&self, memory_id: &str, user_id: &str) -> crate::error::LibreFangResult<bool>;
+
+    /// Update a memory's content (delete + re-add with same metadata).
+    async fn update(
+        &self,
+        memory_id: &str,
+        user_id: &str,
+        content: &str,
+    ) -> crate::error::LibreFangResult<bool>;
 }
 
 /// Trait for proactive memory hooks (auto_memorize, auto_retrieve).
@@ -695,8 +742,7 @@ mod tests {
 
     #[test]
     fn test_memory_item_with_category() {
-        let item = MemoryItem::session("User asked about pricing")
-            .with_category("inquiry");
+        let item = MemoryItem::session("User asked about pricing").with_category("inquiry");
         assert_eq!(item.category, Some("inquiry".to_string()));
     }
 

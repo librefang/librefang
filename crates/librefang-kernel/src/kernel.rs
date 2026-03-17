@@ -74,7 +74,7 @@ pub struct LibreFangKernel {
     /// Memory substrate.
     pub memory: Arc<MemorySubstrate>,
     /// Proactive memory store (mem0-style auto_retrieve/auto_memorize).
-    pub proactive_memory: std::sync::RwLock<Option<Arc<librefang_memory::ProactiveMemoryStore>>>,
+    pub proactive_memory: OnceLock<Arc<librefang_memory::ProactiveMemoryStore>>,
     /// Process supervisor.
     pub supervisor: Supervisor,
     /// Workflow engine.
@@ -986,7 +986,7 @@ impl LibreFangKernel {
             event_bus: EventBus::new(),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
-            proactive_memory: std::sync::RwLock::new(None),
+            proactive_memory: OnceLock::new(),
             supervisor,
             workflows: WorkflowEngine::new(),
             triggers: TriggerEngine::new(),
@@ -1033,15 +1033,27 @@ impl LibreFangKernel {
             self_handle: OnceLock::new(),
         };
 
-        // Initialize proactive memory system (mem0-style)
-        // This enables auto_retrieve (before agent execution) and auto_memorize (after agent execution)
-        let proactive_store = librefang_runtime::proactive_memory::init_proactive_memory_with_defaults(
-            &kernel.hooks,
-            Arc::clone(&kernel.memory),
-        );
-        // Store in kernel for direct access from agent_loop
-        if let Some(store) = proactive_store {
-            *kernel.proactive_memory.write().unwrap() = Some(store);
+        // Initialize proactive memory system (mem0-style) from config.
+        // Use LLM-powered extraction if an extraction_model is configured,
+        // otherwise fall back to rule-based extraction.
+        {
+            let pm_config = kernel.config.proactive_memory.clone();
+            let store = if let Some(ref model) = pm_config.extraction_model {
+                librefang_runtime::proactive_memory::init_proactive_memory_with_llm(
+                    Arc::clone(&kernel.memory),
+                    pm_config,
+                    Arc::clone(&kernel.default_driver),
+                    model.clone(),
+                )
+            } else {
+                librefang_runtime::proactive_memory::init_proactive_memory(
+                    Arc::clone(&kernel.memory),
+                    pm_config,
+                )
+            };
+            if let Some(s) = store {
+                let _ = kernel.proactive_memory.set(s);
+            }
         }
 
         // Restore persisted agents from SQLite
@@ -1969,7 +1981,7 @@ impl LibreFangKernel {
                 ctx_window,
                 Some(&kernel_clone.process_manager),
                 None, // content_blocks (streaming path uses text only for now)
-                None, // proactive_memory
+                kernel_clone.proactive_memory.get().cloned(),
             )
             .await;
 
@@ -2649,8 +2661,7 @@ impl LibreFangKernel {
             message.to_string()
         };
 
-        // Extract proactive memory before async call (RwLockGuard is not Send)
-        let proactive_memory = self.proactive_memory.read().unwrap().clone();
+        let proactive_memory = self.proactive_memory.get().cloned();
 
         let result = run_agent_loop(
             &manifest,
