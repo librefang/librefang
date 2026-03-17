@@ -24,6 +24,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+          BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
+          BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
             echo "No Discord release webhook configured, skipping"
@@ -136,4 +138,67 @@ jobs:
           printf '%s' "$CONTENT" | jq -Rs '{content: .}' | \
             curl -s -X POST -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK_URL"
 
-          echo "✓ Consolidated notification sent"
+          echo "✓ Discord notification sent"
+
+          # --- Bluesky post ---
+          if [ -z "$BLUESKY_HANDLE" ] || [ -z "$BLUESKY_APP_PASSWORD" ]; then
+            echo "No Bluesky credentials configured, skipping"
+            exit 0
+          fi
+
+          # Authenticate
+          BSKY_SESSION=$(curl -s -X POST "https://bsky.social/xrpc/com.atproto.server.createSession" \
+            -H "Content-Type: application/json" \
+            -d "{\"identifier\": \"$BLUESKY_HANDLE\", \"password\": \"$BLUESKY_APP_PASSWORD\"}") || true
+
+          BSKY_TOKEN=$(echo "$BSKY_SESSION" | jq -r '.accessJwt // empty')
+          BSKY_DID=$(echo "$BSKY_SESSION" | jq -r '.did // empty')
+
+          if [ -z "$BSKY_TOKEN" ]; then
+            echo "⚠ Bluesky auth failed, skipping"
+            exit 0
+          fi
+
+          # Build post text (max 300 chars for Bluesky)
+          RELEASE_URL="https://github.com/librefang/librefang/releases/tag/$TAG"
+          BSKY_TEXT="🚀 LibreFang v${VERSION} released!
+
+$(echo "$CHANGES" | head -5 | sed 's/^- /• /')
+
+📦 $RELEASE_URL"
+
+          # Truncate to 300 graphemes
+          BSKY_TEXT=$(echo "$BSKY_TEXT" | head -c 296)
+
+          # Detect link facet for the URL
+          URL_START=$(echo "$BSKY_TEXT" | grep -b -o "$RELEASE_URL" | head -1 | cut -d: -f1)
+          URL_END=$((URL_START + ${#RELEASE_URL}))
+
+          # Create post
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+          BSKY_PAYLOAD=$(jq -n \
+            --arg text "$BSKY_TEXT" \
+            --arg now "$NOW" \
+            --arg url "$RELEASE_URL" \
+            --argjson start "${URL_START:-0}" \
+            --argjson end "${URL_END:-0}" \
+            '{
+              repo: "'"$BSKY_DID"'",
+              collection: "app.bsky.feed.post",
+              record: {
+                "$type": "app.bsky.feed.post",
+                text: $text,
+                createdAt: $now,
+                facets: [{
+                  index: { byteStart: $start, byteEnd: $end },
+                  features: [{ "$type": "app.bsky.richtext.facet#link", uri: $url }]
+                }]
+              }
+            }')
+
+          curl -s -X POST "https://bsky.social/xrpc/com.atproto.repo.createRecord" \
+            -H "Authorization: Bearer $BSKY_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$BSKY_PAYLOAD" > /dev/null
+
+          echo "✓ Bluesky post published"
