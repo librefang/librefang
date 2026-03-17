@@ -132,6 +132,25 @@ description = "Publish events when health checks fail"
 setting_type = "toggle"
 default = "true"
 
+[[settings]]
+key = "rollback_strategy"
+label = "Rollback Strategy"
+description = "Default rollback approach for failed deployments"
+setting_type = "select"
+default = "manual"
+
+[[settings.options]]
+value = "manual"
+label = "Manual (alert and wait for user)"
+
+[[settings.options]]
+value = "auto_previous"
+label = "Auto-rollback to previous version"
+
+[[settings.options]]
+value = "blue_green"
+label = "Blue-green switch back"
+
 # ─── Agent configuration ─────────────────────────────────────────────────────
 
 [agent]
@@ -283,6 +302,62 @@ Incident severity levels:
 - **SEV3**: Minor functionality impaired, some users affected
 - **SEV4**: Minor issue, workaround available
 
+Rate your diagnosis confidence before taking action:
+- **High confidence (≥80%)**: Clear correlation between change and failure, reproducible, single root cause → proceed with fix
+- **Medium confidence (50-80%)**: Likely cause identified but not fully confirmed → apply non-destructive mitigation first, monitor
+- **Low confidence (<50%)**: Multiple possible causes, no clear correlation → gather more data, do NOT apply fixes, escalate to user
+NEVER apply a destructive fix (restart, rollback, scale-down) with low confidence.
+
+### Root Cause Investigation Steps
+
+When investigating, follow this structured approach:
+
+**Step 1 — Correlate with timeline:**
+```
+# Check what changed recently (deployments, config changes)
+git log --oneline --since="2 hours ago"
+# Check system events
+journalctl --since "2 hours ago" --priority=err
+```
+
+**Step 2 — Gather metrics at the time of failure:**
+```
+# CPU spike diagnosis
+ps aux --sort=-%cpu | head -20
+# Memory pressure
+free -h && cat /proc/meminfo | grep -E "MemAvailable|SwapUsed"
+# Disk I/O bottleneck
+iostat -x 1 5
+# Network issues
+ss -s && netstat -tlnp
+```
+
+**Step 3 — Extract and search logs:**
+```
+# Application logs around failure time
+docker logs --since "30m" CONTAINER 2>&1 | grep -iE "error|fatal|panic|timeout"
+# Kubernetes pod crash logs
+kubectl logs POD -n NAMESPACE --previous --tail=200
+# System logs
+journalctl -u SERVICE --since "30 min ago" --no-pager | grep -iE "error|fail|kill"
+```
+
+**Step 4 — Common failure patterns and diagnosis:**
+| Symptom | Likely Cause | Diagnosis Command |
+|---------|-------------|-------------------|
+| CPU 100% sustained | Infinite loop or runaway process | `top -b -n1 | head -15` |
+| OOMKilled | Memory leak or undersized limits | `dmesg | grep -i "oom\\|killed"` |
+| Connection refused | Service crashed or port conflict | `ss -tlnp | grep PORT` |
+| DNS resolution failure | DNS server down or misconfigured | `dig @8.8.8.8 hostname` |
+| SSL cert expired | Certificate not renewed | `openssl s_client -connect host:443 2>/dev/null | openssl x509 -noout -dates` |
+| Disk full | Logs or data filling disk | `du -sh /* 2>/dev/null | sort -rh | head -10` |
+
+**Step 5 — Confirm root cause before fixing:**
+- Can you reproduce the issue? If not, gather more data.
+- Does the timeline match? (e.g., deploy at 14:00, errors start at 14:02 → likely deploy-related)
+- Is there a single root cause or multiple contributing factors?
+- NEVER apply a fix unless you understand WHY it will work.
+
 ---
 
 ## Phase 6 — Infrastructure Analysis
@@ -294,6 +369,14 @@ Analyze infrastructure for optimization:
 3. **Security**: Check for exposed ports, outdated packages, misconfigurations
 4. **Reliability**: Assess single points of failure, backup status
 5. **Compliance**: Check against best practices (CIS benchmarks, etc.)
+
+### Session Exit Criteria
+Stop the current monitoring/incident session when ANY of these conditions is met:
+1. **Incident resolved**: All health checks pass for 3 consecutive cycles after mitigation
+2. **Escalation needed**: SEV1/SEV2 incident not mitigated within 10 minutes — alert user for manual intervention
+3. **No issues found**: 5 consecutive monitoring cycles with all services healthy — save state and exit
+4. **Resource exhausted**: Monitoring iterations exceed 30 in a single session — save state and schedule next run
+5. **Cascading failure**: 3+ unrelated services failing simultaneously — stop automated remediation, alert user
 
 ---
 

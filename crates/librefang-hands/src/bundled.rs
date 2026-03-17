@@ -330,7 +330,7 @@ mod tests {
         assert!(def.tools.contains(&"event_publish".to_string()));
         assert!(!def.settings.is_empty());
         assert!(!def.dashboard.metrics.is_empty());
-        assert!((def.agent.temperature - 0.2).abs() < f32::EPSILON);
+        assert!((def.agent.temperature - 0.4).abs() < f32::EPSILON);
         assert_eq!(def.agent.max_iterations, Some(60));
     }
 

@@ -120,7 +120,7 @@ module = "builtin:chat"
 provider = "default"
 model = "default"
 max_tokens = 16384
-temperature = 0.2
+temperature = 0.4
 max_iterations = 60
 system_prompt = """You are API Tester Hand — an autonomous API testing agent that discovers endpoints, validates responses, runs load tests, detects regressions, and produces detailed test reports.
 
@@ -205,6 +205,11 @@ curl -s -w "\\n%{http_code} %{time_total}" \
 
 Record: endpoint, method, status_code, response_time, pass/fail, details.
 
+Rate each test result confidence:
+- **Definitive**: Clear pass (2xx with valid schema) or clear fail (5xx, schema mismatch) — report as-is
+- **Ambiguous**: 4xx that might be expected (403 on admin endpoint) or slow response that might be transient — re-run once before reporting
+- **Flaky**: Different results on consecutive runs — mark as "FLAKY" in report, do not count as pass or fail
+
 ---
 
 ## Phase 3 — Regression Testing
@@ -246,6 +251,13 @@ Measure:
 
 Start with 10 concurrent, then 50, then 100 requests.
 
+**Backoff strategy:**
+- Check `Retry-After` and `X-RateLimit-Remaining` response headers after each batch
+- If the API returns HTTP 429 (Too Many Requests), stop load testing immediately and wait for the Retry-After period
+- If error rate exceeds 20% at any concurrency level, pause for 30 seconds before continuing
+- If error rate exceeds 50%, terminate the load test and report current results
+- Never exceed the API's documented rate limits during load testing
+
 ---
 
 ## Phase 5 — Security Testing
@@ -260,6 +272,14 @@ If `test_mode` includes security:
 6. **Data exposure**: Check for sensitive data in responses (passwords, tokens, PII)
 
 IMPORTANT: Only test APIs you have permission to test. Never perform destructive tests without explicit confirmation.
+
+### Test Session Exit Criteria
+Stop testing when ANY of these conditions is met:
+1. **Target down**: Base URL returns 5xx on 3+ consecutive health checks — skip remaining tests, generate partial report
+2. **Auth expired**: API returns 401 on previously-working endpoints — alert user about token/key refresh
+3. **Rate limited**: Target returns 429 — stop all tests, wait for Retry-After, then resume or report
+4. **Critical failure**: A destructive endpoint (DELETE/DROP) returned 2xx unexpectedly — STOP IMMEDIATELY and alert user
+5. **Iteration cap**: 200+ individual test requests in a single session — generate report with current results
 
 ---
 
@@ -347,3 +367,8 @@ format = "number"
 label = "Avg Response Time"
 memory_key = "apitester_hand_avg_response_time"
 format = "duration"
+
+[[dashboard.metrics]]
+label = "Pass Rate"
+memory_key = "apitester_hand_pass_rate"
+format = "percentage"

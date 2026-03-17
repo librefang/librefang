@@ -241,7 +241,64 @@ t_stat, p_value = stats.ttest_ind(group1, group2)
 chi2, p_value, dof, expected = stats.chi2_contingency(contingency_table)
 
 # Significance: p < 0.05 is commonly used threshold
+
+# Mann-Whitney U test (non-parametric alternative to t-test)
+u_stat, p_value = stats.mannwhitneyu(group1, group2, alternative='two-sided')
+
+# One-way ANOVA (compare 3+ group means)
+f_stat, p_value = stats.f_oneway(group1, group2, group3)
+
+# Normality check (determines which test to use)
+shapiro_stat, p_value = stats.shapiro(data)  # p > 0.05 means normal
 ```
+
+### Statistical Significance Decision Guide
+
+**Test selection flowchart:**
+| Data Situation | Normal Distribution? | Test to Use |
+|---------------|---------------------|-------------|
+| Compare 2 group means | Yes | Independent t-test (`ttest_ind`) |
+| Compare 2 group means | No | Mann-Whitney U (`mannwhitneyu`) |
+| Compare 3+ group means | Yes | One-way ANOVA (`f_oneway`) |
+| Compare 3+ group means | No | Kruskal-Wallis (`kruskal`) |
+| Compare paired samples | Yes | Paired t-test (`ttest_rel`) |
+| Compare paired samples | No | Wilcoxon signed-rank (`wilcoxon`) |
+| Test categorical independence | N/A | Chi-squared (`chi2_contingency`) |
+| Test correlation | Yes | Pearson (`pearsonr`) |
+| Test correlation | No | Spearman (`spearmanr`) |
+
+**P-value interpretation:**
+| p-value | Interpretation | Action |
+|---------|---------------|--------|
+| p < 0.01 | Strong evidence against null hypothesis | Report as statistically significant |
+| 0.01 ≤ p < 0.05 | Moderate evidence | Report as significant with caveat |
+| 0.05 ≤ p < 0.10 | Weak evidence | Report as marginally significant |
+| p ≥ 0.10 | Insufficient evidence | Do not claim significance |
+
+**Practical significance — always report effect size:**
+```python
+# Cohen's d for comparing two means
+def cohens_d(group1, group2):
+    n1, n2 = len(group1), len(group2)
+    var1, var2 = group1.var(), group2.var()
+    pooled_std = ((n1 - 1) * var1 + (n2 - 1) * var2) / (n1 + n2 - 2)
+    return (group1.mean() - group2.mean()) / (pooled_std ** 0.5)
+
+# Interpretation: |d| < 0.2 = negligible, 0.2-0.5 = small, 0.5-0.8 = medium, > 0.8 = large
+```
+
+**Sample size awareness:**
+- n < 30: Use non-parametric tests; results are exploratory
+- 30 ≤ n < 100: Parametric tests OK if normality holds; moderate confidence
+- n ≥ 100: Central Limit Theorem applies; high confidence in parametric tests
+- Always report sample size alongside p-values
+
+**Confidence threshold mapping:**
+| Setting | p-value threshold | Minimum effect size | Minimum sample size |
+|---------|------------------|--------------------|--------------------|
+| High | p < 0.01 | Cohen's d ≥ 0.5 | n ≥ 100 |
+| Medium | p < 0.05 | Cohen's d ≥ 0.3 | n ≥ 30 |
+| Low | p < 0.10 | Any | Any |
 
 ---
 

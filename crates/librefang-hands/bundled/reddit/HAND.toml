@@ -177,6 +177,48 @@ description = "Queue posts and replies for review instead of posting directly"
 setting_type = "toggle"
 default = "true"
 
+[[settings]]
+key = "min_karma_to_post"
+label = "Minimum Karma to Post"
+description = "Only post in subreddits where account has at least this much karma"
+setting_type = "select"
+default = "0"
+
+[[settings.options]]
+value = "0"
+label = "No minimum"
+
+[[settings.options]]
+value = "100"
+label = "100 karma"
+
+[[settings.options]]
+value = "500"
+label = "500 karma"
+
+[[settings]]
+key = "max_reply_depth"
+label = "Max Reply Depth"
+description = "Maximum comment thread depth to reply in (deeper threads get less visibility)"
+setting_type = "select"
+default = "3"
+
+[[settings.options]]
+value = "1"
+label = "Top-level only"
+
+[[settings.options]]
+value = "3"
+label = "Up to 3 levels deep"
+
+[[settings.options]]
+value = "5"
+label = "Up to 5 levels deep"
+
+[[settings.options]]
+value = "unlimited"
+label = "Any depth"
+
 # ─── Agent configuration ─────────────────────────────────────────────────────
 
 [agent]
@@ -215,7 +257,29 @@ Recover state:
 
 ---
 
-## Phase 1 — Subreddit Monitoring
+## Phase 1 — Subreddit Rules & Monitoring
+
+Before monitoring, fetch and parse each subreddit's rules:
+```
+curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -A "LibreFang Reddit Hand/1.0" \
+  "https://oauth.reddit.com/r/SUBREDDIT/about/rules" \
+  -o subreddit_rules.json
+```
+Also fetch subreddit metadata:
+```
+curl -s -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -A "LibreFang Reddit Hand/1.0" \
+  "https://oauth.reddit.com/r/SUBREDDIT/about" \
+  -o subreddit_about.json
+```
+For each subreddit, extract and store:
+- Required flair options (if any)
+- Posting restrictions (text-only, link-only, both)
+- Self-promotion rules and ratio requirements
+- Minimum account age or karma requirements
+- Banned topics or content types
+Store rules in the knowledge graph so they persist across sessions.
 
 Monitor configured subreddits for relevant content:
 ```
@@ -232,6 +296,13 @@ Identify posts worth engaging with based on:
 - Post age (prefer fresh posts for visibility)
 - Engagement potential (questions, discussions)
 - Score trajectory (rising posts)
+- Compliance with subreddit rules
+
+Rate each post's engagement potential:
+- **High relevance (engage)**: Directly matches configured topics, <2 hours old, rising score, open question
+- **Medium relevance (consider)**: Tangentially related, moderate age, decent engagement
+- **Low relevance (skip)**: Off-topic, old, or already has 100+ comments (your reply won't be seen)
+Only engage with High and Medium posts. Skip Low entirely.
 
 Store interesting posts in knowledge graph for tracking.
 
@@ -295,6 +366,14 @@ Track engagement metrics:
 
 Store insights in knowledge graph for content optimization.
 
+### Monitoring Loop Exit Criteria
+Stop the monitoring loop when ANY of these conditions is met:
+1. **No relevant posts**: 5 consecutive monitoring cycles found 0 posts worth engaging with
+2. **Rate limited**: Reddit API returns 429 — back off for the Retry-After period
+3. **Queue full**: Approval queue has 10+ pending items — stop generating until user reviews
+4. **Karma declining**: Net karma from recent posts is negative — pause and alert user for strategy review
+5. **Iteration cap**: 20+ monitoring iterations in a single session — save state and exit
+
 ---
 
 ## Phase 6 — State Persistence
@@ -343,4 +422,9 @@ format = "number"
 [[dashboard.metrics]]
 label = "Karma Earned"
 memory_key = "reddit_hand_karma_earned"
+format = "number"
+
+[[dashboard.metrics]]
+label = "Subreddits Monitored"
+memory_key = "reddit_hand_subreddits_monitored"
 format = "number"

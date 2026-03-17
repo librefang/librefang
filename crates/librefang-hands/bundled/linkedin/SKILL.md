@@ -1,7 +1,9 @@
 ---
 name: linkedin-hand-skill
 version: "1.0.0"
+author: LibreFang
 description: "Expert knowledge for AI LinkedIn management -- API reference, content strategy, networking playbook, and professional engagement best practices"
+tags: [linkedin, social-media, professional, networking, content]
 runtime: prompt_only
 ---
 
@@ -22,34 +24,33 @@ Authorization: Bearer $LINKEDIN_ACCESS_TOKEN
 **Get authenticated user info**:
 ```bash
 curl -s -H "Authorization: Bearer $LINKEDIN_ACCESS_TOKEN" \
-  "https://api.linkedin.com/v2/userinfo"
+  -H "LinkedIn-Version: 202405" \
+  "https://api.linkedin.com/rest/userinfo"
 ```
 
-**Create a text post (UGC Posts API)**:
+**Create a text post (Posts API)**:
 ```bash
-curl -s -X POST "https://api.linkedin.com/v2/ugcPosts" \
+curl -s -X POST "https://api.linkedin.com/rest/posts" \
   -H "Authorization: Bearer $LINKEDIN_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
+  -H "LinkedIn-Version: 202405" \
   -d '{
     "author": "urn:li:person:MEMBER_ID",
     "lifecycleState": "PUBLISHED",
-    "specificContent": {
-      "com.linkedin.ugc.ShareContent": {
-        "shareCommentary": {"text": "Your post content here"},
-        "shareMediaCategory": "NONE"
-      }
-    },
-    "visibility": {
-      "com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"
+    "commentary": "Your post content here",
+    "visibility": "PUBLIC",
+    "distribution": {
+      "feedDistribution": "MAIN_FEED"
     }
   }'
 ```
 
 **Comment on a post**:
 ```bash
-curl -s -X POST "https://api.linkedin.com/v2/socialActions/URN/comments" \
+curl -s -X POST "https://api.linkedin.com/rest/socialActions/URN/comments" \
   -H "Authorization: Bearer $LINKEDIN_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
+  -H "LinkedIn-Version: 202405" \
   -d '{
     "actor": "urn:li:person:MEMBER_ID",
     "message": {"text": "Your comment here"}
@@ -58,9 +59,10 @@ curl -s -X POST "https://api.linkedin.com/v2/socialActions/URN/comments" \
 
 **Like a post**:
 ```bash
-curl -s -X POST "https://api.linkedin.com/v2/socialActions/URN/likes" \
+curl -s -X POST "https://api.linkedin.com/rest/socialActions/URN/likes" \
   -H "Authorization: Bearer $LINKEDIN_ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
+  -H "LinkedIn-Version: 202405" \
   -d '{
     "actor": "urn:li:person:MEMBER_ID"
   }'
@@ -69,7 +71,7 @@ curl -s -X POST "https://api.linkedin.com/v2/socialActions/URN/likes" \
 ### Rate Limits
 | Endpoint | Limit | Window |
 |----------|-------|--------|
-| UGC Posts | 25 posts | 24 hours |
+| Posts | 25 posts | 24 hours |
 | Comments | 10 comments | 1 minute |
 | Likes | 20 likes | 1 minute |
 | API calls (general) | 100 requests | 1 day |
@@ -183,6 +185,32 @@ NEVER post:
 - Defamatory statements about competitors or individuals
 - Content that violates LinkedIn's Professional Community Policies
 - Misleading data or fabricated statistics
+
+### Content Moderation Rules
+
+Before posting any content, classify it:
+
+**Auto-REJECT** (never post):
+- Content containing hate speech, discrimination, or harassment
+- Unverified claims about competitors or individuals
+- Confidential or proprietary business information
+- Content that could be interpreted as financial or legal advice
+- Anything with profanity or inappropriate language
+- Political or religious debate content
+
+**Flag for REVIEW** (queue for human approval):
+- Controversial industry opinions or contrarian takes
+- Content mentioning specific companies or individuals by name
+- Posts discussing salary, compensation, or workplace issues
+- Content referencing current news events
+- Posts with strong emotional tone or personal vulnerability
+
+**Safe to POST** (can auto-publish if approval_mode is off):
+- Educational how-to content and professional tips
+- Industry trend analysis with cited sources
+- Career development advice and frameworks
+- Engagement posts (professional questions, polls)
+- Celebration of team or industry achievements
 
 ### Professional Standards
 - Maintain professional tone even in casual posts

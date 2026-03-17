@@ -97,6 +97,32 @@ label = "Slide Deck Outline"
 value = "memo"
 label = "Strategy Memo"
 
+[[settings]]
+key = "confidence_threshold"
+label = "Confidence Threshold"
+description = "Minimum confidence level for including findings in reports"
+setting_type = "select"
+default = "medium"
+
+[[settings.options]]
+value = "low"
+label = "Low (include speculative insights)"
+
+[[settings.options]]
+value = "medium"
+label = "Medium (evidence-backed findings)"
+
+[[settings.options]]
+value = "high"
+label = "High (only well-corroborated findings)"
+
+[[settings]]
+key = "frameworks"
+label = "Preferred Frameworks"
+description = "Strategic frameworks to prioritize (comma-separated, e.g. SWOT,Porter,PESTEL)"
+setting_type = "text"
+default = ""
+
 # ─── Agent configuration ─────────────────────────────────────────────────────
 
 [agent]
@@ -156,25 +182,53 @@ Key research areas:
 
 Store all findings as entities and relations in the knowledge graph.
 
+### Research Completion Criteria
+Stop researching when ANY of these conditions is met:
+1. **Saturation**: Last 3 searches returned no new insights beyond what is already collected
+2. **Coverage**: At least 3 independent sources confirm each key data point
+3. **Iteration cap**: 15+ search iterations completed — synthesize what you have
+4. **Diminishing returns**: Last search batch added <5% new information to the knowledge graph
+
 ---
 
 ## Phase 3 — Strategic Analysis
 
-Apply appropriate frameworks based on the question:
+Apply appropriate frameworks based on the question. For each framework, produce structured output:
 
-**SWOT Analysis**: Strengths, Weaknesses, Opportunities, Threats
-**Porter's Five Forces**: Supplier power, Buyer power, Competitive rivalry, Threat of substitution, Threat of new entry
-**PESTEL**: Political, Economic, Social, Technological, Environmental, Legal
-**Value Chain Analysis**: Primary and support activities
-**Blue Ocean Strategy**: Value innovation and non-customers
-**BCG Matrix**: Stars, Cash Cows, Question Marks, Dogs
-**Jobs-to-be-Done**: Customer needs and outcomes
+**SWOT Analysis** — Use an evidence table:
+| Category | Item | Evidence | Impact (1-5) |
+|----------|------|----------|-------------|
+| Strength | e.g. "Strong brand" | "85% recognition in survey" | 4 |
+| Weakness | e.g. "High churn" | "Monthly churn 8% vs industry 3%" | 5 |
+| Opportunity | e.g. "Emerging market" | "Market growing 25% YoY" | 4 |
+| Threat | e.g. "New competitor" | "Raised $50M Series B" | 3 |
+
+**Porter's Five Forces** — Rate each force 1-5:
+| Force | Rating (1-5) | Key Evidence |
+|-------|-------------|-------------|
+| Threat of New Entrants | ? | Capital requirements, brand loyalty |
+| Supplier Power | ? | Concentration, switching costs |
+| Buyer Power | ? | Price sensitivity, alternatives |
+| Threat of Substitutes | ? | Performance trade-offs |
+| Competitive Rivalry | ? | Number of competitors, growth rate |
+
+**Worked Example — Netflix vs Blockbuster (2007):**
+SWOT for Netflix: Strength = streaming tech + recommendation engine; Weakness = limited content library; Opportunity = broadband adoption growing 30% YoY; Threat = studios could launch own platforms.
+Porter's for streaming: New entrants = 2/5 (high capital for content); Supplier power = 4/5 (studios control content); Buyer power = 3/5 (low switching cost but high engagement); Substitutes = 2/5 (no equivalent convenience); Rivalry = 3/5 (Blockbuster dominant but slow to adapt).
+Strategic insight: Netflix's technology advantage + Blockbuster's inability to pivot = market disruption opportunity. Confidence: High (85%).
+
+**Other frameworks**: PESTEL, Value Chain Analysis, Blue Ocean Strategy, BCG Matrix, Jobs-to-be-Done — apply when the question calls for it.
+
+**Confidence scoring** — Tag every conclusion:
+- **High** (≥80%): Multiple independent sources confirm; quantitative data available
+- **Medium** (50-80%): 1-2 credible sources; some assumptions required
+- **Low** (<50%): Limited data; significant assumptions; flag as exploratory
 
 For each framework:
 1. Gather evidence from Phase 2 research
-2. Map data to framework dimensions
+2. Map data to framework dimensions with evidence citations
 3. Identify insights and implications
-4. Formulate strategic options
+4. Formulate strategic options with confidence scores
 
 ---
 
@@ -186,6 +240,14 @@ Generate actionable recommendations:
 3. Identify required resources and investments
 4. Map risks and mitigation strategies
 5. Define success metrics and KPIs
+
+### Devil's Advocate Check
+Before finalizing recommendations, actively challenge each one:
+1. **Pre-mortem**: "Assume this strategy failed in 12 months. What went wrong?"
+2. **Contrarian view**: "What would a skeptic say about this recommendation?"
+3. **Second-order effects**: "What unintended consequences could this trigger?"
+4. **Alternative framing**: "Is there a simpler/cheaper approach we're overlooking?"
+If the devil's advocate reveals a fatal flaw, revise the recommendation. If it holds up, note the key risks and mitigations.
 
 Use a decision matrix to rank options:
 - Strategic fit (1-5)
@@ -262,4 +324,9 @@ format = "number"
 [[dashboard.metrics]]
 label = "Active Monitors"
 memory_key = "strategist_hand_active_monitors"
+format = "number"
+
+[[dashboard.metrics]]
+label = "Data Sources Consulted"
+memory_key = "strategist_hand_data_sources"
 format = "number"

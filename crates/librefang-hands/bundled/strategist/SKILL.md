@@ -71,6 +71,31 @@ Methods:
 - **Bottom-up**: Start with unit economics, multiply by reachable customers
 - **Value theory**: How much value does the solution create? What % can you capture?
 
+### Worked Example: Netflix vs Blockbuster (2007)
+
+**SWOT Analysis for Netflix:**
+| Category | Item | Evidence |
+|----------|------|----------|
+| Strength | Streaming technology | First-mover in online streaming; DVD-by-mail eliminated late fees |
+| Strength | Recommendation engine | Personalized suggestions increased engagement 60% |
+| Weakness | Limited content library | Dependent on studio licensing deals |
+| Weakness | High content acquisition cost | Margins compressed by licensing fees |
+| Opportunity | Broadband adoption | US broadband penetration growing 30% YoY |
+| Opportunity | International expansion | Untapped markets in Europe and Asia |
+| Threat | Studio-owned platforms | Studios could bypass Netflix and go direct-to-consumer |
+| Threat | Piracy | Illegal streaming as free alternative |
+
+**Porter's Five Forces for Video Streaming (2007):**
+| Force | Rating | Rationale |
+|-------|--------|-----------|
+| New Entrants | 2/5 | High capital needed for content + tech infrastructure |
+| Supplier Power | 4/5 | Studios control content; few alternatives |
+| Buyer Power | 3/5 | Low switching cost but high engagement reduces churn |
+| Substitutes | 2/5 | No equivalent convenience at the time |
+| Rivalry | 3/5 | Blockbuster dominant but slow to innovate |
+
+**Strategic Insight**: Netflix's technology moat + Blockbuster's organizational inertia = classic disruption pattern. Blockbuster's $6B revenue masked its vulnerability to a $1B challenger with superior unit economics. Confidence: **High (90%)** — outcome confirmed by Blockbuster's 2010 bankruptcy.
+
 ### Competitive Positioning
 
 **Positioning Map**: Plot competitors on 2 key dimensions (e.g., price vs. quality, breadth vs. depth).

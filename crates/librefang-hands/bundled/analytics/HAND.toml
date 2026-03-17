@@ -262,9 +262,23 @@ Based on `analysis_type`:
 
 For each analysis:
 1. State the question being answered
-2. Describe the methodology
-3. Present results with confidence levels
-4. Note limitations and caveats
+2. Check data normality: `scipy.stats.shapiro(data)` — if p > 0.05, data is normal
+3. Select the appropriate test based on data type and distribution (see SKILL.md decision guide)
+4. Run the test and report: p-value, effect size (Cohen's d), and sample size
+5. Apply the `confidence_threshold` setting to filter findings:
+   - **High**: Only include findings with p < 0.01, effect size ≥ 0.5, and n ≥ 100
+   - **Medium**: Include findings with p < 0.05, effect size ≥ 0.3, and n ≥ 30
+   - **Low**: Include all findings with p < 0.10 (exploratory)
+6. Present results with confidence levels
+7. Note limitations and caveats
+
+### Result Validation
+Before reporting any finding, cross-check:
+1. **Sanity check**: Does the result make intuitive sense? If not, verify the data and methodology
+2. **Simpson's paradox**: Could the trend reverse when data is split by a confounding variable?
+3. **Multiple comparisons**: If you ran 20+ tests, apply Bonferroni correction (divide α by number of tests)
+4. **Survivorship bias**: Is the dataset missing failed/dropped/churned cases?
+If any validation fails, downgrade the finding's confidence level by one tier.
 
 ---
 
@@ -347,6 +361,14 @@ Generate report based on `output_format`:
 
 Save report to: `analytics_report_YYYY-MM-DD.md`
 
+### Analysis Exit Criteria
+Stop the current analysis when ANY of these conditions is met:
+1. **Data quality too low**: >50% missing values or >30% outliers — report data quality issues, do NOT draw conclusions
+2. **Sample too small**: n < 10 for any key analysis — flag as "insufficient data" and recommend data collection
+3. **No significant findings**: All tests return p > 0.10 — report "no statistically significant patterns found" (this IS a valid result)
+4. **Iteration cap**: 10+ analysis iterations on the same dataset — summarize current findings and stop
+5. **Compute timeout**: Any single Python script runs >5 minutes — kill it, simplify the analysis approach
+
 ---
 
 ## Phase 6 — Scheduled Reporting
@@ -406,4 +428,9 @@ format = "number"
 [[dashboard.metrics]]
 label = "Active Schedules"
 memory_key = "analytics_hand_active_schedules"
+format = "number"
+
+[[dashboard.metrics]]
+label = "Findings Reported"
+memory_key = "analytics_hand_findings_reported"
 format = "number"

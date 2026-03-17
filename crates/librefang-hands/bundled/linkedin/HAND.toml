@@ -118,6 +118,52 @@ label = "3 hashtags"
 value = "5"
 label = "5 hashtags"
 
+[[settings]]
+key = "target_audience"
+label = "Target Audience"
+description = "Primary audience for your content"
+setting_type = "select"
+default = "peers"
+
+[[settings.options]]
+value = "peers"
+label = "Industry Peers"
+
+[[settings.options]]
+value = "recruiters"
+label = "Recruiters & Hiring Managers"
+
+[[settings.options]]
+value = "clients"
+label = "Potential Clients"
+
+[[settings.options]]
+value = "general"
+label = "General Professional Network"
+
+[[settings]]
+key = "language"
+label = "Language"
+description = "Language for posts and engagement"
+setting_type = "select"
+default = "en"
+
+[[settings.options]]
+value = "en"
+label = "English"
+
+[[settings.options]]
+value = "zh"
+label = "Chinese (中文)"
+
+[[settings.options]]
+value = "es"
+label = "Spanish"
+
+[[settings.options]]
+value = "auto"
+label = "Auto-detect from network"
+
 # ─── Agent configuration ─────────────────────────────────────────────────────
 
 [agent]
@@ -141,7 +187,8 @@ python -c "import platform; print(platform.system())"
 Verify LinkedIn API access:
 ```
 curl -s -H "Authorization: Bearer $LINKEDIN_ACCESS_TOKEN" \
-  "https://api.linkedin.com/v2/userinfo" \
+  -H "LinkedIn-Version: 202405" \
+  "https://api.linkedin.com/rest/userinfo" \
   -o linkedin_me.json
 ```
 If this fails, alert the user that the LINKEDIN_ACCESS_TOKEN is invalid or expired.
@@ -199,6 +246,18 @@ LinkedIn post rules:
 - 3-5 hashtags at the bottom
 - No external links in the post body (kills reach) — put links in comments
 
+Content moderation — classify every post before publishing:
+- **REJECT**: hate speech, unverified competitor claims, confidential info, financial/legal advice, profanity, political/religious debate
+- **FLAG**: controversial opinions, mentions of specific companies/people, salary discussions, current news, strong emotional tone
+- **SAFE**: educational how-to, industry trends with sources, career advice, engagement posts, team celebrations
+If classification is REJECT, discard. If FLAG, force into approval queue regardless of approval_mode setting.
+
+Rate each draft before queuing:
+- **A-grade (post immediately if approval_mode off)**: Strong hook, clear value, matches content_style, no moderation flags
+- **B-grade (queue with note)**: Decent content but hook could be stronger or topic is saturated
+- **C-grade (rewrite or discard)**: Weak hook, unclear value, or too similar to recent posts
+Only queue A and B grade content. Rewrite C-grade or discard entirely.
+
 ---
 
 ## Phase 3 — Posting & Queue Management
@@ -242,6 +301,14 @@ Track metrics:
 
 Analyze which content types and topics perform best.
 Store insights in knowledge graph for future optimization.
+
+### Session Exit Criteria
+Stop the current session when ANY of these conditions is met:
+1. **Queue full**: Approval queue has 10+ pending posts — stop generating until user reviews
+2. **API errors**: 3+ consecutive API failures — save state and alert user about token expiry
+3. **Engagement plateau**: Last 5 posts all had <1% engagement rate — pause and suggest strategy review
+4. **Iteration cap**: 15+ content generation iterations in a single session — save state and exit
+5. **Rate limited**: LinkedIn API returns 429 — back off and reschedule
 
 ---
 
@@ -292,3 +359,8 @@ format = "number"
 label = "Engagement Rate"
 memory_key = "linkedin_hand_engagement_rate"
 format = "percentage"
+
+[[dashboard.metrics]]
+label = "Profile Views"
+memory_key = "linkedin_hand_profile_views"
+format = "number"

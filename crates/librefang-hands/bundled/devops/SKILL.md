@@ -277,3 +277,56 @@ docker compose up -d --build SERVICE_NAME
 # Scale a service
 docker compose up -d --scale SERVICE_NAME=3
 ```
+
+---
+
+## Common Failure Diagnosis Playbooks
+
+### Memory Leak Detection
+```bash
+# Track memory growth over time
+while true; do
+  ps aux --sort=-%mem | head -5 | awk '{print strftime("%H:%M:%S"), $2, $4"%", $11}'
+  sleep 60
+done
+
+# Check for OOM kills
+dmesg | grep -i "oom\|killed" | tail -20
+
+# Kubernetes memory pressure
+kubectl top pods --sort-by=memory | head -10
+```
+
+### DNS Failure Cascade
+```bash
+# Test DNS resolution
+dig hostname +short
+dig @8.8.8.8 hostname +short  # Bypass local DNS
+
+# Check /etc/resolv.conf
+cat /etc/resolv.conf
+
+# Test from inside a container
+kubectl exec -it POD -- nslookup hostname
+```
+
+### Database Connection Pool Exhaustion
+```bash
+# Check active connections (PostgreSQL)
+psql -c "SELECT count(*) FROM pg_stat_activity WHERE state = 'active';"
+psql -c "SELECT max_conn FROM pg_settings WHERE name = 'max_connections';"
+
+# Check for long-running queries
+psql -c "SELECT pid, now() - pg_stat_activity.query_start AS duration, query
+         FROM pg_stat_activity WHERE state != 'idle' ORDER BY duration DESC LIMIT 10;"
+```
+
+### Certificate Expiry Monitoring
+```bash
+# Check cert expiry for a list of domains
+for domain in api.example.com app.example.com; do
+  expiry=$(echo | openssl s_client -servername $domain -connect $domain:443 2>/dev/null | \
+    openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+  echo "$domain: $expiry"
+done
+```

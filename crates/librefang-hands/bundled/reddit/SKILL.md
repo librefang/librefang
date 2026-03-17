@@ -123,6 +123,54 @@ Before posting in any subreddit:
 4. Understand what gets upvoted vs downvoted
 5. Check if the subreddit allows self-promotion or links
 
+### Common Subreddit Rule Patterns
+
+Different subreddits enforce very different rules. Here are real examples:
+
+**r/python** — Strict self-promotion rules:
+- 10:1 ratio: For every self-promotional post, you must have 10 non-promotional contributions
+- No link-only posts — must include discussion or explanation
+- Required flair for post type (Help, Discussion, News, etc.)
+
+**r/AskReddit** — Strict formatting:
+- Title must be a question ending with "?"
+- No text body allowed (title only)
+- No yes/no questions — must invite discussion
+
+**r/science** — Academic rigor:
+- Links must go to peer-reviewed research or reputable news covering research
+- No anecdotal claims, personal opinions, or speculation
+- Comments that don't cite sources may be removed
+
+**r/programming** — Anti-spam:
+- No "What language should I learn?" posts
+- No job postings or hiring threads
+- Blog posts must have substantial technical content, not marketing
+
+**Key rule categories to parse from any subreddit:**
+```
+1. Post format: title-only? text required? link required? flair required?
+2. Self-promotion: allowed? ratio requirement? disclosure needed?
+3. Content restrictions: banned topics? required sources? minimum quality?
+4. Account requirements: minimum age? minimum karma? approved submitters only?
+5. Engagement rules: must respond to comments? no drive-by posting?
+```
+
+### Toxicity & Moderation Signals
+
+Before posting or replying, scan for these red flags:
+- **Thread locked or removed** — moderators already intervened, do NOT engage
+- **Controversial marker** (†) on comments — indicates divisive topic, tread carefully
+- **OP deleted account** — thread may be abandoned or toxic
+- **Heavily downvoted parent** — replying to a -10 comment rarely goes well
+- **Personal attacks in thread** — disengage entirely, do not escalate
+
+When generating replies, NEVER:
+- Take sides in heated debates — provide balanced perspectives
+- Use sarcasm or irony — easily misread in text
+- Correct grammar/spelling unless directly relevant to the discussion
+- Reply to comments that are clearly trolling or bad-faith
+
 ### Post Types That Perform Well
 
 | Type | Best For | Example |
