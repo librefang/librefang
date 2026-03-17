@@ -932,22 +932,86 @@ async fn dispatch_message(
     // deltas directly to it instead of waiting for the full response.
     if adapter.supports_streaming() {
         match handle.send_message_streaming(agent_id, &text).await {
-            Ok(delta_rx) => {
+            Ok(mut delta_rx) => {
                 send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Streaming)
                     .await;
 
+                // Tee: forward deltas to the adapter while buffering a copy.
+                // If send_streaming fails, the buffer lets us fall back to send().
+                let (adapter_tx, adapter_rx) = mpsc::channel::<String>(64);
+                let mut buffered_text = String::new();
+                let buffer_handle = tokio::spawn({
+                    let mut buffered = String::new();
+                    async move {
+                        while let Some(delta) = delta_rx.recv().await {
+                            buffered.push_str(&delta);
+                            // Best-effort forward — if adapter dropped rx, stop.
+                            if adapter_tx.send(delta).await.is_err() {
+                                break;
+                            }
+                        }
+                        buffered
+                    }
+                });
+
                 let stream_result = adapter
-                    .send_streaming(&message.sender, delta_rx, thread_id)
+                    .send_streaming(&message.sender, adapter_rx, thread_id)
                     .await;
 
-                let (success, error_msg) = match &stream_result {
+                // Collect the buffered text (always succeeds unless the task panicked).
+                if let Ok(text) = buffer_handle.await {
+                    buffered_text = text;
+                }
+
+                match &stream_result {
                     Ok(()) => {
                         send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done)
                             .await;
-                        (true, None)
+                        handle
+                            .record_delivery(
+                                agent_id,
+                                ct_str,
+                                &message.sender.platform_id,
+                                true,
+                                None,
+                                thread_id,
+                            )
+                            .await;
+                        return;
                     }
                     Err(e) => {
-                        warn!("Streaming send failed: {e}");
+                        warn!("Streaming send failed, falling back to non-streaming: {e}");
+                        // Fall back: re-send the full accumulated text via the
+                        // non-streaming path so the user still gets a response.
+                        if !buffered_text.is_empty() {
+                            send_response(
+                                adapter,
+                                &message.sender,
+                                buffered_text,
+                                thread_id,
+                                output_format,
+                            )
+                            .await;
+                            send_lifecycle_reaction(
+                                adapter,
+                                &message.sender,
+                                msg_id,
+                                AgentPhase::Done,
+                            )
+                            .await;
+                            handle
+                                .record_delivery(
+                                    agent_id,
+                                    ct_str,
+                                    &message.sender.platform_id,
+                                    true,
+                                    None,
+                                    thread_id,
+                                )
+                                .await;
+                            return;
+                        }
+                        // Buffer was empty — fall through to non-streaming path.
                         send_lifecycle_reaction(
                             adapter,
                             &message.sender,
@@ -955,21 +1019,19 @@ async fn dispatch_message(
                             AgentPhase::Error,
                         )
                         .await;
-                        (false, Some(e.to_string()))
+                        handle
+                            .record_delivery(
+                                agent_id,
+                                ct_str,
+                                &message.sender.platform_id,
+                                false,
+                                Some(&e.to_string()),
+                                thread_id,
+                            )
+                            .await;
+                        return;
                     }
-                };
-
-                handle
-                    .record_delivery(
-                        agent_id,
-                        ct_str,
-                        &message.sender.platform_id,
-                        success,
-                        error_msg.as_deref(),
-                        thread_id,
-                    )
-                    .await;
-                return;
+                }
             }
             Err(e) => {
                 // Streaming not available for this request — fall through to

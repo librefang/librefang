@@ -301,8 +301,9 @@ pub trait ChannelAdapter: Send + Sync {
     ///
     /// The `delta_rx` receiver is consumed (ownership transfer) — the adapter
     /// reads deltas until the channel closes. On error, delivery is partial:
-    /// tokens already sent to the user are not retracted. The stream cannot be
-    /// retried after failure; the caller should fall back to a non-streaming send.
+    /// tokens already sent to the user are not retracted. The bridge layer
+    /// buffers deltas and will fall back to a non-streaming `send()` if this
+    /// method returns an error.
     ///
     /// Default implementation collects all deltas and sends as a single message.
     async fn send_streaming(
