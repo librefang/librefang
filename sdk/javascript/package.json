@@ -1,5 +1,5 @@
 {
-  "name": "librefang-sdk",
+  "name": "@librefang/sdk",
   "version": "0.5.5-20260317",
   "description": "Official JavaScript/TypeScript client for the LibreFang Agent OS REST API",
   "main": "index.js",

@@ -1,8 +1,8 @@
 /**
- * librefang-sdk — Official JavaScript client for the LibreFang Agent OS REST API.
+ * @librefang/sdk — Official JavaScript client for the LibreFang Agent OS REST API.
  *
  * Usage:
- *   const { LibreFang } = require("librefang-sdk");
+ *   const { LibreFang } = require("@librefang/sdk");
  *   const client = new LibreFang("http://localhost:4545");
  *
  *   const agent = await client.agents.create({ template: "assistant" });

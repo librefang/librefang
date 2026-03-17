@@ -70,7 +70,7 @@ jobs:
           # Strip date suffix (e.g. 0.5.0-20260316 → 0.5.0)
           VERSION="${TAG%-*}"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
-          echo "Publishing librefang-sdk@$VERSION"
+          echo "Publishing @librefang/sdk@$VERSION"
 
       - name: Install dependencies
         run: npm install --ignore-scripts
@@ -86,6 +86,13 @@ jobs:
           else
             npm publish --access public
           fi
+
+      - name: Publish to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm config set registry https://npm.pkg.github.com
+          npm publish --access public 2>/dev/null || echo "✓ Already published to GitHub Packages, skipping"
 
   # ── Python SDK → PyPI ─────────────────────────────────────────────────────
   sdk_python:

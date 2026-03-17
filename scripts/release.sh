@@ -191,7 +191,7 @@ curl -fsSL https://get.librefang.ai | sh
 cargo add librefang
 
 # JavaScript SDK
-npm install librefang-sdk
+npm install @librefang/sdk
 
 # Python SDK
 pip install librefang-sdk

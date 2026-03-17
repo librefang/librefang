@@ -1,17 +1,17 @@
-# librefang-sdk
+# @librefang/sdk
 
 Official JavaScript/TypeScript client for the LibreFang Agent OS REST API.
 
 ## Installation
 
 ```bash
-npm install librefang-sdk
+npm install @librefang/sdk
 ```
 
 ## Usage
 
 ```javascript
-const { LibreFang } = require("librefang-sdk");
+const { LibreFang } = require("@librefang/sdk");
 
 const client = new LibreFang("http://localhost:4545");
 ```
@@ -96,7 +96,7 @@ The client provides the following resources:
 This SDK includes TypeScript definitions (`index.d.ts`). Simply import and use:
 
 ```typescript
-import { LibreFang } from "librefang-sdk";
+import { LibreFang } from "@librefang/sdk";
 
 const client = new LibreFang("http://localhost:4545");
 const agents = await client.agents.list();
