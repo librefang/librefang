@@ -16,7 +16,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch, RwLock};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use zeroize::Zeroizing;
 
 /// Feishu tenant access token endpoint.
@@ -195,7 +195,9 @@ impl FeishuAdapter {
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
-        let url = format!("{}?receive_id_type={}", FEISHU_SEND_URL, receive_id_type);
+        let encoded_type: String =
+            url::form_urlencoded::byte_serialize(receive_id_type.as_bytes()).collect();
+        let url = format!("{}?receive_id_type={}", FEISHU_SEND_URL, encoded_type);
 
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -285,7 +287,9 @@ impl FeishuAdapter {
         card: &serde_json::Value,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let token = self.get_token().await?;
-        let url = format!("{}?receive_id_type={}", FEISHU_SEND_URL, receive_id_type);
+        let encoded_type: String =
+            url::form_urlencoded::byte_serialize(receive_id_type.as_bytes()).collect();
+        let url = format!("{}?receive_id_type={}", FEISHU_SEND_URL, encoded_type);
 
         let body = serde_json::json!({
             "receive_id": receive_id,
@@ -311,7 +315,8 @@ impl FeishuAdapter {
         let code = resp_body["code"].as_i64().unwrap_or(-1);
         if code != 0 {
             let msg = resp_body["msg"].as_str().unwrap_or("unknown error");
-            warn!("Feishu send card API error: {msg}");
+            error!("Feishu send card API error (code={code}): {msg}");
+            return Err(format!("Feishu send card API error (code={code}): {msg}").into());
         }
 
         Ok(())
@@ -445,6 +450,12 @@ pub fn build_approval_card(
 /// Extracts the `action` and `request_id` from the button value payload and
 /// converts them into a `ChannelMessage` with a `Command` content type.
 fn parse_card_action(event: &serde_json::Value) -> Option<ChannelMessage> {
+    // Defensive: only handle card.action.trigger events
+    let header = event.get("header")?;
+    if header["event_type"].as_str() != Some("card.action.trigger") {
+        return None;
+    }
+
     let event_data = event.get("event")?;
     let action = event_data.get("action")?;
     let value = action.get("value")?;
@@ -1259,6 +1270,56 @@ mod tests {
                     "open_id": "ou_user1"
                 },
                 "action": {
+                    "tag": "button"
+                }
+            }
+        });
+
+        assert!(parse_card_action(&event).is_none());
+    }
+
+    #[test]
+    fn test_parse_card_action_wrong_event_type_returns_none() {
+        let event = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-card-006",
+                "event_type": "im.message.receive_v1"
+            },
+            "event": {
+                "operator": {
+                    "open_id": "ou_user1"
+                },
+                "open_chat_id": "oc_chat1",
+                "open_message_id": "om_card6",
+                "action": {
+                    "value": {
+                        "action": "approve",
+                        "request_id": "abc-123"
+                    },
+                    "tag": "button"
+                }
+            }
+        });
+
+        assert!(parse_card_action(&event).is_none());
+    }
+
+    #[test]
+    fn test_parse_card_action_missing_header_returns_none() {
+        let event = serde_json::json!({
+            "schema": "2.0",
+            "event": {
+                "operator": {
+                    "open_id": "ou_user1"
+                },
+                "open_chat_id": "oc_chat1",
+                "open_message_id": "om_card7",
+                "action": {
+                    "value": {
+                        "action": "approve",
+                        "request_id": "abc-123"
+                    },
                     "tag": "button"
                 }
             }
