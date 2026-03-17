@@ -604,7 +604,7 @@ impl ProactiveMemoryStore {
                 // Check semantic similarity (Jaccard word overlap)
                 let similarity = librefang_types::memory::text_similarity(&a_lower, &b_lower);
 
-                if is_substring || similarity > 0.5 {
+                if is_substring || similarity > self.config.duplicate_threshold {
                     group.push(all_items[j].clone());
                     used[j] = true;
                 }
@@ -637,7 +637,7 @@ pub struct MemoryStats {
 
 #[async_trait]
 impl ProactiveMemory for ProactiveMemoryStore {
-    /// Semantic search for relevant memories.
+    /// Semantic search for relevant memories, enriched with knowledge graph context.
     async fn search(
         &self,
         query: &str,
@@ -650,7 +650,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
         let filter = Some(MemoryFilter::agent(agent_id));
         let results = self.semantic.recall(query, limit, filter)?;
 
-        Ok(results
+        let mut items: Vec<MemoryItem> = results
             .into_iter()
             .map(|frag| {
                 let level = MemoryLevel::from(frag.scope.as_str());
@@ -668,7 +668,19 @@ impl ProactiveMemory for ProactiveMemoryStore {
                 }
             })
             .take(limit)
-            .collect())
+            .collect();
+
+        // Enrich with knowledge graph: if entities in query match graph nodes,
+        // synthesize a context memory from graph relations.
+        if items.len() < limit {
+            if let Some(graph_ctx) = self.graph_context(query) {
+                items.push(
+                    MemoryItem::new(graph_ctx, MemoryLevel::Agent).with_category("knowledge_graph"),
+                );
+            }
+        }
+
+        Ok(items)
     }
 
     /// Add memories with automatic extraction and conflict resolution (mem0-style).
@@ -792,24 +804,50 @@ impl ProactiveMemory for ProactiveMemoryStore {
         Ok(true)
     }
 
-    /// Update a memory's content by deleting the old one and storing new content.
-    async fn update(&self, memory_id: &str, user_id: &str, content: &str) -> LibreFangResult<bool> {
-        let agent_id = Self::parse_agent_id(user_id)?;
-
-        // Delete old
+    /// Update a memory's content in-place, preserving version history.
+    async fn update(
+        &self,
+        memory_id: &str,
+        _user_id: &str,
+        content: &str,
+    ) -> LibreFangResult<bool> {
         let uuid = uuid::Uuid::parse_str(memory_id)
             .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
-        let mid = librefang_types::memory::MemoryId(uuid);
-        self.semantic.forget(mid)?;
+        let mid = MemoryId(uuid);
 
-        // Store updated content as session memory
-        self.semantic.remember(
-            agent_id,
-            content,
-            MemorySource::Conversation,
-            scopes::SESSION,
-            HashMap::new(),
-        )?;
+        // Get old memory for version history
+        let old_frag = match self.semantic.get_by_id(mid, false)? {
+            Some(f) => f,
+            None => return Ok(false),
+        };
+
+        // Build metadata with version history
+        let mut metadata = old_frag.metadata.clone();
+        let old_content = old_frag.content.clone();
+
+        metadata.insert(
+            "previous_content".to_string(),
+            serde_json::json!(old_content),
+        );
+        metadata.insert(
+            "updated_at".to_string(),
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
+
+        // Append to version history chain
+        let mut history: Vec<serde_json::Value> = metadata
+            .get("version_history")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        history.push(serde_json::json!({
+            "content": old_content,
+            "replaced_at": chrono::Utc::now().to_rfc3339(),
+        }));
+        metadata.insert("version_history".to_string(), serde_json::json!(history));
+
+        // Update content in-place (preserves ID, agent, scope, access stats)
+        self.semantic.update_content(mid, content, Some(metadata))?;
 
         Ok(true)
     }
@@ -954,12 +992,22 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
     }
 
     /// Proactively retrieve relevant context before agent execution.
+    ///
+    /// Also performs session TTL cleanup if configured.
     async fn auto_retrieve(&self, user_id: &str, query: &str) -> LibreFangResult<Vec<MemoryItem>> {
         if !self.config.auto_retrieve {
             return Ok(Vec::new());
         }
 
         let agent_id = Self::parse_agent_id(user_id)?;
+
+        // Cleanup expired session memories (lightweight, runs on each retrieve)
+        if self.config.session_ttl_hours > 0 {
+            let ttl = chrono::Duration::hours(self.config.session_ttl_hours as i64);
+            if let Err(e) = self.cleanup_expired_sessions(user_id, ttl) {
+                tracing::debug!("Session TTL cleanup failed (non-fatal): {}", e);
+            }
+        }
 
         // Create filter for this agent
         let filter = Some(MemoryFilter::agent(agent_id));

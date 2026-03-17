@@ -139,6 +139,10 @@ pub struct ProactiveMemoryConfig {
     /// Session memory TTL in hours. Memories older than this are cleaned up
     /// automatically before each agent execution. Default: 24 hours.
     pub session_ttl_hours: u32,
+    /// Similarity threshold for duplicate detection (0.0 - 1.0).
+    /// Memories with Jaccard word overlap above this are considered duplicates.
+    /// Default: 0.5.
+    pub duplicate_threshold: f32,
 }
 
 impl Default for ProactiveMemoryConfig {
@@ -156,6 +160,7 @@ impl Default for ProactiveMemoryConfig {
                 "relationship".to_string(),
             ],
             session_ttl_hours: 24,
+            duplicate_threshold: 0.5,
         }
     }
 }
@@ -302,6 +307,31 @@ pub trait MemoryExtractor: Send + Sync {
     fn format_context(&self, memories: &[MemoryItem]) -> String;
 }
 
+/// Extract the phrase after a pattern, taking up to the first sentence boundary.
+fn extract_after_pattern(text: &str, pattern: &str) -> Option<String> {
+    let idx = text.find(pattern)?;
+    let rest = &text[idx + pattern.len()..];
+    // Take until sentence boundary or end
+    let end = rest
+        .find(['.', ',', '!', '?', ';', '\n'])
+        .unwrap_or(rest.len());
+    let phrase = rest[..end].trim();
+    if phrase.is_empty() {
+        None
+    } else {
+        Some(phrase.to_string())
+    }
+}
+
+/// Capitalize the first letter of a string.
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
+}
+
 /// Simple word-overlap similarity (Jaccard index on words).
 pub fn text_similarity(a: &str, b: &str) -> f32 {
     let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
@@ -330,6 +360,7 @@ impl MemoryExtractor for DefaultMemoryExtractor {
         messages: &[serde_json::Value],
     ) -> crate::error::LibreFangResult<ExtractionResult> {
         let mut memories = Vec::new();
+        let mut relations = Vec::new();
 
         // Simple keyword-based extraction (fallback when no LLM available).
         // Only extract from user messages to avoid assistant echo.
@@ -364,6 +395,17 @@ impl MemoryExtractor for DefaultMemoryExtractor {
                     metadata,
                     created_at: Utc::now(),
                 });
+
+                // Extract preference relation: "I prefer X" → (User, prefers, X)
+                if let Some(object) = extract_after_pattern(&lower, "i prefer ") {
+                    relations.push(RelationTriple {
+                        subject: "User".to_string(),
+                        subject_type: "person".to_string(),
+                        relation: "prefers".to_string(),
+                        object,
+                        object_type: "concept".to_string(),
+                    });
+                }
             }
 
             // Extract important facts (explicit identity statements)
@@ -382,13 +424,42 @@ impl MemoryExtractor for DefaultMemoryExtractor {
                     metadata,
                     created_at: Utc::now(),
                 });
+
+                // Extract fact relations
+                if let Some(name) = extract_after_pattern(&lower, "my name is ") {
+                    relations.push(RelationTriple {
+                        subject: capitalize_first(&name),
+                        subject_type: "person".to_string(),
+                        relation: "is_named".to_string(),
+                        object: "User".to_string(),
+                        object_type: "person".to_string(),
+                    });
+                }
+                if let Some(company) = extract_after_pattern(&lower, "i work at ") {
+                    relations.push(RelationTriple {
+                        subject: "User".to_string(),
+                        subject_type: "person".to_string(),
+                        relation: "works_at".to_string(),
+                        object: capitalize_first(&company),
+                        object_type: "organization".to_string(),
+                    });
+                }
+                if let Some(place) = extract_after_pattern(&lower, "i live in ") {
+                    relations.push(RelationTriple {
+                        subject: "User".to_string(),
+                        subject_type: "person".to_string(),
+                        relation: "located_in".to_string(),
+                        object: capitalize_first(&place),
+                        object_type: "location".to_string(),
+                    });
+                }
             }
         }
 
         Ok(ExtractionResult {
-            has_content: !memories.is_empty(),
+            has_content: !memories.is_empty() || !relations.is_empty(),
             memories,
-            relations: Vec::new(),
+            relations,
             trigger: "default_extractor".to_string(),
         })
     }
