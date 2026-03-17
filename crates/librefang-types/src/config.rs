@@ -1178,7 +1178,7 @@ impl Default for QueueConcurrencyConfig {
 ///
 /// Environment variables `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are also
 /// respected as fallbacks when the config fields are empty.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProxyConfig {
     /// HTTP proxy URL (e.g. `http://proxy:8080`).
@@ -1193,6 +1193,39 @@ pub struct ProxyConfig {
     /// Falls back to `NO_PROXY` / `no_proxy` env var.
     #[serde(default)]
     pub no_proxy: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field(
+                "http_proxy",
+                &self.http_proxy.as_deref().map(redact_proxy_url),
+            )
+            .field(
+                "https_proxy",
+                &self.https_proxy.as_deref().map(redact_proxy_url),
+            )
+            .field("no_proxy", &self.no_proxy)
+            .finish()
+    }
+}
+
+/// Redact credentials from a proxy URL for safe logging.
+///
+/// Turns `http://user:pass@host:port/path` into `http://***@host:port/path`.
+/// Returns the URL unchanged if it contains no `@` (no credentials).
+pub fn redact_proxy_url(url: &str) -> String {
+    // Find the scheme separator "://"
+    if let Some(scheme_end) = url.find("://") {
+        let after_scheme = &url[scheme_end + 3..];
+        // If there is an `@`, credentials are present before it
+        if let Some(at_pos) = after_scheme.find('@') {
+            let host_and_rest = &after_scheme[at_pos..]; // includes '@'
+            return format!("{}://***{}", &url[..scheme_end], host_and_rest);
+        }
+    }
+    url.to_string()
 }
 
 /// Top-level kernel configuration.
@@ -4835,5 +4868,48 @@ mod tests {
         assert!(SignalConfig::default().account_id.is_none());
         assert!(MatrixConfig::default().account_id.is_none());
         assert!(EmailConfig::default().account_id.is_none());
+    }
+
+    #[test]
+    fn test_redact_proxy_url_with_credentials() {
+        assert_eq!(
+            redact_proxy_url("http://user:pass@proxy.example.com:8080"),
+            "http://***@proxy.example.com:8080"
+        );
+    }
+
+    #[test]
+    fn test_redact_proxy_url_without_credentials() {
+        assert_eq!(
+            redact_proxy_url("http://proxy.example.com:8080"),
+            "http://proxy.example.com:8080"
+        );
+    }
+
+    #[test]
+    fn test_redact_proxy_url_empty() {
+        assert_eq!(redact_proxy_url(""), "");
+    }
+
+    #[test]
+    fn test_proxy_config_debug_redacts_credentials() {
+        let cfg = ProxyConfig {
+            http_proxy: Some("http://admin:secret@proxy:8080".to_string()),
+            https_proxy: Some("http://proxy:8080".to_string()),
+            no_proxy: Some("localhost".to_string()),
+        };
+        let debug = format!("{:?}", cfg);
+        assert!(
+            !debug.contains("secret"),
+            "credentials leaked in Debug output: {debug}"
+        );
+        assert!(
+            !debug.contains("admin"),
+            "username leaked in Debug output: {debug}"
+        );
+        assert!(
+            debug.contains("***"),
+            "Debug output should contain redacted marker"
+        );
     }
 }

@@ -108,7 +108,10 @@ async fn start_test_server_with_provider(
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))
         .route("/api/status", axum::routing::get(routes::status))
-        .route("/api/config/reload", axum::routing::post(routes::config_reload))
+        .route(
+            "/api/config/reload",
+            axum::routing::post(routes::config_reload),
+        )
         .route(
             "/api/agents",
             axum::routing::get(routes::list_agents).post(routes::spawn_agent),
@@ -451,7 +454,11 @@ async fn test_config_reload_reports_proxy_changes_require_restart() {
             toml::Value::String("http://proxy.example.com:8080".to_string()),
         )])),
     );
-    std::fs::write(&server.config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+    std::fs::write(
+        &server.config_path,
+        toml::to_string_pretty(&config).unwrap(),
+    )
+    .unwrap();
 
     let resp = client
         .post(format!("{}/api/config/reload", server.base_url))
@@ -464,12 +471,15 @@ async fn test_config_reload_reports_proxy_changes_require_restart() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "partial");
     assert_eq!(body["restart_required"], true);
-    assert!(body["restart_reasons"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|value| value.as_str())
-        .any(|reason| reason.contains("proxy config changed")), "unexpected reload response: {body}");
+    assert!(
+        body["restart_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value.as_str())
+            .any(|reason| reason.contains("proxy config changed")),
+        "unexpected reload response: {body}"
+    );
 }
 
 #[tokio::test]

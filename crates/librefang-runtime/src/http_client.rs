@@ -61,6 +61,13 @@ static GLOBAL_PROXY: OnceLock<ProxyConfig> = OnceLock::new();
 /// Config-file values are also exported as environment variables so that
 /// crates which build their own `reqwest::Client` (and thus rely on reqwest's
 /// built-in env-var detection) automatically pick up the proxy settings.
+/// # Thread safety
+///
+/// This function calls `std::env::set_var` which is inherently racy in a
+/// multi-threaded process. It **must** be called exactly once during
+/// single-threaded daemon bootstrap, before the Tokio runtime spawns any
+/// worker threads. The `OnceLock::set` at the end guarantees that only the
+/// first call takes effect; subsequent calls are silently ignored.
 pub fn init_proxy(cfg: ProxyConfig) {
     // Export config values as env vars for crates that build reqwest clients
     // without going through our builder (e.g. librefang-channels).
@@ -161,7 +168,10 @@ pub fn build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder {
             if let Ok(p) = Proxy::http(url) {
                 builder = builder.proxy(p.no_proxy(no_proxy_filter.clone()));
             } else {
-                tracing::warn!("invalid HTTP proxy URL: {url}");
+                tracing::warn!(
+                    "invalid HTTP proxy URL: {}",
+                    librefang_types::config::redact_proxy_url(url)
+                );
             }
         }
     }
@@ -172,7 +182,10 @@ pub fn build_http_client(proxy: &ProxyConfig) -> reqwest::ClientBuilder {
             if let Ok(p) = Proxy::https(url) {
                 builder = builder.proxy(p.no_proxy(no_proxy_filter.clone()));
             } else {
-                tracing::warn!("invalid HTTPS proxy URL: {url}");
+                tracing::warn!(
+                    "invalid HTTPS proxy URL: {}",
+                    librefang_types::config::redact_proxy_url(url)
+                );
             }
         }
     }
