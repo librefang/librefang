@@ -1071,14 +1071,19 @@ mod tests {
                 ],
             },
             timeout_secs: 30,
-            env: vec!["GITHUB_PERSONAL_ACCESS_TOKEN".to_string()],
+            env: vec![
+                "GITHUB_PERSONAL_ACCESS_TOKEN=ghp_test123".to_string(),
+                "LEGACY_NAME_ONLY".to_string(), // legacy plain-name format (no-op)
+            ],
         };
 
         let json = serde_json::to_string(&config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "github");
         assert_eq!(back.timeout_secs, 30);
-        assert_eq!(back.env, vec!["GITHUB_PERSONAL_ACCESS_TOKEN"]);
+        assert_eq!(back.env.len(), 2);
+        assert_eq!(back.env[0], "GITHUB_PERSONAL_ACCESS_TOKEN=ghp_test123");
+        assert_eq!(back.env[1], "LEGACY_NAME_ONLY");
 
         match back.transport {
             McpTransport::Stdio { command, args } => {
@@ -1142,6 +1147,25 @@ mod tests {
             }
             _ => panic!("Expected HttpCompat transport"),
         }
+    }
+
+    #[test]
+    fn test_env_key_value_parsing() {
+        // KEY=VALUE entries are split and applied
+        let entry = "MY_KEY=my_value";
+        let (key, value) = entry.split_once('=').unwrap();
+        assert_eq!(key, "MY_KEY");
+        assert_eq!(value, "my_value");
+
+        // Values containing '=' are preserved (split_once)
+        let entry = "TOKEN=abc=def==";
+        let (key, value) = entry.split_once('=').unwrap();
+        assert_eq!(key, "TOKEN");
+        assert_eq!(value, "abc=def==");
+
+        // Plain names (legacy) have no '=' → no-op
+        let entry = "PLAIN_NAME";
+        assert!(entry.split_once('=').is_none());
     }
 
     #[test]
