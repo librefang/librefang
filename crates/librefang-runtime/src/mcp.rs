@@ -32,7 +32,12 @@ pub struct McpServerConfig {
     /// Request timeout in seconds (default: 30).
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
-    /// Environment variables to pass through to the subprocess (sandboxed).
+    /// Extra environment variables for the subprocess.
+    ///
+    /// Each entry can be either:
+    /// - `"KEY=VALUE"` — set an explicit env var on the child process, or
+    /// - `"KEY"` — (legacy) ignored, since the child now inherits the full
+    ///   parent environment.
     #[serde(default)]
     pub env: Vec<String>,
 }
@@ -491,7 +496,7 @@ impl McpConnection {
     async fn connect_stdio(
         command: &str,
         args: &[String],
-        env_whitelist: &[String],
+        extra_env: &[String],
     ) -> Result<McpTransportHandle, String> {
         // Validate command path (no path traversal)
         if command.contains("..") {
@@ -526,12 +531,13 @@ impl McpConnection {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        // Inherit the parent process environment (which includes .env/vault
-        // credentials) and layer any MCP-specific env vars on top.
-        for var_name in env_whitelist {
-            if let Ok(val) = std::env::var(var_name) {
-                cmd.env(var_name, val);
+        // Child inherits the full parent environment (including .env/vault
+        // credentials).  Layer any explicit KEY=VALUE pairs from config on top.
+        for entry in extra_env {
+            if let Some((key, value)) = entry.split_once('=') {
+                cmd.env(key, value);
             }
+            // Plain names (legacy format) are no-ops — already inherited.
         }
 
         let mut child = cmd
