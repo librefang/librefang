@@ -12,6 +12,7 @@ on:
 permissions:
   actions: read
   contents: read
+  discussions: write
 
 jobs:
   check_and_notify:
@@ -209,3 +210,28 @@ jobs:
             -d "$BSKY_PAYLOAD" > /dev/null
 
           echo "✓ Bluesky post published"
+
+          # --- GitHub Discussion announcement ---
+          ARTICLE_FILE="articles/release-${VERSION}.md"
+          if [ -f "$ARTICLE_FILE" ]; then
+            DISC_BODY=$(sed '/^```markdown$/d; /^```$/d' "$ARTICLE_FILE" | awk 'BEGIN{s=0} /^---$/{s++; next} s<2{next} {print}')
+            DISC_TITLE="LibreFang ${VERSION} Released"
+            REPO_ID="R_kgDORkvylw"
+            CATEGORY_ID="DIC_kwDORkvyl84C4NIY"
+
+            RESULT=$(gh api graphql -f query='
+              mutation($repoId: ID!, $catId: ID!, $title: String!, $body: String!) {
+                createDiscussion(input: {repositoryId: $repoId, categoryId: $catId, title: $title, body: $body}) {
+                  discussion { url }
+                }
+              }' -f repoId="$REPO_ID" -f catId="$CATEGORY_ID" -f title="$DISC_TITLE" -f body="$DISC_BODY" 2>&1) || true
+
+            DISC_URL=$(echo "$RESULT" | jq -r '.data.createDiscussion.discussion.url // empty' 2>/dev/null)
+            if [ -n "$DISC_URL" ]; then
+              echo "✓ Discussion created: $DISC_URL"
+            else
+              echo "⚠ Discussion creation failed: $RESULT"
+            fi
+          else
+            echo "No article found at $ARTICLE_FILE, skipping discussion"
+          fi
