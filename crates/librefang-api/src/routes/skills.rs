@@ -2384,6 +2384,89 @@ pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoR
     }))
 }
 
+/// GET /api/integrations/:id — Get a single integration by ID.
+#[utoipa::path(
+    get,
+    path = "/api/integrations/{id}",
+    tag = "integrations",
+    params(
+        ("id" = String, Path, description = "Integration ID"),
+    ),
+    responses(
+        (status = 200, description = "Integration detail", body = serde_json::Value),
+        (status = 404, description = "Integration not found", body = serde_json::Value),
+    )
+)]
+pub async fn get_integration(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let registry = state
+        .kernel
+        .extension_registry
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let health = &state.kernel.extension_health;
+
+    // Look up the template first
+    let template = match registry.get_template(&id) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Integration '{}' not found", id)})),
+            )
+                .into_response();
+        }
+    };
+
+    let installed = registry.get_installed(&id);
+    let h = health.get_health(&id);
+
+    let status = match &installed {
+        Some(inst) if !inst.enabled => "disabled",
+        Some(_) => match h.as_ref().map(|h| &h.status) {
+            Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
+            Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
+            _ => "installed",
+        },
+        None => "available",
+    };
+
+    let error_message = h.as_ref().and_then(|h| match &h.status {
+        librefang_extensions::IntegrationStatus::Error(msg) => Some(msg.clone()),
+        _ => None,
+    });
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "id": template.id,
+            "name": template.name,
+            "description": template.description,
+            "icon": template.icon,
+            "category": template.category.to_string(),
+            "status": status,
+            "tags": template.tags,
+            "tool_count": h.as_ref().map(|h| h.tool_count).unwrap_or(0),
+            "installed": installed.is_some(),
+            "enabled": installed.as_ref().map(|i| i.enabled).unwrap_or(false),
+            "installed_at": installed.as_ref().map(|i| i.installed_at.to_rfc3339()),
+            "has_oauth": template.oauth.is_some(),
+            "setup_instructions": template.setup_instructions,
+            "required_env": template.required_env.iter().map(|e| serde_json::json!({
+                "name": e.name,
+                "label": e.label,
+                "help": e.help,
+                "is_secret": e.is_secret,
+                "get_url": e.get_url,
+            })).collect::<Vec<_>>(),
+            "error": error_message,
+        })),
+    )
+        .into_response()
+}
+
 /// GET /api/integrations/available — List all available templates.
 #[utoipa::path(
     get,

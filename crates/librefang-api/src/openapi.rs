@@ -131,6 +131,7 @@ use crate::types;
 
         // ── Integrations ──
         routes::list_integrations,
+        routes::get_integration,
         routes::list_available_integrations,
         routes::add_integration,
         routes::remove_integration,
