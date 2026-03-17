@@ -748,12 +748,23 @@ pub async fn run_agent_loop(
                     "Agent loop completed"
                 );
 
-                // Run auto_memorize directly (not via hook) for proper result handling
+                // Run auto_memorize directly (not via hook) for proper result handling.
+                // Relations are stored inside auto_memorize via store_relations().
                 if let Some(ref pm_store) = proactive_memory {
                     let user_id = session.agent_id.0.to_string();
                     let messages_json = serialize_session_messages(&session.messages);
-                    if let Err(e) = pm_store.auto_memorize(&user_id, &messages_json).await {
-                        warn!("Proactive memory auto_memorize failed: {e}");
+                    match pm_store.auto_memorize(&user_id, &messages_json).await {
+                        Ok(result) if result.has_content => {
+                            debug!(
+                                "Proactive memory: stored {} memories, {} relations",
+                                result.memories.len(),
+                                result.relations.len(),
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!("Proactive memory auto_memorize failed: {e}");
+                        }
                     }
                 }
 
@@ -1809,12 +1820,23 @@ pub async fn run_agent_loop_streaming(
                     "Streaming agent loop completed"
                 );
 
-                // Run auto_memorize directly for streaming path
+                // Run auto_memorize directly for streaming path.
+                // Relations are stored inside auto_memorize via store_relations().
                 if let Some(ref pm_store) = proactive_memory {
                     let user_id = session.agent_id.0.to_string();
                     let messages_json = serialize_session_messages(&session.messages);
-                    if let Err(e) = pm_store.auto_memorize(&user_id, &messages_json).await {
-                        warn!("Proactive memory auto_memorize failed (streaming): {e}");
+                    match pm_store.auto_memorize(&user_id, &messages_json).await {
+                        Ok(result) if result.has_content => {
+                            debug!(
+                                "Proactive memory (streaming): stored {} memories, {} relations",
+                                result.memories.len(),
+                                result.relations.len(),
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!("Proactive memory auto_memorize failed (streaming): {e}");
+                        }
                     }
                 }
 
