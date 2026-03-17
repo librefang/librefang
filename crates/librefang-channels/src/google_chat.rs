@@ -138,8 +138,9 @@ impl GoogleChatAdapter {
     /// 2. JWT-based service account auth (if `private_key` + `client_email` present)
     /// 3. Direct `access_token` field in key JSON (legacy/testing fallback)
     ///
-    /// Uses a write lock during refresh to prevent thundering-herd token exchanges
-    /// when multiple concurrent callers see an expired cache simultaneously.
+    /// Uses double-checked locking to prevent thundering-herd token exchanges.
+    /// The write lock is released before the HTTP request so concurrent readers
+    /// are not blocked during the (potentially slow) token exchange.
     async fn get_access_token(&self) -> Result<String, Box<dyn std::error::Error>> {
         // Fast path: check cache with read lock
         {
@@ -152,11 +153,14 @@ impl GoogleChatAdapter {
         }
 
         // Slow path: acquire write lock, then re-check (another task may have refreshed)
-        let mut cache = self.cached_token.write().await;
-        if let Some((ref token, expiry)) = *cache {
-            if Instant::now() + Duration::from_secs(TOKEN_REFRESH_MARGIN_SECS) < expiry {
-                return Ok(token.clone());
+        {
+            let cache = self.cached_token.write().await;
+            if let Some((ref token, expiry)) = *cache {
+                if Instant::now() + Duration::from_secs(TOKEN_REFRESH_MARGIN_SECS) < expiry {
+                    return Ok(token.clone());
+                }
             }
+            // Write lock dropped here — we'll do the expensive work (HTTP) without holding it.
         }
 
         let sa_key: ServiceAccountKey = serde_json::from_str(&self.service_account_key)
@@ -164,7 +168,7 @@ impl GoogleChatAdapter {
 
         // Try JWT-based authentication if private_key is present
         if !sa_key.private_key.is_empty() && !sa_key.client_email.is_empty() {
-            let token = self.exchange_jwt_for_token_inner(&sa_key, &mut cache).await?;
+            let token = self.exchange_jwt_for_token(&sa_key).await?;
             return Ok(token);
         }
 
@@ -174,19 +178,21 @@ impl GoogleChatAdapter {
         )?;
 
         let expiry = Instant::now() + Duration::from_secs(DEFAULT_TOKEN_LIFETIME_SECS);
-        *cache = Some((token.clone(), expiry));
+        *self.cached_token.write().await = Some((token.clone(), expiry));
 
         Ok(token)
     }
 
     /// Build a signed JWT assertion and exchange it for an OAuth2 access token.
     ///
-    /// Accepts a mutable reference to the cache guard so the caller retains the
-    /// write lock for the entire refresh cycle, preventing concurrent refreshes.
-    async fn exchange_jwt_for_token_inner(
+    /// The write lock is NOT held during the HTTP exchange. After obtaining the
+    /// token, the cache is updated under a fresh write lock. This means a second
+    /// concurrent caller may also perform a token exchange (at most one extra),
+    /// but no caller is blocked on network I/O — a good tradeoff for an operation
+    /// that only happens once per hour.
+    async fn exchange_jwt_for_token(
         &self,
         sa_key: &ServiceAccountKey,
-        cache: &mut Option<(String, Instant)>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         // Validate token_uri against allowlist to prevent SSRF
         if !ALLOWED_TOKEN_URI_PREFIXES
@@ -232,7 +238,7 @@ impl GoogleChatAdapter {
 
         let jwt = format!("{signing_input}.{signature_b64}");
 
-        // Exchange JWT for access token at the token endpoint
+        // Exchange JWT for access token at the token endpoint (no lock held)
         let resp = self
             .client
             .post(&sa_key.token_uri)
@@ -261,8 +267,9 @@ impl GoogleChatAdapter {
             .as_u64()
             .unwrap_or(DEFAULT_TOKEN_LIFETIME_SECS);
 
+        // Re-acquire write lock to update cache
         let expiry = Instant::now() + Duration::from_secs(expires_in);
-        *cache = Some((access_token.clone(), expiry));
+        *self.cached_token.write().await = Some((access_token.clone(), expiry));
 
         debug!(
             "Google Chat: obtained access token via JWT, expires in {}s",
