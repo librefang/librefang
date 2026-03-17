@@ -147,9 +147,12 @@ jobs:
           fi
 
           # Authenticate
-          BSKY_SESSION=$(curl -s -X POST "https://bsky.social/xrpc/com.atproto.server.createSession" \
-            -H "Content-Type: application/json" \
-            -d "{\"identifier\": \"$BLUESKY_HANDLE\", \"password\": \"$BLUESKY_APP_PASSWORD\"}") || true
+          BSKY_SESSION=$(jq -n \
+            --arg id "$BLUESKY_HANDLE" \
+            --arg pw "$BLUESKY_APP_PASSWORD" \
+            '{identifier: $id, password: $pw}' | \
+            curl -s -X POST "https://bsky.social/xrpc/com.atproto.server.createSession" \
+              -H "Content-Type: application/json" -d @-) || true
 
           BSKY_TOKEN=$(echo "$BSKY_SESSION" | jq -r '.accessJwt // empty')
           BSKY_DID=$(echo "$BSKY_SESSION" | jq -r '.did // empty')
