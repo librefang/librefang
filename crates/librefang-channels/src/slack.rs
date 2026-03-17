@@ -443,6 +443,13 @@ async fn parse_slack_event(
     // Slack channel prefixes: D = direct message, other channel types are group contexts.
     let is_group = !channel.starts_with('D');
 
+    // Extract thread_ts for threading context. Slack uses `thread_ts` to identify
+    // the parent message of a thread. For edited messages, check the inner message first.
+    let thread_id = msg_data["thread_ts"]
+        .as_str()
+        .or_else(|| event["thread_ts"].as_str())
+        .map(|s| s.to_string());
+
     Some(ChannelMessage {
         channel: ChannelType::Slack,
         platform_message_id: ts.to_string(),
@@ -457,7 +464,7 @@ async fn parse_slack_event(
         target_agent: None,
         timestamp,
         is_group,
-        thread_id: None,
+        thread_id,
         metadata,
     })
 }
@@ -683,6 +690,57 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("U456")
         );
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_event_thread_ts() {
+        let bot_id = Arc::new(RwLock::new(Some("B123".to_string())));
+        let event = serde_json::json!({
+            "type": "message",
+            "user": "U456",
+            "channel": "C789",
+            "text": "Thread reply",
+            "ts": "1700000001.000200",
+            "thread_ts": "1700000000.000100"
+        });
+
+        let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
+        assert_eq!(msg.thread_id, Some("1700000000.000100".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_event_no_thread_ts() {
+        let bot_id = Arc::new(RwLock::new(Some("B123".to_string())));
+        let event = serde_json::json!({
+            "type": "message",
+            "user": "U456",
+            "channel": "C789",
+            "text": "Top-level message",
+            "ts": "1700000000.000100"
+        });
+
+        let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
+        assert_eq!(msg.thread_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_event_message_changed_thread_ts() {
+        let bot_id = Arc::new(RwLock::new(Some("B123".to_string())));
+        let event = serde_json::json!({
+            "type": "message",
+            "subtype": "message_changed",
+            "channel": "C789",
+            "message": {
+                "user": "U456",
+                "text": "Edited thread reply",
+                "ts": "1700000001.000200",
+                "thread_ts": "1700000000.000100"
+            },
+            "ts": "1700000002.000300"
+        });
+
+        let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
+        assert_eq!(msg.thread_id, Some("1700000000.000100".to_string()));
     }
 
     #[test]
