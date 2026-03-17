@@ -90,7 +90,6 @@ pub mod categories {
 /// // Auto-retrieve before agent execution
 /// let context = store.auto_retrieve("user123", "What did I tell you about my preferences?").await.unwrap();
 /// ```
-#[derive(Clone)]
 pub struct ProactiveMemoryStore {
     #[allow(dead_code)]
     substrate: Arc<MemorySubstrate>,
@@ -100,6 +99,25 @@ pub struct ProactiveMemoryStore {
     config: ProactiveMemoryConfig,
     /// Memory extractor for LLM-powered extraction
     extractor: Arc<dyn MemoryExtractor>,
+    /// Counter for auto-consolidation (runs every 10 auto_memorize calls per agent).
+    consolidation_counter: std::sync::atomic::AtomicU32,
+}
+
+impl Clone for ProactiveMemoryStore {
+    fn clone(&self) -> Self {
+        Self {
+            substrate: self.substrate.clone(),
+            structured: self.structured.clone(),
+            semantic: self.semantic.clone(),
+            knowledge: self.knowledge.clone(),
+            config: self.config.clone(),
+            extractor: self.extractor.clone(),
+            consolidation_counter: std::sync::atomic::AtomicU32::new(
+                self.consolidation_counter
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+        }
+    }
 }
 
 impl ProactiveMemoryStore {
@@ -114,6 +132,7 @@ impl ProactiveMemoryStore {
             substrate,
             config,
             extractor: Arc::new(DefaultMemoryExtractor),
+            consolidation_counter: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -132,6 +151,7 @@ impl ProactiveMemoryStore {
             substrate,
             config,
             extractor,
+            consolidation_counter: std::sync::atomic::AtomicU32::new(0),
         }
     }
 
@@ -1121,6 +1141,22 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         // Store extracted relations in knowledge graph
         if !extraction_result.relations.is_empty() {
             self.store_relations(&extraction_result.relations);
+        }
+
+        // Auto-consolidation: merge duplicates every 10 auto_memorize calls
+        let count = self
+            .consolidation_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if count > 0 && count.is_multiple_of(10) {
+            match self.consolidate(user_id).await {
+                Ok(merged) if merged > 0 => {
+                    tracing::info!("Auto-consolidation: merged {} duplicate memories", merged);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!("Auto-consolidation failed (non-fatal): {}", e);
+                }
+            }
         }
 
         Ok(ExtractionResult {

@@ -348,6 +348,30 @@ pub fn text_similarity(a: &str, b: &str) -> f32 {
     }
 }
 
+/// Helper to push a memory item with extracted content (not the whole message).
+fn push_memory(
+    memories: &mut Vec<MemoryItem>,
+    content: &str,
+    level: MemoryLevel,
+    category: &str,
+    role: &str,
+) {
+    // Dedup: skip if we already extracted identical content
+    if memories.iter().any(|m| m.content == content) {
+        return;
+    }
+    let mut metadata = HashMap::new();
+    metadata.insert("extracted_from".to_string(), serde_json::json!(role));
+    memories.push(MemoryItem {
+        id: Uuid::new_v4().to_string(),
+        content: content.to_string(),
+        level,
+        category: Some(category.to_string()),
+        metadata,
+        created_at: Utc::now(),
+    });
+}
+
 /// Default implementation of MemoryExtractor that uses simple rule-based extraction.
 ///
 /// This provides basic functionality without requiring an LLM.
@@ -378,113 +402,142 @@ impl MemoryExtractor for DefaultMemoryExtractor {
                 .unwrap_or("");
             let lower = content.to_lowercase();
 
-            // Extract preferences — use strict patterns to avoid false positives
-            if lower.contains("i prefer ")
-                || lower.contains("i always ")
-                || lower.contains("i never ")
-                || lower.contains("i dislike ")
-                || lower.contains("my favorite ")
-            {
-                let mut metadata = HashMap::new();
-                metadata.insert("extracted_from".to_string(), serde_json::json!(role));
-                memories.push(MemoryItem {
-                    id: Uuid::new_v4().to_string(),
-                    content: content.to_string(),
-                    level: MemoryLevel::User,
-                    category: Some("user_preference".to_string()),
-                    metadata,
-                    created_at: Utc::now(),
-                });
-
-                // Extract preference relation: "I prefer X" → (User, prefers, X)
-                if let Some(object) = extract_after_pattern(&lower, "i prefer ") {
+            // ── Preference patterns ──
+            // Store extracted phrase, not the whole message
+            let pref_patterns: &[(&str, &str)] = &[
+                ("i prefer ", "prefers"),
+                ("i always ", "prefers"),
+                ("i never ", "dislikes"),
+                ("i dislike ", "dislikes"),
+                ("my favorite ", "prefers"),
+                ("i like to ", "prefers"),
+                ("i don't like ", "dislikes"),
+                ("i'd rather ", "prefers"),
+                ("i want ", "prefers"),
+                ("i need ", "prefers"),
+            ];
+            for &(pattern, rel) in pref_patterns {
+                if let Some(phrase) = extract_after_pattern(&lower, pattern) {
+                    let extracted = format!("User {pattern}{phrase}");
+                    push_memory(
+                        &mut memories,
+                        &extracted,
+                        MemoryLevel::User,
+                        "user_preference",
+                        role,
+                    );
                     relations.push(RelationTriple {
                         subject: "User".to_string(),
                         subject_type: "person".to_string(),
-                        relation: "prefers".to_string(),
-                        object,
+                        relation: rel.to_string(),
+                        object: capitalize_first(&phrase),
                         object_type: "concept".to_string(),
                     });
                 }
             }
 
-            // Extract important facts (explicit identity statements)
-            if lower.contains("my name is")
-                || lower.contains("i work at ")
-                || lower.contains("i live in ")
-                || lower.contains("my job is ")
-            {
-                let mut metadata = HashMap::new();
-                metadata.insert("extracted_from".to_string(), serde_json::json!(role));
-                memories.push(MemoryItem {
-                    id: Uuid::new_v4().to_string(),
-                    content: content.to_string(),
-                    level: MemoryLevel::User,
-                    category: Some("important_fact".to_string()),
-                    metadata,
-                    created_at: Utc::now(),
-                });
-
-                // Extract fact relations
-                if let Some(name) = extract_after_pattern(&lower, "my name is ") {
-                    relations.push(RelationTriple {
-                        subject: capitalize_first(&name),
-                        subject_type: "person".to_string(),
-                        relation: "is_named".to_string(),
-                        object: "User".to_string(),
-                        object_type: "person".to_string(),
-                    });
-                }
-                if let Some(company) = extract_after_pattern(&lower, "i work at ") {
-                    relations.push(RelationTriple {
-                        subject: "User".to_string(),
-                        subject_type: "person".to_string(),
-                        relation: "works_at".to_string(),
-                        object: capitalize_first(&company),
-                        object_type: "organization".to_string(),
-                    });
-                }
-                if let Some(place) = extract_after_pattern(&lower, "i live in ") {
+            // ── Identity / fact patterns ──
+            let fact_patterns: &[(&str, &str, &str)] = &[
+                ("my name is ", "is_named", "person"),
+                ("i work at ", "works_at", "organization"),
+                ("i'm working at ", "works_at", "organization"),
+                ("i work on ", "works_on", "project"),
+                ("i'm working on ", "works_on", "project"),
+                ("i live in ", "located_in", "location"),
+                ("i'm from ", "located_in", "location"),
+                ("my job is ", "works_as", "concept"),
+                ("i'm a ", "works_as", "concept"),
+                ("i am a ", "works_as", "concept"),
+                ("my team is ", "part_of", "organization"),
+                ("my project is ", "works_on", "project"),
+                ("our project ", "works_on", "project"),
+                ("we're building ", "works_on", "project"),
+                ("we are building ", "works_on", "project"),
+                ("we're migrating to ", "uses", "tool"),
+                ("we are migrating to ", "uses", "tool"),
+            ];
+            for &(pattern, rel, obj_type) in fact_patterns {
+                if let Some(phrase) = extract_after_pattern(&lower, pattern) {
+                    let extracted = format!("User {pattern}{phrase}");
+                    push_memory(
+                        &mut memories,
+                        &extracted,
+                        MemoryLevel::User,
+                        "important_fact",
+                        role,
+                    );
                     relations.push(RelationTriple {
                         subject: "User".to_string(),
                         subject_type: "person".to_string(),
-                        relation: "located_in".to_string(),
-                        object: capitalize_first(&place),
-                        object_type: "location".to_string(),
+                        relation: rel.to_string(),
+                        object: capitalize_first(&phrase),
+                        object_type: obj_type.to_string(),
                     });
                 }
             }
 
-            // Extract tool/technology usage: "I use X"
-            if lower.contains("i use ") || lower.contains("i'm using ") {
-                let mut metadata = HashMap::new();
-                metadata.insert("extracted_from".to_string(), serde_json::json!(role));
-                memories.push(MemoryItem {
-                    id: Uuid::new_v4().to_string(),
-                    content: content.to_string(),
-                    level: MemoryLevel::User,
-                    category: Some("user_preference".to_string()),
-                    metadata,
-                    created_at: Utc::now(),
-                });
-
-                if let Some(tool) = extract_after_pattern(&lower, "i use ") {
+            // ── Tool/technology usage ──
+            let tool_patterns: &[&str] = &[
+                "i use ",
+                "i'm using ",
+                "i am using ",
+                "we use ",
+                "we're using ",
+                "our stack includes ",
+                "our tech stack is ",
+                "i code in ",
+                "i program in ",
+                "i write in ",
+                "i develop in ",
+            ];
+            for pattern in tool_patterns {
+                if let Some(phrase) = extract_after_pattern(&lower, pattern) {
+                    let extracted = format!("User {pattern}{phrase}");
+                    push_memory(
+                        &mut memories,
+                        &extracted,
+                        MemoryLevel::User,
+                        "user_preference",
+                        role,
+                    );
                     relations.push(RelationTriple {
                         subject: "User".to_string(),
                         subject_type: "person".to_string(),
                         relation: "uses".to_string(),
-                        object: capitalize_first(&tool),
+                        object: capitalize_first(&phrase),
                         object_type: "tool".to_string(),
                     });
                 }
-                if let Some(tool) = extract_after_pattern(&lower, "i'm using ") {
-                    relations.push(RelationTriple {
-                        subject: "User".to_string(),
-                        subject_type: "person".to_string(),
-                        relation: "uses".to_string(),
-                        object: capitalize_first(&tool),
-                        object_type: "tool".to_string(),
-                    });
+            }
+
+            // ── Task context (session-level) ──
+            let task_patterns: &[&str] = &[
+                "i'm trying to ",
+                "i am trying to ",
+                "i want to ",
+                "i need to ",
+                "the goal is to ",
+                "we need to ",
+                "the task is ",
+                "the problem is ",
+                "the issue is ",
+                "the bug is ",
+                "i'm debugging ",
+                "i'm fixing ",
+            ];
+            for pattern in task_patterns {
+                if let Some(phrase) = extract_after_pattern(&lower, pattern) {
+                    // Only extract if the phrase is substantial (>10 chars)
+                    if phrase.len() > 10 {
+                        let extracted = format!("User {pattern}{phrase}");
+                        push_memory(
+                            &mut memories,
+                            &extracted,
+                            MemoryLevel::Session,
+                            "task_context",
+                            role,
+                        );
+                    }
                 }
             }
         }

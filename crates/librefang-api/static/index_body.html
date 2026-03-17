@@ -109,6 +109,10 @@
               <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg></span>
               <span class="nav-label" data-i18n="nav.comms">Comms</span>
             </a>
+            <a class="nav-item" :class="{ active: page === 'memory' }" @click="navigate('memory')" :aria-current="page === 'memory' ? 'page' : false">
+              <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 0-4 4v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2h-2V6a4 4 0 0 0-4-4z"/><circle cx="12" cy="15" r="2"/></svg></span>
+              <span class="nav-label">Memory</span>
+            </a>
           </div>
         </template>
       </div>
@@ -4398,6 +4402,100 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             </div>
           </div>
         </div>
+      </div>
+    </template>
+
+    <!-- Page: Memory (Proactive Memory / mem0-style) -->
+    <template x-if="page === 'memory'">
+      <div x-data="memoryPage()" x-init="init()">
+        <div class="page-header">
+          <h2>Memory</h2>
+          <p class="page-subtitle">Proactive memory system — what your agents remember about users.</p>
+        </div>
+
+        <!-- Stats bar -->
+        <div class="stats-grid" style="margin-bottom:24px">
+          <div class="stat-card">
+            <div class="stat-value" x-text="stats.total || 0"></div>
+            <div class="stat-label">Total Memories</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" x-text="stats.user_count || 0"></div>
+            <div class="stat-label">User Level</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" x-text="stats.session_count || 0"></div>
+            <div class="stat-label">Session Level</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" x-text="stats.agent_count || 0"></div>
+            <div class="stat-label">Agent Level</div>
+          </div>
+        </div>
+
+        <!-- Search -->
+        <div style="display:flex;gap:8px;margin-bottom:16px">
+          <input type="text" x-model="searchQuery" @keyup.enter="searchMemories()" placeholder="Search memories..." style="flex:1" class="form-input">
+          <button @click="searchMemories()" class="btn btn-primary">Search</button>
+          <button @click="loadMemories()" class="btn btn-secondary">All</button>
+        </div>
+
+        <!-- Memory list -->
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Content</th>
+                <th>Level</th>
+                <th>Category</th>
+                <th>Created</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="mem in memories" :key="mem.id">
+                <tr>
+                  <td x-text="mem.content" style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></td>
+                  <td><span class="badge" :class="'badge-' + mem.level" x-text="mem.level"></span></td>
+                  <td x-text="mem.category || '—'" style="color:var(--text-secondary)"></td>
+                  <td x-text="new Date(mem.created_at).toLocaleDateString()" style="white-space:nowrap"></td>
+                  <td>
+                    <button @click="viewHistory(mem.id)" class="btn btn-sm" title="History">&#x1f4dc;</button>
+                    <button @click="deleteMemory(mem.id)" class="btn btn-sm btn-danger" title="Delete">&#x2715;</button>
+                  </td>
+                </tr>
+              </template>
+              <tr x-show="memories.length === 0">
+                <td colspan="5" style="text-align:center;color:var(--text-secondary);padding:32px">No memories found</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- History modal -->
+        <template x-if="showHistory">
+          <div class="modal-overlay" @click.self="showHistory = false">
+            <div class="modal" style="max-width:600px">
+              <div class="modal-header">
+                <h3>Version History</h3>
+                <button @click="showHistory = false" class="btn btn-sm">&times;</button>
+              </div>
+              <div class="modal-body">
+                <template x-for="(v, i) in historyItems" :key="i">
+                  <div style="padding:8px 0;border-bottom:1px solid var(--border)">
+                    <div x-text="v.content" style="font-family:monospace;font-size:13px"></div>
+                    <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">
+                      Replaced at: <span x-text="new Date(v.replaced_at).toLocaleString()"></span>
+                    </div>
+                  </div>
+                </template>
+                <div x-show="historyItems.length === 0" style="color:var(--text-secondary);text-align:center;padding:16px">
+                  No previous versions
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
       </div>
     </template>
 
