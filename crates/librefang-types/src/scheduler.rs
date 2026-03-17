@@ -132,6 +132,9 @@ pub enum CronAction {
         /// Optional input text passed to the first workflow step.
         #[serde(default)]
         input: Option<String>,
+        /// Timeout in seconds (1..=3600). Defaults to 300 (5 min) if unset.
+        #[serde(default)]
+        timeout_secs: Option<u64>,
     },
 }
 
@@ -310,7 +313,11 @@ impl CronJob {
                     }
                 }
             }
-            CronAction::Workflow { workflow_id, .. } => {
+            CronAction::Workflow {
+                workflow_id,
+                timeout_secs,
+                ..
+            } => {
                 if workflow_id.is_empty() {
                     return Err("workflow_id must not be empty".into());
                 }
@@ -319,6 +326,16 @@ impl CronJob {
                         "workflow_id too long ({} chars, max {MAX_WORKFLOW_ID_LEN})",
                         workflow_id.len()
                     ));
+                }
+                if let Some(t) = timeout_secs {
+                    if *t == 0 {
+                        return Err("workflow timeout_secs must be > 0".into());
+                    }
+                    if *t > 3600 {
+                        return Err(format!(
+                            "workflow timeout_secs too large ({t}, max 3600)"
+                        ));
+                    }
                 }
             }
         }
@@ -895,6 +912,7 @@ mod tests {
         job.action = CronAction::Workflow {
             workflow_id: "550e8400-e29b-41d4-a716-446655440000".into(),
             input: None,
+            timeout_secs: None,
         };
         assert!(job.validate(0).is_ok());
     }
@@ -905,6 +923,7 @@ mod tests {
         job.action = CronAction::Workflow {
             workflow_id: "daily-report-pipeline".into(),
             input: Some("generate report".into()),
+            timeout_secs: None,
         };
         assert!(job.validate(0).is_ok());
     }
@@ -915,6 +934,7 @@ mod tests {
         job.action = CronAction::Workflow {
             workflow_id: String::new(),
             input: None,
+            timeout_secs: None,
         };
         let err = job.validate(0).unwrap_err();
         assert!(err.contains("empty"), "{err}");
@@ -926,9 +946,56 @@ mod tests {
         job.action = CronAction::Workflow {
             workflow_id: "x".repeat(257),
             input: None,
+            timeout_secs: None,
         };
         let err = job.validate(0).unwrap_err();
         assert!(err.contains("too long"), "{err}");
+    }
+
+    #[test]
+    fn workflow_action_timeout_valid() {
+        let mut job = valid_job();
+        job.action = CronAction::Workflow {
+            workflow_id: "my-workflow".into(),
+            input: None,
+            timeout_secs: Some(60),
+        };
+        assert!(job.validate(0).is_ok());
+    }
+
+    #[test]
+    fn workflow_action_timeout_max_boundary() {
+        let mut job = valid_job();
+        job.action = CronAction::Workflow {
+            workflow_id: "my-workflow".into(),
+            input: None,
+            timeout_secs: Some(3600),
+        };
+        assert!(job.validate(0).is_ok());
+    }
+
+    #[test]
+    fn workflow_action_timeout_zero_rejected() {
+        let mut job = valid_job();
+        job.action = CronAction::Workflow {
+            workflow_id: "my-workflow".into(),
+            input: None,
+            timeout_secs: Some(0),
+        };
+        let err = job.validate(0).unwrap_err();
+        assert!(err.contains("must be > 0"), "{err}");
+    }
+
+    #[test]
+    fn workflow_action_timeout_too_large() {
+        let mut job = valid_job();
+        job.action = CronAction::Workflow {
+            workflow_id: "my-workflow".into(),
+            input: None,
+            timeout_secs: Some(3601),
+        };
+        let err = job.validate(0).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
     }
 
     #[test]
@@ -936,6 +1003,7 @@ mod tests {
         let action = CronAction::Workflow {
             workflow_id: "my-workflow".into(),
             input: Some("hello".into()),
+            timeout_secs: None,
         };
         let json = serde_json::to_string(&action).unwrap();
         assert!(json.contains("\"kind\":\"workflow\""));
@@ -948,12 +1016,19 @@ mod tests {
         let action = CronAction::Workflow {
             workflow_id: "550e8400-e29b-41d4-a716-446655440000".into(),
             input: None,
+            timeout_secs: Some(120),
         };
         let json = serde_json::to_string(&action).unwrap();
         let back: CronAction = serde_json::from_str(&json).unwrap();
-        if let CronAction::Workflow { workflow_id, input } = back {
+        if let CronAction::Workflow {
+            workflow_id,
+            input,
+            timeout_secs,
+        } = back
+        {
             assert_eq!(workflow_id, "550e8400-e29b-41d4-a716-446655440000");
             assert!(input.is_none());
+            assert_eq!(timeout_secs, Some(120));
         } else {
             panic!("expected Workflow variant");
         }

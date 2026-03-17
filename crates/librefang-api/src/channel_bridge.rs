@@ -643,6 +643,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             librefang_types::scheduler::CronAction::Workflow {
                                 workflow_id,
                                 input,
+                                ..
                             } => {
                                 // Resolve workflow by UUID or name
                                 let resolved = if let Ok(uuid) = uuid::Uuid::parse_str(workflow_id)
