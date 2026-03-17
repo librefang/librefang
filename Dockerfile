@@ -1,7 +1,14 @@
 # syntax=docker/dockerfile:1
-FROM rust:1-alpine AS builder
+FROM rust:1.85-slim-bookworm AS builder
 WORKDIR /build
-RUN apk add --no-cache musl-dev perl make
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    perl \
+    perl-modules \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
 # Build dependencies first (cached unless Cargo.toml/Cargo.lock change)
 COPY Cargo.toml Cargo.lock ./
@@ -16,14 +23,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --bin librefang \
     && cp target/release/librefang /usr/local/bin/librefang
 
-FROM rust:1-slim-bookworm
+FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     python3 \
-    python3-pip \
     python3-venv \
     nodejs \
-    npm \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/local/bin/librefang /usr/local/bin/
 COPY --from=builder /build/agents /opt/librefang/agents
