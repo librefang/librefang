@@ -99,7 +99,9 @@ impl BlueskyAdapter {
     }
 
     /// Create a new session via `com.atproto.server.createSession`.
-    async fn create_session(&self) -> Result<BlueskySession, Box<dyn std::error::Error>> {
+    async fn create_session(
+        &self,
+    ) -> Result<BlueskySession, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/xrpc/com.atproto.server.createSession", self.service_url);
 
         let body = serde_json::json!({
@@ -138,7 +140,7 @@ impl BlueskyAdapter {
     async fn refresh_session(
         &self,
         refresh_jwt: &str,
-    ) -> Result<BlueskySession, Box<dyn std::error::Error>> {
+    ) -> Result<BlueskySession, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/xrpc/com.atproto.server.refreshSession",
             self.service_url
@@ -176,7 +178,9 @@ impl BlueskyAdapter {
     }
 
     /// Get a valid access JWT, creating or refreshing the session as needed.
-    async fn get_token(&self) -> Result<(String, String), Box<dyn std::error::Error>> {
+    async fn get_token(
+        &self,
+    ) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
         let guard = self.session.read().await;
         if let Some(ref session) = *guard {
             // Sessions last ~2 hours; refresh if older than 90 minutes
@@ -204,7 +208,7 @@ impl BlueskyAdapter {
     }
 
     /// Validate credentials by creating a session.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let session = self.create_session().await?;
         let did = session.did.clone();
         *self.session.write().await = Some(session);
@@ -216,7 +220,7 @@ impl BlueskyAdapter {
         &self,
         text: &str,
         reply_ref: Option<&serde_json::Value>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let (token, did) = self.get_token().await?;
         let url = format!("{}/xrpc/com.atproto.repo.createRecord", self.service_url);
 
@@ -355,8 +359,10 @@ impl ChannelAdapter for BlueskyAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let did = self.validate().await?;
         info!("Bluesky adapter authenticated as {did}");
@@ -533,7 +539,7 @@ impl ChannelAdapter for BlueskyAdapter {
         &self,
         _user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_create_post(&text, None).await?;
@@ -546,12 +552,15 @@ impl ChannelAdapter for BlueskyAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Bluesky/AT Protocol does not support typing indicators
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

@@ -20,7 +20,7 @@ use zeroize::Zeroizing;
 
 const POLL_INTERVAL_SECS: u64 = 10;
 const MAX_MESSAGE_LEN: usize = 3000;
-const LINKEDIN_API_BASE: &str = "https://api.linkedin.com/v2";
+const LINKEDIN_API_BASE: &str = "https://api.linkedin.com/rest";
 
 /// LinkedIn Messaging channel adapter.
 ///
@@ -82,7 +82,7 @@ impl LinkedInAdapter {
     }
 
     /// Validate credentials by fetching the organization info.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/organizations/{}",
             LINKEDIN_API_BASE,
@@ -110,7 +110,7 @@ impl LinkedInAdapter {
         access_token: &str,
         organization_id: &str,
         after_ts: i64,
-    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/organizationMessages?q=organization&organization={}&count=50",
             LINKEDIN_API_BASE,
@@ -154,7 +154,7 @@ impl LinkedInAdapter {
         &self,
         recipient_urn: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/organizationMessages", LINKEDIN_API_BASE);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
         let num_chunks = chunks.len();
@@ -232,8 +232,10 @@ impl ChannelAdapter for LinkedInAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let org_name = self.validate().await?;
         info!("LinkedIn adapter authenticated for org: {org_name}");
 
@@ -380,7 +382,7 @@ impl ChannelAdapter for LinkedInAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(t) => t,
             _ => "(Unsupported content type)".to_string(),
@@ -390,12 +392,15 @@ impl ChannelAdapter for LinkedInAdapter {
         self.api_send_message(&user.platform_id, &text).await
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // LinkedIn Messaging API does not support typing indicators.
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
@@ -434,7 +439,7 @@ mod tests {
     #[test]
     fn test_linkedin_auth_headers() {
         let adapter = LinkedInAdapter::new("my-oauth-token".to_string(), "12345".to_string());
-        let builder = adapter.client.get("https://api.linkedin.com/v2/me");
+        let builder = adapter.client.get("https://api.linkedin.com/rest/me");
         let builder = adapter.auth_request(builder);
         let request = builder.build().unwrap();
         assert!(request.headers().contains_key("authorization"));

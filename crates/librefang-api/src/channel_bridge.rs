@@ -99,12 +99,14 @@ use librefang_channels::wecom::WeComAdapter;
 
 use async_trait::async_trait;
 use librefang_kernel::LibreFangKernel;
+use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use std::sync::Arc;
 #[cfg(feature = "channel-telegram")]
 use std::time::Duration;
 use std::time::Instant;
-use tracing::{error, info, warn};
+use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
 
 use librefang_runtime::str_utils::safe_truncate_str;
 
@@ -150,6 +152,58 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .await
             .map_err(|e| format!("{e}"))?;
         Ok(result.response)
+    }
+
+    async fn send_message_streaming(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> Result<mpsc::Receiver<String>, String> {
+        let (mut event_rx, kernel_handle) = self
+            .kernel
+            .send_message_streaming(agent_id, message, None)
+            .map_err(|e| format!("{e}"))?;
+
+        // Bridge StreamEvent -> text-only mpsc channel for the adapter.
+        let (tx, rx) = mpsc::channel::<String>(64);
+
+        let bridge_handle = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    StreamEvent::TextDelta { text } => {
+                        if tx.send(text).await.is_err() {
+                            break; // receiver dropped
+                        }
+                    }
+                    StreamEvent::ContentComplete { .. } => break,
+                    _ => {
+                        // ToolUseStart, ToolInputDelta, ThinkingDelta, etc. — skip
+                        debug!("Streaming bridge: skipping non-text event");
+                    }
+                }
+            }
+        });
+
+        // Spawn a supervisor that awaits both handles and logs panics / errors.
+        tokio::spawn(async move {
+            match kernel_handle.await {
+                Err(e) => error!("Streaming kernel task panicked: {e}"),
+                Ok(Err(e)) => error!("Streaming kernel task returned error: {e}"),
+                Ok(Ok(result)) => {
+                    debug!(
+                        input_tokens = result.total_usage.input_tokens,
+                        output_tokens = result.total_usage.output_tokens,
+                        iterations = result.iterations,
+                        "Streaming kernel task completed"
+                    );
+                }
+            }
+            if let Err(e) = bridge_handle.await {
+                error!("Streaming bridge task panicked: {e}");
+            }
+        });
+
+        Ok(rx)
     }
 
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {

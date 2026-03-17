@@ -67,7 +67,7 @@ impl FlockAdapter {
     }
 
     /// Validate credentials by fetching bot/app info.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/users.getInfo?token={}",
             FLOCK_API_BASE,
@@ -93,7 +93,7 @@ impl FlockAdapter {
         &self,
         to: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/chat.sendMessage", FLOCK_API_BASE);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -133,7 +133,7 @@ impl FlockAdapter {
         to: &str,
         text: &str,
         attachment_title: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/chat.sendMessage", FLOCK_API_BASE);
 
         let body = serde_json::json!({
@@ -250,8 +250,10 @@ impl ChannelAdapter for FlockAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let bot_user_id = self.validate().await?;
         info!("Flock adapter authenticated (user_id: {bot_user_id})");
@@ -327,7 +329,7 @@ impl ChannelAdapter for FlockAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -340,12 +342,15 @@ impl ChannelAdapter for FlockAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Flock does not expose a typing indicator API for bots
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

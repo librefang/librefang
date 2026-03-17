@@ -115,7 +115,7 @@ impl NtfyAdapter {
         &self,
         text: &str,
         title: Option<&str>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/{}", self.server_url, self.topic);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -157,8 +157,10 @@ impl ChannelAdapter for NtfyAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         info!(
             "ntfy adapter subscribing to {}/{}",
             self.server_url, self.topic
@@ -337,7 +339,7 @@ impl ChannelAdapter for NtfyAdapter {
         &self,
         _user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(t) => t,
             _ => "(Unsupported content type)".to_string(),
@@ -345,12 +347,15 @@ impl ChannelAdapter for NtfyAdapter {
         self.publish(&text, Some("LibreFang")).await
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // ntfy has no typing indicator concept.
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

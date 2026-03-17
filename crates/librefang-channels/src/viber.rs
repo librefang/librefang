@@ -106,7 +106,7 @@ impl ViberAdapter {
     }
 
     /// Validate the auth token by calling the get_account_info endpoint.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let resp = self
             .auth_header(self.client.post(VIBER_ACCOUNT_INFO_URL))
             .send()
@@ -130,7 +130,7 @@ impl ViberAdapter {
     }
 
     /// Register the webhook URL with Viber.
-    async fn register_webhook(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn register_webhook(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let body = serde_json::json!({
             "url": self.webhook_url,
             "event_types": [
@@ -176,7 +176,7 @@ impl ViberAdapter {
         &self,
         receiver: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
         for chunk in chunks {
@@ -317,8 +317,10 @@ impl ChannelAdapter for ViberAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let bot_name = self.validate().await?;
         info!("Viber adapter authenticated as {bot_name}");
@@ -387,7 +389,7 @@ impl ChannelAdapter for ViberAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -429,12 +431,15 @@ impl ChannelAdapter for ViberAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Viber does not support typing indicators via REST API
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

@@ -86,7 +86,7 @@ impl TeamsAdapter {
     }
 
     /// Obtain a valid OAuth2 bearer token, refreshing if expired or missing.
-    async fn get_token(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn get_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // Check cache first
         {
             let guard = self.cached_token.read().await;
@@ -143,7 +143,7 @@ impl TeamsAdapter {
         service_url: &str,
         conversation_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
         let url = format!(
             "{}/v3/conversations/{}/activities",
@@ -289,8 +289,10 @@ impl ChannelAdapter for TeamsAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials by obtaining an initial token
         let _ = self.get_token().await?;
         info!("Teams adapter authenticated (app_id: {})", self.app_id);
@@ -365,7 +367,7 @@ impl ChannelAdapter for TeamsAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // We need the serviceUrl from metadata; fall back to the default Bot Framework URL
         let default_service_url = "https://smba.trafficmanager.net/teams/".to_string();
         let conversation_id = &user.platform_id;
@@ -387,7 +389,10 @@ impl ChannelAdapter for TeamsAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
         let default_service_url = "https://smba.trafficmanager.net/teams/";
         let url = format!(
@@ -411,7 +416,7 @@ impl ChannelAdapter for TeamsAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

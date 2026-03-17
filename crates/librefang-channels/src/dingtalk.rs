@@ -144,8 +144,10 @@ impl ChannelAdapter for DingTalkAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
         let port = self.webhook_port;
         let secret = self.secret.clone();
@@ -285,7 +287,7 @@ impl ChannelAdapter for DingTalkAdapter {
         &self,
         _user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(t) => t,
             _ => "(Unsupported content type)".to_string(),
@@ -330,12 +332,15 @@ impl ChannelAdapter for DingTalkAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // DingTalk Robot API does not support typing indicators.
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
