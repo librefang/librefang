@@ -979,10 +979,7 @@ pub async fn get_approval(
     match state.kernel.approval_manager.get_pending(uuid) {
         Some(a) => {
             let registry_agents = state.kernel.registry.list();
-            (
-                StatusCode::OK,
-                Json(approval_to_json(&a, &registry_agents)),
-            )
+            (StatusCode::OK, Json(approval_to_json(&a, &registry_agents)))
         }
         None => (
             StatusCode::NOT_FOUND,

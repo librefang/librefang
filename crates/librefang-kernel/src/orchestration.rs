@@ -284,7 +284,9 @@ impl RetryPolicy {
         let multiplier = self.backoff_multiplier.powi(exp);
         // Guard against infinity/NaN to prevent Duration::mul_f64 panic.
         let capped = if multiplier.is_finite() {
-            self.initial_backoff.mul_f64(multiplier).min(self.max_backoff)
+            self.initial_backoff
+                .mul_f64(multiplier)
+                .min(self.max_backoff)
         } else {
             self.max_backoff
         };
@@ -614,7 +616,10 @@ mod tests {
         // With full jitter, delay should be in [0, capped).
         for attempt in 0..5 {
             let d = policy.delay_for_attempt(attempt);
-            assert!(d < Duration::from_secs(10), "jitter delay {d:?} should be < max_backoff");
+            assert!(
+                d < Duration::from_secs(10),
+                "jitter delay {d:?} should be < max_backoff"
+            );
         }
     }
 
