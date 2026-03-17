@@ -331,3 +331,58 @@ mod tests {
         assert_eq!(json["message"], "Deleted");
         assert!(json.get("error").is_none());
     }
+
+    #[test]
+    fn agent_list_query_defaults() {
+        let q: AgentListQuery = serde_json::from_str("{}").unwrap();
+        assert!(q.q.is_none());
+        assert!(q.status.is_none());
+        assert!(q.limit.is_none());
+        assert!(q.offset.is_none());
+        assert!(q.sort.is_none());
+        assert!(q.order.is_none());
+    }
+
+    #[test]
+    fn agent_list_query_full() {
+        let json =
+            r#"{"q":"test","status":"running","limit":10,"offset":5,"sort":"name","order":"desc"}"#;
+        let q: AgentListQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(q.q.as_deref(), Some("test"));
+        assert_eq!(q.status.as_deref(), Some("running"));
+        assert_eq!(q.limit, Some(10));
+        assert_eq!(q.offset, Some(5));
+        assert_eq!(q.sort.as_deref(), Some("name"));
+        assert_eq!(q.order.as_deref(), Some("desc"));
+    }
+
+    #[test]
+    fn paginated_response_serialize() {
+        let resp = PaginatedResponse {
+            items: vec!["a", "b"],
+            total: 10,
+            offset: 2,
+            limit: Some(5),
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["items"], serde_json::json!(["a", "b"]));
+        assert_eq!(json["total"], 10);
+        assert_eq!(json["offset"], 2);
+        assert_eq!(json["limit"], 5);
+    }
+
+    #[test]
+    fn paginated_response_serialize_no_limit() {
+        let resp = PaginatedResponse {
+            items: vec![1, 2, 3],
+            total: 3,
+            offset: 0,
+            limit: None,
+        };
+        let json = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["items"], serde_json::json!([1, 2, 3]));
+        assert_eq!(json["total"], 3);
+        assert_eq!(json["offset"], 0);
+        assert!(json["limit"].is_null());
+    }
+}

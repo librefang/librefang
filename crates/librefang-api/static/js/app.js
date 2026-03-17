@@ -118,9 +118,17 @@ document.addEventListener('alpine:init', function() {
 
     async refreshAgents() {
       try {
-        var res = await LibreFangAPI.get('/api/agents');
-        this.agents = Array.isArray(res) ? res : (res && res.items ? res.items : []);
-        this.agentCount = this.agents.length;
+        var data = await LibreFangAPI.get('/api/agents');
+        if (data && Array.isArray(data.items)) {
+          this.agents = data.items;
+          this.agentCount = typeof data.total === 'number' ? data.total : data.items.length;
+        } else if (Array.isArray(data)) {
+          this.agents = data;
+          this.agentCount = data.length;
+        } else {
+          this.agents = [];
+          this.agentCount = 0;
+        }
       } catch(e) { /* silent */ }
     },
 

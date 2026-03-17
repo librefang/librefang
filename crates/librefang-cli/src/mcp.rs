@@ -32,7 +32,13 @@ impl McpBackend {
                     .send()
                     .ok()
                     .and_then(|r| r.json::<Value>().ok());
-                match resp.and_then(|v| v.as_array().cloned()) {
+                // Handle paginated { items: [...] } or legacy array response
+                let agents_arr = resp.and_then(|v| {
+                    v.get("items")
+                        .and_then(|items| items.as_array().cloned())
+                        .or_else(|| v.as_array().cloned())
+                });
+                match agents_arr {
                     Some(agents) => agents
                         .iter()
                         .map(|a| {

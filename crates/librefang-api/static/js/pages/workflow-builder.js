@@ -108,7 +108,7 @@ function workflowBuilder() {
       // Load agents for the agent step dropdown
       try {
         var list = await LibreFangAPI.get('/api/agents');
-        self.agents = Array.isArray(list) ? list : (list && list.items ? list.items : []);
+        self.agents = (list && Array.isArray(list.items)) ? list.items : (Array.isArray(list) ? list : []);
       } catch(_) {
         self.agents = [];
       }
