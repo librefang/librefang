@@ -1695,6 +1695,108 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
     }))
 }
 
+/// GET /api/mcp/servers/{name} — Retrieve a single MCP server by name.
+///
+/// Returns the configured server entry plus live connection status and tools
+/// if the server is currently connected.
+#[utoipa::path(
+    get,
+    path = "/api/mcp/servers/{name}",
+    tag = "mcp",
+    params(
+        ("name" = String, Path, description = "Server name"),
+    ),
+    responses(
+        (status = 200, description = "MCP server details", body = serde_json::Value),
+        (status = 404, description = "MCP server not found")
+    )
+)]
+pub async fn get_mcp_server(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    // Find the configured entry by name
+    let entry = state
+        .kernel
+        .config
+        .mcp_servers
+        .iter()
+        .find(|s| s.name == name);
+
+    let entry = match entry {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("MCP server '{}' not found", name)})),
+            );
+        }
+    };
+
+    let transport = match &entry.transport {
+        librefang_types::config::McpTransportEntry::Stdio { command, args } => {
+            serde_json::json!({
+                "type": "stdio",
+                "command": command,
+                "args": args,
+            })
+        }
+        librefang_types::config::McpTransportEntry::Sse { url } => {
+            serde_json::json!({
+                "type": "sse",
+                "url": url,
+            })
+        }
+        librefang_types::config::McpTransportEntry::HttpCompat {
+            base_url,
+            headers,
+            tools,
+        } => {
+            let tool_summaries: Vec<serde_json::Value> =
+                tools.iter().map(http_compat_tool_summary).collect();
+            let header_summaries: Vec<serde_json::Value> =
+                headers.iter().map(http_compat_header_summary).collect();
+            serde_json::json!({
+                "type": "http_compat",
+                "base_url": base_url,
+                "headers": header_summaries,
+                "tools_count": tool_summaries.len(),
+                "tools": tool_summaries,
+            })
+        }
+    };
+
+    let mut result = serde_json::json!({
+        "name": entry.name,
+        "transport": transport,
+        "timeout_secs": entry.timeout_secs,
+        "env": entry.env,
+        "connected": false,
+    });
+
+    // Check live connection status
+    let connections = state.kernel.mcp_connections.lock().await;
+    if let Some(conn) = connections.iter().find(|c| c.name() == name) {
+        let tools: Vec<serde_json::Value> = conn
+            .tools()
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                })
+            })
+            .collect();
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("connected".to_string(), serde_json::json!(true));
+            obj.insert("tools_count".to_string(), serde_json::json!(tools.len()));
+            obj.insert("tools".to_string(), serde_json::json!(tools));
+        }
+    }
+
+    (StatusCode::OK, Json(result))
+}
+
 /// POST /api/mcp/servers — Add a new MCP server configuration.
 ///
 /// Expects a JSON body matching `McpServerConfigEntry` (name, transport, timeout_secs, env).
