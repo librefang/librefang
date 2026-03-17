@@ -189,6 +189,7 @@ use crate::types;
 
         // ── Sessions ──
         routes::list_sessions,
+        routes::get_session,
         routes::delete_session,
         routes::set_session_label,
         routes::find_session_by_label,

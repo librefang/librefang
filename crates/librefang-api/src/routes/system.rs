@@ -743,6 +743,44 @@ pub async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoRespo
     }
 }
 
+/// GET /api/sessions/:id — Get a single session by ID.
+#[utoipa::path(get, path = "/api/sessions/{id}", tag = "sessions", params(("id" = String, Path, description = "Session ID")), responses((status = 200, description = "Session found", body = serde_json::Value), (status = 404, description = "Session not found")))]
+pub async fn get_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let session_id = match id.parse::<uuid::Uuid>() {
+        Ok(u) => librefang_types::agent::SessionId(u),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid session ID"})),
+            );
+        }
+    };
+
+    match state.kernel.memory.get_session(session_id) {
+        Ok(Some(session)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "session_id": session.id.0.to_string(),
+                "agent_id": session.agent_id.0.to_string(),
+                "messages": session.messages,
+                "context_window_tokens": session.context_window_tokens,
+                "label": session.label,
+            })),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Session not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
 /// DELETE /api/sessions/:id — Delete a session.
 #[utoipa::path(delete, path = "/api/sessions/{id}", tag = "sessions", params(("id" = String, Path, description = "Session ID")), responses((status = 200, description = "Session deleted")))]
 pub async fn delete_session(

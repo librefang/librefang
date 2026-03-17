@@ -391,7 +391,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/sessions/{id}",
-            axum::routing::delete(routes::delete_session),
+            axum::routing::get(routes::get_session).delete(routes::delete_session),
         )
         .route(
             "/sessions/{id}/label",
