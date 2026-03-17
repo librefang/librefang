@@ -63,6 +63,9 @@ pub const BEDROCK_BASE_URL: &str = "https://bedrock-runtime.us-east-1.amazonaws.
 // ── Google Cloud Vertex AI ───────────────────────────────────────
 pub const VERTEX_AI_BASE_URL: &str = "https://us-central1-aiplatform.googleapis.com";
 
+// ── NVIDIA NIM ──────────────────────────────────────────────────
+pub const NVIDIA_NIM_BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
+
 /// A model's capability tier.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

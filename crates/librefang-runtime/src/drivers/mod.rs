@@ -23,8 +23,8 @@ use librefang_types::model_catalog::{
     MISTRAL_BASE_URL, MOONSHOT_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL,
     PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL, SAMBANOVA_BASE_URL,
     TOGETHER_BASE_URL, VENICE_BASE_URL, VERTEX_AI_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
-    VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL,
-    ZHIPU_CODING_BASE_URL,
+    NVIDIA_NIM_BASE_URL, VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL,
+    ZAI_CODING_BASE_URL, ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
 };
 use std::sync::Arc;
 
@@ -463,6 +463,16 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         alt_api_key_env: None,
         hidden: false,
     },
+    ProviderEntry {
+        name: "nvidia-nim",
+        aliases: &[],
+        base_url: NVIDIA_NIM_BASE_URL,
+        api_key_env: "NVIDIA_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
 ];
 
 // ── Registry Lookup ──────────────────────────────────────────────
@@ -792,7 +802,8 @@ mod tests {
         assert!(providers.contains(&"chutes"));
         assert!(providers.contains(&"claude-code"));
         assert!(providers.contains(&"vertex-ai"));
-        assert_eq!(providers.len(), 36);
+        assert!(providers.contains(&"nvidia-nim"));
+        assert_eq!(providers.len(), 37);
     }
 
     #[test]
