@@ -791,8 +791,10 @@ impl ChannelAdapter for TelegramAdapter {
         let formatted = formatter::format_for_channel(&full_text, OutputFormat::TelegramHtml);
 
         if let Some(msg_id) = sent_message_id {
-            let sanitized = sanitize_telegram_html(&formatted);
-            let chunks = split_message(&sanitized, 4096);
+            // Split *before* sanitization — api_edit_message / api_send_message
+            // sanitize internally, so pre-sanitizing here would double-escape
+            // HTML entities.
+            let chunks = split_message(&formatted, 4096);
             if chunks.len() <= 1 {
                 // Single message — just edit in place.
                 let _ = self.api_edit_message(chat_id, msg_id, &formatted).await;

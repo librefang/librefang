@@ -320,6 +320,9 @@ pub trait ChannelAdapter: Send + Sync {
 /// Split a message into chunks of at most `max_len` characters,
 /// preferring to split at newline boundaries.
 ///
+/// HTML-entity-aware: never cuts in the middle of `&...;` sequences
+/// (e.g. `&amp;`, `&lt;`, `&#123;`).
+///
 /// Shared utility used by Telegram, Discord, and Slack adapters.
 #[inline]
 pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
@@ -335,6 +338,10 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
         }
         // Try to split at a newline near the boundary (UTF-8 safe)
         let safe_end = librefang_types::truncate_str(remaining, max_len).len();
+        // Avoid splitting inside an HTML entity (`&...;`).  Walk backwards
+        // from safe_end: if we find `&` without a subsequent `;` before the
+        // boundary, move the split point to just before that `&`.
+        let safe_end = retreat_past_html_entity(remaining, safe_end);
         let split_at = remaining[..safe_end].rfind('\n').unwrap_or(safe_end);
         let (chunk, rest) = remaining.split_at(split_at);
         chunks.push(chunk);
@@ -345,6 +352,27 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
             .unwrap_or(rest);
     }
     chunks
+}
+
+/// If `pos` falls inside an HTML entity (`&...;`), return the index of the
+/// `&` so the caller splits before it.  Otherwise return `pos` unchanged.
+///
+/// HTML entities are at most ~10 chars long (`&#1114111;`), so we only
+/// look back a small window.
+fn retreat_past_html_entity(text: &str, pos: usize) -> usize {
+    // Maximum entity length we consider (e.g. `&#1114111;` = 10 chars).
+    const MAX_ENTITY_LEN: usize = 12;
+    let search_start = pos.saturating_sub(MAX_ENTITY_LEN);
+    // Look for the last `&` in the window ending at `pos`.
+    if let Some(rel) = text[search_start..pos].rfind('&') {
+        let amp_pos = search_start + rel;
+        // Check whether there is a matching `;` between the `&` and `pos`.
+        // If not, we are inside an incomplete entity — retreat to `amp_pos`.
+        if !text[amp_pos..pos].contains(';') {
+            return amp_pos;
+        }
+    }
+    pos
 }
 
 #[cfg(test)]

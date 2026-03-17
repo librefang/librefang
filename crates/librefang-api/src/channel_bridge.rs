@@ -159,7 +159,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         agent_id: AgentId,
         message: &str,
     ) -> Result<mpsc::Receiver<String>, String> {
-        let (mut event_rx, _join_handle) = self
+        let (mut event_rx, kernel_handle) = self
             .kernel
             .send_message_streaming(agent_id, message, None)
             .map_err(|e| format!("{e}"))?;
@@ -167,7 +167,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         // Bridge StreamEvent -> text-only mpsc channel for the adapter.
         let (tx, rx) = mpsc::channel::<String>(64);
 
-        tokio::spawn(async move {
+        let bridge_handle = tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 match event {
                     StreamEvent::TextDelta { text } => {
@@ -181,6 +181,16 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                         debug!("Streaming bridge: skipping non-text event");
                     }
                 }
+            }
+        });
+
+        // Spawn a supervisor that awaits both handles and logs panics.
+        tokio::spawn(async move {
+            if let Err(e) = kernel_handle.await {
+                error!("Streaming kernel task panicked: {e}");
+            }
+            if let Err(e) = bridge_handle.await {
+                error!("Streaming bridge task panicked: {e}");
             }
         });
 
