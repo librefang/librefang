@@ -276,6 +276,109 @@ impl SemanticStore {
         Ok(fragments)
     }
 
+    /// Get a single memory fragment by ID (including soft-deleted ones for history).
+    pub fn get_by_id(
+        &self,
+        id: MemoryId,
+        include_deleted: bool,
+    ) -> LibreFangResult<Option<MemoryFragment>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let deleted_clause = if include_deleted {
+            ""
+        } else {
+            " AND deleted = 0"
+        };
+        let sql = format!(
+            "SELECT id, agent_id, content, source, scope, confidence, metadata, created_at, accessed_at, access_count, embedding
+             FROM memories WHERE id = ?1{deleted_clause}",
+        );
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let result = stmt.query_row(rusqlite::params![id.0.to_string()], |row| {
+            let id_str: String = row.get(0)?;
+            let agent_str: String = row.get(1)?;
+            let content: String = row.get(2)?;
+            let source_str: String = row.get(3)?;
+            let scope: String = row.get(4)?;
+            let confidence: f64 = row.get(5)?;
+            let meta_str: String = row.get(6)?;
+            let created_str: String = row.get(7)?;
+            let accessed_str: String = row.get(8)?;
+            let access_count: i64 = row.get(9)?;
+            let embedding_bytes: Option<Vec<u8>> = row.get(10)?;
+            Ok((
+                id_str,
+                agent_str,
+                content,
+                source_str,
+                scope,
+                confidence,
+                meta_str,
+                created_str,
+                accessed_str,
+                access_count,
+                embedding_bytes,
+            ))
+        });
+
+        match result {
+            Ok((
+                id_str,
+                agent_str,
+                content,
+                source_str,
+                scope,
+                confidence,
+                meta_str,
+                created_str,
+                accessed_str,
+                access_count,
+                embedding_bytes,
+            )) => {
+                let id = uuid::Uuid::parse_str(&id_str)
+                    .map(MemoryId)
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let agent_id = uuid::Uuid::parse_str(&agent_str)
+                    .map(librefang_types::agent::AgentId)
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let source: MemorySource =
+                    serde_json::from_str(&source_str).unwrap_or(MemorySource::System);
+                let metadata: HashMap<String, serde_json::Value> =
+                    serde_json::from_str(&meta_str).unwrap_or_default();
+                let created_at = chrono::DateTime::parse_from_rfc3339(&created_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let accessed_at = chrono::DateTime::parse_from_rfc3339(&accessed_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+                let embedding = embedding_bytes.as_deref().map(embedding_from_bytes);
+
+                Ok(Some(MemoryFragment {
+                    id,
+                    agent_id,
+                    content,
+                    embedding,
+                    metadata,
+                    source,
+                    confidence: confidence as f32,
+                    created_at,
+                    accessed_at,
+                    access_count: access_count as u64,
+                    scope,
+                }))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LibreFangError::Memory(e.to_string())),
+        }
+    }
+
     /// Soft-delete a memory fragment.
     pub fn forget(&self, id: MemoryId) -> LibreFangResult<()> {
         let conn = self

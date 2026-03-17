@@ -303,7 +303,7 @@ pub trait MemoryExtractor: Send + Sync {
 }
 
 /// Simple word-overlap similarity (Jaccard index on words).
-fn text_similarity(a: &str, b: &str) -> f32 {
+pub fn text_similarity(a: &str, b: &str) -> f32 {
     let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
     let words_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
     if words_a.is_empty() && words_b.is_empty() {

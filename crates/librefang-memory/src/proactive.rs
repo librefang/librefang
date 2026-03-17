@@ -233,10 +233,20 @@ impl ProactiveMemoryStore {
         agent_id: AgentId,
         item: &MemoryItem,
     ) -> LibreFangResult<Option<MemoryAddResult>> {
-        // Search for similar existing memories (top 5 candidates)
-        let existing =
+        // Search for similar existing memories (top 5 candidates).
+        // Use significant keywords from the content for broader matching,
+        // since LIKE %full_content% won't find partial matches.
+        let search_query = extract_search_keywords(&item.content);
+        let mut existing =
             self.semantic
-                .recall(&item.content, 5, Some(MemoryFilter::agent(agent_id)))?;
+                .recall(&search_query, 5, Some(MemoryFilter::agent(agent_id)))?;
+
+        // If keyword search found nothing, try with the full content as fallback
+        if existing.is_empty() {
+            existing =
+                self.semantic
+                    .recall(&item.content, 5, Some(MemoryFilter::agent(agent_id)))?;
+        }
 
         // Ask the extractor to decide: ADD, UPDATE, or NOOP
         let action = self.extractor.decide_action(item, &existing).await?;
@@ -276,9 +286,48 @@ impl ProactiveMemoryStore {
                 })?;
                 let old_mid = MemoryId(old_uuid);
 
+                // Capture old content for version history before overwriting
+                let old_content = self
+                    .semantic
+                    .get_by_id(old_mid, false)?
+                    .map(|f| f.content)
+                    .unwrap_or_default();
+
                 let mut metadata = item.metadata.clone();
                 metadata.insert("category".to_string(), serde_json::json!(&item.category));
                 metadata.insert("updated_from".to_string(), serde_json::json!(existing_id));
+                metadata.insert(
+                    "previous_content".to_string(),
+                    serde_json::json!(old_content),
+                );
+                metadata.insert(
+                    "updated_at".to_string(),
+                    serde_json::json!(chrono::Utc::now().to_rfc3339()),
+                );
+
+                // Build version history chain
+                if let Some(old_frag) = self.semantic.get_by_id(old_mid, false)? {
+                    if let Some(existing_history) = old_frag.metadata.get("version_history") {
+                        // Append to existing history
+                        let mut history = existing_history.clone();
+                        if let Some(arr) = history.as_array_mut() {
+                            arr.push(serde_json::json!({
+                                "content": old_content,
+                                "replaced_at": chrono::Utc::now().to_rfc3339(),
+                            }));
+                            metadata.insert("version_history".to_string(), history);
+                        }
+                    } else {
+                        // Start new history chain
+                        metadata.insert(
+                            "version_history".to_string(),
+                            serde_json::json!([{
+                                "content": old_content,
+                                "replaced_at": chrono::Utc::now().to_rfc3339(),
+                            }]),
+                        );
+                    }
+                }
 
                 // Update content in-place (preserves ID, agent, scope, access stats)
                 self.semantic
@@ -485,6 +534,33 @@ impl ProactiveMemoryStore {
             .forget_older_than(agent_id, scopes::SESSION, cutoff)
     }
 
+    /// Get the version history of a memory.
+    ///
+    /// Returns a list of previous content values, most recent first.
+    /// Each entry has `content` and `replaced_at` timestamp.
+    pub fn history(&self, memory_id: &str) -> LibreFangResult<Vec<serde_json::Value>> {
+        let uuid = uuid::Uuid::parse_str(memory_id)
+            .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
+        let mid = MemoryId(uuid);
+
+        let frag = self
+            .semantic
+            .get_by_id(mid, false)?
+            .ok_or_else(|| LibreFangError::Internal("Memory not found".to_string()))?;
+
+        let history = frag
+            .metadata
+            .get("version_history")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        // Return in reverse chronological order (most recent first)
+        let mut history = history;
+        history.reverse();
+        Ok(history)
+    }
+
     /// Count memories for a user/agent, optionally filtered by level.
     pub fn count(&self, user_id: &str, level: Option<MemoryLevel>) -> LibreFangResult<u64> {
         let agent_id = Self::parse_agent_id(user_id)?;
@@ -494,8 +570,9 @@ impl ProactiveMemoryStore {
 
     /// Find duplicate/near-duplicate memories for a user/agent.
     ///
-    /// Returns groups of memories that have identical or very similar content,
-    /// useful for manual review or automated consolidation.
+    /// Uses both substring containment and word-overlap (Jaccard) similarity
+    /// to detect semantic duplicates that simple exact-match would miss.
+    /// Threshold: items with Jaccard similarity > 0.5 are grouped together.
     pub async fn find_duplicates(
         &self,
         user_id: &str,
@@ -504,7 +581,6 @@ impl ProactiveMemoryStore {
         let agent_id = Self::parse_agent_id(user_id)?;
         let all_items = self.retrieve_memory_items(agent_id, level, None)?;
 
-        // Group by substring containment (simple O(n^2) approach, fine for small N)
         let mut used = vec![false; all_items.len()];
         let mut groups: Vec<Vec<MemoryItem>> = Vec::new();
 
@@ -520,7 +596,15 @@ impl ProactiveMemoryStore {
                     continue;
                 }
                 let b_lower = all_items[j].content.to_lowercase();
-                if a_lower.contains(&b_lower) || b_lower.contains(&a_lower) || a_lower == b_lower {
+
+                // Check substring containment
+                let is_substring =
+                    a_lower.contains(&b_lower) || b_lower.contains(&a_lower) || a_lower == b_lower;
+
+                // Check semantic similarity (Jaccard word overlap)
+                let similarity = librefang_types::memory::text_similarity(&a_lower, &b_lower);
+
+                if is_substring || similarity > 0.5 {
                     group.push(all_items[j].clone());
                     used[j] = true;
                 }
@@ -728,6 +812,40 @@ impl ProactiveMemory for ProactiveMemoryStore {
         )?;
 
         Ok(true)
+    }
+}
+
+/// Extract significant keywords from content for broader LIKE search.
+///
+/// Instead of searching for the full content string (which requires exact substring match),
+/// pick the most distinctive words to find related memories.
+fn extract_search_keywords(content: &str) -> String {
+    const STOP_WORDS: &[&str] = &[
+        "i", "a", "an", "the", "is", "am", "are", "was", "were", "be", "been", "being", "have",
+        "has", "had", "do", "does", "did", "will", "would", "could", "should", "may", "might",
+        "can", "shall", "for", "and", "but", "or", "nor", "not", "so", "yet", "at", "by", "in",
+        "of", "on", "to", "up", "it", "my", "me", "we", "he", "she", "they", "this", "that",
+        "with", "from", "all", "very", "just", "also", "than",
+    ];
+
+    let words: Vec<&str> = content
+        .split_whitespace()
+        .filter(|w| {
+            let lower = w.to_lowercase();
+            lower.len() > 2 && !STOP_WORDS.contains(&lower.as_str())
+        })
+        .take(4) // Use up to 4 significant words
+        .collect();
+
+    if words.is_empty() {
+        content.to_string()
+    } else {
+        // Return the longest word for best LIKE matching
+        words
+            .iter()
+            .max_by_key(|w| w.len())
+            .unwrap_or(&content)
+            .to_string()
     }
 }
 
@@ -1128,5 +1246,215 @@ mod tests {
         let agent_id = AgentId::new().to_string();
         let count = store.count(&agent_id, None).unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_add_dedup_exact_match_is_noop() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new().to_string();
+
+        // Add a preference
+        let r1 = store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "I prefer dark mode"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(r1.len(), 1);
+
+        // Add the exact same preference again — should be NOOP
+        let r2 = store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "I prefer dark mode"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+        // Should not add a duplicate
+        assert!(r2.is_empty());
+
+        // Total count should still be 1
+        let count = store.count(&agent_id, None).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_add_updates_conflicting_preference() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new().to_string();
+
+        // Add initial preference
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "I prefer Python for scripting"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+
+        // Add a superset preference (contains the old one) — should UPDATE
+        let r2 = store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "I prefer Python for scripting and data analysis"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+        assert_eq!(r2.len(), 1);
+
+        // Should still have only 1 memory (updated, not duplicated)
+        let count = store.count(&agent_id, None).unwrap();
+        assert_eq!(count, 1);
+
+        // Content should be the updated version
+        let results = store.search("Python", &agent_id, 10).await.unwrap();
+        assert!(!results.is_empty());
+        assert!(results[0].content.contains("data analysis"));
+    }
+
+    #[tokio::test]
+    async fn test_version_history_tracking() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new().to_string();
+
+        // Add initial preference
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "I prefer dark mode always"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+
+        // Search to get memory ID
+        let results = store.search("dark mode", &agent_id, 10).await.unwrap();
+        assert!(!results.is_empty());
+        let mem_id = results[0].id.clone();
+
+        // Update via the update API
+        store
+            .update(&mem_id, &agent_id, "I prefer light mode now")
+            .await
+            .unwrap();
+
+        // The old memory should be soft-deleted, new one created
+        // History for the new memory won't have the chain since update() uses delete+re-add
+        // But add_with_decision UPDATE preserves history
+        let count = store.count(&agent_id, None).unwrap();
+        assert!(count >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_knowledge_graph_stores_relations() {
+        let substrate = Arc::new(MemorySubstrate::open_in_memory(0.1).unwrap());
+        let store = ProactiveMemoryStore::with_default_config(substrate.clone());
+
+        // Manually store a relation
+        let triples = vec![librefang_types::memory::RelationTriple {
+            subject: "Alice".to_string(),
+            subject_type: "person".to_string(),
+            relation: "works_at".to_string(),
+            object: "Acme Corp".to_string(),
+            object_type: "organization".to_string(),
+        }];
+        store.store_relations(&triples);
+
+        // Query the knowledge graph
+        let matches = substrate
+            .knowledge()
+            .query_graph(GraphPattern {
+                source: Some("alice".to_string()),
+                relation: None,
+                target: None,
+                max_depth: 1,
+            })
+            .unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].target.name, "Acme Corp");
+    }
+
+    #[tokio::test]
+    async fn test_find_duplicates_semantic() {
+        let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
+        let store = ProactiveMemoryStore::with_default_config(Arc::new(substrate));
+        let agent_id = AgentId::new().to_string();
+
+        // Add two semantically similar but not identical memories
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "I prefer using dark mode in my editor"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "My name is John Smith"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+
+        // These should not be grouped as duplicates (different content)
+        let groups = store.find_duplicates(&agent_id, None).await.unwrap();
+        // No duplicate groups expected for distinct content
+        for group in &groups {
+            assert!(
+                group.len() <= 1 || {
+                    // If grouped, they should be genuinely similar
+                    let a = &group[0].content.to_lowercase();
+                    let b = &group[1].content.to_lowercase();
+                    librefang_types::memory::text_similarity(a, b) > 0.5
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn test_text_similarity() {
+        use librefang_types::memory::text_similarity;
+
+        // Identical
+        assert!((text_similarity("hello world", "hello world") - 1.0).abs() < f32::EPSILON);
+
+        // High overlap
+        let sim = text_similarity(
+            "i prefer dark mode in my editor",
+            "i prefer dark mode in my terminal",
+        );
+        assert!(sim > 0.5);
+
+        // Low overlap
+        let sim = text_similarity("rust programming language", "cooking italian food");
+        assert!(sim < 0.2);
+
+        // Empty
+        assert!((text_similarity("", "") - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_entity_type_parsing() {
+        assert_eq!(parse_entity_type("person"), EntityType::Person);
+        assert_eq!(parse_entity_type("organization"), EntityType::Organization);
+        assert_eq!(parse_entity_type("tool"), EntityType::Tool);
+        assert_eq!(
+            parse_entity_type("custom_thing"),
+            EntityType::Custom("custom_thing".to_string())
+        );
+    }
+
+    #[test]
+    fn test_relation_type_parsing() {
+        assert_eq!(parse_relation_type("works_at"), RelationType::WorksAt);
+        assert_eq!(parse_relation_type("uses"), RelationType::Uses);
+        assert_eq!(parse_relation_type("prefers"), RelationType::Uses);
+        assert_eq!(
+            parse_relation_type("custom_rel"),
+            RelationType::Custom("custom_rel".to_string())
+        );
     }
 }

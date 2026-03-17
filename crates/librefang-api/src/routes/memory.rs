@@ -492,3 +492,40 @@ pub async fn memory_duplicates(
         ),
     }
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/memory/:memory_id/history
+// ---------------------------------------------------------------------------
+
+/// Get the version history of a specific memory.
+#[utoipa::path(
+    get,
+    path = "/api/memory/{memory_id}/history",
+    tag = "memory",
+    params(("memory_id" = String, Path, description = "Memory ID")),
+    responses((status = 200, description = "Memory version history", body = serde_json::Value))
+)]
+pub async fn memory_history(
+    State(state): State<Arc<AppState>>,
+    Path(memory_id): Path<String>,
+) -> impl IntoResponse {
+    let store = match get_pm_store(&state) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    match store.history(&memory_id) {
+        Ok(history) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "memory_id": memory_id,
+                "versions": history,
+                "version_count": history.len(),
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}

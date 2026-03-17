@@ -222,6 +222,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::put(routes::memory_update).delete(routes::memory_delete),
         )
         .route(
+            "/memory/{memory_id}/history",
+            axum::routing::get(routes::memory_history),
+        )
+        .route(
             "/memory/user/{user_id}",
             axum::routing::get(routes::memory_get_user),
         )

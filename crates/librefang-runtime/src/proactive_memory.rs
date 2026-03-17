@@ -491,4 +491,87 @@ mod tests {
         assert_eq!(result.memories[2].level, MemoryLevel::Agent);
         assert_eq!(result.memories[3].level, MemoryLevel::Session); // default
     }
+
+    #[test]
+    fn test_parse_llm_extraction_new_format_with_relations() {
+        let json = r#"{
+            "memories": [
+                {"content": "User prefers Rust", "category": "user_preference", "level": "user"}
+            ],
+            "relations": [
+                {"subject": "User", "subject_type": "person", "relation": "prefers", "object": "Rust", "object_type": "tool"}
+            ]
+        }"#;
+        let result = parse_llm_extraction_response(json).unwrap();
+        assert!(result.has_content);
+        assert_eq!(result.memories.len(), 1);
+        assert_eq!(result.memories[0].content, "User prefers Rust");
+        assert_eq!(result.relations.len(), 1);
+        assert_eq!(result.relations[0].subject, "User");
+        assert_eq!(result.relations[0].relation, "prefers");
+        assert_eq!(result.relations[0].object, "Rust");
+        assert_eq!(result.relations[0].object_type, "tool");
+    }
+
+    #[test]
+    fn test_parse_llm_extraction_relations_only() {
+        let json = r#"{
+            "memories": [],
+            "relations": [
+                {"subject": "Alice", "subject_type": "person", "relation": "works_at", "object": "Google", "object_type": "organization"}
+            ]
+        }"#;
+        let result = parse_llm_extraction_response(json).unwrap();
+        assert!(result.has_content); // relations count as content
+        assert!(result.memories.is_empty());
+        assert_eq!(result.relations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_decision_response_add() {
+        let fragments = vec![];
+        let result = parse_decision_response(r#"{"action": "ADD"}"#, &fragments).unwrap();
+        assert_eq!(result, MemoryAction::Add);
+    }
+
+    #[test]
+    fn test_parse_decision_response_noop() {
+        let fragments = vec![];
+        let result = parse_decision_response(r#"{"action": "NOOP"}"#, &fragments).unwrap();
+        assert_eq!(result, MemoryAction::Noop);
+    }
+
+    #[test]
+    fn test_parse_decision_response_update() {
+        use librefang_types::memory::{MemoryFragment, MemoryId, MemorySource};
+        let mem_id = MemoryId::new();
+        let fragments = vec![MemoryFragment {
+            id: mem_id,
+            agent_id: librefang_types::agent::AgentId::new(),
+            content: "Old content".to_string(),
+            embedding: None,
+            metadata: std::collections::HashMap::new(),
+            source: MemorySource::Conversation,
+            confidence: 1.0,
+            created_at: chrono::Utc::now(),
+            accessed_at: chrono::Utc::now(),
+            access_count: 0,
+            scope: "user_memory".to_string(),
+        }];
+        let json = format!(r#"{{"action": "UPDATE", "existing_id": "{}"}}"#, mem_id);
+        let result = parse_decision_response(&json, &fragments).unwrap();
+        assert_eq!(
+            result,
+            MemoryAction::Update {
+                existing_id: mem_id.to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_decision_response_invalid_defaults_to_add() {
+        let fragments = vec![];
+        let result = parse_decision_response("garbage", &fragments).unwrap();
+        assert_eq!(result, MemoryAction::Add);
+    }
 }
