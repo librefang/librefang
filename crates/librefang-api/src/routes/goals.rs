@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_types::agent::AgentId;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -15,7 +16,7 @@ use std::sync::Arc;
 /// The well-known shared-memory key for goals storage.
 const GOALS_KEY: &str = "__librefang_goals";
 
-/// Shared agent ID for goals KV storage (same as schedules).
+/// Shared agent ID for goals KV storage.
 fn goals_shared_agent_id() -> AgentId {
     AgentId(uuid::Uuid::from_bytes([
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -108,7 +109,7 @@ pub async fn create_goal(
         }
     };
 
-    if title.len() > 256 {
+    if title.chars().count() > 256 {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "Title too long (max 256 chars)"})),
@@ -116,7 +117,7 @@ pub async fn create_goal(
     }
 
     let description = req["description"].as_str().unwrap_or("").to_string();
-    if description.len() > 4096 {
+    if description.chars().count() > 4096 {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "Description too long (max 4096 chars)"})),
@@ -125,25 +126,7 @@ pub async fn create_goal(
 
     let parent_id = req["parent_id"].as_str().map(|s| s.to_string());
 
-    // If parent_id is specified, verify it exists
-    if let Some(ref pid) = parent_id {
-        let shared_id = goals_shared_agent_id();
-        let parent_exists = match state.kernel.memory.structured_get(shared_id, GOALS_KEY) {
-            Ok(Some(serde_json::Value::Array(ref arr))) => {
-                arr.iter().any(|g| g["id"].as_str() == Some(pid))
-            }
-            _ => false,
-        };
-        if !parent_exists {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": format!("Parent goal '{}' not found", pid)})),
-            );
-        }
-    }
-
     let status = req["status"].as_str().unwrap_or("pending").to_string();
-    // Validate status
     if !["pending", "in_progress", "completed", "cancelled"].contains(&status.as_str()) {
         return (
             StatusCode::BAD_REQUEST,
@@ -182,12 +165,24 @@ pub async fn create_goal(
         entry["agent_id"] = serde_json::Value::String(aid.clone());
     }
 
+    // Single read-then-write to reduce TOCTOU window between parent validation and list append
     let shared_id = goals_shared_agent_id();
     let mut goals: Vec<serde_json::Value> =
         match state.kernel.memory.structured_get(shared_id, GOALS_KEY) {
             Ok(Some(serde_json::Value::Array(arr))) => arr,
             _ => Vec::new(),
         };
+
+    // Validate parent_id exists within the same snapshot
+    if let Some(ref pid) = parent_id {
+        let parent_exists = goals.iter().any(|g| g["id"].as_str() == Some(pid.as_str()));
+        if !parent_exists {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Parent goal '{}' not found", pid)})),
+            );
+        }
+    }
 
     goals.push(entry.clone());
     if let Err(e) =
@@ -219,63 +214,120 @@ pub async fn update_goal_by_id(
             _ => Vec::new(),
         };
 
+    // --- Validate inputs before mutating ---
+
+    if let Some(title) = req.get("title").and_then(|v| v.as_str()) {
+        if title.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Title must not be empty"})),
+            );
+        }
+        if title.chars().count() > 256 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Title too long (max 256 chars)"})),
+            );
+        }
+    }
+
+    if let Some(description) = req.get("description").and_then(|v| v.as_str()) {
+        if description.chars().count() > 4096 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Description too long (max 4096 chars)"})),
+            );
+        }
+    }
+
+    if let Some(status) = req.get("status").and_then(|v| v.as_str()) {
+        if !["pending", "in_progress", "completed", "cancelled"].contains(&status) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid status"})),
+            );
+        }
+    }
+
+    if let Some(progress) = req.get("progress").and_then(|v| v.as_u64()) {
+        if progress > 100 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Progress must be 0-100"})),
+            );
+        }
+    }
+
+    // Validate parent_id: detect self-reference, verify existence, and detect indirect cycles
+    if let Some(parent_id) = req.get("parent_id") {
+        if !parent_id.is_null() {
+            if let Some(pid) = parent_id.as_str() {
+                if pid == id {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "A goal cannot be its own parent"})),
+                    );
+                }
+                // Verify the target parent exists
+                if !goals.iter().any(|g| g["id"].as_str() == Some(pid)) {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({"error": format!("Parent goal '{}' not found", pid)})),
+                    );
+                }
+                // Detect indirect cycles: walk ancestor chain from `pid` upward.
+                // Use a seen set to guard against infinite loops on corrupted data.
+                let mut ancestor = Some(pid.to_string());
+                let mut seen = HashSet::new();
+                seen.insert(id.clone());
+                while let Some(ref anc_id) = ancestor {
+                    if !seen.insert(anc_id.clone()) {
+                        break; // already visited — corrupted data, stop walking
+                    }
+                    let anc_parent = goals.iter().find_map(|gg| {
+                        if gg["id"].as_str() == Some(anc_id) {
+                            gg["parent_id"].as_str().map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    });
+                    match anc_parent {
+                        Some(ref ap) if ap == &id => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(serde_json::json!({"error": "Circular parent reference detected"})),
+                            );
+                        }
+                        Some(ap) => ancestor = Some(ap),
+                        None => break,
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Apply mutations ---
+
     let mut found = false;
     for g in goals.iter_mut() {
         if g["id"].as_str() == Some(&id) {
             found = true;
             if let Some(title) = req.get("title").and_then(|v| v.as_str()) {
-                if title.is_empty() {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "Title must not be empty"})),
-                    );
-                }
-                if title.len() > 256 {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "Title too long (max 256 chars)"})),
-                    );
-                }
                 g["title"] = serde_json::Value::String(title.to_string());
             }
             if let Some(description) = req.get("description").and_then(|v| v.as_str()) {
-                if description.len() > 4096 {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "Description too long (max 4096 chars)"})),
-                    );
-                }
                 g["description"] = serde_json::Value::String(description.to_string());
             }
             if let Some(status) = req.get("status").and_then(|v| v.as_str()) {
-                if !["pending", "in_progress", "completed", "cancelled"].contains(&status) {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "Invalid status"})),
-                    );
-                }
                 g["status"] = serde_json::Value::String(status.to_string());
             }
             if let Some(progress) = req.get("progress").and_then(|v| v.as_u64()) {
-                if progress > 100 {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "Progress must be 0-100"})),
-                    );
-                }
                 g["progress"] = serde_json::json!(progress);
             }
             if let Some(parent_id) = req.get("parent_id") {
                 if parent_id.is_null() {
                     g.as_object_mut().map(|obj| obj.remove("parent_id"));
                 } else if let Some(pid) = parent_id.as_str() {
-                    // Prevent self-reference
-                    if pid == id {
-                        return (
-                            StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({"error": "A goal cannot be its own parent"})),
-                        );
-                    }
                     g["parent_id"] = serde_json::Value::String(pid.to_string());
                 }
             }
@@ -316,7 +368,7 @@ pub async fn update_goal_by_id(
     )
 }
 
-/// DELETE /api/goals/{id} — Delete a goal and optionally its children.
+/// DELETE /api/goals/{id} — Delete a goal and all its descendants.
 pub async fn delete_goal(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -331,26 +383,25 @@ pub async fn delete_goal(
     let before = goals.len();
 
     // Collect all IDs to remove: the target goal + all descendants
-    let mut ids_to_remove = vec![id.clone()];
-    let mut i = 0;
-    while i < ids_to_remove.len() {
-        let current_id = ids_to_remove[i].clone();
+    let mut ids_to_remove: HashSet<String> = HashSet::new();
+    ids_to_remove.insert(id.clone());
+    let mut queue = vec![id.clone()];
+    while let Some(current_id) = queue.pop() {
         for g in &goals {
             if g["parent_id"].as_str() == Some(&current_id) {
                 if let Some(child_id) = g["id"].as_str() {
-                    if !ids_to_remove.contains(&child_id.to_string()) {
-                        ids_to_remove.push(child_id.to_string());
+                    if ids_to_remove.insert(child_id.to_string()) {
+                        queue.push(child_id.to_string());
                     }
                 }
             }
         }
-        i += 1;
     }
 
     goals.retain(|g| {
         g["id"]
             .as_str()
-            .map(|gid| !ids_to_remove.contains(&gid.to_string()))
+            .map(|gid| !ids_to_remove.contains(gid))
             .unwrap_or(true)
     });
 

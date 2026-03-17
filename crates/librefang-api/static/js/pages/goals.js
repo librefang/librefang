@@ -76,11 +76,14 @@ function goalsPage() {
     get flatTree() {
       var self = this;
       var result = [];
+      var visited = {};
       function walk(parentId, depth) {
         var children = parentId
           ? self.goals.filter(function(g) { return g.parent_id === parentId; })
           : self.goals.filter(function(g) { return !g.parent_id; });
         children.forEach(function(g) {
+          if (visited[g.id]) return; // guard against circular references
+          visited[g.id] = true;
           result.push({ goal: g, depth: depth });
           if (self.isExpanded(g.id)) {
             walk(g.id, depth + 1);

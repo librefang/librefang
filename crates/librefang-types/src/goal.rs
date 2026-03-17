@@ -116,16 +116,16 @@ impl Goal {
         if self.title.is_empty() {
             return Err("title must not be empty".into());
         }
-        if self.title.len() > MAX_TITLE_LEN {
+        if self.title.chars().count() > MAX_TITLE_LEN {
             return Err(format!(
                 "title too long ({} chars, max {MAX_TITLE_LEN})",
-                self.title.len()
+                self.title.chars().count()
             ));
         }
-        if self.description.len() > MAX_DESCRIPTION_LEN {
+        if self.description.chars().count() > MAX_DESCRIPTION_LEN {
             return Err(format!(
                 "description too long ({} chars, max {MAX_DESCRIPTION_LEN})",
-                self.description.len()
+                self.description.chars().count()
             ));
         }
         if self.progress > 100 {
