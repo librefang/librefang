@@ -36,14 +36,16 @@ const ALLOWED_TOKEN_URI_PREFIXES: &[&str] = &[
 ];
 
 /// Fields extracted from a Google service account JSON key file.
-#[derive(Clone, serde::Deserialize)]
+///
+/// NOTE: `Clone` is intentionally omitted to avoid spreading `private_key` in memory.
+#[derive(serde::Deserialize)]
 struct ServiceAccountKey {
     /// Service account email address (used as JWT `iss` and `sub`).
     #[serde(default)]
     client_email: String,
-    /// PEM-encoded RSA private key.
-    #[serde(default)]
-    private_key: String,
+    /// PEM-encoded RSA private key.  Wrapped in `Zeroizing` so it is wiped on drop.
+    #[serde(default, deserialize_with = "deserialize_zeroizing_string")]
+    private_key: Zeroizing<String>,
     /// Token endpoint URL (typically `https://oauth2.googleapis.com/token`).
     #[serde(default = "default_token_uri")]
     token_uri: String,
@@ -52,13 +54,26 @@ struct ServiceAccountKey {
     access_token: Option<String>,
 }
 
+/// Deserialize a `String` directly into `Zeroizing<String>`.
+fn deserialize_zeroizing_string<'de, D>(deserializer: D) -> Result<Zeroizing<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let s = String::deserialize(deserializer)?;
+    Ok(Zeroizing::new(s))
+}
+
 impl std::fmt::Debug for ServiceAccountKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServiceAccountKey")
             .field("client_email", &self.client_email)
             .field("private_key", &"[REDACTED]")
             .field("token_uri", &self.token_uri)
-            .field("access_token", &self.access_token.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "access_token",
+                &self.access_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -122,8 +137,11 @@ impl GoogleChatAdapter {
     /// 1. Cached token (if not expired)
     /// 2. JWT-based service account auth (if `private_key` + `client_email` present)
     /// 3. Direct `access_token` field in key JSON (legacy/testing fallback)
+    ///
+    /// Uses a write lock during refresh to prevent thundering-herd token exchanges
+    /// when multiple concurrent callers see an expired cache simultaneously.
     async fn get_access_token(&self) -> Result<String, Box<dyn std::error::Error>> {
-        // Check cache first
+        // Fast path: check cache with read lock
         {
             let cache = self.cached_token.read().await;
             if let Some((ref token, expiry)) = *cache {
@@ -133,12 +151,20 @@ impl GoogleChatAdapter {
             }
         }
 
+        // Slow path: acquire write lock, then re-check (another task may have refreshed)
+        let mut cache = self.cached_token.write().await;
+        if let Some((ref token, expiry)) = *cache {
+            if Instant::now() + Duration::from_secs(TOKEN_REFRESH_MARGIN_SECS) < expiry {
+                return Ok(token.clone());
+            }
+        }
+
         let sa_key: ServiceAccountKey = serde_json::from_str(&self.service_account_key)
             .map_err(|e| format!("Invalid service account key JSON: {e}"))?;
 
         // Try JWT-based authentication if private_key is present
         if !sa_key.private_key.is_empty() && !sa_key.client_email.is_empty() {
-            let token = self.exchange_jwt_for_token(&sa_key).await?;
+            let token = self.exchange_jwt_for_token_inner(&sa_key, &mut cache).await?;
             return Ok(token);
         }
 
@@ -148,15 +174,19 @@ impl GoogleChatAdapter {
         )?;
 
         let expiry = Instant::now() + Duration::from_secs(DEFAULT_TOKEN_LIFETIME_SECS);
-        *self.cached_token.write().await = Some((token.clone(), expiry));
+        *cache = Some((token.clone(), expiry));
 
         Ok(token)
     }
 
     /// Build a signed JWT assertion and exchange it for an OAuth2 access token.
-    async fn exchange_jwt_for_token(
+    ///
+    /// Accepts a mutable reference to the cache guard so the caller retains the
+    /// write lock for the entire refresh cycle, preventing concurrent refreshes.
+    async fn exchange_jwt_for_token_inner(
         &self,
         sa_key: &ServiceAccountKey,
+        cache: &mut Option<(String, Instant)>,
     ) -> Result<String, Box<dyn std::error::Error>> {
         // Validate token_uri against allowlist to prevent SSRF
         if !ALLOWED_TOKEN_URI_PREFIXES
@@ -217,6 +247,7 @@ impl GoogleChatAdapter {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            warn!("Google Chat: token exchange failed ({status}): {body}");
             return Err(format!("Token exchange failed ({status}): {body}").into());
         }
 
@@ -231,7 +262,7 @@ impl GoogleChatAdapter {
             .unwrap_or(DEFAULT_TOKEN_LIFETIME_SECS);
 
         let expiry = Instant::now() + Duration::from_secs(expires_in);
-        *self.cached_token.write().await = Some((access_token.clone(), expiry));
+        *cache = Some((access_token.clone(), expiry));
 
         debug!(
             "Google Chat: obtained access token via JWT, expires in {}s",
@@ -355,7 +386,7 @@ impl ChannelAdapter for GoogleChatAdapter {
                         return;
                     }
 
-                    // Read headers to find Content-Length
+                    // Read headers to find Content-Length (case-insensitive per HTTP spec)
                     let mut content_length: usize = 0;
                     loop {
                         let mut header_line = String::new();
@@ -369,26 +400,20 @@ impl ChannelAdapter for GoogleChatAdapter {
                         if trimmed.is_empty() {
                             break;
                         }
-                        if let Some(val) = trimmed.strip_prefix("Content-Length:") {
-                            if let Ok(len) = val.trim().parse::<usize>() {
-                                content_length = len;
-                            }
-                        }
-                        if let Some(val) = trimmed.strip_prefix("content-length:") {
+                        let lower = trimmed.to_lowercase();
+                        if let Some(val) = lower.strip_prefix("content-length:") {
                             if let Ok(len) = val.trim().parse::<usize>() {
                                 content_length = len;
                             }
                         }
                     }
 
-                    // Read body
-                    let mut body_buf = vec![0u8; content_length.min(65536)];
+                    // Read body (cap at 64 KB to prevent abuse)
+                    let read_len = content_length.min(65536);
+                    let mut body_buf = vec![0u8; read_len];
                     use tokio::io::AsyncReadExt;
-                    if content_length > 0
-                        && reader
-                            .read_exact(&mut body_buf[..content_length.min(65536)])
-                            .await
-                            .is_err()
+                    if read_len > 0
+                        && reader.read_exact(&mut body_buf).await.is_err()
                     {
                         return;
                     }
@@ -400,7 +425,7 @@ impl ChannelAdapter for GoogleChatAdapter {
 
                     // Parse the Google Chat event payload
                     let payload: serde_json::Value =
-                        match serde_json::from_slice(&body_buf[..content_length.min(65536)]) {
+                        match serde_json::from_slice(&body_buf) {
                             Ok(v) => v,
                             Err(_) => return,
                         };
@@ -637,7 +662,7 @@ mod tests {
     fn test_service_account_key_debug_redacts_secrets() {
         let key = ServiceAccountKey {
             client_email: "bot@test.iam.gserviceaccount.com".to_string(),
-            private_key: "-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----".to_string(),
+            private_key: Zeroizing::new("-----BEGIN PRIVATE KEY-----\nSECRET\n-----END PRIVATE KEY-----".to_string()),
             token_uri: "https://oauth2.googleapis.com/token".to_string(),
             access_token: Some("super-secret-token".to_string()),
         };

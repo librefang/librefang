@@ -1433,6 +1433,8 @@ pub async fn start_channel_bridge_with_config(
                 gc_config.default_agent.clone(),
                 gc_config.account_id.clone(),
             ));
+        } else {
+            warn!("Google Chat configured but no credentials found (neither service_account_key_path nor {} env var), skipping", gc_config.service_account_env);
         }
     }
 
