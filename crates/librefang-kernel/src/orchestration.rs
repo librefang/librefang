@@ -109,26 +109,24 @@ impl CheckpointStore {
     /// Load a checkpoint for a specific run.
     pub async fn load(&self, run_id: WorkflowRunId) -> Result<Option<WorkflowCheckpoint>, String> {
         let path = self.path_for(run_id);
-        if !path.exists() {
-            return Ok(None);
+        match fs::read_to_string(&path).await {
+            Ok(data) => {
+                let cp: WorkflowCheckpoint = serde_json::from_str(&data)
+                    .map_err(|e| format!("Failed to parse checkpoint: {e}"))?;
+                Ok(Some(cp))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("Failed to read checkpoint: {e}")),
         }
-        let data = fs::read_to_string(&path)
-            .await
-            .map_err(|e| format!("Failed to read checkpoint: {e}"))?;
-        let cp: WorkflowCheckpoint =
-            serde_json::from_str(&data).map_err(|e| format!("Failed to parse checkpoint: {e}"))?;
-        Ok(Some(cp))
     }
 
     /// List all persisted checkpoints (for recovery on daemon startup).
     pub async fn list_all(&self) -> Result<Vec<WorkflowCheckpoint>, String> {
-        if !self.dir.exists() {
-            return Ok(Vec::new());
-        }
-
-        let mut entries = fs::read_dir(&self.dir)
-            .await
-            .map_err(|e| format!("Failed to read checkpoint dir: {e}"))?;
+        let mut entries = match fs::read_dir(&self.dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(format!("Failed to read checkpoint dir: {e}")),
+        };
 
         let mut checkpoints = Vec::new();
         while let Some(entry) = entries
@@ -157,13 +155,14 @@ impl CheckpointStore {
     /// Remove a checkpoint once the run has finished (completed or permanently failed).
     pub async fn remove(&self, run_id: WorkflowRunId) -> Result<(), String> {
         let path = self.path_for(run_id);
-        if path.exists() {
-            fs::remove_file(&path)
-                .await
-                .map_err(|e| format!("Failed to remove checkpoint: {e}"))?;
-            debug!(run_id = %run_id, "Checkpoint removed");
+        match fs::remove_file(&path).await {
+            Ok(()) => {
+                debug!(run_id = %run_id, "Checkpoint removed");
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("Failed to remove checkpoint: {e}")),
         }
-        Ok(())
     }
 }
 
@@ -280,13 +279,19 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// Compute the wait duration for a given attempt (0-indexed).
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
-        let base = self
-            .initial_backoff
-            .mul_f64(self.backoff_multiplier.powi(attempt as i32));
-        let capped = base.min(self.max_backoff);
+        // Cap attempt to avoid i32 overflow in powi().
+        let exp = attempt.min(i32::MAX as u32) as i32;
+        let multiplier = self.backoff_multiplier.powi(exp);
+        // Guard against infinity/NaN to prevent Duration::mul_f64 panic.
+        let capped = if multiplier.is_finite() {
+            self.initial_backoff.mul_f64(multiplier).min(self.max_backoff)
+        } else {
+            self.max_backoff
+        };
         if self.jitter {
-            let jitter_ms = rand::random::<u64>() % (capped.as_millis() as u64).max(1);
-            capped + Duration::from_millis(jitter_ms)
+            // Full jitter: random duration in [0, capped) instead of [capped, 2*capped).
+            let capped_ms = capped.as_millis() as u64;
+            Duration::from_millis(rand::random::<u64>() % capped_ms.max(1))
         } else {
             capped
         }
@@ -579,6 +584,53 @@ mod tests {
         let store = CheckpointStore::new(tmp.path().join("nonexistent"));
         let all = store.list_all().await.unwrap();
         assert!(all.is_empty());
+    }
+
+    #[test]
+    fn test_delay_for_attempt_large_attempt_no_panic() {
+        let policy = RetryPolicy {
+            max_retries: 1000,
+            initial_backoff: Duration::from_millis(100),
+            backoff_multiplier: 2.0,
+            max_backoff: Duration::from_secs(30),
+            jitter: false,
+        };
+        // Must not panic even with very large attempt values.
+        let d = policy.delay_for_attempt(1000);
+        assert_eq!(d, Duration::from_secs(30));
+        let d = policy.delay_for_attempt(u32::MAX);
+        assert_eq!(d, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_delay_for_attempt_with_jitter() {
+        let policy = RetryPolicy {
+            max_retries: 5,
+            initial_backoff: Duration::from_secs(1),
+            backoff_multiplier: 2.0,
+            max_backoff: Duration::from_secs(10),
+            jitter: true,
+        };
+        // With full jitter, delay should be in [0, capped).
+        for attempt in 0..5 {
+            let d = policy.delay_for_attempt(attempt);
+            assert!(d < Duration::from_secs(10), "jitter delay {d:?} should be < max_backoff");
+        }
+    }
+
+    #[test]
+    fn test_quality_check_invalid_regex() {
+        let check = QualityCheck::MatchesRegex("[invalid".into());
+        // Invalid regex should return false, not panic.
+        assert!(!check.passes("anything"));
+    }
+
+    #[test]
+    fn test_quality_check_empty_all_and_any() {
+        // All([]) is vacuously true.
+        assert!(QualityCheck::All(vec![]).passes("anything"));
+        // Any([]) has no passing check, so false.
+        assert!(!QualityCheck::Any(vec![]).passes("anything"));
     }
 
     #[tokio::test]
