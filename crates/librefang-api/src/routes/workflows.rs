@@ -1006,6 +1006,33 @@ pub async fn toggle_cron_job(
     }
 }
 
+/// GET /api/cron/jobs/{id} — Get a single cron job by ID.
+#[utoipa::path(get, path = "/api/cron/jobs/{id}", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job details", body = serde_json::Value), (status = 404, description = "Job not found")))]
+pub async fn get_cron_job(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match uuid::Uuid::parse_str(&id) {
+        Ok(uuid) => {
+            let job_id = librefang_types::scheduler::CronJobId(uuid);
+            match state.kernel.cron_scheduler.get_job(job_id) {
+                Some(job) => (
+                    StatusCode::OK,
+                    Json(serde_json::to_value(&job).unwrap_or_default()),
+                ),
+                None => (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "Job not found"})),
+                ),
+            }
+        }
+        Err(_) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid job ID"})),
+        ),
+    }
+}
+
 /// GET /api/cron/jobs/{id}/status — Get status of a specific cron job.
 #[utoipa::path(get, path = "/api/cron/jobs/{id}/status", tag = "workflows", params(("id" = String, Path, description = "Cron job ID")), responses((status = 200, description = "Cron job status", body = serde_json::Value)))]
 pub async fn cron_job_status(

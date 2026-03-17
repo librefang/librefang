@@ -577,7 +577,9 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/cron/jobs/{id}",
-            axum::routing::delete(routes::delete_cron_job).put(routes::update_cron_job),
+            axum::routing::get(routes::get_cron_job)
+                .delete(routes::delete_cron_job)
+                .put(routes::update_cron_job),
         )
         .route(
             "/cron/jobs/{id}/enable",
