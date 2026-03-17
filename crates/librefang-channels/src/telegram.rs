@@ -323,6 +323,10 @@ impl TelegramAdapter {
     ///
     /// Used for streaming: we send an initial placeholder, then edit it in-place
     /// as tokens arrive. Returns `None` if the API call fails.
+    ///
+    /// The initial message is sent as plain text (no `parse_mode`) because the
+    /// content is raw, unformatted LLM output that may contain `<`, `>`, `&`
+    /// characters. HTML formatting is only applied on the final edit.
     async fn api_send_message_returning_id(
         &self,
         chat_id: i64,
@@ -334,11 +338,9 @@ impl TelegramAdapter {
             self.api_base_url,
             self.token.as_str()
         );
-        let sanitized = sanitize_telegram_html(text);
         let mut body = serde_json::json!({
             "chat_id": chat_id,
-            "text": sanitized,
-            "parse_mode": "HTML",
+            "text": text,
         });
         if let Some(tid) = thread_id {
             body["message_thread_id"] = serde_json::json!(tid);
@@ -378,24 +380,37 @@ impl TelegramAdapter {
     /// Used during streaming to progressively replace the message content with
     /// accumulated tokens. Silently ignores errors (best-effort) since the final
     /// complete text will be sent as a fallback if editing fails.
+    ///
+    /// When `html` is true, the text is sanitized and sent with `parse_mode: HTML`.
+    /// During intermediate streaming edits this should be `false` (raw text);
+    /// only the final edit should use `true` for proper formatting.
     async fn api_edit_message(
         &self,
         chat_id: i64,
         message_id: i64,
         text: &str,
+        html: bool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/bot{}/editMessageText",
             self.api_base_url,
             self.token.as_str()
         );
-        let sanitized = sanitize_telegram_html(text);
-        let body = serde_json::json!({
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "text": sanitized,
-            "parse_mode": "HTML",
-        });
+        let body = if html {
+            let sanitized = sanitize_telegram_html(text);
+            serde_json::json!({
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": sanitized,
+                "parse_mode": "HTML",
+            })
+        } else {
+            serde_json::json!({
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+            })
+        };
 
         let resp = self.client.post(&url).json(&body).send().await?;
         if !resp.status().is_success() {
@@ -797,7 +812,9 @@ impl ChannelAdapter for TelegramAdapter {
             // Throttle edits to respect Telegram rate limits.
             if last_edit.elapsed() >= STREAMING_EDIT_INTERVAL {
                 if let Some(msg_id) = sent_message_id {
-                    let _ = self.api_edit_message(chat_id, msg_id, &intermediate).await;
+                    let _ = self
+                        .api_edit_message(chat_id, msg_id, &intermediate, true)
+                        .await;
                     last_edit = Instant::now();
                 }
             }
@@ -813,11 +830,15 @@ impl ChannelAdapter for TelegramAdapter {
             let chunks = split_message(&formatted, 4096);
             if chunks.len() <= 1 {
                 // Single message — just edit in place.
-                let _ = self.api_edit_message(chat_id, msg_id, &formatted).await;
+                let _ = self
+                    .api_edit_message(chat_id, msg_id, &formatted, true)
+                    .await;
             } else {
                 // Response exceeds 4096 chars — edit the first chunk in place,
                 // then send remaining chunks as new messages.
-                let _ = self.api_edit_message(chat_id, msg_id, chunks[0]).await;
+                let _ = self
+                    .api_edit_message(chat_id, msg_id, chunks[0], true)
+                    .await;
                 for chunk in &chunks[1..] {
                     let _ = self.api_send_message(chat_id, chunk, tid).await;
                 }
