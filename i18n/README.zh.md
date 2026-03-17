@@ -34,7 +34,7 @@
 
 LibreFang 是一个 **Agent 操作系统** — 用 Rust 从头构建的完整自主 AI 智能体运行平台。不是聊天机器人框架，不是 Python 包装器。
 
-传统智能体框架等你输入。LibreFang 运行**为你工作的智能体** — 按计划 7x24 运行，监控目标、生成线索、管理社交媒体，并向仪表板报告。
+传统智能体框架等待你的输入。LibreFang 运行**为你工作的智能体** — 按计划全天候运行，监控目标、生成线索、管理社交媒体，并向控制台报告。
 
 > LibreFang 是 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) 的社区分支，采用开放治理和合并优先的 PR 政策。详见 [GOVERNANCE.md](../GOVERNANCE.md)。
 
@@ -44,10 +44,10 @@ LibreFang 是一个 **Agent 操作系统** — 用 Rust 从头构建的完整自
 # 安装
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
-# 初始化（引导你完成提供商设置）
+# 初始化（引导你完成服务商配置）
 librefang init
 
-# 启动 — 仪表板地址 http://localhost:4545
+# 启动 — 控制台 http://localhost:4545
 librefang start
 ```
 
@@ -78,7 +78,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 
 ## Hands：为你工作的智能体
 
-**Hands** 是预构建的自主能力包，独立运行，按计划执行，无需提示。内置 14 个：
+**Hands** 是预置的自主能力包，按计划独立运行，无需提示。内置 14 个：
 
 | Hand | 功能 |
 |------|------|
@@ -93,7 +93,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 | **Reddit** | Reddit 管理 — 子版块监控、发帖、互动追踪 |
 | **LinkedIn** | LinkedIn 管理 — 内容创作、社交拓展、职业互动 |
 | **Clip** | YouTube 转短视频 — 裁剪精华、字幕、AI 配音 |
-| **Browser** | Web 自动化 — 基于 Playwright，强制购买审批门 |
+| **Browser** | Web 自动化 — 基于 Playwright，购买操作强制审批 |
 | **API Tester** | API 测试 — 端点发现、验证、负载测试、回归检测 |
 | **DevOps** | DevOps 自动化 — CI/CD、基础设施监控、事件响应 |
 
@@ -109,16 +109,16 @@ librefang hand list                  # 查看所有 Hands
 
 ```
 librefang-kernel      编排、工作流、计量、RBAC、调度、预算
-librefang-runtime     智能体循环、3 个 LLM 驱动、53 个工具、WASM 沙箱、MCP、A2A
-librefang-api         140+ REST/WS/SSE 端点、OpenAI 兼容 API、仪表板
+librefang-runtime     智能体循环、3 个 LLM 驱动器、53 个工具、WASM 沙箱、MCP、A2A
+librefang-api         140+ REST/WS/SSE 端点、OpenAI 兼容 API、控制台
 librefang-channels    40 个消息适配器，速率限制、DM/群组策略
 librefang-memory      SQLite 持久化、向量嵌入、会话、压缩
-librefang-types       核心类型、污染追踪、Ed25519 签名、模型目录
+librefang-types       核心类型、污点追踪、Ed25519 签名、模型目录
 librefang-skills      60 个内置技能、SKILL.md 解析器、FangHub 市场
 librefang-hands       14 个自主 Hands、HAND.toml 解析器、生命周期管理
 librefang-extensions  25 个 MCP 模板、AES-256-GCM 保险库、OAuth2 PKCE
 librefang-wire        OFP P2P 协议、HMAC-SHA256 双向认证
-librefang-cli         CLI、守护进程管理、TUI 仪表板、MCP 服务器模式
+librefang-cli         CLI、守护进程管理、TUI 控制台、MCP 服务器模式
 librefang-desktop     Tauri 2.0 原生应用（托盘、通知、快捷键）
 librefang-migrate     OpenClaw、LangChain、AutoGPT 迁移引擎
 xtask                 构建自动化
@@ -126,11 +126,11 @@ xtask                 构建自动化
 
 ## 核心特性
 
-**40 个频道适配器** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、飞书、LINE、Mastodon、Bluesky 等。[完整列表](../docs/channel-adapters.md)
+**40 个渠道适配器** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、飞书、LINE、Mastodon、Bluesky 等。[完整列表](../docs/channel-adapters.md)
 
-**27 个 LLM 提供商** — Anthropic、Gemini、OpenAI、Groq、DeepSeek、OpenRouter、Ollama 等。智能路由、自动降级、成本追踪。[详情](../docs/providers.md)
+**27 个 LLM 服务商** — Anthropic、Gemini、OpenAI、Groq、DeepSeek、OpenRouter、Ollama 等。智能路由、自动回退、成本追踪。[详情](../docs/providers.md)
 
-**16 层安全体系** — WASM 沙箱、Merkle 审计链、污染追踪、Ed25519 签名、SSRF 防护、密钥零化等。[详情](../docs/comparison.md#16-security-systems--defense-in-depth)
+**16 层安全体系** — WASM 沙箱、Merkle 审计链、污点追踪、Ed25519 签名、SSRF 防护、密钥清零等。[详情](../docs/comparison.md#16-security-systems--defense-in-depth)
 
 **OpenAI 兼容 API** — 即插即用的 `/v1/chat/completions` 端点。140+ REST/WS/SSE 端点。[API 参考](../docs/api-reference.md)
 
