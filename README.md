@@ -55,8 +55,7 @@ librefang start
 <summary><strong>Homebrew</strong></summary>
 
 ```bash
-brew tap librefang/tap
-brew install librefang
+brew tap librefang/tap && brew install librefang
 ```
 
 </details>
@@ -73,7 +72,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 <details>
 <summary><strong>Cloud Deploy</strong></summary>
 
-[![Deploy to Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Deploy to Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Deploy to GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](infra/gcp/README.md)
+[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](infra/gcp/README.md)
 
 </details>
 
@@ -116,7 +115,7 @@ librefang-channels    40 messaging adapters with rate limiting, DM/group policie
 librefang-memory      SQLite persistence, vector embeddings, sessions, compaction
 librefang-types       Core types, taint tracking, Ed25519 signing, model catalog
 librefang-skills      60 bundled skills, SKILL.md parser, FangHub marketplace
-librefang-hands       7 autonomous Hands, HAND.toml parser, lifecycle management
+librefang-hands       14 autonomous Hands, HAND.toml parser, lifecycle management
 librefang-extensions  25 MCP templates, AES-256-GCM vault, OAuth2 PKCE
 librefang-wire        OFP P2P protocol, HMAC-SHA256 mutual auth
 librefang-cli         CLI, daemon management, TUI dashboard, MCP server mode
@@ -154,7 +153,7 @@ See [docs/comparison.md](docs/comparison.md) for benchmarks and feature-by-featu
 
 - [Documentation](https://docs.librefang.ai) &bull; [API Reference](docs/api-reference.md) &bull; [Getting Started](docs/getting-started.md)
 - [Contributing](CONTRIBUTING.md) &bull; [Governance](GOVERNANCE.md) &bull; [Security](SECURITY.md)
-- [Discussions](https://github.com/librefang/librefang/discussions) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
+- [Discussions](https://github.com/librefang/librefang/discussions) — Q&A, use cases, feature votes, announcements &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## Contributors
 
