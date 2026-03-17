@@ -16,4 +16,5 @@ pub mod stream_dedup;
 pub mod types;
 pub mod versioning;
 pub mod webchat;
+pub mod webhook_store;
 pub mod ws;

@@ -72,4 +72,6 @@ pub struct AppState {
     /// Avoids blocking the `/api/providers` endpoint on TCP timeouts to
     /// unreachable local services. 60-second TTL.
     pub provider_probe_cache: librefang_runtime::provider_health::ProbeCache,
+    /// Webhook subscription store for outbound event notifications.
+    pub webhook_store: crate::webhook_store::WebhookStore,
 }

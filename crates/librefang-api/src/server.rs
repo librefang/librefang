@@ -516,6 +516,21 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/webhooks/events/{id}",
             axum::routing::put(routes::update_event_webhook).delete(routes::delete_event_webhook),
         )
+        // Outbound webhook management endpoints (#179)
+        .route(
+            "/webhooks",
+            axum::routing::get(routes::list_webhooks).post(routes::create_webhook),
+        )
+        .route(
+            "/webhooks/{id}",
+            axum::routing::get(routes::get_webhook)
+                .put(routes::update_webhook)
+                .delete(routes::delete_webhook),
+        )
+        .route(
+            "/webhooks/{id}/test",
+            axum::routing::post(routes::test_webhook),
+        )
         // Webhook trigger endpoints (external event injection)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
@@ -645,6 +660,9 @@ pub async fn build_router(
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: crate::webhook_store::WebhookStore::load(
+            kernel.config.home_dir.join("webhooks.json"),
+        ),
     });
 
     // CORS: allow localhost origins by default. If API key is set, the API

@@ -2320,6 +2320,328 @@ pub async fn delete_event_webhook(Path(id): Path<String>) -> impl IntoResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Outbound webhook management endpoints (file-persisted subscriptions)
+// ---------------------------------------------------------------------------
+
+/// GET /api/webhooks — List all webhook subscriptions (secrets redacted).
+pub async fn list_webhooks(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let webhooks: Vec<_> = state
+        .webhook_store
+        .list()
+        .iter()
+        .map(crate::webhook_store::redact_webhook_secret)
+        .collect();
+    let total = webhooks.len();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"webhooks": webhooks, "total": total})),
+    )
+}
+
+/// GET /api/webhooks/{id} — Get a single webhook subscription (secret redacted).
+pub async fn get_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let wh_id = match uuid::Uuid::parse_str(&id) {
+        Ok(uuid) => crate::webhook_store::WebhookId(uuid),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid webhook ID"})),
+            );
+        }
+    };
+    match state.webhook_store.get(wh_id) {
+        Some(wh) => {
+            let redacted = crate::webhook_store::redact_webhook_secret(&wh);
+            match serde_json::to_value(&redacted) {
+                Ok(v) => (StatusCode::OK, Json(v)),
+                Err(_) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "serialization error"})),
+                ),
+            }
+        }
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Webhook not found"})),
+        ),
+    }
+}
+
+/// POST /api/webhooks — Create a new webhook subscription.
+pub async fn create_webhook(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::webhook_store::CreateWebhookRequest>,
+) -> impl IntoResponse {
+    match state.webhook_store.create(req) {
+        Ok(webhook) => {
+            let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
+            match serde_json::to_value(&redacted) {
+                Ok(v) => (StatusCode::CREATED, Json(v)),
+                Err(_) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "serialization error"})),
+                ),
+            }
+        }
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// PUT /api/webhooks/{id} — Update a webhook subscription.
+pub async fn update_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::webhook_store::UpdateWebhookRequest>,
+) -> impl IntoResponse {
+    match uuid::Uuid::parse_str(&id) {
+        Ok(uuid) => {
+            let wh_id = crate::webhook_store::WebhookId(uuid);
+            match state.webhook_store.update(wh_id, req) {
+                Ok(webhook) => {
+                    let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
+                    match serde_json::to_value(&redacted) {
+                        Ok(v) => (StatusCode::OK, Json(v)),
+                        Err(_) => (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({"error": "serialization error"})),
+                        ),
+                    }
+                }
+                Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))),
+            }
+        }
+        Err(_) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid webhook ID"})),
+        ),
+    }
+}
+
+/// DELETE /api/webhooks/{id} — Delete a webhook subscription.
+pub async fn delete_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match uuid::Uuid::parse_str(&id) {
+        Ok(uuid) => {
+            let wh_id = crate::webhook_store::WebhookId(uuid);
+            if state.webhook_store.delete(wh_id) {
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"status": "deleted"})),
+                )
+            } else {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "Webhook not found"})),
+                )
+            }
+        }
+        Err(_) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid webhook ID"})),
+        ),
+    }
+}
+
+/// POST /api/webhooks/{id}/test — Send a test event to a webhook.
+///
+/// Includes HMAC-SHA256 signature in `X-Webhook-Signature` header when
+/// the webhook has a secret configured.
+pub async fn test_webhook(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let wh_id = match uuid::Uuid::parse_str(&id) {
+        Ok(uuid) => crate::webhook_store::WebhookId(uuid),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid webhook ID"})),
+            );
+        }
+    };
+
+    let webhook = match state.webhook_store.get(wh_id) {
+        Some(w) => w,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Webhook not found"})),
+            );
+        }
+    };
+
+    // Re-validate the URL against SSRF rules before sending
+    if let Err(e) = crate::webhook_store::validate_webhook_url(&webhook.url) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("Webhook URL is not safe: {e}")})),
+        );
+    }
+
+    let test_payload = serde_json::json!({
+        "event": "test",
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+        "webhook_id": webhook.id.to_string(),
+        "message": "This is a test event from LibreFang.",
+    });
+
+    let payload_bytes = serde_json::to_vec(&test_payload).unwrap_or_default();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default();
+
+    let mut request = client
+        .post(&webhook.url)
+        .header("Content-Type", "application/json")
+        .header("User-Agent", "LibreFang-Webhook/1.0");
+
+    // Add HMAC signature if secret is configured
+    if let Some(ref secret) = webhook.secret {
+        let signature = crate::webhook_store::compute_hmac_signature(secret, &payload_bytes);
+        request = request.header("X-Webhook-Signature", signature);
+    }
+
+    match request.body(payload_bytes).send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "sent",
+                    "response_status": status,
+                    "webhook_id": id,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": format!("Failed to reach webhook URL: {e}"),
+                "webhook_id": id,
+            })),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task queue management endpoints (#184)
+// ---------------------------------------------------------------------------
+
+/// GET /api/tasks/status — Summary counts of tasks by status.
+pub async fn task_queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.kernel.task_list(None).await {
+        Ok(tasks) => {
+            let mut pending = 0u64;
+            let mut in_progress = 0u64;
+            let mut completed = 0u64;
+            let mut failed = 0u64;
+            for t in &tasks {
+                match t["status"].as_str().unwrap_or("") {
+                    "pending" => pending += 1,
+                    "in_progress" => in_progress += 1,
+                    "completed" => completed += 1,
+                    "failed" => failed += 1,
+                    _ => {}
+                }
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "total": tasks.len(),
+                    "pending": pending,
+                    "in_progress": in_progress,
+                    "completed": completed,
+                    "failed": failed,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// GET /api/tasks/list — List tasks, optionally filtered by ?status=pending|in_progress|completed|failed.
+pub async fn task_queue_list(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let status_filter = params.get("status").map(|s| s.as_str());
+    match state.kernel.task_list(status_filter).await {
+        Ok(tasks) => {
+            let total = tasks.len();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"tasks": tasks, "total": total})),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// DELETE /api/tasks/{id} — Remove a task from the queue.
+pub async fn task_queue_delete(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.kernel.task_delete(&id).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "deleted", "id": id})),
+        ),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Task not found"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+/// POST /api/tasks/{id}/retry — Re-queue a completed or failed task back to pending.
+///
+/// In-progress tasks cannot be retried to prevent duplicate execution.
+pub async fn task_queue_retry(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.kernel.task_retry(&id).await {
+        Ok(true) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "retried", "id": id})),
+        ),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "Task not found or not in a retryable state (must be completed or failed)"
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e})),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Event Webhook Tests
 // ---------------------------------------------------------------------------
 #[cfg(test)]
@@ -2632,111 +2954,5 @@ mod event_webhook_tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Task queue management endpoints (#184)
-// ---------------------------------------------------------------------------
-
-/// GET /api/tasks/status — Summary counts of tasks by status.
-pub async fn task_queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.kernel.task_list(None).await {
-        Ok(tasks) => {
-            let mut pending = 0u64;
-            let mut in_progress = 0u64;
-            let mut completed = 0u64;
-            let mut failed = 0u64;
-            for t in &tasks {
-                match t["status"].as_str().unwrap_or("") {
-                    "pending" => pending += 1,
-                    "in_progress" => in_progress += 1,
-                    "completed" => completed += 1,
-                    "failed" => failed += 1,
-                    _ => {}
-                }
-            }
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "total": tasks.len(),
-                    "pending": pending,
-                    "in_progress": in_progress,
-                    "completed": completed,
-                    "failed": failed,
-                })),
-            )
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ),
-    }
-}
-
-/// GET /api/tasks/list — List tasks, optionally filtered by ?status=pending|in_progress|completed|failed.
-pub async fn task_queue_list(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> impl IntoResponse {
-    let status_filter = params.get("status").map(|s| s.as_str());
-    match state.kernel.task_list(status_filter).await {
-        Ok(tasks) => {
-            let total = tasks.len();
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({"tasks": tasks, "total": total})),
-            )
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ),
-    }
-}
-
-/// DELETE /api/tasks/{id} — Remove a task from the queue.
-pub async fn task_queue_delete(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    match state.kernel.task_delete(&id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "deleted", "id": id})),
-        ),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Task not found"})),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ),
-    }
-}
-
-/// POST /api/tasks/{id}/retry — Re-queue a completed or failed task back to pending.
-///
-/// In-progress tasks cannot be retried to prevent duplicate execution.
-pub async fn task_queue_retry(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    match state.kernel.task_retry(&id).await {
-        Ok(true) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"status": "retried", "id": id})),
-        ),
-        Ok(false) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": "Task not found or not in a retryable state (must be completed or failed)"
-            })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ),
     }
 }

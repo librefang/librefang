@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "0.5.5-20260317"
+    "version": "0.5.6-20260317"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -6079,6 +6079,14 @@
           "new_name"
         ],
         "properties": {
+          "include_skills": {
+            "type": "boolean",
+            "description": "Whether to copy skills from the source agent (default: true)."
+          },
+          "include_tools": {
+            "type": "boolean",
+            "description": "Whether to copy tools from the source agent (default: true)."
+          },
           "new_name": {
             "type": "string"
           }
