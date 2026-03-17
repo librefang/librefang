@@ -464,6 +464,9 @@ pub struct AgentManifest {
     /// Installed skill references (empty = all skills available).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub skills: Vec<String>,
+    /// Explicitly disable all skills, overriding the empty-list = all-skills default.
+    #[serde(default)]
+    pub skills_disabled: bool,
     /// MCP server allowlist (empty = all connected MCP servers available).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub mcp_servers: Vec<String>,
@@ -499,6 +502,9 @@ pub struct AgentManifest {
     /// Tool blocklist — these tools are excluded (applied after allowlist).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub tool_blocklist: Vec<String>,
+    /// Explicitly disable all tools, overriding profile / capability / filter expansion.
+    #[serde(default)]
+    pub tools_disabled: bool,
 }
 
 fn default_true() -> bool {
@@ -522,6 +528,7 @@ impl Default for AgentManifest {
             profile: None,
             tools: HashMap::new(),
             skills: Vec::new(),
+            skills_disabled: false,
             mcp_servers: Vec::new(),
             metadata: HashMap::new(),
             tags: Vec::new(),
@@ -533,6 +540,7 @@ impl Default for AgentManifest {
             exec_policy: None,
             tool_allowlist: Vec::new(),
             tool_blocklist: Vec::new(),
+            tools_disabled: false,
         }
     }
 }

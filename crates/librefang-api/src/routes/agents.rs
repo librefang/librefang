@@ -1200,7 +1200,9 @@ pub async fn get_agent(
                 "color": entry.identity.color,
             },
             "skills": entry.manifest.skills,
-            "skills_mode": if entry.manifest.skills.is_empty() { "all" } else { "allowlist" },
+            "skills_mode": skill_assignment_mode(&entry.manifest),
+            "skills_disabled": entry.manifest.skills_disabled,
+            "tools_disabled": entry.manifest.tools_disabled,
             "mcp_servers": entry.manifest.mcp_servers,
             "mcp_servers_mode": if entry.manifest.mcp_servers.is_empty() { "all" } else { "allowlist" },
             "fallback_models": entry.manifest.fallback_models,
@@ -1738,6 +1740,7 @@ pub async fn get_agent_tools(
         Json(serde_json::json!({
             "tool_allowlist": entry.manifest.tool_allowlist,
             "tool_blocklist": entry.manifest.tool_blocklist,
+            "disabled": entry.manifest.tools_disabled,
         })),
     )
 }
@@ -1843,17 +1846,13 @@ pub async fn get_agent_skills(
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .skill_names();
-    let mode = if entry.manifest.skills.is_empty() {
-        "all"
-    } else {
-        "allowlist"
-    };
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "assigned": entry.manifest.skills,
             "available": available,
-            "mode": mode,
+            "mode": skill_assignment_mode(&entry.manifest),
+            "disabled": entry.manifest.skills_disabled,
         })),
     )
 }
@@ -2550,6 +2549,42 @@ pub async fn patch_agent_config(
 #[derive(serde::Deserialize, utoipa::ToSchema)]
 pub struct CloneAgentRequest {
     pub new_name: String,
+    /// Whether to copy skills from the source agent (default: true).
+    #[serde(default = "default_clone_true")]
+    pub include_skills: bool,
+    /// Whether to copy tools from the source agent (default: true).
+    #[serde(default = "default_clone_true")]
+    pub include_tools: bool,
+}
+
+fn default_clone_true() -> bool {
+    true
+}
+
+fn apply_clone_inclusion_flags(
+    manifest: &mut librefang_types::agent::AgentManifest,
+    req: &CloneAgentRequest,
+) {
+    if !req.include_skills {
+        manifest.skills.clear();
+        manifest.skills_disabled = true;
+    }
+    if !req.include_tools {
+        manifest.tools.clear();
+        manifest.tool_allowlist.clear();
+        manifest.tool_blocklist.clear();
+        manifest.tools_disabled = true;
+    }
+}
+
+fn skill_assignment_mode(manifest: &librefang_types::agent::AgentManifest) -> &'static str {
+    if manifest.skills_disabled {
+        "none"
+    } else if manifest.skills.is_empty() {
+        "all"
+    } else {
+        "allowlist"
+    }
 }
 
 /// POST /api/agents/{id}/clone — Clone an agent with its workspace files.
@@ -2606,6 +2641,9 @@ pub async fn clone_agent(
     let mut cloned_manifest = source.manifest.clone();
     cloned_manifest.name = req.new_name.clone();
     cloned_manifest.workspace = None; // Let kernel assign a new workspace
+
+    // Conditionally strip skills and tools based on request flags.
+    apply_clone_inclusion_flags(&mut cloned_manifest, &req);
 
     // Spawn the cloned agent
     let new_id = match state.kernel.spawn_agent(cloned_manifest) {
@@ -3264,4 +3302,108 @@ pub async fn get_agent_deliveries(
             "receipts": receipts,
         })),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_clone_request_defaults() {
+        let json = r#"{"new_name": "clone-1"}"#;
+        let req: CloneAgentRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.new_name, "clone-1");
+        assert!(req.include_skills);
+        assert!(req.include_tools);
+    }
+
+    #[test]
+    fn test_clone_request_explicit_false() {
+        let json = r#"{"new_name": "clone-2", "include_skills": false, "include_tools": false}"#;
+        let req: CloneAgentRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.new_name, "clone-2");
+        assert!(!req.include_skills);
+        assert!(!req.include_tools);
+    }
+
+    #[test]
+    fn test_clone_request_partial_flags() {
+        let json = r#"{"new_name": "clone-3", "include_skills": false}"#;
+        let req: CloneAgentRequest = serde_json::from_str(json).unwrap();
+        assert!(!req.include_skills);
+        assert!(req.include_tools);
+
+        let json = r#"{"new_name": "clone-4", "include_tools": false}"#;
+        let req: CloneAgentRequest = serde_json::from_str(json).unwrap();
+        assert!(req.include_skills);
+        assert!(!req.include_tools);
+    }
+
+    #[test]
+    fn test_clone_manifest_strips_skills_when_excluded() {
+        let manifest = librefang_types::agent::AgentManifest {
+            skills: vec!["skill-a".to_string(), "skill-b".to_string()],
+            tools: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "tool-a".to_string(),
+                    librefang_types::agent::ToolConfig {
+                        params: std::collections::HashMap::new(),
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        };
+
+        let mut cloned = manifest.clone();
+        apply_clone_inclusion_flags(
+            &mut cloned,
+            &CloneAgentRequest {
+                new_name: "clone-1".to_string(),
+                include_skills: false,
+                include_tools: true,
+            },
+        );
+        assert!(cloned.skills.is_empty());
+        assert!(cloned.skills_disabled);
+        assert_eq!(skill_assignment_mode(&cloned), "none");
+        assert!(!cloned.tools.is_empty());
+    }
+
+    #[test]
+    fn test_clone_manifest_disables_tools_when_excluded() {
+        let manifest = librefang_types::agent::AgentManifest {
+            tools: {
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "tool-a".to_string(),
+                    librefang_types::agent::ToolConfig {
+                        params: std::collections::HashMap::new(),
+                    },
+                );
+                m
+            },
+            tool_allowlist: vec!["allowed-tool".to_string()],
+            tool_blocklist: vec!["blocked-tool".to_string()],
+            ..Default::default()
+        };
+
+        let mut cloned = manifest.clone();
+        apply_clone_inclusion_flags(
+            &mut cloned,
+            &CloneAgentRequest {
+                new_name: "clone-2".to_string(),
+                include_skills: true,
+                include_tools: false,
+            },
+        );
+        assert!(cloned.tools.is_empty());
+        assert!(cloned.tool_allowlist.is_empty());
+        assert!(cloned.tool_blocklist.is_empty());
+        assert!(cloned.tools_disabled);
+    }
 }

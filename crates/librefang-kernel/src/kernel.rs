@@ -1756,8 +1756,16 @@ impl LibreFangKernel {
                 base_system_prompt: manifest.model.system_prompt.clone(),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
                 recalled_memories: vec![],
-                skill_summary: self.build_skill_summary(&manifest.skills),
-                skill_prompt_context: self.collect_prompt_context(&manifest.skills),
+                skill_summary: if manifest.skills_disabled {
+                    String::new()
+                } else {
+                    self.build_skill_summary(&manifest.skills)
+                },
+                skill_prompt_context: if manifest.skills_disabled {
+                    String::new()
+                } else {
+                    self.collect_prompt_context(&manifest.skills)
+                },
                 mcp_summary: if mcp_tool_count > 0 {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
@@ -2445,8 +2453,16 @@ impl LibreFangKernel {
                 base_system_prompt: manifest.model.system_prompt.clone(),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
                 recalled_memories: vec![], // Recalled in agent_loop, not here
-                skill_summary: self.build_skill_summary(&manifest.skills),
-                skill_prompt_context: self.collect_prompt_context(&manifest.skills),
+                skill_summary: if manifest.skills_disabled {
+                    String::new()
+                } else {
+                    self.build_skill_summary(&manifest.skills)
+                },
+                skill_prompt_context: if manifest.skills_disabled {
+                    String::new()
+                } else {
+                    self.collect_prompt_context(&manifest.skills)
+                },
                 mcp_summary: if mcp_tool_count > 0 {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
@@ -5042,13 +5058,17 @@ impl LibreFangKernel {
 
         // Look up agent entry for profile, skill/MCP allowlists, and declared tools
         let entry = self.registry.get(agent_id);
-        let (skill_allowlist, mcp_allowlist, tool_profile) = entry
+        if entry.as_ref().is_some_and(|e| e.manifest.tools_disabled) {
+            return Vec::new();
+        }
+        let (skill_allowlist, mcp_allowlist, tool_profile, skills_disabled) = entry
             .as_ref()
             .map(|e| {
                 (
                     e.manifest.skills.clone(),
                     e.manifest.mcp_servers.clone(),
                     e.manifest.profile.clone(),
+                    e.manifest.skills_disabled,
                 )
             })
             .unwrap_or_default();
@@ -5097,8 +5117,10 @@ impl LibreFangKernel {
         };
 
         // Step 2: Add skill-provided tools (filtered by agent's skill allowlist,
-        // then by declared tools).
-        let skill_tools = {
+        // then by declared tools). Skip entirely when skills are disabled.
+        let skill_tools = if skills_disabled {
+            vec![]
+        } else {
             let registry = self
                 .skill_registry
                 .read()
@@ -6598,6 +6620,43 @@ mod tests {
         assert!(
             entry.manifest.tool_blocklist.is_empty(),
             "hand activation should not set a runtime blocklist by default"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn test_available_tools_returns_empty_when_tools_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-tools-disabled-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+        let manifest = AgentManifest {
+            name: "no-tools".to_string(),
+            description: "agent with tools disabled".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            profile: Some(librefang_types::agent::ToolProfile::Full),
+            capabilities: ManifestCapabilities {
+                tools: vec!["file_read".to_string(), "web_fetch".to_string()],
+                ..Default::default()
+            },
+            tools_disabled: true,
+            ..Default::default()
+        };
+
+        let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+        let tools = kernel.available_tools(agent_id);
+        assert!(
+            tools.is_empty(),
+            "disabled tools should suppress all builtin, skill, and MCP tools"
         );
 
         kernel.shutdown();
