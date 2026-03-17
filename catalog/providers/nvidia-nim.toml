@@ -73,7 +73,7 @@ output_cost_per_m = 0.0
 supports_tools = true
 supports_vision = false
 supports_streaming = true
-aliases = ["mistral-nemo"]
+aliases = ["nvidia-mistral-nemo"]
 
 [[models]]
 id = "mistralai/mixtral-8x22b-instruct-v0.1"
