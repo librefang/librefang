@@ -164,11 +164,12 @@ jobs:
 
           # Build post text (max 300 graphemes for Bluesky)
           RELEASE_URL="https://github.com/librefang/librefang/releases/tag/$TAG"
+          BSKY_CHANGES=$(echo "$CHANGES" | head -5 | sed 's/^- /- /')
           BSKY_TEXT="LibreFang v${VERSION} released!
 
-$(echo "$CHANGES" | head -5 | sed 's/^- /- /')
+${BSKY_CHANGES}
 
-$RELEASE_URL"
+${RELEASE_URL}"
 
           # Truncate to 300 graphemes (cut on valid UTF-8 boundary using python)
           BSKY_TEXT=$(python3 -c "
