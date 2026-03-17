@@ -384,6 +384,22 @@ fn channel_type_str(channel: &crate::types::ChannelType) -> &str {
 /// Metadata key for the actual sender user ID (distinct from platform_id in DMs).
 pub const SENDER_USER_ID_KEY: &str = "sender_user_id";
 
+/// Build a `SenderContext` from a `ChannelMessage` and its resolved channel type string.
+///
+/// Shared helper to avoid duplicating the construction in `dispatch_message`
+/// and `dispatch_with_blocks`.
+fn build_sender_context(message: &ChannelMessage, ct_str: &str) -> SenderContext {
+    SenderContext {
+        channel: Some(ct_str.to_string()),
+        sender_id: Some(message.sender.platform_id.clone()),
+        sender_name: if message.sender.display_name.is_empty() {
+            None
+        } else {
+            Some(message.sender.display_name.clone())
+        },
+    }
+}
+
 /// Extract the sender identity used for RBAC and per-user rate limiting.
 fn sender_user_id(message: &ChannelMessage) -> &str {
     message
@@ -932,15 +948,7 @@ async fn dispatch_message(
     let _ = adapter.send_typing(&message.sender).await;
 
     // Build sender identity context for the agent
-    let sender_ctx = SenderContext {
-        channel: Some(ct_str.to_string()),
-        sender_id: Some(message.sender.platform_id.clone()),
-        sender_name: if message.sender.display_name.is_empty() {
-            None
-        } else {
-            Some(message.sender.display_name.clone())
-        },
-    };
+    let sender_ctx = build_sender_context(message, ct_str);
 
     // Lifecycle reaction: ⏳ Queued → 🤔 Thinking → ✅ Done / ❌ Error
     let msg_id = &message.platform_message_id;
@@ -967,6 +975,7 @@ async fn dispatch_message(
                 .await;
         }
         Err(e) => {
+            let retry_sender = sender_ctx.clone();
             handle_send_error(
                 &e,
                 agent_id,
@@ -982,7 +991,7 @@ async fn dispatch_message(
                 |new_id| {
                     let h = handle.clone();
                     let t = text.clone();
-                    async move { h.send_message(new_id, &t).await }
+                    async move { h.send_message_with_sender(new_id, &t, &retry_sender).await }
                 },
             )
             .await;
@@ -1201,15 +1210,7 @@ async fn dispatch_with_blocks(
     let _ = adapter.send_typing(&message.sender).await;
 
     // Build sender identity context for the agent
-    let sender_ctx = SenderContext {
-        channel: Some(ct_str.to_string()),
-        sender_id: Some(message.sender.platform_id.clone()),
-        sender_name: if message.sender.display_name.is_empty() {
-            None
-        } else {
-            Some(message.sender.display_name.clone())
-        },
-    };
+    let sender_ctx = build_sender_context(message, ct_str);
 
     // Lifecycle reaction: ⏳ Queued → 🤔 Thinking → ✅ Done / ❌ Error
     let msg_id = &message.platform_message_id;
@@ -1249,7 +1250,11 @@ async fn dispatch_with_blocks(
                 output_format,
                 |new_id| {
                     let h = handle.clone();
-                    async move { h.send_message_with_blocks(new_id, blocks).await }
+                    let retry_sender = sender_ctx.clone();
+                    async move {
+                        h.send_message_with_blocks_and_sender(new_id, blocks, &retry_sender)
+                            .await
+                    }
                 },
             )
             .await;

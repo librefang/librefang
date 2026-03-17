@@ -798,11 +798,23 @@ pub async fn send_message(
     }
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-    match state
-        .kernel
-        .send_message_with_handle(agent_id, &req.message, Some(kernel_handle))
-        .await
-    {
+    let result = if let Some(ref sender) = req.sender {
+        state
+            .kernel
+            .send_message_with_handle_and_sender(
+                agent_id,
+                &req.message,
+                Some(kernel_handle),
+                sender,
+            )
+            .await
+    } else {
+        state
+            .kernel
+            .send_message_with_handle(agent_id, &req.message, Some(kernel_handle))
+            .await
+    };
+    match result {
         Ok(result) => {
             // Strip <think>...</think> blocks from model output
             let cleaned = crate::ws::strip_think_tags(&result.response);

@@ -1517,6 +1517,21 @@ impl LibreFangKernel {
             .await
     }
 
+    /// Send a message with an explicit kernel handle and sender identity context.
+    ///
+    /// Combines `send_message_with_handle` (explicit kernel handle for inter-agent
+    /// tool access) with `send_message_with_sender` (sender identity propagation).
+    pub async fn send_message_with_handle_and_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender: &librefang_types::message::SenderContext,
+    ) -> KernelResult<AgentLoopResult> {
+        self.send_message_inner(agent_id, message, kernel_handle, None, Some(sender))
+            .await
+    }
+
     /// Send a message with optional content blocks and an optional kernel handle.
     ///
     /// When `content_blocks` is `Some`, the LLM agent loop receives structured
