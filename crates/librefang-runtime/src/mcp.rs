@@ -526,33 +526,11 @@ impl McpConnection {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        // Sandbox: clear environment, only pass whitelisted vars
-        cmd.env_clear();
+        // Inherit the parent process environment (which includes .env/vault
+        // credentials) and layer any MCP-specific env vars on top.
         for var_name in env_whitelist {
             if let Ok(val) = std::env::var(var_name) {
                 cmd.env(var_name, val);
-            }
-        }
-        // Always pass PATH for binary resolution
-        if let Ok(path) = std::env::var("PATH") {
-            cmd.env("PATH", path);
-        }
-        // On Windows, npm/node need APPDATA, USERPROFILE, LOCALAPPDATA, and SystemRoot
-        if cfg!(windows) {
-            for var in &[
-                "APPDATA",
-                "LOCALAPPDATA",
-                "USERPROFILE",
-                "SystemRoot",
-                "TEMP",
-                "TMP",
-                "HOME",
-                "HOMEDRIVE",
-                "HOMEPATH",
-            ] {
-                if let Ok(val) = std::env::var(var) {
-                    cmd.env(var, val);
-                }
             }
         }
 
