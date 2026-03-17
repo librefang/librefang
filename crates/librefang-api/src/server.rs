@@ -453,6 +453,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/providers/{name}/url",
             axum::routing::put(routes::set_provider_url),
         )
+        .route(
+            "/providers/{name}",
+            axum::routing::get(routes::get_provider),
+        )
         .route("/skills/create", axum::routing::post(routes::create_skill))
         .route("/extensions", axum::routing::get(routes::list_extensions))
         .route(
