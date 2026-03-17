@@ -15,6 +15,24 @@ use librefang_types::memory::{
 use std::sync::Arc;
 use tracing::warn;
 
+// ---------------------------------------------------------------------------
+// EmbeddingDriver → EmbeddingFn bridge
+// ---------------------------------------------------------------------------
+
+/// Wraps the runtime's `EmbeddingDriver` to implement `EmbeddingFn` (from librefang-memory).
+/// This avoids a circular dependency between librefang-memory and librefang-runtime.
+struct EmbeddingBridge(Arc<dyn crate::embedding::EmbeddingDriver + Send + Sync>);
+
+#[async_trait::async_trait]
+impl librefang_memory::proactive::EmbeddingFn for EmbeddingBridge {
+    async fn embed_one(&self, text: &str) -> librefang_types::error::LibreFangResult<Vec<f32>> {
+        self.0
+            .embed_one(text)
+            .await
+            .map_err(|e| LibreFangError::Internal(format!("Embedding failed: {e}")))
+    }
+}
+
 /// Build a context string with proactive memory for prompt injection.
 ///
 /// Includes both semantic memory matches and relevant knowledge graph relations.
@@ -48,14 +66,7 @@ pub fn init_proactive_memory(
     memory: Arc<librefang_memory::MemorySubstrate>,
     config: ProactiveMemoryConfig,
 ) -> Option<Arc<ProactiveMemoryStore>> {
-    if !config.auto_retrieve && !config.auto_memorize {
-        tracing::debug!("Proactive memory is disabled");
-        return None;
-    }
-
-    let store = ProactiveMemoryStore::new(memory, config);
-    tracing::info!("Proactive memory system initialized");
-    Some(Arc::new(store))
+    init_proactive_memory_full(memory, config, None, None)
 }
 
 /// Initialize proactive memory with an LLM-powered extractor.
@@ -68,14 +79,45 @@ pub fn init_proactive_memory_with_llm(
     driver: Arc<dyn crate::llm_driver::LlmDriver>,
     model: String,
 ) -> Option<Arc<ProactiveMemoryStore>> {
+    init_proactive_memory_full(memory, config, Some((driver, model)), None)
+}
+
+/// Initialize proactive memory with an embedding driver for vector search.
+pub fn init_proactive_memory_with_embedding(
+    memory: Arc<librefang_memory::MemorySubstrate>,
+    config: ProactiveMemoryConfig,
+    llm: Option<(Arc<dyn crate::llm_driver::LlmDriver>, String)>,
+    embedding: Arc<dyn crate::embedding::EmbeddingDriver + Send + Sync>,
+) -> Option<Arc<ProactiveMemoryStore>> {
+    init_proactive_memory_full(memory, config, llm, Some(embedding))
+}
+
+/// Full initialization: LLM extractor + embedding driver (both optional).
+pub fn init_proactive_memory_full(
+    memory: Arc<librefang_memory::MemorySubstrate>,
+    config: ProactiveMemoryConfig,
+    llm: Option<(Arc<dyn crate::llm_driver::LlmDriver>, String)>,
+    embedding: Option<Arc<dyn crate::embedding::EmbeddingDriver + Send + Sync>>,
+) -> Option<Arc<ProactiveMemoryStore>> {
     if !config.auto_retrieve && !config.auto_memorize {
         tracing::debug!("Proactive memory is disabled");
         return None;
     }
 
-    let extractor = Arc::new(LlmMemoryExtractor::new(driver, model));
-    let store = ProactiveMemoryStore::with_extractor(memory, config, extractor);
-    tracing::info!("Proactive memory system initialized (LLM-powered extraction)");
+    let mut store = if let Some((driver, model)) = llm {
+        let extractor = Arc::new(LlmMemoryExtractor::new(driver, model));
+        ProactiveMemoryStore::with_extractor(memory, config, extractor)
+    } else {
+        ProactiveMemoryStore::new(memory, config)
+    };
+
+    if let Some(emb) = embedding {
+        store = store.with_embedding(Arc::new(EmbeddingBridge(emb)));
+        tracing::info!("Proactive memory system initialized (with embeddings)");
+    } else {
+        tracing::info!("Proactive memory system initialized (text search fallback)");
+    }
+
     Some(Arc::new(store))
 }
 

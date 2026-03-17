@@ -1034,22 +1034,26 @@ impl LibreFangKernel {
         };
 
         // Initialize proactive memory system (mem0-style) from config.
-        // Use LLM-powered extraction if an extraction_model is configured,
-        // otherwise fall back to rule-based extraction.
+        // Passes through LLM driver (for extraction) and embedding driver (for vector search).
         {
             let pm_config = kernel.config.proactive_memory.clone();
-            let extraction_model = pm_config.extraction_model.clone();
-            let store = if let Some(model) = extraction_model {
-                librefang_runtime::proactive_memory::init_proactive_memory_with_llm(
+            let llm = pm_config
+                .extraction_model
+                .clone()
+                .map(|model| (Arc::clone(&kernel.default_driver) as _, model));
+            let store = if let Some(ref emb) = kernel.embedding_driver {
+                librefang_runtime::proactive_memory::init_proactive_memory_with_embedding(
                     Arc::clone(&kernel.memory),
                     pm_config,
-                    Arc::clone(&kernel.default_driver),
-                    model,
+                    llm,
+                    Arc::clone(emb),
                 )
             } else {
-                librefang_runtime::proactive_memory::init_proactive_memory(
+                librefang_runtime::proactive_memory::init_proactive_memory_full(
                     Arc::clone(&kernel.memory),
                     pm_config,
+                    llm,
+                    None,
                 )
             };
             if let Some(s) = store {

@@ -90,6 +90,13 @@ pub mod categories {
 /// // Auto-retrieve before agent execution
 /// let context = store.auto_retrieve("user123", "What did I tell you about my preferences?").await.unwrap();
 /// ```
+/// Trait for computing text embeddings (re-exported from runtime to avoid circular dep).
+#[async_trait]
+pub trait EmbeddingFn: Send + Sync {
+    /// Compute embedding for a single text.
+    async fn embed_one(&self, text: &str) -> LibreFangResult<Vec<f32>>;
+}
+
 pub struct ProactiveMemoryStore {
     #[allow(dead_code)]
     substrate: Arc<MemorySubstrate>,
@@ -99,6 +106,10 @@ pub struct ProactiveMemoryStore {
     config: ProactiveMemoryConfig,
     /// Memory extractor for LLM-powered extraction
     extractor: Arc<dyn MemoryExtractor>,
+    /// Optional embedding driver for vector similarity search.
+    /// When present, memories are stored with embeddings and search uses cosine similarity.
+    /// When absent, falls back to LIKE text matching.
+    embedding: Option<Arc<dyn EmbeddingFn>>,
     /// Counter for auto-consolidation (runs every 10 auto_memorize calls per agent).
     consolidation_counter: std::sync::atomic::AtomicU32,
 }
@@ -112,6 +123,7 @@ impl Clone for ProactiveMemoryStore {
             knowledge: self.knowledge.clone(),
             config: self.config.clone(),
             extractor: self.extractor.clone(),
+            embedding: self.embedding.clone(),
             consolidation_counter: std::sync::atomic::AtomicU32::new(
                 self.consolidation_counter
                     .load(std::sync::atomic::Ordering::Relaxed),
@@ -132,6 +144,7 @@ impl ProactiveMemoryStore {
             substrate,
             config,
             extractor: Arc::new(DefaultMemoryExtractor),
+            embedding: None,
             consolidation_counter: std::sync::atomic::AtomicU32::new(0),
         }
     }
@@ -151,8 +164,18 @@ impl ProactiveMemoryStore {
             substrate,
             config,
             extractor,
+            embedding: None,
             consolidation_counter: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+
+    /// Set the embedding driver for vector similarity search.
+    ///
+    /// When set, memories are stored with embeddings and search uses cosine similarity.
+    /// When not set, falls back to LIKE text matching.
+    pub fn with_embedding(mut self, driver: Arc<dyn EmbeddingFn>) -> Self {
+        self.embedding = Some(driver);
+        self
     }
 
     /// Create with default configuration.
@@ -253,20 +276,27 @@ impl ProactiveMemoryStore {
         agent_id: AgentId,
         item: &MemoryItem,
     ) -> LibreFangResult<Option<MemoryAddResult>> {
-        // Search for similar existing memories (top 5 candidates).
-        // Use significant keywords from the content for broader matching,
-        // since LIKE %full_content% won't find partial matches.
-        let search_query = extract_search_keywords(&item.content);
-        let mut existing =
-            self.semantic
-                .recall(&search_query, 5, Some(MemoryFilter::agent(agent_id)))?;
+        // Generate embedding for the new memory (if driver available)
+        let query_embedding = if let Some(ref emb) = self.embedding {
+            emb.embed_one(&item.content).await.ok()
+        } else {
+            None
+        };
 
-        // If keyword search found nothing, try with the full content as fallback
-        if existing.is_empty() {
-            existing =
-                self.semantic
-                    .recall(&item.content, 5, Some(MemoryFilter::agent(agent_id)))?;
-        }
+        // Search for similar existing memories (top 5 candidates).
+        // Use vector search if embedding available, otherwise keyword LIKE.
+        let filter = Some(MemoryFilter::agent(agent_id));
+        let existing = if let Some(ref qe) = query_embedding {
+            self.semantic
+                .recall_with_embedding(&item.content, 5, filter.clone(), Some(qe))?
+        } else {
+            let search_query = extract_search_keywords(&item.content);
+            let mut results = self.semantic.recall(&search_query, 5, filter.clone())?;
+            if results.is_empty() {
+                results = self.semantic.recall(&item.content, 5, filter)?;
+            }
+            results
+        };
 
         // Ask the extractor to decide: ADD, UPDATE, or NOOP
         let action = self.extractor.decide_action(item, &existing).await?;
@@ -282,12 +312,14 @@ impl ProactiveMemoryStore {
             MemoryAction::Add => {
                 let mut metadata = item.metadata.clone();
                 metadata.insert("category".to_string(), serde_json::json!(&item.category));
-                self.semantic.remember(
+                // Store with embedding if available
+                self.semantic.remember_with_embedding(
                     agent_id,
                     &item.content,
                     MemorySource::Conversation,
                     item.level.scope_str(),
                     metadata,
+                    query_embedding.as_deref(),
                 )?;
                 tracing::debug!(
                     "Memory decision: ADD new: {}",
@@ -763,6 +795,9 @@ pub struct MemoryStats {
 #[async_trait]
 impl ProactiveMemory for ProactiveMemoryStore {
     /// Semantic search for relevant memories, enriched with knowledge graph context.
+    ///
+    /// Uses vector similarity when an embedding driver is configured,
+    /// otherwise falls back to LIKE text matching.
     async fn search(
         &self,
         query: &str,
@@ -773,7 +808,18 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
         // Filter by agent to avoid cross-agent leakage
         let filter = Some(MemoryFilter::agent(agent_id));
-        let results = self.semantic.recall(query, limit, filter)?;
+
+        // Use vector search if embedding driver available
+        let results = if let Some(ref emb) = self.embedding {
+            if let Ok(qe) = emb.embed_one(query).await {
+                self.semantic
+                    .recall_with_embedding(query, limit, filter, Some(&qe))?
+            } else {
+                self.semantic.recall(query, limit, filter)?
+            }
+        } else {
+            self.semantic.recall(query, limit, filter)?
+        };
 
         let mut items: Vec<MemoryItem> = results
             .into_iter()
@@ -1188,10 +1234,23 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         // Create filter for this agent
         let filter = Some(MemoryFilter::agent(agent_id));
 
-        // Search across all memory levels using semantic store
-        let results = self
-            .semantic
-            .recall(query, self.config.max_retrieve, filter)?;
+        // Search across all memory levels — use vector search if available
+        let results = if let Some(ref emb) = self.embedding {
+            if let Ok(qe) = emb.embed_one(query).await {
+                self.semantic.recall_with_embedding(
+                    query,
+                    self.config.max_retrieve,
+                    filter,
+                    Some(&qe),
+                )?
+            } else {
+                self.semantic
+                    .recall(query, self.config.max_retrieve, filter)?
+            }
+        } else {
+            self.semantic
+                .recall(query, self.config.max_retrieve, filter)?
+        };
 
         Ok(results
             .into_iter()
