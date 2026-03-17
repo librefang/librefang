@@ -493,6 +493,20 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::delete(routes::delete_backup),
         )
         .route("/restore", axum::routing::post(routes::restore_backup))
+        // Task queue management endpoints (#184)
+        .route(
+            "/tasks/status",
+            axum::routing::get(routes::task_queue_status),
+        )
+        .route("/tasks/list", axum::routing::get(routes::task_queue_list))
+        .route(
+            "/tasks/{id}",
+            axum::routing::delete(routes::task_queue_delete),
+        )
+        .route(
+            "/tasks/{id}/retry",
+            axum::routing::post(routes::task_queue_retry),
+        )
         // Event webhook subscription endpoints (#185)
         .route(
             "/webhooks/events",
