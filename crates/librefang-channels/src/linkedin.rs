@@ -20,7 +20,7 @@ use zeroize::Zeroizing;
 
 const POLL_INTERVAL_SECS: u64 = 10;
 const MAX_MESSAGE_LEN: usize = 3000;
-const LINKEDIN_API_BASE: &str = "https://api.linkedin.com/v2";
+const LINKEDIN_API_BASE: &str = "https://api.linkedin.com/rest";
 
 /// LinkedIn Messaging channel adapter.
 ///
@@ -434,7 +434,7 @@ mod tests {
     #[test]
     fn test_linkedin_auth_headers() {
         let adapter = LinkedInAdapter::new("my-oauth-token".to_string(), "12345".to_string());
-        let builder = adapter.client.get("https://api.linkedin.com/v2/me");
+        let builder = adapter.client.get("https://api.linkedin.com/rest/me");
         let builder = adapter.auth_request(builder);
         let request = builder.build().unwrap();
         assert!(request.headers().contains_key("authorization"));
