@@ -146,7 +146,9 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/agents/{id}/files/{filename}",
-            axum::routing::get(routes::get_agent_file).put(routes::set_agent_file),
+            axum::routing::get(routes::get_agent_file)
+                .put(routes::set_agent_file)
+                .delete(routes::delete_agent_file),
         )
         .route(
             "/agents/{id}/metrics",
