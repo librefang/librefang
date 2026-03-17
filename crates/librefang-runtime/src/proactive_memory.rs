@@ -9,7 +9,9 @@
 
 use librefang_memory::{ProactiveMemoryConfig, ProactiveMemoryHooks, ProactiveMemoryStore};
 use librefang_types::error::LibreFangError;
-use librefang_types::memory::{ExtractionResult, MemoryExtractor, MemoryItem, MemoryLevel};
+use librefang_types::memory::{
+    ExtractionResult, MemoryAction, MemoryExtractor, MemoryFragment, MemoryItem, MemoryLevel,
+};
 use std::sync::Arc;
 use tracing::warn;
 
@@ -103,6 +105,24 @@ Example response:
 
 If nothing worth remembering, respond with: []"#;
 
+const DECISION_SYSTEM_PROMPT: &str = r#"You are a memory conflict resolution system. Given a NEW memory and a list of EXISTING memories, decide what action to take.
+
+Actions:
+- "ADD": The new memory is genuinely new information. No existing memory covers this.
+- "UPDATE": The new memory updates/supersedes an existing memory (e.g., user changed preference, corrected a fact). Return the ID of the memory to replace.
+- "NOOP": The new memory is a duplicate or already covered by an existing memory. Skip it.
+
+Guidelines:
+- If existing memory says "User prefers Python" and new says "User prefers Rust" → UPDATE (preference changed)
+- If existing memory says "User's name is John" and new says "User's name is John" → NOOP (duplicate)
+- If existing memory says "User works at Acme" and new says "User works at Google now" → UPDATE (fact changed)
+- If no existing memory is related → ADD
+
+Respond with a single JSON object:
+{"action": "ADD"} or {"action": "UPDATE", "existing_id": "<id>"} or {"action": "NOOP"}
+
+If nothing matches, default to ADD."#;
+
 /// LLM-powered memory extractor that uses a language model to identify
 /// important information from conversations.
 pub struct LlmMemoryExtractor {
@@ -167,6 +187,66 @@ impl MemoryExtractor for LlmMemoryExtractor {
         parse_llm_extraction_response(&text)
     }
 
+    /// LLM-powered conflict resolution: decide ADD/UPDATE/NOOP.
+    ///
+    /// Sends the new memory and existing candidates to the LLM for reasoning.
+    /// Falls back to the default heuristic if the LLM call fails.
+    async fn decide_action(
+        &self,
+        new_memory: &MemoryItem,
+        existing_memories: &[MemoryFragment],
+    ) -> librefang_types::error::LibreFangResult<MemoryAction> {
+        // If no existing memories, always ADD
+        if existing_memories.is_empty() {
+            return Ok(MemoryAction::Add);
+        }
+
+        // Build the context for the LLM
+        let mut existing_text = String::new();
+        for (i, mem) in existing_memories.iter().enumerate() {
+            existing_text.push_str(&format!(
+                "{}. [ID: {}] \"{}\"\n",
+                i + 1,
+                mem.id,
+                mem.content
+            ));
+        }
+
+        let user_msg = format!(
+            "NEW MEMORY: \"{}\"\n\nEXISTING MEMORIES:\n{}",
+            new_memory.content, existing_text
+        );
+
+        let request = crate::llm_driver::CompletionRequest {
+            model: self.model.clone(),
+            messages: vec![
+                librefang_types::message::Message::system(DECISION_SYSTEM_PROMPT),
+                librefang_types::message::Message::user(user_msg),
+            ],
+            tools: Vec::new(),
+            max_tokens: 256,
+            temperature: 0.0,
+            system: Some(DECISION_SYSTEM_PROMPT.to_string()),
+            thinking: None,
+            prompt_caching: false,
+        };
+
+        match self.driver.complete(request).await {
+            Ok(response) => {
+                let text = response.text();
+                parse_decision_response(&text, existing_memories)
+            }
+            Err(e) => {
+                tracing::warn!("LLM decision call failed, falling back to heuristic: {e}");
+                // Fall back to default heuristic
+                let default_extractor = librefang_types::memory::DefaultMemoryExtractor;
+                default_extractor
+                    .decide_action(new_memory, existing_memories)
+                    .await
+            }
+        }
+    }
+
     fn format_context(&self, memories: &[MemoryItem]) -> String {
         if memories.is_empty() {
             return String::new();
@@ -182,6 +262,52 @@ impl MemoryExtractor for LlmMemoryExtractor {
             context.push_str(&format!("- {} {}\n", level_str, mem.content));
         }
         context
+    }
+}
+
+/// Parse the LLM's decision response into a MemoryAction.
+fn parse_decision_response(
+    text: &str,
+    existing_memories: &[MemoryFragment],
+) -> librefang_types::error::LibreFangResult<MemoryAction> {
+    // Strip markdown code blocks
+    let json_str = text
+        .trim()
+        .strip_prefix("```json")
+        .or_else(|| text.trim().strip_prefix("```"))
+        .unwrap_or(text.trim());
+    let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+
+    let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
+
+    match parsed.get("action").and_then(|v| v.as_str()) {
+        Some("NOOP") | Some("noop") => Ok(MemoryAction::Noop),
+        Some("UPDATE") | Some("update") => {
+            let existing_id = parsed
+                .get("existing_id")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            // Validate the ID exists in our candidates
+            if let Some(ref id) = existing_id {
+                let valid = existing_memories.iter().any(|m| m.id.to_string() == *id);
+                if valid {
+                    return Ok(MemoryAction::Update {
+                        existing_id: id.clone(),
+                    });
+                }
+            }
+
+            // If ID is invalid/missing, use the first existing memory
+            if let Some(first) = existing_memories.first() {
+                Ok(MemoryAction::Update {
+                    existing_id: first.id.to_string(),
+                })
+            } else {
+                Ok(MemoryAction::Add)
+            }
+        }
+        _ => Ok(MemoryAction::Add),
     }
 }
 

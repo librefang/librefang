@@ -29,8 +29,9 @@ use async_trait::async_trait;
 use librefang_types::agent::AgentId;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
-    DefaultMemoryExtractor, ExtractionResult, MemoryExtractor, MemoryFilter, MemoryItem,
-    MemoryLevel, MemorySource, ProactiveMemory, ProactiveMemoryConfig, ProactiveMemoryHooks,
+    DefaultMemoryExtractor, ExtractionResult, MemoryAction, MemoryAddResult, MemoryExtractor,
+    MemoryFilter, MemoryId, MemoryItem, MemoryLevel, MemorySource, ProactiveMemory,
+    ProactiveMemoryConfig, ProactiveMemoryHooks,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -217,6 +218,79 @@ impl ProactiveMemoryStore {
         Ok(items)
     }
 
+    /// Core mem0 decision flow: search for similar memories, decide action, execute.
+    ///
+    /// Returns `None` if the decision was NOOP (skip duplicate).
+    async fn add_with_decision(
+        &self,
+        agent_id: AgentId,
+        item: &MemoryItem,
+    ) -> LibreFangResult<Option<MemoryAddResult>> {
+        // Search for similar existing memories (top 5 candidates)
+        let existing =
+            self.semantic
+                .recall(&item.content, 5, Some(MemoryFilter::agent(agent_id)))?;
+
+        // Ask the extractor to decide: ADD, UPDATE, or NOOP
+        let action = self.extractor.decide_action(item, &existing).await?;
+
+        match action {
+            MemoryAction::Noop => {
+                tracing::debug!(
+                    "Memory decision: NOOP (skip duplicate): {}",
+                    truncate_for_log(&item.content, 80)
+                );
+                Ok(None)
+            }
+            MemoryAction::Add => {
+                let mut metadata = item.metadata.clone();
+                metadata.insert("category".to_string(), serde_json::json!(&item.category));
+                self.semantic.remember(
+                    agent_id,
+                    &item.content,
+                    MemorySource::Conversation,
+                    item.level.scope_str(),
+                    metadata,
+                )?;
+                tracing::debug!(
+                    "Memory decision: ADD new: {}",
+                    truncate_for_log(&item.content, 80)
+                );
+                Ok(Some(MemoryAddResult {
+                    item: item.clone(),
+                    action: MemoryAction::Add,
+                    replaced_id: None,
+                }))
+            }
+            MemoryAction::Update { ref existing_id } => {
+                // Parse the old memory ID and update in-place
+                let old_uuid = uuid::Uuid::parse_str(existing_id).map_err(|e| {
+                    LibreFangError::Internal(format!("Invalid existing memory ID: {e}"))
+                })?;
+                let old_mid = MemoryId(old_uuid);
+
+                let mut metadata = item.metadata.clone();
+                metadata.insert("category".to_string(), serde_json::json!(&item.category));
+                metadata.insert("updated_from".to_string(), serde_json::json!(existing_id));
+
+                // Update content in-place (preserves ID, agent, scope, access stats)
+                self.semantic
+                    .update_content(old_mid, &item.content, Some(metadata))?;
+
+                tracing::debug!(
+                    "Memory decision: UPDATE {} -> {}",
+                    existing_id,
+                    truncate_for_log(&item.content, 80)
+                );
+                Ok(Some(MemoryAddResult {
+                    item: item.clone(),
+                    action: action.clone(),
+                    replaced_id: Some(existing_id.clone()),
+                }))
+            }
+        }
+    }
+
     /// Format retrieved memories into a context string for prompt injection.
     pub fn format_context(&self, memories: &[MemoryItem]) -> String {
         self.extractor.format_context(memories)
@@ -385,10 +459,15 @@ impl ProactiveMemory for ProactiveMemoryStore {
             .collect())
     }
 
-    /// Add memories with automatic extraction.
+    /// Add memories with automatic extraction and conflict resolution (mem0-style).
     ///
-    /// Uses the configured extractor to break down messages into individual memories.
-    /// Returns the extracted items so the caller knows what was stored.
+    /// Core flow:
+    /// 1. Extract memories from messages using configured extractor
+    /// 2. For each extracted memory, search for similar existing memories
+    /// 3. Let extractor decide: ADD (new), UPDATE (replace old), or NOOP (skip)
+    /// 4. Execute the decision
+    ///
+    /// Returns the list of memories that were actually stored or updated.
     async fn add(
         &self,
         messages: &[serde_json::Value],
@@ -400,22 +479,9 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
         let agent_id = Self::parse_agent_id(user_id)?;
 
-        // Try to extract structured memories first
+        // Step 1: Extract structured memories
         let extraction = self.extractor.extract_memories(messages).await?;
-        if extraction.has_content {
-            for item in &extraction.memories {
-                let mut metadata = item.metadata.clone();
-                metadata.insert("category".to_string(), serde_json::json!(&item.category));
-                self.semantic.remember(
-                    agent_id,
-                    &item.content,
-                    MemorySource::Conversation,
-                    item.level.scope_str(),
-                    metadata,
-                )?;
-            }
-            Ok(extraction.memories)
-        } else {
+        if !extraction.has_content {
             // Fallback: store raw message content as session memory
             let content = messages
                 .iter()
@@ -435,9 +501,19 @@ impl ProactiveMemory for ProactiveMemoryStore {
                 HashMap::new(),
             )?;
 
-            // Return a synthetic MemoryItem for the raw content
-            Ok(vec![MemoryItem::new(content, MemoryLevel::Session)])
+            return Ok(vec![MemoryItem::new(content, MemoryLevel::Session)]);
         }
+
+        // Step 2-4: For each extracted memory, decide and execute
+        let mut results = Vec::new();
+        for item in &extraction.memories {
+            let result = self.add_with_decision(agent_id, item).await?;
+            if let Some(r) = result {
+                results.push(r.item);
+            }
+        }
+
+        Ok(results)
     }
 
     /// Add memories at a specific memory level.
@@ -522,12 +598,23 @@ impl ProactiveMemory for ProactiveMemoryStore {
     }
 }
 
+/// Truncate a string for log messages.
+fn truncate_for_log(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max])
+    }
+}
+
 #[async_trait]
 impl ProactiveMemoryHooks for ProactiveMemoryStore {
-    /// Extract and store important information after agent execution.
+    /// Extract and store important information after agent execution (mem0-style).
     ///
-    /// Uses the configured MemoryExtractor (default: rule-based, can be LLM-powered)
-    /// to identify important information, then stores extracted items.
+    /// Uses the full decision flow:
+    /// 1. Extract memories from conversation
+    /// 2. For each, search existing + decide ADD/UPDATE/NOOP
+    /// 3. Execute decisions
     async fn auto_memorize(
         &self,
         user_id: &str,
@@ -543,48 +630,32 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
 
         let agent_id = Self::parse_agent_id(user_id)?;
 
-        // Use the extractor to extract memories (LLM-powered if configured)
+        // Extract memories using configured extractor (LLM or rule-based)
         let extraction_result = self.extractor.extract_memories(conversation).await?;
 
-        // Store extracted memories, skipping near-duplicates.
+        // Apply decision flow for each extracted memory
+        let mut stored_memories = Vec::new();
         for item in &extraction_result.memories {
-            // Dedup: check if very similar content already exists for this agent.
-            // Uses text search to find potential duplicates, then checks similarity.
-            let existing =
-                self.semantic
-                    .recall(&item.content, 1, Some(MemoryFilter::agent(agent_id)))?;
-            if let Some(top) = existing.first() {
-                // Exact match — skip
-                if top.content == item.content {
-                    continue;
-                }
-                // Substring containment — if existing memory contains this or vice versa
-                let new_lower = item.content.to_lowercase();
-                let old_lower = top.content.to_lowercase();
-                if old_lower.contains(&new_lower) || new_lower.contains(&old_lower) {
-                    tracing::debug!(
-                        "Skipping near-duplicate memory (substring match): {}",
-                        item.content
-                    );
-                    continue;
+            // Tag with auto_memorize metadata
+            let mut enriched = item.clone();
+            enriched
+                .metadata
+                .insert("auto_memorize".to_string(), serde_json::json!(true));
+
+            match self.add_with_decision(agent_id, &enriched).await {
+                Ok(Some(result)) => stored_memories.push(result.item),
+                Ok(None) => {} // NOOP
+                Err(e) => {
+                    tracing::warn!("auto_memorize decision failed for memory: {}", e);
                 }
             }
-
-            let mut metadata = item.metadata.clone();
-            metadata.insert("memory_id".to_string(), serde_json::json!(&item.id));
-            metadata.insert("category".to_string(), serde_json::json!(&item.category));
-            metadata.insert("auto_memorize".to_string(), serde_json::json!(true));
-
-            self.semantic.remember(
-                agent_id,
-                &item.content,
-                MemorySource::Inference,
-                item.level.scope_str(),
-                metadata,
-            )?;
         }
 
-        Ok(extraction_result)
+        Ok(ExtractionResult {
+            has_content: !stored_memories.is_empty(),
+            memories: stored_memories,
+            trigger: extraction_result.trigger,
+        })
     }
 
     /// Proactively retrieve relevant context before agent execution.

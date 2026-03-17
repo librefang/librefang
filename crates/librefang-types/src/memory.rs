@@ -171,7 +171,36 @@ pub struct ExtractionResult {
     pub trigger: String,
 }
 
-/// Trait for LLM-powered memory extraction.
+/// Result from a single memory add operation, including the decision taken.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryAddResult {
+    /// The memory item that was stored (or the updated version).
+    pub item: MemoryItem,
+    /// What action was taken.
+    pub action: MemoryAction,
+    /// If updated, the ID of the old memory that was replaced.
+    pub replaced_id: Option<String>,
+}
+
+/// Action to take when a new memory conflicts with an existing one.
+///
+/// This is the core mem0 decision: when we extract a new memory, should we
+/// add it as new, update an existing one, or skip it?
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "action")]
+pub enum MemoryAction {
+    /// Store as a new memory (no conflict with existing).
+    Add,
+    /// Update an existing memory (new info supersedes old).
+    Update {
+        /// ID of the existing memory to replace.
+        existing_id: String,
+    },
+    /// Skip — duplicate or subsumed by existing memory.
+    Noop,
+}
+
+/// Trait for LLM-powered memory extraction and conflict resolution.
 ///
 /// This trait allows the runtime to inject an LLM client for memory extraction
 /// without creating circular dependencies between librefang-memory and librefang-runtime.
@@ -192,11 +221,82 @@ pub trait MemoryExtractor: Send + Sync {
         messages: &[serde_json::Value],
     ) -> crate::error::LibreFangResult<ExtractionResult>;
 
+    /// Decide what to do with a new memory given existing similar memories.
+    ///
+    /// This is the core mem0 decision flow:
+    /// - **Add**: No conflict, store as new memory.
+    /// - **Update(id)**: New info supersedes existing memory `id`.
+    /// - **Noop**: Duplicate or already subsumed by existing memory.
+    ///
+    /// Default implementation uses simple heuristic (substring matching).
+    /// LLM-powered implementations should use the model to reason about conflicts.
+    async fn decide_action(
+        &self,
+        new_memory: &MemoryItem,
+        existing_memories: &[MemoryFragment],
+    ) -> crate::error::LibreFangResult<MemoryAction> {
+        // Default heuristic: substring-based dedup
+        for existing in existing_memories {
+            let new_lower = new_memory.content.to_lowercase();
+            let old_lower = existing.content.to_lowercase();
+
+            // Exact match → skip
+            if new_lower == old_lower {
+                return Ok(MemoryAction::Noop);
+            }
+
+            // Existing already contains new info → skip
+            if old_lower.contains(&new_lower) {
+                return Ok(MemoryAction::Noop);
+            }
+
+            // New info contains old → update (new is more complete)
+            if new_lower.contains(&old_lower) {
+                return Ok(MemoryAction::Update {
+                    existing_id: existing.id.to_string(),
+                });
+            }
+
+            // Same category and high textual overlap → likely an update
+            let new_cat = new_memory.category.as_deref().unwrap_or("");
+            let old_cat = existing
+                .metadata
+                .get("category")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !new_cat.is_empty() && new_cat == old_cat {
+                let similarity = text_similarity(&new_lower, &old_lower);
+                if similarity > 0.6 {
+                    return Ok(MemoryAction::Update {
+                        existing_id: existing.id.to_string(),
+                    });
+                }
+            }
+        }
+        Ok(MemoryAction::Add)
+    }
+
     /// Generate a search context from retrieved memories.
     ///
     /// Takes retrieved memory items and formats them for injection
     /// into the agent's context prompt.
     fn format_context(&self, memories: &[MemoryItem]) -> String;
+}
+
+/// Simple word-overlap similarity (Jaccard index on words).
+fn text_similarity(a: &str, b: &str) -> f32 {
+    let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
+    let words_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
+    if words_a.is_empty() && words_b.is_empty() {
+        return 1.0;
+    }
+    let intersection = words_a.intersection(&words_b).count();
+    let union = words_a.union(&words_b).count();
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f32 / union as f32
+    }
 }
 
 /// Default implementation of MemoryExtractor that uses simple rule-based extraction.

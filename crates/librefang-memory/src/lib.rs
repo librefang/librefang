@@ -28,8 +28,9 @@ pub use substrate::MemorySubstrate;
 
 // Re-export types for convenience
 pub use librefang_types::memory::{
-    ExtractionResult, MemoryFilter, MemoryFragment, MemoryId, MemoryItem, MemoryLevel,
-    MemorySource, ProactiveMemory, ProactiveMemoryConfig, ProactiveMemoryHooks,
+    ExtractionResult, MemoryAction, MemoryAddResult, MemoryFilter, MemoryFragment, MemoryId,
+    MemoryItem, MemoryLevel, MemorySource, ProactiveMemory, ProactiveMemoryConfig,
+    ProactiveMemoryHooks,
 };
 
 // Re-export proactive memory store

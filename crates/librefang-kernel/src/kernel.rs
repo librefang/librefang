@@ -1038,12 +1038,13 @@ impl LibreFangKernel {
         // otherwise fall back to rule-based extraction.
         {
             let pm_config = kernel.config.proactive_memory.clone();
-            let store = if let Some(ref model) = pm_config.extraction_model {
+            let extraction_model = pm_config.extraction_model.clone();
+            let store = if let Some(model) = extraction_model {
                 librefang_runtime::proactive_memory::init_proactive_memory_with_llm(
                     Arc::clone(&kernel.memory),
                     pm_config,
                     Arc::clone(&kernel.default_driver),
-                    model.clone(),
+                    model,
                 )
             } else {
                 librefang_runtime::proactive_memory::init_proactive_memory(

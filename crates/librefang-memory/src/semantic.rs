@@ -290,6 +290,39 @@ impl SemanticStore {
         Ok(())
     }
 
+    /// Update the content (and optionally metadata) of an existing memory in-place.
+    ///
+    /// Preserves the original ID, agent_id, scope, source, and access stats.
+    /// Updates `accessed_at` to now.
+    pub fn update_content(
+        &self,
+        id: MemoryId,
+        new_content: &str,
+        new_metadata: Option<HashMap<String, serde_json::Value>>,
+    ) -> LibreFangResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let now = Utc::now().to_rfc3339();
+        if let Some(meta) = new_metadata {
+            let meta_str = serde_json::to_string(&meta)
+                .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+            conn.execute(
+                "UPDATE memories SET content = ?1, metadata = ?2, accessed_at = ?3, embedding = NULL WHERE id = ?4 AND deleted = 0",
+                rusqlite::params![new_content, meta_str, now, id.0.to_string()],
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        } else {
+            conn.execute(
+                "UPDATE memories SET content = ?1, accessed_at = ?2, embedding = NULL WHERE id = ?3 AND deleted = 0",
+                rusqlite::params![new_content, now, id.0.to_string()],
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Update the embedding for an existing memory.
     pub fn update_embedding(&self, id: MemoryId, embedding: &[f32]) -> LibreFangResult<()> {
         let conn = self
