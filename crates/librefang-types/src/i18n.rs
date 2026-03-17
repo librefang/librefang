@@ -239,7 +239,7 @@ mod tests {
         let t = ErrorTranslator::new("en");
         let result = t.t_args("api-error-template-not-found", &[("name", "my-agent")]);
         // Fluent may produce ASCII or Unicode curly quotes depending on platform
-        let normalized = result.replace('\u{2018}', "'").replace('\u{2019}', "'");
+        let normalized = result.replace(['\u{2018}', '\u{2019}'], "'");
         assert_eq!(normalized, "Template 'my-agent' not found");
     }
 

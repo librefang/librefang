@@ -1,6 +1,7 @@
 //! Agent CRUD, messaging, sessions, files, and upload handlers.
 
 use super::AppState;
+use crate::middleware::RequestLanguage;
 use crate::types::*;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -10,6 +11,7 @@ use dashmap::DashMap;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
+use librefang_types::i18n::{self, ErrorTranslator};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
@@ -38,6 +40,7 @@ struct ManifestError {
 async fn resolve_manifest(
     state: &AppState,
     req: &SpawnRequest,
+    lang: &'static str,
 ) -> Result<ResolvedManifest, ManifestError> {
     // Resolve template name → manifest_toml
     let manifest_toml = if req.manifest_toml.trim().is_empty() {
@@ -47,8 +50,9 @@ async fn resolve_manifest(
                 .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
                 .collect();
             if safe_name.is_empty() || safe_name != *tmpl_name {
+                let t = ErrorTranslator::new(lang);
                 return Err(ManifestError {
-                    message: "Invalid template name".into(),
+                    message: t.t("api-error-template-invalid-name"),
                 });
             }
             let tmpl_path = state
@@ -62,14 +66,16 @@ async fn resolve_manifest(
             match tokio::fs::read_to_string(&tmpl_path).await {
                 Ok(content) => content,
                 Err(_) => {
+                    let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
-                        message: format!("Template '{}' not found", safe_name),
+                        message: t.t_args("api-error-template-not-found", &[("name", &safe_name)]),
                     });
                 }
             }
         } else {
+            let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
-                message: "Either 'manifest_toml' or 'template' is required".into(),
+                message: t.t("api-error-template-required"),
             });
         }
     } else {
@@ -78,8 +84,9 @@ async fn resolve_manifest(
 
     // Size guard
     if manifest_toml.len() > MAX_MANIFEST_SIZE {
+        let t = ErrorTranslator::new(lang);
         return Err(ManifestError {
-            message: "Manifest too large (max 1MB)".into(),
+            message: t.t("api-error-manifest-too-large"),
         });
     }
 
@@ -89,8 +96,9 @@ async fn resolve_manifest(
             Ok(verified_toml) => {
                 if verified_toml.trim() != manifest_toml.trim() {
                     tracing::warn!("Signed manifest content does not match manifest_toml");
+                    let t = ErrorTranslator::new(lang);
                     return Err(ManifestError {
-                        message: "Signed manifest content does not match manifest_toml".into(),
+                        message: t.t("api-error-manifest-signature-mismatch"),
                     });
                 }
             }
@@ -102,8 +110,9 @@ async fn resolve_manifest(
                     "manifest signature verification failed",
                     format!("error: {e}"),
                 );
+                let t = ErrorTranslator::new(lang);
                 return Err(ManifestError {
-                    message: "Manifest signature verification failed".into(),
+                    message: t.t("api-error-manifest-signature-failed"),
                 });
             }
         }
@@ -113,8 +122,10 @@ async fn resolve_manifest(
     let manifest: AgentManifest = match toml::from_str(&manifest_toml) {
         Ok(m) => m,
         Err(e) => {
+            let _ = e;
+            let t = ErrorTranslator::new(lang);
             return Err(ManifestError {
-                message: format!("Invalid manifest: {e}"),
+                message: t.t("api-error-manifest-invalid-format"),
             });
         }
     };
@@ -136,9 +147,12 @@ async fn resolve_manifest(
 )]
 pub async fn spawn_agent(
     State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<SpawnRequest>,
 ) -> impl IntoResponse {
-    let resolved = match resolve_manifest(&state, &req).await {
+    let l = super::resolve_lang(lang.as_ref());
+
+    let resolved = match resolve_manifest(&state, &req, l).await {
         Ok(r) => r,
         Err(e) => {
             // Map specific errors to appropriate HTTP status codes
@@ -165,9 +179,10 @@ pub async fn spawn_agent(
         ),
         Err(e) => {
             tracing::warn!("Spawn failed: {e}");
+            let t = ErrorTranslator::new(l);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Agent spawn failed"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-spawn-failed")})),
             )
         }
     }
@@ -218,7 +233,7 @@ pub async fn bulk_create_agents(
     let mut results: Vec<BulkCreateResult> = Vec::with_capacity(req.agents.len());
 
     for (index, spawn_req) in req.agents.iter().enumerate() {
-        match resolve_manifest(&state, spawn_req).await {
+        match resolve_manifest(&state, spawn_req, i18n::DEFAULT_LANGUAGE).await {
             Err(e) => {
                 results.push(BulkCreateResult {
                     index,
@@ -735,12 +750,24 @@ pub async fn send_message(
     Path(id): Path<String>,
     Json(req): Json<MessageRequest>,
 ) -> impl IntoResponse {
+    // Pre-translate error messages before the `.await` point below.
+    // `ErrorTranslator` wraps a `FluentBundle` which is `!Send`, so it must
+    // not be held across an await boundary (axum requires `Send` futures).
+    let (err_invalid_id, err_too_large, err_not_found) = {
+        let t = ErrorTranslator::new(i18n::DEFAULT_LANGUAGE);
+        (
+            t.t("api-error-agent-invalid-id"),
+            t.t("api-error-message-too-large"),
+            t.t("api-error-agent-not-found"),
+        )
+    };
+
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": err_invalid_id})),
             );
         }
     };
@@ -750,7 +777,7 @@ pub async fn send_message(
     if req.message.len() > MAX_MESSAGE_SIZE {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
+            Json(serde_json::json!({"error": err_too_large})),
         );
     }
 
@@ -758,7 +785,7 @@ pub async fn send_message(
     if state.kernel.registry.get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
+            Json(serde_json::json!({"error": err_not_found})),
         );
     }
 

@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "0.5.2-20260316"
+    "version": "0.5.5-20260317"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -4591,6 +4591,39 @@
                 "schema": {}
               }
             }
+          }
+        }
+      }
+    },
+    "/api/peers/{id}": {
+      "get": {
+        "tags": [
+          "network"
+        ],
+        "summary": "GET /api/peers/{id} — Get a single peer by node ID.",
+        "operationId": "get_peer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Peer node ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Peer details",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Peer not found"
           }
         }
       }

@@ -24,10 +24,31 @@ pub use skills::*;
 pub use system::*;
 pub use workflows::*;
 
+use crate::middleware::RequestLanguage;
 use dashmap::DashMap;
 use librefang_kernel::LibreFangKernel;
+use librefang_types::i18n::{self, ErrorTranslator};
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Extract an [`ErrorTranslator`] from the request extensions.
+///
+/// Uses the language resolved by the `accept_language` middleware, or falls
+/// back to English if the middleware hasn't run (e.g. in tests).
+#[allow(dead_code)]
+pub(crate) fn translator_from_extensions(extensions: &axum::http::Extensions) -> ErrorTranslator {
+    let lang = extensions
+        .get::<RequestLanguage>()
+        .map(|rl| rl.0)
+        .unwrap_or(i18n::DEFAULT_LANGUAGE);
+    ErrorTranslator::new(lang)
+}
+
+/// Resolve the client language from an optional `RequestLanguage` extension.
+#[allow(dead_code)]
+pub(crate) fn resolve_lang(lang: Option<&axum::Extension<RequestLanguage>>) -> &'static str {
+    lang.map(|l| l.0 .0).unwrap_or(i18n::DEFAULT_LANGUAGE)
+}
 
 /// Shared application state.
 ///
