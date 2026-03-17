@@ -390,7 +390,7 @@ impl ChannelAdapter for MessengerAdapter {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
             }
-            ChannelContent::Image { url, caption } => {
+            ChannelContent::Image { url, caption, .. } => {
                 // Send image attachment via Messenger
                 let api_url = format!(
                     "{}/me/messages?access_token={}",

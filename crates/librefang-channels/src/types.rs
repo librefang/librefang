@@ -45,6 +45,12 @@ pub enum ChannelContent {
     Image {
         url: String,
         caption: Option<String>,
+        /// MIME type of the image (e.g. `image/jpeg`, `image/png`).
+        /// When present, this is passed through to the vision/LLM layer so that
+        /// the correct media type is used instead of the generic
+        /// `application/octet-stream` default.
+        #[serde(default)]
+        mime_type: Option<String>,
     },
     File {
         url: String,

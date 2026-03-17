@@ -257,7 +257,7 @@ impl ChannelAdapter for WhatsAppAdapter {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
             }
-            ChannelContent::Image { url, caption } => {
+            ChannelContent::Image { url, caption, .. } => {
                 let body = serde_json::json!({
                     "messaging_product": "whatsapp",
                     "to": user.platform_id,

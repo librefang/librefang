@@ -394,7 +394,7 @@ impl ChannelAdapter for ViberAdapter {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
             }
-            ChannelContent::Image { url, caption } => {
+            ChannelContent::Image { url, caption, .. } => {
                 let mut sender = serde_json::json!({
                     "name": self.sender_name,
                 });

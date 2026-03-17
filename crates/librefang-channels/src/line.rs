@@ -459,7 +459,7 @@ impl ChannelAdapter for LineAdapter {
             ChannelContent::Text(text) => {
                 self.api_push_message(&user.platform_id, &text).await?;
             }
-            ChannelContent::Image { url, caption } => {
+            ChannelContent::Image { url, caption, .. } => {
                 // LINE supports image messages with a preview
                 let body = serde_json::json!({
                     "to": user.platform_id,

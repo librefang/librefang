@@ -490,7 +490,7 @@ impl ChannelAdapter for RevoltAdapter {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
             }
-            ChannelContent::Image { url, caption } => {
+            ChannelContent::Image { url, caption, .. } => {
                 // Revolt supports embedding images in messages via markdown
                 let markdown = if let Some(cap) = caption {
                     format!("![{}]({})", cap, url)

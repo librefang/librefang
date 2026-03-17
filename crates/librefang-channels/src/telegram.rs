@@ -506,7 +506,7 @@ impl TelegramAdapter {
             ChannelContent::Text(text) => {
                 self.api_send_message(chat_id, &text, thread_id).await?;
             }
-            ChannelContent::Image { url, caption } => {
+            ChannelContent::Image { url, caption, .. } => {
                 self.api_send_photo(chat_id, &url, caption.as_deref(), thread_id)
                     .await?;
             }
@@ -914,6 +914,31 @@ async fn telegram_get_file_url(
     Some(format!("{api_base_url}/file/bot{token}/{file_path}"))
 }
 
+/// Detect image MIME type from a Telegram file path or download URL.
+///
+/// Telegram file paths typically look like `photos/file_42.jpg` so the
+/// extension is a reliable signal. Falls back to `None` if no known
+/// image extension is found, letting downstream code use magic-byte
+/// detection or a safe default.
+fn mime_type_from_telegram_path(url_or_path: &str) -> Option<String> {
+    let lower = url_or_path.to_ascii_lowercase();
+    if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        Some("image/jpeg".to_string())
+    } else if lower.ends_with(".png") {
+        Some("image/png".to_string())
+    } else if lower.ends_with(".gif") {
+        Some("image/gif".to_string())
+    } else if lower.ends_with(".webp") {
+        Some("image/webp".to_string())
+    } else if lower.ends_with(".bmp") {
+        Some("image/bmp".to_string())
+    } else if lower.ends_with(".tiff") || lower.ends_with(".tif") {
+        Some("image/tiff".to_string())
+    } else {
+        None
+    }
+}
+
 async fn parse_telegram_update(
     update: &serde_json::Value,
     allowed_users: &[String],
@@ -1024,7 +1049,14 @@ async fn parse_telegram_update(
             .unwrap_or("");
         let caption = message["caption"].as_str().map(String::from);
         match telegram_get_file_url(token, client, file_id, api_base_url).await {
-            Some(url) => ChannelContent::Image { url, caption },
+            Some(url) => {
+                let mime_type = mime_type_from_telegram_path(&url);
+                ChannelContent::Image {
+                    url,
+                    caption,
+                    mime_type,
+                }
+            }
             None => ChannelContent::Text(format!(
                 "[Photo received{}]",
                 caption

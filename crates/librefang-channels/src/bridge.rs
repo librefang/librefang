@@ -700,9 +700,10 @@ async fn dispatch_message(
     if let ChannelContent::Image {
         ref url,
         ref caption,
+        ref mime_type,
     } = message.content
     {
-        let blocks = download_image_to_blocks(url, caption.as_deref()).await;
+        let blocks = download_image_to_blocks(url, caption.as_deref(), mime_type.as_deref()).await;
         if blocks
             .iter()
             .any(|b| matches!(b, ContentBlock::Image { .. }))
@@ -730,6 +731,7 @@ async fn dispatch_message(
         ChannelContent::Image {
             ref url,
             ref caption,
+            ..
         } => {
             // Fallback when image download failed
             match caption {
@@ -1199,7 +1201,15 @@ fn media_type_from_url(url: &str) -> String {
 /// Returns a `Vec<ContentBlock>` containing an image block (base64-encoded) and
 /// optionally a text block for the caption. If the download fails, returns a
 /// text-only block describing the failure.
-async fn download_image_to_blocks(url: &str, caption: Option<&str>) -> Vec<ContentBlock> {
+///
+/// `mime_type_hint` is an optional MIME type pre-detected by the channel adapter
+/// (e.g. from a Telegram file path). When present it takes priority over the
+/// HTTP Content-Type header because many APIs return `application/octet-stream`.
+async fn download_image_to_blocks(
+    url: &str,
+    caption: Option<&str>,
+    mime_type_hint: Option<&str>,
+) -> Vec<ContentBlock> {
     use base64::Engine;
 
     // 5 MB limit to prevent memory abuse from oversized images
@@ -1238,11 +1248,15 @@ async fn download_image_to_blocks(url: &str, caption: Option<&str>) -> Vec<Conte
         }
     };
 
-    // Three-tier media type detection:
-    // 1. Trusted Content-Type header (only if image/*)
-    // 2. Magic byte sniffing (most reliable for binary data)
-    // 3. URL extension fallback
-    let media_type = header_type
+    // Four-tier media type detection:
+    // 1. Adapter-provided hint (e.g. Telegram file path extension) — most
+    //    reliable because many APIs return application/octet-stream in headers
+    // 2. Trusted Content-Type header (only if image/*)
+    // 3. Magic byte sniffing (most reliable for binary data)
+    // 4. URL extension fallback
+    let media_type = mime_type_hint
+        .map(|s| s.to_string())
+        .or(header_type)
         .unwrap_or_else(|| detect_image_magic(&bytes).unwrap_or_else(|| media_type_from_url(url)));
 
     if bytes.len() > MAX_IMAGE_BYTES {

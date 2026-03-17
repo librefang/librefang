@@ -7111,6 +7111,7 @@ impl KernelHandle for LibreFangKernel {
             "image" => librefang_channels::types::ChannelContent::Image {
                 url: media_url.to_string(),
                 caption: caption.map(|s| s.to_string()),
+                mime_type: None,
             },
             "file" => librefang_channels::types::ChannelContent::File {
                 url: media_url.to_string(),
