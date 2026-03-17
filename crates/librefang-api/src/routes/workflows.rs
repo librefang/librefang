@@ -137,6 +137,62 @@ pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResp
     Json(list)
 }
 
+/// GET /api/workflows/:id — Get a single workflow by ID.
+#[utoipa::path(
+    get,
+    path = "/api/workflows/{id}",
+    tag = "workflows",
+    params(("id" = String, Path, description = "Workflow ID")),
+    responses(
+        (status = 200, description = "Workflow details", body = serde_json::Value),
+        (status = 404, description = "Workflow not found")
+    )
+)]
+pub async fn get_workflow(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let workflow_id = WorkflowId(match id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid workflow ID"})),
+            );
+        }
+    });
+
+    match state.kernel.workflows.get_workflow(workflow_id).await {
+        Some(w) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": w.id.to_string(),
+                "name": w.name,
+                "description": w.description,
+                "steps": w.steps.iter().map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "agent": match &s.agent {
+                            StepAgent::ById { id } => serde_json::json!({"agent_id": id}),
+                            StepAgent::ByName { name } => serde_json::json!({"agent_name": name}),
+                        },
+                        "prompt_template": s.prompt_template,
+                        "mode": format!("{:?}", s.mode),
+                        "timeout_secs": s.timeout_secs,
+                        "error_mode": format!("{:?}", s.error_mode),
+                        "output_var": s.output_var,
+                    })
+                }).collect::<Vec<_>>(),
+                "created_at": w.created_at.to_rfc3339(),
+            })),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("Workflow '{}' not found", id)})),
+        ),
+    }
+}
+
 /// POST /api/workflows/:id/run — Execute a workflow.
 #[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "Workflow run started", body = serde_json::Value)))]
 pub async fn run_workflow(
