@@ -1412,6 +1412,99 @@ weak_aliases = ["changelog"]
         assert!(with.score >= MIN_HAND_SCORE);
     }
 
+    #[test]
+    fn test_semantic_fallback_routes_chinese_to_collector() {
+        // Chinese input: no English keyword match → score 0 without semantic
+        let without = hand("帮我监控这个网站的变更");
+        assert_eq!(
+            without.hand_id, None,
+            "Chinese should not match English keywords"
+        );
+
+        // With embedding similarity: "帮我监控这个网站的变更" would be semantically
+        // close to collector's description "monitors any target continuously with
+        // change detection". Simulated here with a high cosine score.
+        let mut scores = HashMap::new();
+        scores.insert("collector".to_string(), 0.85);
+        scores.insert("browser".to_string(), 0.3);
+        let with = auto_select_hand("帮我监控这个网站的变更", Some(&scores));
+        assert_eq!(with.hand_id, Some("collector".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_fallback_routes_japanese_to_trader() {
+        // Japanese: "株式取引のポートフォリオを確認して" (check stock trading portfolio)
+        let without = hand("株式取引のポートフォリオを確認して");
+        assert_eq!(without.hand_id, None);
+
+        let mut scores = HashMap::new();
+        scores.insert("trader".to_string(), 0.82);
+        scores.insert("analytics".to_string(), 0.25);
+        let with = auto_select_hand("株式取引のポートフォリオを確認して", Some(&scores));
+        assert_eq!(with.hand_id, Some("trader".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_fallback_routes_korean_to_researcher() {
+        // Korean: "이 주제에 대해 심층 연구를 해주세요" (do deep research on this topic)
+        let mut scores = HashMap::new();
+        scores.insert("researcher".to_string(), 0.88);
+        let with = auto_select_hand("이 주제에 대해 심층 연구를 해주세요", Some(&scores));
+        assert_eq!(with.hand_id, Some("researcher".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_low_similarity_does_not_match() {
+        // All scores below threshold: similarity too low to trigger routing
+        let mut scores = HashMap::new();
+        scores.insert("collector".to_string(), 0.2);
+        scores.insert("browser".to_string(), 0.15);
+        scores.insert("trader".to_string(), 0.1);
+        let sel = auto_select_hand("一些随便的话", Some(&scores));
+        // 0.2 * 3 = 0.6, rounds to 1 — below MIN_HAND_SCORE(2)
+        assert_eq!(sel.hand_id, None, "low similarity should not match");
+    }
+
+    #[test]
+    fn test_semantic_plus_keyword_combined_scoring() {
+        // English keyword gives partial score, semantic boosts it over threshold
+        // "deploy" is a weak alias for devops (score 1, below threshold alone)
+        let keyword_only = hand("help me deploy the service");
+        // May or may not match depending on whether deploy hits weak alias
+        let keyword_score = keyword_only.score;
+
+        // With semantic boost: devops similarity adds bonus points
+        let mut scores = HashMap::new();
+        scores.insert("devops".to_string(), 0.75);
+        let combined = auto_select_hand("help me deploy the service", Some(&scores));
+        assert!(
+            combined.score > keyword_score,
+            "semantic should boost keyword score"
+        );
+        assert_eq!(combined.hand_id, Some("devops".to_string()));
+    }
+
+    #[test]
+    fn test_no_embedding_graceful_degradation() {
+        // When semantic_scores is None, only keyword matching is used.
+        // Non-English input simply gets no match (graceful, not error).
+        let sel = auto_select_hand("请帮我做数据分析", None);
+        assert_eq!(sel.hand_id, None, "should gracefully return no match");
+        assert_eq!(sel.score, 0);
+    }
+
+    #[test]
+    fn test_semantic_does_not_override_strong_keyword() {
+        // If keyword matching strongly matches hand A, but semantic scores
+        // favor hand B, keyword should still win (keyword score is higher).
+        let mut scores = HashMap::new();
+        scores.insert("trader".to_string(), 0.9); // semantic favors trader
+                                                  // But message strongly matches browser via keywords
+        let sel = auto_select_hand("open website and navigate to the login page", Some(&scores));
+        // Browser should win because keyword score (3+) > trader semantic (2-3)
+        assert_eq!(sel.hand_id, Some("browser".to_string()));
+    }
+
     // ── Cache consistency ───────────────────────────────────────────
 
     #[test]
