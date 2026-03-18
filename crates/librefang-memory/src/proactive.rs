@@ -1106,6 +1106,7 @@ impl ProactiveMemoryStore {
             session_count,
             agent_count,
             categories,
+            enabled: cfg.enabled,
             auto_memorize_enabled: cfg.auto_memorize,
             auto_retrieve_enabled: cfg.auto_retrieve,
             llm_extraction: cfg.extraction_model.is_some(),
@@ -1131,6 +1132,7 @@ impl ProactiveMemoryStore {
             session_count,
             agent_count,
             categories,
+            enabled: cfg.enabled,
             auto_memorize_enabled: cfg.auto_memorize,
             auto_retrieve_enabled: cfg.auto_retrieve,
             llm_extraction: cfg.extraction_model.is_some(),
@@ -1530,6 +1532,8 @@ pub struct MemoryStats {
     pub session_count: usize,
     pub agent_count: usize,
     pub categories: HashMap<String, usize>,
+    /// Whether the proactive memory subsystem is enabled.
+    pub enabled: bool,
     /// Whether auto-memorize is enabled.
     pub auto_memorize_enabled: bool,
     /// Whether auto-retrieve is enabled.
