@@ -3044,22 +3044,20 @@ pub async fn delete_agent_file(
         );
     }
 
-    let entry = match state.kernel.registry.get(agent_id) {
-        Some(e) => e,
+    let workspace = match state.kernel.registry.get(agent_id) {
+        Some(e) => match e.manifest.workspace {
+            Some(ref ws) => ws.clone(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "Agent has no workspace"})),
+                );
+            }
+        },
         None => {
             return (
                 StatusCode::NOT_FOUND,
                 Json(serde_json::json!({"error": "Agent not found"})),
-            );
-        }
-    };
-
-    let workspace = match entry.manifest.workspace {
-        Some(ref ws) => ws.clone(),
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent has no workspace"})),
             );
         }
     };
