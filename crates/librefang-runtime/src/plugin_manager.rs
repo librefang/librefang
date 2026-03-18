@@ -50,11 +50,9 @@ pub fn plugins_dir() -> PathBuf {
             #[cfg(unix)]
             let fallback = PathBuf::from("/tmp/librefang");
             #[cfg(windows)]
-            let fallback = PathBuf::from(
-                std::env::var("TEMP")
-                    .unwrap_or_else(|_| r"C:\Temp".to_string()),
-            )
-            .join("librefang");
+            let fallback =
+                PathBuf::from(std::env::var("TEMP").unwrap_or_else(|_| r"C:\Temp".to_string()))
+                    .join("librefang");
             #[cfg(not(any(unix, windows)))]
             let fallback = PathBuf::from(".librefang");
             fallback
@@ -595,8 +593,13 @@ async fn download_github_entry(
                 .map_err(|e| format!("Failed to parse dir listing: {e}"))?;
 
             for sub_entry in &sub_entries {
-                Box::pin(download_github_entry(client, sub_entry, &target_path, depth + 1))
-                    .await?;
+                Box::pin(download_github_entry(
+                    client,
+                    sub_entry,
+                    &target_path,
+                    depth + 1,
+                ))
+                .await?;
             }
         }
         other => {
