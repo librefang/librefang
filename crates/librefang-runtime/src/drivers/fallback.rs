@@ -41,7 +41,14 @@ impl FallbackDriver {
     /// Create a new fallback driver from an ordered chain of (driver, model_name) pairs.
     ///
     /// The first entry is the primary; subsequent are fallbacks.
+    ///
+    /// # Panics
+    /// Panics if `drivers` is empty — at least one driver must be provided.
     pub fn new(drivers: Vec<Arc<dyn LlmDriver>>) -> Self {
+        assert!(
+            !drivers.is_empty(),
+            "FallbackDriver requires at least one driver"
+        );
         Self {
             drivers: drivers
                 .into_iter()
@@ -56,7 +63,14 @@ impl FallbackDriver {
     }
 
     /// Create a new fallback driver with explicit model names for each driver.
+    ///
+    /// # Panics
+    /// Panics if `drivers` is empty — at least one driver must be provided.
     pub fn with_models(drivers: Vec<(Arc<dyn LlmDriver>, String)>) -> Self {
+        assert!(
+            !drivers.is_empty(),
+            "FallbackDriver requires at least one driver"
+        );
         Self {
             drivers: drivers
                 .into_iter()
@@ -86,7 +100,7 @@ impl FallbackDriver {
                 _ => {
                     let la = self.drivers[a].ewma_latency_ms.load(Ordering::Relaxed);
                     let lb = self.drivers[b].ewma_latency_ms.load(Ordering::Relaxed);
-                    la.cmp(&lb)
+                    la.cmp(&lb).then(a.cmp(&b))
                 }
             }
         });
@@ -123,9 +137,10 @@ impl LlmDriver for FallbackDriver {
                 }
                 Err(e) => {
                     entry.consecutive_errors.fetch_add(1, Ordering::Relaxed);
+                    let prev = entry.ewma_latency_ms.load(Ordering::Relaxed);
                     entry
                         .ewma_latency_ms
-                        .fetch_add(ERROR_PENALTY_MS, Ordering::Relaxed);
+                        .store(prev.saturating_add(ERROR_PENALTY_MS), Ordering::Relaxed);
                     warn!(
                         driver_index = i,
                         model = %entry.model_name,
@@ -175,9 +190,10 @@ impl LlmDriver for FallbackDriver {
                 }
                 Err(e) => {
                     entry.consecutive_errors.fetch_add(1, Ordering::Relaxed);
+                    let prev = entry.ewma_latency_ms.load(Ordering::Relaxed);
                     entry
                         .ewma_latency_ms
-                        .fetch_add(ERROR_PENALTY_MS, Ordering::Relaxed);
+                        .store(prev.saturating_add(ERROR_PENALTY_MS), Ordering::Relaxed);
                     warn!(
                         driver_index = i,
                         model = %entry.model_name,
@@ -521,5 +537,34 @@ mod tests {
             order[0], 1,
             "healthy driver should come first even with higher latency"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "FallbackDriver requires at least one driver")]
+    fn test_new_empty_drivers_panics() {
+        let _driver = FallbackDriver::new(vec![]);
+    }
+
+    #[test]
+    #[should_panic(expected = "FallbackDriver requires at least one driver")]
+    fn test_with_models_empty_drivers_panics() {
+        let _driver = FallbackDriver::with_models(vec![]);
+    }
+
+    #[tokio::test]
+    async fn test_ewma_saturating_add_does_not_overflow() {
+        // Single FailDriver so health_order must try it
+        let driver = FallbackDriver::new(vec![Arc::new(FailDriver) as Arc<dyn LlmDriver>]);
+
+        // Set EWMA near u64::MAX to test saturation
+        driver.drivers[0]
+            .ewma_latency_ms
+            .store(u64::MAX - 1, Ordering::Relaxed);
+
+        // This call will fail, triggering saturating_add(ERROR_PENALTY_MS)
+        let _ = driver.complete(test_request()).await;
+
+        let ewma = driver.drivers[0].ewma_latency_ms.load(Ordering::Relaxed);
+        assert_eq!(ewma, u64::MAX, "EWMA should saturate at u64::MAX");
     }
 }

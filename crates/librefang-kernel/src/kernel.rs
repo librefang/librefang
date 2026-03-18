@@ -2376,14 +2376,14 @@ impl LibreFangKernel {
         );
 
         // ── Compare hand vs template score and pick the best ──
-        let hand_usable = hand_selection.hand_id.is_some()
-            && !self.is_hand_cooled_down(hand_selection.hand_id.as_deref().unwrap())
-            && self.hand_requirements_met(hand_selection.hand_id.as_deref().unwrap());
+        let hand_id_ref = hand_selection.hand_id.as_deref();
+        let hand_usable = hand_id_ref
+            .is_some_and(|hid| !self.is_hand_cooled_down(hid) && self.hand_requirements_met(hid));
 
         let prefer_hand = hand_usable && hand_selection.score >= template_selection.score;
 
         if prefer_hand {
-            let hand_id = hand_selection.hand_id.as_deref().unwrap();
+            let hand_id = hand_id_ref.unwrap();
             info!(
                 router = %entry.name,
                 route_type = "hand",
