@@ -4365,7 +4365,8 @@ fn cmd_trigger_list(agent_id: Option<&str>) {
     };
     let body = daemon_json(client.get(&url).send());
 
-    match body.as_array() {
+    let arr = body["triggers"].as_array().or_else(|| body.as_array());
+    match arr {
         Some(triggers) if triggers.is_empty() => println!("No triggers registered."),
         Some(triggers) => {
             println!(

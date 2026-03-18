@@ -520,7 +520,7 @@ pub async fn create_trigger(
     path = "/api/triggers",
     tag = "workflows",
     responses(
-        (status = 200, description = "List triggers", body = Vec<serde_json::Value>)
+        (status = 200, description = "List triggers", body = serde_json::Value)
     )
 )]
 pub async fn list_triggers(
@@ -547,7 +547,7 @@ pub async fn list_triggers(
             })
         })
         .collect();
-    Json(list)
+    Json(serde_json::json!({"triggers": list, "total": list.len()}))
 }
 
 /// DELETE /api/triggers/:id — Remove a trigger.
