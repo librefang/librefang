@@ -223,6 +223,7 @@ use crate::types;
         routes::memory_update,
         routes::memory_delete,
         routes::memory_stats,
+        routes::memory_list_agent,
         routes::memory_reset_agent,
         routes::memory_clear_level,
         routes::memory_search_agent,

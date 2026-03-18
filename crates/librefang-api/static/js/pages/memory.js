@@ -75,7 +75,7 @@ function memoryPage() {
 
     get listEndpoint() {
       if (this.selectedAgentId) {
-        return '/api/memory/agents/' + encodeURIComponent(this.selectedAgentId) + '/search?q=&limit=' + this.pageLimit;
+        return '/api/memory/agents/' + encodeURIComponent(this.selectedAgentId) + '?offset=' + this.pageOffset + '&limit=' + this.pageLimit;
       }
       return '/api/memory?offset=' + this.pageOffset + '&limit=' + this.pageLimit;
     },

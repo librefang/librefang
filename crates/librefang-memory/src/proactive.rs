@@ -333,31 +333,35 @@ impl ProactiveMemoryStore {
 
         let cutoff = Utc::now() - chrono::Duration::hours(ttl_hours as i64);
 
+        // Collect agent_ids that have expired session memories BEFORE soft-deleting them.
+        // This ensures we don't miss agents whose only memories were the expired ones.
+        let agent_ids: Vec<String> = {
+            let conn = self
+                .semantic
+                .conn()
+                .lock()
+                .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT DISTINCT agent_id FROM memories \
+                     WHERE scope = ?1 AND created_at < ?2 AND deleted = 0",
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let ids = stmt
+                .query_map(
+                    rusqlite::params![scopes::SESSION, cutoff.to_rfc3339()],
+                    |row| row.get::<_, String>(0),
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+            ids
+        };
+
         // Soft-delete expired session memories in the semantic store (across all agents)
         let count = self
             .semantic
             .forget_session_older_than_global(scopes::SESSION, cutoff)?;
-
-        // Also clean up expired session KV entries in the structured store.
-        // We query the semantic store for distinct agent_ids that had session memories,
-        // but since we already deleted them above, we scan KV entries directly.
-        let conn = self
-            .semantic
-            .conn()
-            .lock()
-            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
-
-        // Collect distinct agent_ids that have any memories
-        let mut stmt = conn
-            .prepare("SELECT DISTINCT agent_id FROM memories WHERE deleted = 0")
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
-        let agent_ids: Vec<String> = stmt
-            .query_map([], |row| row.get::<_, String>(0))
-            .map_err(|e| LibreFangError::Memory(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .collect();
-        drop(stmt);
-        drop(conn);
 
         // For each agent, clean up expired session KV entries
         for aid_str in &agent_ids {
@@ -822,7 +826,20 @@ impl ProactiveMemoryStore {
             return Ok(()); // still within budget
         }
 
-        let to_evict = total_after - max;
+        let to_evict_raw = total_after - max;
+        // Cap eviction at the number of existing memories — we can't evict more
+        // than what actually exists. If new_count alone exceeds the cap, log a warning.
+        let to_evict = to_evict_raw.min(current);
+        if to_evict < to_evict_raw {
+            tracing::warn!(
+                agent_id = %agent_id,
+                new_count = new_count,
+                max = max,
+                current_count = current,
+                "New memory batch alone exceeds per-agent cap; \
+                 cap will be exceeded even after evicting all existing memories"
+            );
+        }
         tracing::debug!(
             agent_id = %agent_id,
             current_count = current,
@@ -1589,11 +1606,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
             return Ok(vec![item]);
         }
 
-        // Step 2: Enforce per-agent memory cap before inserting new memories
-        let new_count = extraction.memories.len();
-        self.evict_if_over_cap(agent_id, new_count)?;
-
-        // Step 3-5: For each extracted memory, decide and execute
+        // Step 2-4: For each extracted memory, decide and execute
         let mut results = Vec::new();
         for item in &extraction.memories {
             let result = self.add_with_decision(agent_id, item).await?;
@@ -1601,6 +1614,11 @@ impl ProactiveMemory for ProactiveMemoryStore {
                 results.push(r.item);
             }
         }
+
+        // Step 5: Enforce per-agent memory cap AFTER the decision loop.
+        // Memories are already stored, so pass new_count=0 — the current DB count
+        // already includes the ADDs, and eviction will trim only the true excess.
+        self.evict_if_over_cap(agent_id, 0)?;
 
         // Step 6: Store extracted relations in knowledge graph
         if !extraction.relations.is_empty() {

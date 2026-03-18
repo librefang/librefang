@@ -467,6 +467,57 @@ pub async fn memory_clear_level(
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/memory/agents/:agent_id?offset=0&limit=20
+// ---------------------------------------------------------------------------
+
+/// List memories for a specific agent with pagination.
+#[utoipa::path(
+    get,
+    path = "/api/memory/agents/{id}",
+    tag = "proactive-memory",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("category" = Option<String>, Query, description = "Optional category filter"),
+        ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
+        ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
+    ),
+    responses((status = 200, description = "Paginated agent memory list", body = serde_json::Value))
+)]
+pub async fn memory_list_agent(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+    Query(params): Query<MemoryListQuery>,
+) -> impl IntoResponse {
+    let store = match get_pm_store(&state) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    let limit = params.limit.min(100);
+    let offset = params.offset;
+
+    match store.list(&agent_id, params.category.as_deref()).await {
+        Ok(items) => {
+            let total = items.len();
+            let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "memories": page,
+                    "total": total,
+                    "offset": offset,
+                    "limit": limit,
+                })),
+            )
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/memory/agents/:agent_id/search?q=...&limit=10
 // ---------------------------------------------------------------------------
 

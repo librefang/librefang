@@ -818,6 +818,11 @@ function settingsPage() {
       this.pmSaving = true;
       this.pmSaveStatus = '';
       try {
+        var fields = ['max_retrieve', 'extraction_threshold', 'duplicate_threshold', 'confidence_decay_rate', 'session_ttl_hours', 'max_memories_per_agent'];
+        for (var i = 0; i < fields.length; i++) {
+          var v = String(this.pmSettings[fields[i]]).trim();
+          if (v === '') { LibreFangToast.error(fields[i] + ' is required'); this.pmSaving = false; return; }
+        }
         var mr = Number(this.pmSettings.max_retrieve);
         var et = Number(this.pmSettings.extraction_threshold);
         var dt = Number(this.pmSettings.duplicate_threshold);
@@ -830,6 +835,9 @@ function settingsPage() {
         if (isNaN(cd) || cd < 0 || cd > 1) { LibreFangToast.error('confidence_decay_rate must be 0–1'); this.pmSaving = false; return; }
         if (isNaN(st) || st < 1) { LibreFangToast.error('session_ttl_hours must be >= 1'); this.pmSaving = false; return; }
         if (isNaN(mma) || mma < 0) { LibreFangToast.error('max_memories_per_agent must be >= 0'); this.pmSaving = false; return; }
+        if (!Number.isInteger(mr)) { LibreFangToast.error('max_retrieve must be an integer'); this.pmSaving = false; return; }
+        if (!Number.isInteger(st)) { LibreFangToast.error('session_ttl_hours must be an integer'); this.pmSaving = false; return; }
+        if (!Number.isInteger(mma)) { LibreFangToast.error('max_memories_per_agent must be an integer'); this.pmSaving = false; return; }
         var fields = [
           { path: 'proactive_memory.auto_memorize', value: this.pmSettings.auto_memorize },
           { path: 'proactive_memory.auto_retrieve', value: this.pmSettings.auto_retrieve },

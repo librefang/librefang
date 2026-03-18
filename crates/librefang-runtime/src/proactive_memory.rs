@@ -410,6 +410,17 @@ fn parse_decision_response(
                 }
             }
 
+            // Try interpreting as a 1-based index (LLM may return "1" instead of the UUID)
+            if let Some(ref id_str) = existing_id {
+                if let Ok(index) = id_str.parse::<usize>() {
+                    if index >= 1 && index <= existing_memories.len() {
+                        return Ok(MemoryAction::Update {
+                            existing_id: existing_memories[index - 1].id.to_string(),
+                        });
+                    }
+                }
+            }
+
             // If ID is invalid/missing, fall back to ADD rather than blindly
             // updating the first candidate — let consolidation merge later.
             Ok(MemoryAction::Add)

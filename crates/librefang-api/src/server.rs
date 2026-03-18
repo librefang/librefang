@@ -236,7 +236,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         // Per-agent proactive memory endpoints
         .route(
             "/memory/agents/{id}",
-            axum::routing::delete(routes::memory_reset_agent),
+            axum::routing::get(routes::memory_list_agent).delete(routes::memory_reset_agent),
         )
         .route(
             "/memory/agents/{id}/search",
