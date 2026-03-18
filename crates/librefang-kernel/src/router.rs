@@ -258,6 +258,95 @@ const HAND_RULES: &[RouteRule] = &[
         ],
         weak: &[],
     },
+    RouteRule {
+        target: "analytics",
+        strong: &[
+            (
+                "analytics",
+                r"数据分析|数据可视化|dashboard|仪表盘|报表生成|automated report",
+            ),
+            (
+                "data-pipeline",
+                r"数据采集|数据清洗|data pipeline|etl|csv分析|excel分析",
+            ),
+        ],
+        weak: &[("visualization", r"可视化|图表|chart|matplotlib|seaborn")],
+    },
+    RouteRule {
+        target: "apitester",
+        strong: &[
+            (
+                "api-test",
+                r"api test|接口测试|endpoint test|load test|压力测试|回归测试.*api",
+            ),
+            (
+                "api-validate",
+                r"接口验证|请求校验|api discovery|swagger|openapi|postman",
+            ),
+        ],
+        weak: &[("api-debug", r"api.*调试|接口.*异常|请求.*失败")],
+    },
+    RouteRule {
+        target: "devops",
+        strong: &[
+            (
+                "cicd",
+                r"ci/cd|pipeline|github actions|jenkins|部署自动化|发布流水线",
+            ),
+            (
+                "infra",
+                r"基础设施监控|infrastructure|incident response|容器编排|helm|terraform",
+            ),
+        ],
+        weak: &[("deploy", r"部署|上线|运维|k8s|docker|容器")],
+    },
+    RouteRule {
+        target: "linkedin",
+        strong: &[
+            ("linkedin", r"linkedin|领英|profile optimization|职业社交"),
+            (
+                "professional-network",
+                r"职业内容|professional engagement|人脉拓展|linkedin post",
+            ),
+        ],
+        weak: &[],
+    },
+    RouteRule {
+        target: "reddit",
+        strong: &[
+            ("reddit", r"reddit|subreddit|r/\w+"),
+            (
+                "reddit-engage",
+                r"reddit.*发帖|reddit.*回复|reddit.*监控|karma|reddit thread",
+            ),
+        ],
+        weak: &[],
+    },
+    RouteRule {
+        target: "strategist",
+        strong: &[
+            (
+                "strategy",
+                r"战略分析|competitive analysis|商业计划|business plan|市场研究",
+            ),
+            (
+                "strategic",
+                r"战略建议|strategic recommendation|竞品分析|行业分析|swot",
+            ),
+        ],
+        weak: &[("market-research", r"市场调研|行业报告|竞争格局")],
+    },
+    RouteRule {
+        target: "twitter",
+        strong: &[
+            ("twitter", r"twitter|tweet|推特|x\.com"),
+            (
+                "twitter-manage",
+                r"发推|推文|twitter.*发帖|twitter.*互动|scheduled tweet",
+            ),
+        ],
+        weak: &[],
+    },
 ];
 
 const TEMPLATE_RULES: &[RouteRule] = &[
