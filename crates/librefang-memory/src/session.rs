@@ -74,6 +74,51 @@ impl SessionStore {
         }
     }
 
+    /// Load a session from the database along with its `created_at` timestamp.
+    pub fn get_session_with_created_at(
+        &self,
+        session_id: SessionId,
+    ) -> LibreFangResult<Option<(Session, String)>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT agent_id, messages, context_window_tokens, label, created_at FROM sessions WHERE id = ?1")
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let result = stmt.query_row(rusqlite::params![session_id.0.to_string()], |row| {
+            let agent_str: String = row.get(0)?;
+            let messages_blob: Vec<u8> = row.get(1)?;
+            let tokens: i64 = row.get(2)?;
+            let label: Option<String> = row.get(3).unwrap_or(None);
+            let created_at: String = row.get(4)?;
+            Ok((agent_str, messages_blob, tokens, label, created_at))
+        });
+
+        match result {
+            Ok((agent_str, messages_blob, tokens, label, created_at)) => {
+                let agent_id = uuid::Uuid::parse_str(&agent_str)
+                    .map(AgentId)
+                    .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+                let messages: Vec<Message> = rmp_serde::from_slice(&messages_blob)
+                    .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+                Ok(Some((
+                    Session {
+                        id: session_id,
+                        agent_id,
+                        messages,
+                        context_window_tokens: tokens as u64,
+                        label,
+                    },
+                    created_at,
+                )))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(LibreFangError::Memory(e.to_string())),
+        }
+    }
+
     /// Save a session to the database.
     pub fn save_session(&self, session: &Session) -> LibreFangResult<()> {
         let conn = self
@@ -337,6 +382,62 @@ impl SessionStore {
     }
 }
 
+impl SessionStore {
+    /// Delete sessions that have not been updated within `retention_days`.
+    ///
+    /// Returns the number of sessions deleted.
+    pub fn cleanup_expired_sessions(&self, retention_days: u32) -> LibreFangResult<u64> {
+        if retention_days == 0 {
+            return Ok(0);
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let cutoff = Utc::now() - chrono::Duration::days(i64::from(retention_days));
+        let cutoff_str = cutoff.to_rfc3339();
+        let deleted = conn
+            .execute(
+                "DELETE FROM sessions WHERE updated_at < ?1",
+                rusqlite::params![cutoff_str],
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(deleted as u64)
+    }
+
+    /// For each agent, keep only the newest `max_per_agent` sessions, deleting the rest.
+    ///
+    /// Returns the total number of sessions deleted across all agents.
+    pub fn cleanup_excess_sessions(&self, max_per_agent: u32) -> LibreFangResult<u64> {
+        if max_per_agent == 0 {
+            return Ok(0);
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        // Single-query approach using window functions (SQLite 3.25+).
+        // ROW_NUMBER partitions by agent and ranks by recency; rows beyond
+        // the limit are deleted in one pass — no N+1 per-agent queries.
+        let deleted = conn
+            .execute(
+                "DELETE FROM sessions WHERE id IN (
+                    SELECT id FROM (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY agent_id ORDER BY updated_at DESC
+                        ) AS rn
+                        FROM sessions
+                    ) WHERE rn > ?1
+                )",
+                rusqlite::params![max_per_agent],
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        Ok(deleted as u64)
+    }
+}
+
 /// Default number of recent messages to include from canonical session.
 const DEFAULT_CANONICAL_WINDOW: usize = 50;
 
@@ -589,7 +690,7 @@ impl SessionStore {
                             ContentBlock::Image { media_type, .. } => {
                                 text_parts.push(format!("[image: {media_type}]"));
                             }
-                            ContentBlock::Thinking { thinking } => {
+                            ContentBlock::Thinking { thinking, .. } => {
                                 text_parts.push(format!(
                                     "[thinking: {}]",
                                     librefang_types::truncate_str(thinking, 200)
@@ -776,6 +877,88 @@ mod tests {
         let all_text: String = recent.iter().map(|m| m.content.text_content()).collect();
         assert!(all_text.contains("Jaber"));
         assert!(summary.is_none()); // Only 2 messages, no compaction
+    }
+
+    #[test]
+    fn test_cleanup_expired_sessions() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        // Create two sessions
+        let s1 = store.create_session(agent_id).unwrap();
+        let s2 = store.create_session(agent_id).unwrap();
+
+        // Manually backdate s1 to 60 days ago
+        {
+            let conn = store.conn.lock().unwrap();
+            let old_date = (Utc::now() - chrono::Duration::days(60)).to_rfc3339();
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![old_date, s1.id.0.to_string()],
+            )
+            .unwrap();
+        }
+
+        // Cleanup with 30-day retention
+        let deleted = store.cleanup_expired_sessions(30).unwrap();
+        assert_eq!(deleted, 1);
+
+        // s1 should be gone, s2 should remain
+        assert!(store.get_session(s1.id).unwrap().is_none());
+        assert!(store.get_session(s2.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_cleanup_expired_sessions_zero_noop() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        store.create_session(agent_id).unwrap();
+
+        // retention_days=0 should be a no-op
+        let deleted = store.cleanup_expired_sessions(0).unwrap();
+        assert_eq!(deleted, 0);
+    }
+
+    #[test]
+    fn test_cleanup_excess_sessions() {
+        let store = setup();
+        let agent_id = AgentId::new();
+
+        // Create 5 sessions, staggering updated_at so ordering is deterministic
+        let mut session_ids = Vec::new();
+        for i in 0..5 {
+            let s = store.create_session(agent_id).unwrap();
+            let conn = store.conn.lock().unwrap();
+            let date = (Utc::now() + chrono::Duration::seconds(i)).to_rfc3339();
+            conn.execute(
+                "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![date, s.id.0.to_string()],
+            )
+            .unwrap();
+            session_ids.push(s.id);
+        }
+
+        // Keep only 2 per agent
+        let deleted = store.cleanup_excess_sessions(2).unwrap();
+        assert_eq!(deleted, 3);
+
+        // The 3 oldest should be gone, the 2 newest should remain
+        assert!(store.get_session(session_ids[0]).unwrap().is_none());
+        assert!(store.get_session(session_ids[1]).unwrap().is_none());
+        assert!(store.get_session(session_ids[2]).unwrap().is_none());
+        assert!(store.get_session(session_ids[3]).unwrap().is_some());
+        assert!(store.get_session(session_ids[4]).unwrap().is_some());
+    }
+
+    #[test]
+    fn test_cleanup_excess_sessions_zero_noop() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        store.create_session(agent_id).unwrap();
+
+        // max_per_agent=0 should be a no-op
+        let deleted = store.cleanup_excess_sessions(0).unwrap();
+        assert_eq!(deleted, 0);
     }
 
     #[test]

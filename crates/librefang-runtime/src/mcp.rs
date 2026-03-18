@@ -32,7 +32,12 @@ pub struct McpServerConfig {
     /// Request timeout in seconds (default: 30).
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
-    /// Environment variables to pass through to the subprocess (sandboxed).
+    /// Extra environment variables for the subprocess.
+    ///
+    /// Each entry can be either:
+    /// - `"KEY=VALUE"` — set an explicit env var on the child process, or
+    /// - `"KEY"` — (legacy) ignored, since the child now inherits the full
+    ///   parent environment.
     #[serde(default)]
     pub env: Vec<String>,
 }
@@ -491,7 +496,7 @@ impl McpConnection {
     async fn connect_stdio(
         command: &str,
         args: &[String],
-        env_whitelist: &[String],
+        extra_env: &[String],
     ) -> Result<McpTransportHandle, String> {
         // Validate command path (no path traversal)
         if command.contains("..") {
@@ -526,34 +531,13 @@ impl McpConnection {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        // Sandbox: clear environment, only pass whitelisted vars
-        cmd.env_clear();
-        for var_name in env_whitelist {
-            if let Ok(val) = std::env::var(var_name) {
-                cmd.env(var_name, val);
+        // Child inherits the full parent environment (including .env/vault
+        // credentials).  Layer any explicit KEY=VALUE pairs from config on top.
+        for entry in extra_env {
+            if let Some((key, value)) = entry.split_once('=') {
+                cmd.env(key, value);
             }
-        }
-        // Always pass PATH for binary resolution
-        if let Ok(path) = std::env::var("PATH") {
-            cmd.env("PATH", path);
-        }
-        // On Windows, npm/node need APPDATA, USERPROFILE, LOCALAPPDATA, and SystemRoot
-        if cfg!(windows) {
-            for var in &[
-                "APPDATA",
-                "LOCALAPPDATA",
-                "USERPROFILE",
-                "SystemRoot",
-                "TEMP",
-                "TMP",
-                "HOME",
-                "HOMEDRIVE",
-                "HOMEPATH",
-            ] {
-                if let Ok(val) = std::env::var(var) {
-                    cmd.env(var, val);
-                }
-            }
+            // Plain names (legacy format) are no-ops — already inherited.
         }
 
         let mut child = cmd
@@ -596,7 +580,7 @@ impl McpConnection {
             return Err("SSRF: MCP SSE URL targets metadata endpoint".to_string());
         }
 
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::client_builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
@@ -613,7 +597,7 @@ impl McpConnection {
             return Err("SSRF: HTTP compatibility backend targets metadata endpoint".to_string());
         }
 
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::client_builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
@@ -1087,14 +1071,19 @@ mod tests {
                 ],
             },
             timeout_secs: 30,
-            env: vec!["GITHUB_PERSONAL_ACCESS_TOKEN".to_string()],
+            env: vec![
+                "GITHUB_PERSONAL_ACCESS_TOKEN=ghp_test123".to_string(),
+                "LEGACY_NAME_ONLY".to_string(), // legacy plain-name format (no-op)
+            ],
         };
 
         let json = serde_json::to_string(&config).unwrap();
         let back: McpServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(back.name, "github");
         assert_eq!(back.timeout_secs, 30);
-        assert_eq!(back.env, vec!["GITHUB_PERSONAL_ACCESS_TOKEN"]);
+        assert_eq!(back.env.len(), 2);
+        assert_eq!(back.env[0], "GITHUB_PERSONAL_ACCESS_TOKEN=ghp_test123");
+        assert_eq!(back.env[1], "LEGACY_NAME_ONLY");
 
         match back.transport {
             McpTransport::Stdio { command, args } => {
@@ -1161,6 +1150,25 @@ mod tests {
     }
 
     #[test]
+    fn test_env_key_value_parsing() {
+        // KEY=VALUE entries are split and applied
+        let entry = "MY_KEY=my_value";
+        let (key, value) = entry.split_once('=').unwrap();
+        assert_eq!(key, "MY_KEY");
+        assert_eq!(value, "my_value");
+
+        // Values containing '=' are preserved (split_once)
+        let entry = "TOKEN=abc=def==";
+        let (key, value) = entry.split_once('=').unwrap();
+        assert_eq!(key, "TOKEN");
+        assert_eq!(value, "abc=def==");
+
+        // Plain names (legacy) have no '=' → no-op
+        let entry = "PLAIN_NAME";
+        assert!(entry.split_once('=').is_none());
+    }
+
+    #[test]
     fn test_http_compat_tool_registration() {
         let mut conn = McpConnection {
             config: McpServerConfig {
@@ -1176,7 +1184,7 @@ mod tests {
             tools: Vec::new(),
             original_names: HashMap::new(),
             transport: McpTransportHandle::HttpCompat {
-                client: reqwest::Client::new(),
+                client: crate::http_client::new_client(),
             },
             next_id: 1,
         };

@@ -99,12 +99,14 @@ use librefang_channels::wecom::WeComAdapter;
 
 use async_trait::async_trait;
 use librefang_kernel::LibreFangKernel;
+use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use std::sync::Arc;
 #[cfg(feature = "channel-telegram")]
 use std::time::Duration;
 use std::time::Instant;
-use tracing::{error, info, warn};
+use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
 
 use librefang_runtime::str_utils::safe_truncate_str;
 
@@ -122,7 +124,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .send_message(agent_id, message)
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(result.response)
+        // When the agent intentionally chose not to reply (NO_REPLY / [[silent]]),
+        // return an empty string so the bridge skips sending a response to the channel.
+        if result.silent {
+            Ok(String::new())
+        } else {
+            Ok(result.response)
+        }
     }
 
     async fn send_message_with_blocks(
@@ -149,7 +157,74 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .send_message_with_blocks(agent_id, &text, blocks)
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(result.response)
+        if result.silent {
+            Ok(String::new())
+        } else {
+            Ok(result.response)
+        }
+    }
+
+    async fn send_message_streaming(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> Result<mpsc::Receiver<String>, String> {
+        let (mut event_rx, kernel_handle) = self
+            .kernel
+            .send_message_streaming(agent_id, message, None)
+            .map_err(|e| format!("{e}"))?;
+
+        // Bridge StreamEvent -> text-only mpsc channel for the adapter.
+        let (tx, rx) = mpsc::channel::<String>(64);
+
+        let bridge_handle = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    StreamEvent::TextDelta { text } => {
+                        if tx.send(text).await.is_err() {
+                            break; // receiver dropped
+                        }
+                    }
+                    StreamEvent::ContentComplete { .. } => {
+                        // Do NOT break here. ContentComplete fires at the end of each
+                        // LLM turn (iteration), not at the end of the entire agent loop.
+                        // In a multi-iteration scenario — e.g. the router agent's first
+                        // turn is a tool call (no text) and the second turn contains the
+                        // actual text response — breaking here would cause us to exit
+                        // before the text-bearing iteration is even reached.
+                        //
+                        // The loop naturally terminates when `event_rx.recv()` returns
+                        // `None`, which happens when the kernel drops the sender after
+                        // the full agent loop completes.
+                    }
+                    _ => {
+                        // ToolUseStart, ToolInputDelta, ThinkingDelta, etc. — skip
+                        debug!("Streaming bridge: skipping non-text event");
+                    }
+                }
+            }
+        });
+
+        // Spawn a supervisor that awaits both handles and logs panics / errors.
+        tokio::spawn(async move {
+            match kernel_handle.await {
+                Err(e) => error!("Streaming kernel task panicked: {e}"),
+                Ok(Err(e)) => error!("Streaming kernel task returned error: {e}"),
+                Ok(Ok(result)) => {
+                    debug!(
+                        input_tokens = result.total_usage.input_tokens,
+                        output_tokens = result.total_usage.output_tokens,
+                        iterations = result.iterations,
+                        "Streaming kernel task completed"
+                    );
+                }
+            }
+            if let Err(e) = bridge_handle.await {
+                error!("Streaming bridge task panicked: {e}");
+            }
+        });
+
+        Ok(rx)
     }
 
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
@@ -985,7 +1060,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             return "OFP peer network is disabled. Set network_enabled = true in config.toml."
                 .to_string();
         }
-        match &self.kernel.peer_registry {
+        match self.kernel.peer_registry.get() {
             Some(registry) => {
                 let peers = registry.all_peers();
                 if peers.is_empty() {
@@ -1410,7 +1485,20 @@ pub async fn start_channel_bridge_with_config(
     // Google Chat
     #[cfg(feature = "channel-google-chat")]
     for gc_config in config.google_chat.iter() {
-        if let Some(key) = read_token(&gc_config.service_account_env, "Google Chat") {
+        // Try service_account_key_path first, then fall back to env var
+        let key = gc_config
+            .service_account_key_path
+            .as_ref()
+            .filter(|p| !p.is_empty())
+            .and_then(|path| match std::fs::read_to_string(path) {
+                Ok(contents) => Some(contents),
+                Err(e) => {
+                    warn!("Google Chat: failed to read service account key from {path}: {e}");
+                    None
+                }
+            })
+            .or_else(|| read_token(&gc_config.service_account_env, "Google Chat"));
+        if let Some(key) = key {
             let adapter = Arc::new(
                 GoogleChatAdapter::new(key, gc_config.space_ids.clone(), gc_config.webhook_port)
                     .with_account_id(gc_config.account_id.clone()),
@@ -1420,6 +1508,8 @@ pub async fn start_channel_bridge_with_config(
                 gc_config.default_agent.clone(),
                 gc_config.account_id.clone(),
             ));
+        } else {
+            warn!("Google Chat configured but no credentials found (neither service_account_key_path nor {} env var), skipping", gc_config.service_account_env);
         }
     }
 
@@ -1653,8 +1743,14 @@ pub async fn start_channel_bridge_with_config(
                     wc_config.agent_id.clone(),
                     secret,
                     wc_config.webhook_port,
-                    wc_config.encoding_aes_key.clone(),
-                    wc_config.token.clone(),
+                    wc_config
+                        .encoding_aes_key_env
+                        .as_ref()
+                        .and_then(|e| std::env::var(e).ok()),
+                    wc_config
+                        .token_env
+                        .as_ref()
+                        .and_then(|e| std::env::var(e).ok()),
                 )
                 .with_account_id(wc_config.account_id.clone()),
             );

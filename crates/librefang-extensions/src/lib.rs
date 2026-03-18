@@ -10,6 +10,7 @@
 pub mod bundled;
 pub mod credentials;
 pub mod health;
+pub(crate) mod http_client;
 pub mod installer;
 pub mod oauth;
 pub mod registry;

@@ -683,6 +683,87 @@ fn content_to_blocks(content: MessageContent) -> Vec<ContentBlock> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Safe trim helpers
+// ---------------------------------------------------------------------------
+
+/// Check if a message contains any `ToolUse` blocks.
+fn message_has_tool_use(msg: &Message) -> bool {
+    match &msg.content {
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ToolUse { .. })),
+        _ => false,
+    }
+}
+
+/// Check if a message contains only `ToolResult` blocks (i.e. it is a tool-
+/// result delivery, not a fresh user question).
+fn message_is_only_tool_results(msg: &Message) -> bool {
+    match &msg.content {
+        MessageContent::Blocks(blocks) => {
+            !blocks.is_empty()
+                && blocks
+                    .iter()
+                    .all(|b| matches!(b, ContentBlock::ToolResult { .. }))
+        }
+        _ => false,
+    }
+}
+
+/// Find the latest safe trim point at or after `min_trim` that does **not**
+/// split a ToolUse/ToolResult pair.
+///
+/// A "safe" trim point is an index where:
+/// - `messages[index]` is a `User` message that is a fresh question (not only
+///   ToolResult blocks), **or**
+/// - `messages[index - 1]` is an `Assistant` message without pending ToolUse
+///   blocks (the tool cycle completed).
+///
+/// Returns `None` only when no safe point exists (caller should fall back to
+/// the original `min_trim` value).
+pub fn find_safe_trim_point(messages: &[Message], min_trim: usize) -> Option<usize> {
+    let len = messages.len();
+    if min_trim >= len {
+        return None;
+    }
+
+    // Upper bound: keep at least 2 messages after trim so the LLM has context.
+    let upper = if len > 2 { len - 1 } else { len };
+
+    // Scan forward from min_trim (prefer trimming slightly more over splitting pairs).
+    for i in min_trim..upper {
+        if is_safe_boundary(messages, i) {
+            return Some(i);
+        }
+    }
+
+    // No safe point forward — scan backward (trim less to avoid splitting).
+    (0..min_trim).rev().find(|&i| is_safe_boundary(messages, i))
+}
+
+/// Returns `true` when index `i` is a clean conversation-turn boundary.
+fn is_safe_boundary(messages: &[Message], i: usize) -> bool {
+    let msg = &messages[i];
+
+    // The message at the cut point must be a User message that is a fresh
+    // question (not a ToolResult delivery).
+    if msg.role != Role::User || message_is_only_tool_results(msg) {
+        return false;
+    }
+
+    // If there is a preceding message it must be an Assistant message that
+    // does NOT contain unresolved ToolUse blocks.
+    if i > 0 {
+        let prev = &messages[i - 1];
+        if prev.role == Role::Assistant && message_has_tool_use(prev) {
+            return false;
+        }
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1230,5 +1311,97 @@ mod tests {
         ];
         prune_heartbeat_turns(&mut messages, 2);
         assert_eq!(messages.len(), 4);
+    }
+
+    // --- find_safe_trim_point tests ---
+
+    #[test]
+    fn test_safe_trim_plain_messages() {
+        // Plain User/Assistant alternation — trim point is exactly min_trim.
+        let messages = vec![
+            Message::user("q1"),
+            Message::assistant("a1"),
+            Message::user("q2"),
+            Message::assistant("a2"),
+            Message::user("q3"),
+            Message::assistant("a3"),
+        ];
+        assert_eq!(find_safe_trim_point(&messages, 2), Some(2)); // messages[2] = User "q2"
+        assert_eq!(find_safe_trim_point(&messages, 0), Some(0)); // messages[0] = User "q1"
+    }
+
+    #[test]
+    fn test_safe_trim_skips_tool_pair() {
+        // messages[2] is assistant with ToolUse, messages[3] is user with ToolResult
+        // — trim at 2 or 3 would split the pair, so it should advance to 4.
+        let messages = vec![
+            Message::user("q1"),
+            Message::assistant("a1"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "shell".into(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    tool_name: "shell".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                }]),
+            },
+            Message::user("q2"),
+            Message::assistant("a2"),
+        ];
+        // min_trim = 3 → messages[3] is ToolResult-only User → skip → messages[4] is clean User
+        assert_eq!(find_safe_trim_point(&messages, 3), Some(4));
+        // min_trim = 2 → messages[2] is Assistant with ToolUse → skip → messages[3] ToolResult → skip → messages[4]
+        assert_eq!(find_safe_trim_point(&messages, 2), Some(4));
+    }
+
+    #[test]
+    fn test_safe_trim_scans_backward() {
+        // All messages from min_trim onward are tool pairs — should scan backward.
+        let messages = vec![
+            Message::user("q1"),
+            Message::assistant("a1"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "shell".into(),
+                    input: serde_json::json!({}),
+                    provider_metadata: None,
+                }]),
+            },
+            Message {
+                role: Role::User,
+                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                    tool_use_id: "t1".into(),
+                    tool_name: "shell".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                }]),
+            },
+        ];
+        // min_trim = 2, forward scan hits ToolUse+ToolResult only, backward finds index 0
+        assert_eq!(find_safe_trim_point(&messages, 2), Some(0));
+    }
+
+    #[test]
+    fn test_safe_trim_respects_upper_bound() {
+        // upper = len - 1 = 2, forward scan 0..2 = [0,1].
+        // messages[0] is Assistant → no, messages[1] is User → yes.
+        let messages = vec![
+            Message::assistant("a1"),
+            Message::user("q1"),
+            Message::assistant("a2"),
+        ];
+        assert_eq!(find_safe_trim_point(&messages, 0), Some(1));
     }
 }

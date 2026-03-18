@@ -19,6 +19,36 @@ default = [
     "channel-mattermost",
     "channel-irc",
     "channel-google-chat",
+    "channel-twitch",
+    "channel-rocketchat",
+    "channel-zulip",
+    "channel-xmpp",
+    "channel-bluesky",
+    "channel-feishu",
+    "channel-line",
+    "channel-mastodon",
+    "channel-messenger",
+    "channel-reddit",
+    "channel-revolt",
+    "channel-viber",
+    "channel-flock",
+    "channel-guilded",
+    "channel-keybase",
+    "channel-nextcloud",
+    "channel-nostr",
+    "channel-pumble",
+    "channel-threema",
+    "channel-twist",
+    "channel-webex",
+    "channel-dingtalk",
+    "channel-discourse",
+    "channel-gitter",
+    "channel-gotify",
+    "channel-linkedin",
+    "channel-mumble",
+    "channel-ntfy",
+    "channel-qq",
+    "channel-wecom",
 ]
 
 all-channels = [
@@ -64,6 +94,7 @@ all-channels = [
     "channel-ntfy",
     "channel-qq",
     "channel-wecom",
+    "channel-mqtt",
 ]
 
 # Individual channel features
@@ -71,14 +102,14 @@ channel-telegram = []
 channel-discord = []
 channel-slack = []
 channel-matrix = []
-channel-email = ["dep:lettre", "dep:imap", "dep:native-tls", "dep:mailparse"]
+channel-email = ["dep:lettre", "dep:imap", "dep:rustls-connector", "dep:mailparse"]
 channel-webhook = []
 channel-whatsapp = []
 channel-signal = []
 channel-teams = []
 channel-mattermost = []
 channel-irc = []
-channel-google-chat = []
+channel-google-chat = ["dep:rsa"]
 channel-twitch = []
 channel-rocketchat = []
 channel-zulip = []
@@ -95,7 +126,7 @@ channel-flock = []
 channel-guilded = []
 channel-keybase = []
 channel-nextcloud = []
-channel-nostr = []
+channel-nostr = ["dep:k256"]
 channel-pumble = []
 channel-threema = []
 channel-twist = []
@@ -107,8 +138,9 @@ channel-gotify = []
 channel-linkedin = []
 channel-mumble = []
 channel-ntfy = []
-channel-qq = ["dep:rustls"]
+channel-qq = []
 channel-wecom = ["dep:roxmltree", "dep:aes", "dep:cbc"]
+channel-mqtt = ["dep:rumqttc"]
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }
@@ -134,17 +166,28 @@ base64 = { workspace = true }
 hex = { workspace = true }
 html-escape = { workspace = true }
 regex-lite = { workspace = true }
+smallvec = { workspace = true }
+webpki-roots = { workspace = true }
+rustls-native-certs = { workspace = true }
 
 # Channel-specific optional dependencies
+rsa = { workspace = true, optional = true }
 aes = { version = "0.8", optional = true }
 cbc = { version = "0.1", optional = true }
-rustls = { version = "0.23", default-features = false, features = ["ring"], optional = true }
+rustls = { workspace = true, features = ["ring"] }
 roxmltree = { version = "0.21", optional = true }
+k256 = { workspace = true, optional = true }
 
+rumqttc = { workspace = true, optional = true }
 lettre = { workspace = true, optional = true }
 imap = { workspace = true, optional = true }
-native-tls = { workspace = true, optional = true }
+rustls-connector = { workspace = true, optional = true }
 mailparse = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio-test = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "dispatch"
+harness = false

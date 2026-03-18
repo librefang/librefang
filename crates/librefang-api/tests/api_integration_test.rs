@@ -7,14 +7,19 @@
 //!
 //! Run: cargo test -p librefang-api --test api_integration_test -- --nocapture
 
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
 use axum::Router;
 use librefang_api::middleware;
 use librefang_api::routes::{self, AppState};
+use librefang_api::server;
 use librefang_api::ws;
 use librefang_kernel::LibreFangKernel;
+use librefang_runtime::audit::AuditAction;
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
 use std::sync::Arc;
 use std::time::Instant;
+use tower::ServiceExt;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
@@ -28,7 +33,19 @@ struct TestServer {
     _tmp: tempfile::TempDir,
 }
 
+struct FullRouterHarness {
+    app: Router,
+    state: Arc<AppState>,
+    _tmp: tempfile::TempDir,
+}
+
 impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.state.kernel.shutdown();
+    }
+}
+
+impl Drop for FullRouterHarness {
     fn drop(&mut self) {
         self.state.kernel.shutdown();
     }
@@ -78,6 +95,9 @@ async fn start_test_server_with_provider(
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
+            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
+        )),
     });
 
     let app = Router::new()
@@ -94,6 +114,14 @@ async fn start_test_server_with_provider(
         .route(
             "/api/agents/{id}/session",
             axum::routing::get(routes::get_agent_session),
+        )
+        .route(
+            "/api/agents/{id}/metrics",
+            axum::routing::get(routes::agent_metrics),
+        )
+        .route(
+            "/api/agents/{id}/logs",
+            axum::routing::get(routes::agent_logs),
         )
         .route("/api/agents/{id}/ws", axum::routing::get(ws::agent_ws))
         .route(
@@ -144,6 +172,39 @@ async fn start_test_server_with_provider(
     }
 }
 
+async fn start_full_router(api_key: &str) -> FullRouterHarness {
+    let tmp = tempfile::tempdir().expect("Failed to create temp dir");
+
+    let config = KernelConfig {
+        home_dir: tmp.path().to_path_buf(),
+        data_dir: tmp.path().join("data"),
+        api_key: api_key.to_string(),
+        default_model: DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "test-model".to_string(),
+            api_key_env: "OLLAMA_API_KEY".to_string(),
+            base_url: None,
+        },
+        ..KernelConfig::default()
+    };
+
+    let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+    let kernel = Arc::new(kernel);
+    kernel.set_self_handle();
+
+    let (app, state) = server::build_router(
+        kernel,
+        "127.0.0.1:0".parse().expect("listen addr should parse"),
+    )
+    .await;
+
+    FullRouterHarness {
+        app,
+        state,
+        _tmp: tmp,
+    }
+}
+
 /// Manifest that uses ollama (no API key required, won't make real LLM calls).
 const TEST_MANIFEST: &str = r#"
 name = "test-agent"
@@ -189,7 +250,7 @@ memory_write = ["self.*"]
 #[tokio::test]
 async fn test_health_endpoint() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     let resp = client
         .get(format!("{}/api/health", server.base_url))
@@ -214,7 +275,7 @@ async fn test_health_endpoint() {
 #[tokio::test]
 async fn test_status_endpoint() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     let resp = client
         .get(format!("{}/api/status", server.base_url))
@@ -232,9 +293,138 @@ async fn test_status_endpoint() {
 }
 
 #[tokio::test]
+async fn test_build_router_exposes_versioned_api_aliases() {
+    let harness = start_full_router("").await;
+
+    let health = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health.status(), StatusCode::OK);
+    assert_eq!(health.headers()["x-api-version"], "v1");
+
+    let versioned_health = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(versioned_health.status(), StatusCode::OK);
+    assert_eq!(versioned_health.headers()["x-api-version"], "v1");
+
+    let versions = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/versions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(versions.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(versions.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["current"], "v1");
+    assert!(json["supported"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("v1")));
+}
+
+#[tokio::test]
+async fn test_build_router_path_version_beats_unknown_accept_header() {
+    let harness = start_full_router("").await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/health")
+                .header("accept", "application/vnd.librefang.v99+json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-api-version"], "v1");
+}
+
+#[tokio::test]
+async fn test_build_router_providers_marks_lemonade_as_local() {
+    let harness = start_full_router("").await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/providers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let providers = json["providers"].as_array().unwrap();
+    let lemonade = providers
+        .iter()
+        .find(|provider| provider["id"] == "lemonade")
+        .expect("lemonade provider should be present");
+
+    assert_eq!(lemonade["is_local"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn test_build_router_unauthorized_responses_include_api_version_header() {
+    let harness = start_full_router("secret").await;
+
+    let response = harness
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agents")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.headers()["x-api-version"], "v1");
+}
+
+#[tokio::test]
 async fn test_spawn_list_kill_agent() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // --- Spawn ---
     let resp = client
@@ -288,7 +478,7 @@ async fn test_spawn_list_kill_agent() {
 #[tokio::test]
 async fn test_agent_session_empty() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // Spawn agent
     let resp = client
@@ -316,6 +506,64 @@ async fn test_agent_session_empty() {
 }
 
 #[tokio::test]
+async fn test_agent_monitoring_endpoints() {
+    let server = start_test_server().await;
+    let client = librefang_runtime::http_client::new_client();
+
+    let resp = client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": TEST_MANIFEST}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agent_id = body["agent_id"].as_str().unwrap().to_string();
+
+    server.state.kernel.audit_log.record(
+        agent_id.clone(),
+        AuditAction::AgentMessage,
+        "exact match target",
+        "custom_error",
+    );
+    server.state.kernel.audit_log.record(
+        agent_id.clone(),
+        AuditAction::AgentMessage,
+        "should not match substring filter",
+        "not_custom_error",
+    );
+
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/metrics",
+            server.base_url, agent_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let metrics: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(metrics["agent_id"], agent_id);
+    assert!(metrics["token_usage"].is_object());
+    assert!(metrics["tool_calls"].is_object());
+    assert!(metrics.get("avg_response_time_ms").is_some());
+
+    let resp = client
+        .get(format!(
+            "{}/api/agents/{}/logs?level=custom_error&n=10",
+            server.base_url, agent_id
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let logs: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(logs["count"], 1);
+    assert_eq!(logs["logs"].as_array().unwrap().len(), 1);
+    assert_eq!(logs["logs"][0]["outcome"], "custom_error");
+}
+
+#[tokio::test]
 async fn test_send_message_with_llm() {
     if std::env::var("GROQ_API_KEY").is_err() {
         eprintln!("GROQ_API_KEY not set, skipping LLM integration test");
@@ -323,7 +571,7 @@ async fn test_send_message_with_llm() {
     }
 
     let server = start_test_server_with_llm().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // Spawn
     let resp = client
@@ -371,7 +619,7 @@ async fn test_send_message_with_llm() {
 #[tokio::test]
 async fn test_workflow_crud() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // Spawn agent for workflow
     let resp = client
@@ -423,7 +671,7 @@ async fn test_workflow_crud() {
 #[tokio::test]
 async fn test_trigger_crud() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // Spawn agent for trigger
     let resp = client
@@ -500,7 +748,7 @@ async fn test_trigger_crud() {
 #[tokio::test]
 async fn test_invalid_agent_id_returns_400() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // Send message to invalid ID
     let resp = client
@@ -533,7 +781,7 @@ async fn test_invalid_agent_id_returns_400() {
 #[tokio::test]
 async fn test_kill_nonexistent_agent_returns_404() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     let fake_id = uuid::Uuid::new_v4();
     let resp = client
@@ -547,7 +795,7 @@ async fn test_kill_nonexistent_agent_returns_404() {
 #[tokio::test]
 async fn test_spawn_invalid_manifest_returns_400() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     let resp = client
         .post(format!("{}/api/agents", server.base_url))
@@ -563,7 +811,7 @@ async fn test_spawn_invalid_manifest_returns_400() {
 #[tokio::test]
 async fn test_request_id_header_is_uuid() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     let resp = client
         .get(format!("{}/api/health", server.base_url))
@@ -586,7 +834,7 @@ async fn test_request_id_header_is_uuid() {
 #[tokio::test]
 async fn test_multiple_agents_lifecycle() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // Spawn 3 agents
     let mut ids = Vec::new();
@@ -709,6 +957,9 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
+            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
+        )),
     });
 
     let api_key_state = state.kernel.config.api_key.clone();
@@ -727,6 +978,14 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         .route(
             "/api/agents/{id}/session",
             axum::routing::get(routes::get_agent_session),
+        )
+        .route(
+            "/api/agents/{id}/metrics",
+            axum::routing::get(routes::agent_metrics),
+        )
+        .route(
+            "/api/agents/{id}/logs",
+            axum::routing::get(routes::agent_logs),
         )
         .route("/api/agents/{id}/ws", axum::routing::get(ws::agent_ws))
         .route(
@@ -782,7 +1041,7 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
 #[tokio::test]
 async fn test_auth_health_is_public() {
     let server = start_test_server_with_auth("secret-key-123").await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // /api/health should be accessible without auth
     let resp = client
@@ -796,7 +1055,7 @@ async fn test_auth_health_is_public() {
 #[tokio::test]
 async fn test_auth_rejects_no_token() {
     let server = start_test_server_with_auth("secret-key-123").await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // Protected endpoint without auth header → 401
     // Note: /api/status is public (dashboard needs it), so use a protected endpoint
@@ -813,7 +1072,7 @@ async fn test_auth_rejects_no_token() {
 #[tokio::test]
 async fn test_auth_rejects_wrong_token() {
     let server = start_test_server_with_auth("secret-key-123").await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // Wrong bearer token → 401
     // Note: /api/status is public (dashboard needs it), so use a protected endpoint
@@ -831,7 +1090,7 @@ async fn test_auth_rejects_wrong_token() {
 #[tokio::test]
 async fn test_auth_accepts_correct_token() {
     let server = start_test_server_with_auth("secret-key-123").await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // Correct bearer token → 200
     let resp = client
@@ -849,7 +1108,7 @@ async fn test_auth_accepts_correct_token() {
 async fn test_auth_disabled_when_no_key() {
     // Empty API key = auth disabled
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // Protected endpoint accessible without auth when no key is configured
     let resp = client
@@ -867,7 +1126,7 @@ async fn test_auth_disabled_when_no_key() {
 #[tokio::test]
 async fn test_list_tools() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     let resp = client
         .get(format!("{}/api/tools", server.base_url))
@@ -884,7 +1143,7 @@ async fn test_list_tools() {
 #[tokio::test]
 async fn test_get_tool_found() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     // First list tools to get a known tool name
     let resp = client
@@ -912,7 +1171,7 @@ async fn test_get_tool_found() {
 #[tokio::test]
 async fn test_get_tool_not_found() {
     let server = start_test_server().await;
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
 
     let resp = client
         .get(format!(

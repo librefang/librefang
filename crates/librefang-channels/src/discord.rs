@@ -65,7 +65,7 @@ impl DiscordAdapter {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         Self {
             token: Zeroizing::new(token),
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             allowed_guilds,
             allowed_users,
             ignore_bots,
@@ -85,7 +85,7 @@ impl DiscordAdapter {
     }
 
     /// Get the WebSocket gateway URL from the Discord API.
-    async fn get_gateway_url(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn get_gateway_url(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{DISCORD_API_BASE}/gateway/bot");
         let resp: serde_json::Value = self
             .client
@@ -108,7 +108,7 @@ impl DiscordAdapter {
         &self,
         channel_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
         let chunks = split_message(text, DISCORD_MSG_LIMIT);
 
@@ -131,7 +131,10 @@ impl DiscordAdapter {
     }
 
     /// Send typing indicator to a Discord channel.
-    async fn api_send_typing(&self, channel_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn api_send_typing(
+        &self,
+        channel_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/typing");
         let _ = self
             .client
@@ -155,8 +158,10 @@ impl ChannelAdapter for DiscordAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let gateway_url = self.get_gateway_url().await?;
         info!("Discord gateway URL obtained");
 
@@ -426,7 +431,7 @@ impl ChannelAdapter for DiscordAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // platform_id is the channel_id for Discord
         let channel_id = &user.platform_id;
         match content {
@@ -441,11 +446,14 @@ impl ChannelAdapter for DiscordAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.api_send_typing(&user.platform_id).await
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

@@ -30,16 +30,38 @@ use librefang_runtime::sandbox::{SandboxConfig, WasmSandbox};
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::*;
 use librefang_types::capability::Capability;
-use librefang_types::config::{KernelConfig, OutputFormat};
+use librefang_types::config::{AuthProfile, KernelConfig, OutputFormat};
 use librefang_types::error::LibreFangError;
 use librefang_types::event::*;
 use librefang_types::memory::Memory;
 use librefang_types::tool::ToolDefinition;
 
 use async_trait::async_trait;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
+
+const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
+
+/// Cosine similarity between two f32 vectors. Returns 0.0 on dimension mismatch.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom < f32::EPSILON {
+        0.0
+    } else {
+        dot / denom
+    }
+}
 
 /// The main LibreFang kernel — coordinates all subsystems.
 /// Stub LLM driver used when no providers are configured.
@@ -56,6 +78,68 @@ impl LlmDriver for StubDriver {
                 .to_string(),
         ))
     }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct RotationKeySpec {
+    name: String,
+    api_key: String,
+    use_primary_driver: bool,
+}
+
+/// Custom Debug impl that redacts the API key to prevent accidental log leakage.
+impl std::fmt::Debug for RotationKeySpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RotationKeySpec")
+            .field("name", &self.name)
+            .field("api_key", &"<redacted>")
+            .field("use_primary_driver", &self.use_primary_driver)
+            .finish()
+    }
+}
+
+fn collect_rotation_key_specs(
+    profiles: Option<&[AuthProfile]>,
+    primary_api_key: Option<&str>,
+) -> Vec<RotationKeySpec> {
+    let mut seen_keys = HashSet::new();
+    let mut specs = Vec::new();
+    let mut sorted_profiles = profiles.map_or_else(Vec::new, |items| items.to_vec());
+    sorted_profiles.sort_by_key(|profile| profile.priority);
+
+    for profile in sorted_profiles {
+        let Ok(api_key) = std::env::var(&profile.api_key_env) else {
+            warn!(
+                profile = %profile.name,
+                env_var = %profile.api_key_env,
+                "Auth profile env var not set — skipping"
+            );
+            continue;
+        };
+        if api_key.is_empty() || !seen_keys.insert(api_key.clone()) {
+            continue;
+        }
+        specs.push(RotationKeySpec {
+            name: profile.name,
+            use_primary_driver: primary_api_key == Some(api_key.as_str()),
+            api_key,
+        });
+    }
+
+    if let Some(primary_api_key) = primary_api_key.filter(|key| !key.is_empty()) {
+        if seen_keys.insert(primary_api_key.to_string()) {
+            specs.insert(
+                0,
+                RotationKeySpec {
+                    name: "primary".to_string(),
+                    api_key: primary_api_key.to_string(),
+                    use_primary_driver: true,
+                },
+            );
+        }
+    }
+
+    specs
 }
 
 pub struct LibreFangKernel {
@@ -141,10 +225,10 @@ pub struct LibreFangKernel {
     pub hooks: librefang_runtime::hooks::HookRegistry,
     /// Persistent process manager for interactive sessions (REPLs, servers).
     pub process_manager: Arc<librefang_runtime::process_manager::ProcessManager>,
-    /// OFP peer registry — tracks connected peers.
-    pub peer_registry: Option<librefang_wire::PeerRegistry>,
-    /// OFP peer node — the local networking node.
-    pub peer_node: Option<Arc<librefang_wire::PeerNode>>,
+    /// OFP peer registry — tracks connected peers (set once during OFP startup).
+    pub peer_registry: OnceLock<librefang_wire::PeerRegistry>,
+    /// OFP peer node — the local networking node (set once during OFP startup).
+    pub peer_node: OnceLock<Arc<librefang_wire::PeerNode>>,
     /// Boot timestamp for uptime calculation.
     pub booted_at: std::time::Instant,
     /// WhatsApp Web gateway child process PID (for shutdown cleanup).
@@ -155,10 +239,24 @@ pub struct LibreFangKernel {
     /// Hot-reloadable default model override (set via config hot-reload, read at agent spawn).
     pub default_model_override:
         std::sync::RwLock<Option<librefang_types::config::DefaultModelConfig>>,
+    /// Hot-reloadable tool policy override (set via config hot-reload, read in available_tools).
+    pub tool_policy_override: std::sync::RwLock<Option<librefang_types::tool_policy::ToolPolicy>>,
     /// Per-agent message locks — serializes LLM calls for the same agent to prevent
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
     agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// Cooldown tracker for hand routing failures. Maps hand_id → (expiry, consecutive_failures).
+    /// Prevents the router from repeatedly dispatching to a hand that keeps failing.
+    /// After `MAX_HAND_FAILURES` consecutive failures the hand is auto-deactivated.
+    hand_route_cooldowns: dashmap::DashMap<String, (std::time::Instant, u32)>,
+    /// Per-agent decision traces from the most recent message exchange.
+    /// Stored for retrieval via `/api/agents/{id}/traces`.
+    pub decision_traces: dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
+    /// Command queue with lane-based concurrency control.
+    pub command_queue: librefang_runtime::command_lane::CommandQueue,
+    /// Cached embeddings of hand descriptions for semantic routing.
+    /// Maps hand_id → embedding vector. Populated lazily on first routing call.
+    hand_desc_embeddings: tokio::sync::RwLock<Option<std::collections::HashMap<String, Vec<f32>>>>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
 }
@@ -565,15 +663,17 @@ impl LibreFangKernel {
             let env_var = config.resolve_api_key_env(&config.default_model.provider);
             std::env::var(&env_var).ok()
         };
+        let default_base_url = config.default_model.base_url.clone().or_else(|| {
+            config
+                .provider_urls
+                .get(&config.default_model.provider)
+                .cloned()
+        });
         let driver_config = DriverConfig {
             provider: config.default_model.provider.clone(),
-            api_key: default_api_key,
-            base_url: config.default_model.base_url.clone().or_else(|| {
-                config
-                    .provider_urls
-                    .get(&config.default_model.provider)
-                    .cloned()
-            }),
+            api_key: default_api_key.clone(),
+            base_url: default_base_url.clone(),
+            vertex_ai: config.vertex_ai.clone(),
             skip_permissions: true,
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
@@ -581,38 +681,98 @@ impl LibreFangKernel {
         let primary_result = drivers::create_driver(&driver_config);
         let mut driver_chain: Vec<Arc<dyn LlmDriver>> = Vec::new();
 
-        match &primary_result {
-            Ok(d) => driver_chain.push(d.clone()),
-            Err(e) => {
-                warn!(
+        let rotation_specs = collect_rotation_key_specs(
+            config
+                .auth_profiles
+                .get(&config.default_model.provider)
+                .map(Vec::as_slice),
+            default_api_key.as_deref(),
+        );
+
+        if rotation_specs.len() > 1 || (primary_result.is_err() && !rotation_specs.is_empty()) {
+            let mut rotation_drivers: Vec<(Arc<dyn LlmDriver>, String)> = Vec::new();
+
+            for spec in rotation_specs {
+                if spec.use_primary_driver {
+                    if let Ok(driver) = &primary_result {
+                        rotation_drivers.push((driver.clone(), spec.name));
+                        continue;
+                    }
+                }
+
+                let profile_name = spec.name;
+                let profile_config = DriverConfig {
+                    provider: config.default_model.provider.clone(),
+                    api_key: Some(spec.api_key),
+                    base_url: default_base_url.clone(),
+                    vertex_ai: config.vertex_ai.clone(),
+                    skip_permissions: true,
+                };
+                match drivers::create_driver(&profile_config) {
+                    Ok(profile_driver) => {
+                        rotation_drivers.push((profile_driver, profile_name));
+                    }
+                    Err(e) => {
+                        warn!(
+                            profile = %profile_name,
+                            error = %e,
+                            "Auth profile driver creation failed — skipped"
+                        );
+                    }
+                }
+            }
+
+            if rotation_drivers.len() > 1 {
+                info!(
                     provider = %config.default_model.provider,
-                    error = %e,
-                    "Primary LLM driver init failed — trying auto-detect"
+                    pool_size = rotation_drivers.len(),
+                    "Token rotation enabled for default provider"
                 );
-                // Auto-detect: scan env for any configured provider key
-                if let Some((provider, model, env_var)) = drivers::detect_available_provider() {
-                    let auto_config = DriverConfig {
-                        provider: provider.to_string(),
-                        api_key: std::env::var(env_var).ok(),
-                        base_url: config.provider_urls.get(provider).cloned(),
-                        skip_permissions: true,
-                    };
-                    match drivers::create_driver(&auto_config) {
-                        Ok(d) => {
-                            info!(
-                                provider = %provider,
-                                model = %model,
-                                "Auto-detected provider from {} — using as default",
-                                env_var
-                            );
-                            driver_chain.push(d);
-                            // Update the running config so agents get the right model
-                            config.default_model.provider = provider.to_string();
-                            config.default_model.model = model.to_string();
-                            config.default_model.api_key_env = env_var.to_string();
-                        }
-                        Err(e2) => {
-                            warn!(provider = %provider, error = %e2, "Auto-detected provider also failed");
+                let rotation = drivers::token_rotation::TokenRotationDriver::new(
+                    rotation_drivers,
+                    config.default_model.provider.clone(),
+                );
+                driver_chain.push(Arc::new(rotation));
+            } else if let Some((driver, _)) = rotation_drivers.pop() {
+                driver_chain.push(driver);
+            }
+        }
+
+        if driver_chain.is_empty() {
+            match &primary_result {
+                Ok(d) => driver_chain.push(d.clone()),
+                Err(e) => {
+                    warn!(
+                        provider = %config.default_model.provider,
+                        error = %e,
+                        "Primary LLM driver init failed — trying auto-detect"
+                    );
+                    // Auto-detect: scan env for any configured provider key
+                    if let Some((provider, model, env_var)) = drivers::detect_available_provider() {
+                        let auto_config = DriverConfig {
+                            provider: provider.to_string(),
+                            api_key: std::env::var(env_var).ok(),
+                            base_url: config.provider_urls.get(provider).cloned(),
+                            vertex_ai: config.vertex_ai.clone(),
+                            skip_permissions: true,
+                        };
+                        match drivers::create_driver(&auto_config) {
+                            Ok(d) => {
+                                info!(
+                                    provider = %provider,
+                                    model = %model,
+                                    "Auto-detected provider from {} — using as default",
+                                    env_var
+                                );
+                                driver_chain.push(d);
+                                // Update the running config so agents get the right model
+                                config.default_model.provider = provider.to_string();
+                                config.default_model.model = model.to_string();
+                                config.default_model.api_key_env = env_var.to_string();
+                            }
+                            Err(e2) => {
+                                warn!(provider = %provider, error = %e2, "Auto-detected provider also failed");
+                            }
                         }
                     }
                 }
@@ -640,6 +800,7 @@ impl LibreFangKernel {
                     .base_url
                     .clone()
                     .or_else(|| config.provider_urls.get(&fb.provider).cloned()),
+                vertex_ai: config.vertex_ai.clone(),
                 skip_permissions: true,
             };
             match drivers::create_driver(&fb_config) {
@@ -650,7 +811,7 @@ impl LibreFangKernel {
                         "Fallback provider configured"
                     );
                     driver_chain.push(d.clone());
-                    model_chain.push((d, fb.model.clone()));
+                    model_chain.push((d, strip_provider_prefix(&fb.model, &fb.provider)));
                 }
                 Err(e) => {
                     warn!(
@@ -796,10 +957,21 @@ impl LibreFangKernel {
         // Initialize web tools (multi-provider search + SSRF-protected fetch + caching)
         let cache_ttl = std::time::Duration::from_secs(config.web.cache_ttl_minutes * 60);
         let web_cache = Arc::new(librefang_runtime::web_cache::WebCache::new(cache_ttl));
+        let brave_auth_profiles: Vec<(String, u32)> = config
+            .auth_profiles
+            .get("brave")
+            .map(|profiles| {
+                profiles
+                    .iter()
+                    .map(|p| (p.api_key_env.clone(), p.priority))
+                    .collect()
+            })
+            .unwrap_or_default();
         let web_ctx = librefang_runtime::web_search::WebToolsContext {
             search: librefang_runtime::web_search::WebSearchEngine::new(
                 config.web.clone(),
                 web_cache.clone(),
+                brave_auth_profiles,
             ),
             fetch: librefang_runtime::web_fetch::WebFetchEngine::new(
                 config.web.fetch.clone(),
@@ -960,6 +1132,13 @@ impl LibreFangKernel {
         let initial_broadcast = config.broadcast.clone();
         let auto_reply_engine = crate::auto_reply::AutoReplyEngine::new(config.auto_reply.clone());
 
+        // Initialize command queue with configured concurrency limits
+        let command_queue = librefang_runtime::command_lane::CommandQueue::with_capacities(
+            config.queue.concurrency.main_lane as u32,
+            config.queue.concurrency.cron_lane as u32,
+            config.queue.concurrency.subagent_lane as u32,
+        );
+
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1001,13 +1180,18 @@ impl LibreFangKernel {
             auto_reply_engine,
             hooks: librefang_runtime::hooks::HookRegistry::new(),
             process_manager: Arc::new(librefang_runtime::process_manager::ProcessManager::new(5)),
-            peer_registry: None,
-            peer_node: None,
+            peer_registry: OnceLock::new(),
+            peer_node: OnceLock::new(),
             booted_at: std::time::Instant::now(),
             whatsapp_gateway_pid: Arc::new(std::sync::Mutex::new(None)),
             channel_adapters: dashmap::DashMap::new(),
             default_model_override: std::sync::RwLock::new(None),
+            tool_policy_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
+            hand_route_cooldowns: dashmap::DashMap::new(),
+            decision_traces: dashmap::DashMap::new(),
+            command_queue,
+            hand_desc_embeddings: tokio::sync::RwLock::new(None),
             self_handle: OnceLock::new(),
         };
 
@@ -1231,7 +1415,18 @@ impl LibreFangKernel {
         parent: Option<AgentId>,
         source_toml_path: Option<PathBuf>,
     ) -> KernelResult<AgentId> {
-        let agent_id = AgentId::new();
+        self.spawn_agent_inner(manifest, parent, source_toml_path, None)
+    }
+
+    /// Spawn a new agent with all options including a predetermined ID.
+    fn spawn_agent_inner(
+        &self,
+        manifest: AgentManifest,
+        parent: Option<AgentId>,
+        source_toml_path: Option<PathBuf>,
+        predetermined_id: Option<AgentId>,
+    ) -> KernelResult<AgentId> {
+        let agent_id = predetermined_id.unwrap_or_default();
         let session_id = SessionId::new();
         let name = manifest.name.clone();
 
@@ -1515,6 +1710,12 @@ impl LibreFangKernel {
                 // Update last active time
                 let _ = self.registry.set_state(agent_id, AgentState::Running);
 
+                // Store decision traces for API retrieval
+                if !result.decision_traces.is_empty() {
+                    self.decision_traces
+                        .insert(agent_id, result.decision_traces.clone());
+                }
+
                 // SECURITY: Record successful message in audit trail
                 self.audit_log.record(
                     agent_id.to_string(),
@@ -1693,6 +1894,7 @@ impl LibreFangKernel {
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
+            let stable_prefix_mode = self.config.stable_prefix_mode;
             let user_name = self
                 .memory
                 .structured_get(shared_id, "user_name")
@@ -1719,8 +1921,16 @@ impl LibreFangKernel {
                 base_system_prompt: manifest.model.system_prompt.clone(),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
                 recalled_memories: vec![],
-                skill_summary: self.build_skill_summary(&manifest.skills),
-                skill_prompt_context: self.collect_prompt_context(&manifest.skills),
+                skill_summary: if manifest.skills_disabled {
+                    String::new()
+                } else {
+                    self.build_skill_summary(&manifest.skills)
+                },
+                skill_prompt_context: if manifest.skills_disabled {
+                    String::new()
+                } else {
+                    self.collect_prompt_context(&manifest.skills)
+                },
                 mcp_summary: if mcp_tool_count > 0 {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
@@ -1739,11 +1949,14 @@ impl LibreFangKernel {
                     .workspace
                     .as_ref()
                     .and_then(|w| read_identity_file(w, "MEMORY.md")),
-                canonical_context: self
-                    .memory
-                    .canonical_context(agent_id, None)
-                    .ok()
-                    .and_then(|(s, _)| s),
+                canonical_context: if stable_prefix_mode {
+                    None
+                } else {
+                    self.memory
+                        .canonical_context(agent_id, None)
+                        .ok()
+                        .and_then(|(s, _)| s)
+                },
                 user_name,
                 channel_type: None,
                 is_subagent: manifest
@@ -1786,6 +1999,11 @@ impl LibreFangKernel {
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+            // Pass stable_prefix_mode flag to the agent loop via metadata
+            manifest.metadata.insert(
+                STABLE_PREFIX_MODE_METADATA_KEY.to_string(),
+                serde_json::json!(stable_prefix_mode),
+            );
             // Store canonical context separately for injection as user message
             // (keeps system prompt stable across turns for provider prompt caching)
             if let Some(cc_msg) =
@@ -1796,6 +2014,12 @@ impl LibreFangKernel {
                     serde_json::Value::String(cc_msg),
                 );
             }
+
+            // Pass prompt_caching config to the agent loop via metadata.
+            manifest.metadata.insert(
+                "prompt_caching".to_string(),
+                serde_json::Value::Bool(self.config.prompt_caching),
+            );
         }
 
         let memory = Arc::clone(&self.memory);
@@ -1923,6 +2147,29 @@ impl LibreFangKernel {
                     kernel_clone
                         .scheduler
                         .record_usage(agent_id, &result.total_usage);
+
+                    // Persist usage to SQLite (mirrors non-streaming path)
+                    let model = &manifest.model.model;
+                    let cost = MeteringEngine::estimate_cost_with_catalog(
+                        &kernel_clone
+                            .model_catalog
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner()),
+                        model,
+                        result.total_usage.input_tokens,
+                        result.total_usage.output_tokens,
+                    );
+                    let _ = kernel_clone
+                        .metering
+                        .record(&librefang_memory::usage::UsageRecord {
+                            agent_id,
+                            model: model.clone(),
+                            input_tokens: result.total_usage.input_tokens,
+                            output_tokens: result.total_usage.output_tokens,
+                            cost_usd: cost,
+                            tool_calls: result.iterations.saturating_sub(1),
+                        });
+
                     let _ = kernel_clone
                         .registry
                         .set_state(agent_id, AgentState::Running);
@@ -2040,11 +2287,13 @@ impl LibreFangKernel {
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             iterations: 1,
             cost_usd: None,
             silent: false,
             directives: Default::default(),
+            decision_traces: Vec::new(),
         })
     }
 
@@ -2100,13 +2349,20 @@ impl LibreFangKernel {
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             cost_usd: None,
             iterations: 1,
             silent: false,
             directives: Default::default(),
+            decision_traces: Vec::new(),
         })
     }
+
+    /// Duration to suppress routing to a hand after a dispatch failure.
+    const HAND_ROUTE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+    /// Auto-deactivate a hand after this many consecutive routing failures.
+    const MAX_HAND_FAILURES: u32 = 3;
 
     async fn execute_router_agent(
         &self,
@@ -2116,17 +2372,53 @@ impl LibreFangKernel {
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
     ) -> KernelResult<AgentLoopResult> {
-        let hand_selection = router::auto_select_hand(message);
+        // ── Semantic scoring (optional) ──────────────────────────────────
+        // When an embedding driver is available, compute cosine similarity
+        // between the user message and cached hand description embeddings.
+        // This enables cross-lingual routing (e.g. Chinese input matching
+        // English hand descriptions) without hardcoding per-language keywords.
+        let semantic_scores = self.compute_hand_semantic_scores(message).await;
+        let semantic_ref = if semantic_scores.is_empty() {
+            None
+        } else {
+            Some(&semantic_scores)
+        };
+
+        let hand_selection = router::auto_select_hand(message, semantic_ref);
         let template_selection =
             router::auto_select_template(message, &self.config.home_dir.join("agents"));
 
-        if let Some(hand_id) = hand_selection.hand_id {
+        // ── Route decision trace ──
+        info!(
+            router = %entry.name,
+            hand_candidate = hand_selection.hand_id.as_deref().unwrap_or("none"),
+            hand_score = hand_selection.score,
+            hand_reason = %hand_selection.reason,
+            template_candidate = %template_selection.template,
+            template_score = template_selection.score,
+            template_reason = %template_selection.reason,
+            semantic_available = semantic_ref.is_some(),
+            "Route decision: scoring complete"
+        );
+
+        // ── Compare hand vs template score and pick the best ──
+        let hand_id_ref = hand_selection.hand_id.as_deref();
+        let hand_usable = hand_id_ref
+            .is_some_and(|hid| !self.is_hand_cooled_down(hid) && self.hand_requirements_met(hid));
+
+        let prefer_hand = hand_usable && hand_selection.score >= template_selection.score;
+
+        if prefer_hand {
+            let hand_id = hand_id_ref.unwrap();
             info!(
                 router = %entry.name,
                 route_type = "hand",
                 target = hand_id,
+                hand_score = hand_selection.score,
+                template = %template_selection.template,
+                template_score = template_selection.score,
                 reason = %hand_selection.reason,
-                "Router selected hand"
+                "Router selected hand (score comparison)"
             );
             match self
                 .execute_routed_hand(
@@ -2137,14 +2429,26 @@ impl LibreFangKernel {
                 )
                 .await
             {
-                Ok(result) => return Ok(result),
-                Err(err) => warn!(
-                    router = %entry.name,
-                    hand_id,
-                    error = %err,
-                    "Router hand dispatch failed, falling back"
-                ),
+                Ok(result) => {
+                    // Success — clear any previous failure count
+                    self.hand_route_cooldowns.remove(hand_id);
+                    return Ok(result);
+                }
+                Err(err) => {
+                    self.record_hand_failure(hand_id, &entry.name, &err);
+                }
             }
+        } else if let Some(ref hand_id) = hand_selection.hand_id {
+            // Log why hand was skipped despite matching
+            info!(
+                router = %entry.name,
+                hand = %hand_id,
+                hand_score = hand_selection.score,
+                template = %template_selection.template,
+                template_score = template_selection.score,
+                hand_usable,
+                "Route decision: skipped hand"
+            );
         }
 
         if template_selection.score > 0 {
@@ -2190,6 +2494,210 @@ impl LibreFangKernel {
             content_blocks,
         )
         .await
+    }
+
+    /// Record a hand dispatch failure: apply cooldown, increment failure count,
+    /// and auto-deactivate after `MAX_HAND_FAILURES` consecutive failures.
+    fn record_hand_failure(&self, hand_id: &str, router_name: &str, err: &KernelError) {
+        let failures = self
+            .hand_route_cooldowns
+            .get(hand_id)
+            .map(|e| e.1)
+            .unwrap_or(0)
+            + 1;
+
+        if failures >= Self::MAX_HAND_FAILURES {
+            warn!(
+                router = %router_name,
+                hand = %hand_id,
+                consecutive_failures = failures,
+                error = %err,
+                "Hand exceeded max failures — auto-deactivating"
+            );
+            // Try to deactivate the hand
+            if let Some(instance_id) = self.active_hand_instance_id(hand_id) {
+                if let Err(e) = self.hand_registry.deactivate(instance_id) {
+                    warn!(hand = %hand_id, error = %e, "Failed to auto-deactivate hand");
+                } else {
+                    info!(hand = %hand_id, "Hand auto-deactivated after repeated failures");
+                    self.persist_hand_state();
+                    self.notify_owner_bg(format!(
+                        "⚠️ Hand `{hand_id}` auto-deactivated after {failures} consecutive failures. Re-activate with: librefang hand activate {hand_id}"
+                    ));
+                }
+            }
+            self.hand_route_cooldowns.remove(hand_id);
+        } else {
+            warn!(
+                router = %router_name,
+                hand = %hand_id,
+                consecutive_failures = failures,
+                error = %err,
+                "Router hand dispatch failed, applying cooldown"
+            );
+            self.hand_route_cooldowns.insert(
+                hand_id.to_string(),
+                (
+                    std::time::Instant::now() + Self::HAND_ROUTE_COOLDOWN,
+                    failures,
+                ),
+            );
+        }
+    }
+
+    /// Fire-and-forget notification to the owner user via all configured channels.
+    ///
+    /// Best-effort: logs warnings on failure but never blocks the caller.
+    fn notify_owner_bg(&self, message: String) {
+        let weak = match self.self_handle.get() {
+            Some(w) => w.clone(),
+            None => return,
+        };
+        tokio::spawn(async move {
+            let kernel = match weak.upgrade() {
+                Some(k) => k,
+                None => return,
+            };
+            // Find the owner user and their channel bindings
+            let owner = kernel.config.users.iter().find(|u| u.role == "owner");
+            let bindings = match owner {
+                Some(u) => u.channel_bindings.clone(),
+                None => return, // no owner configured — nothing to notify
+            };
+            for (channel, platform_id) in &bindings {
+                if kernel.channel_adapters.contains_key(channel.as_str()) {
+                    if let Err(e) = kernel
+                        .send_channel_message(channel, platform_id, &message, None)
+                        .await
+                    {
+                        warn!(channel = %channel, error = %e, "Failed to send owner notification");
+                    }
+                }
+            }
+        });
+    }
+
+    /// Compute semantic similarity scores between a message and all hand descriptions.
+    ///
+    /// Uses the embedding driver to vectorize the message and computes cosine
+    /// similarity against cached hand description embeddings. Returns an empty
+    /// map if no embedding driver is configured (graceful degradation).
+    async fn compute_hand_semantic_scores(
+        &self,
+        message: &str,
+    ) -> std::collections::HashMap<String, f32> {
+        let driver = match &self.embedding_driver {
+            Some(d) => d,
+            None => return std::collections::HashMap::new(),
+        };
+
+        // Lazily build hand description embeddings on first call.
+        // If embedding fails, we leave the cache as None so it retries next time
+        // (transient network errors should not permanently disable semantic routing).
+        {
+            let read_guard = self.hand_desc_embeddings.read().await;
+            if read_guard.is_none() {
+                drop(read_guard);
+                let mut write_guard = self.hand_desc_embeddings.write().await;
+                if write_guard.is_none() {
+                    let hands = librefang_hands::bundled::bundled_hands();
+                    let mut ids = Vec::new();
+                    let mut descriptions = Vec::new();
+                    for (id, toml_content, _) in &hands {
+                        if let Ok(def) =
+                            librefang_hands::bundled::parse_bundled(id, toml_content, "")
+                        {
+                            ids.push(def.id.clone());
+                            descriptions.push(def.description.clone());
+                        }
+                    }
+                    let desc_refs: Vec<&str> = descriptions.iter().map(|s| s.as_str()).collect();
+                    match driver.embed(&desc_refs).await {
+                        Ok(embeddings) => {
+                            let mut desc_map = std::collections::HashMap::new();
+                            for (id, emb) in ids.into_iter().zip(embeddings) {
+                                desc_map.insert(id, emb);
+                            }
+                            info!(
+                                hands = desc_map.len(),
+                                "Cached hand description embeddings for semantic routing"
+                            );
+                            *write_guard = Some(desc_map);
+                        }
+                        Err(e) => {
+                            // Leave as None so next request retries
+                            warn!(error = %e, "Failed to embed hand descriptions — will retry next request");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Embed the user message (with timeout to avoid blocking routing)
+        let embed_fut = driver.embed_one(message);
+        let msg_embedding =
+            match tokio::time::timeout(std::time::Duration::from_secs(2), embed_fut).await {
+                Ok(Ok(emb)) => emb,
+                Ok(Err(e)) => {
+                    debug!(error = %e, "Failed to embed message for semantic routing");
+                    return std::collections::HashMap::new();
+                }
+                Err(_) => {
+                    debug!("Embedding timed out (2s) — skipping semantic routing");
+                    return std::collections::HashMap::new();
+                }
+            };
+
+        // Compute cosine similarity against each hand
+        let read_guard = self.hand_desc_embeddings.read().await;
+        let Some(ref desc_embeddings) = *read_guard else {
+            return std::collections::HashMap::new();
+        };
+
+        desc_embeddings
+            .iter()
+            .map(|(hand_id, desc_emb)| {
+                let sim = cosine_similarity(&msg_embedding, desc_emb);
+                (hand_id.clone(), sim)
+            })
+            .collect()
+    }
+
+    /// Check if a hand is in cooldown after a recent dispatch failure.
+    fn is_hand_cooled_down(&self, hand_id: &str) -> bool {
+        if let Some(entry) = self.hand_route_cooldowns.get(hand_id) {
+            let (expiry, failures) = *entry;
+            if std::time::Instant::now() < expiry {
+                debug!(hand = %hand_id, failures, "Hand still in route cooldown, skipping");
+                return true;
+            }
+            // Cooldown expired — remove entry
+            drop(entry);
+            self.hand_route_cooldowns.remove(hand_id);
+        }
+        false
+    }
+
+    /// Check if a hand's requirements (binaries, API keys) are satisfied.
+    /// Returns true if requirements cannot be checked (hand not in registry)
+    /// to avoid blocking legitimate routing.
+    fn hand_requirements_met(&self, hand_id: &str) -> bool {
+        match self.hand_registry.check_requirements(hand_id) {
+            Ok(results) => {
+                for (req, satisfied) in &results {
+                    if !satisfied {
+                        info!(
+                            hand = %hand_id,
+                            requirement = %req.label,
+                            "Hand requirement not met, skipping auto-route"
+                        );
+                        return false;
+                    }
+                }
+                true
+            }
+            Err(_) => true, // hand not found in registry — let it through
+        }
     }
 
     async fn execute_routed_hand(
@@ -2287,17 +2795,31 @@ impl LibreFangKernel {
             })
     }
 
+    /// Get the instance UUID for an active hand (for deactivation).
+    fn active_hand_instance_id(&self, hand_id: &str) -> Option<uuid::Uuid> {
+        self.hand_registry
+            .list_instances()
+            .into_iter()
+            .find(|instance| {
+                instance.hand_id == hand_id
+                    && instance.status == librefang_hands::HandStatus::Active
+            })
+            .map(|instance| instance.instance_id)
+    }
+
     fn wrap_routed_result(result: AgentLoopResult) -> AgentLoopResult {
         AgentLoopResult {
             response: result.response,
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
+                ..Default::default()
             },
             iterations: result.iterations,
             cost_usd: None,
             silent: result.silent,
             directives: result.directives,
+            decision_traces: result.decision_traces,
         }
     }
 
@@ -2361,6 +2883,7 @@ impl LibreFangKernel {
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
+            let stable_prefix_mode = self.config.stable_prefix_mode;
             let user_name = self
                 .memory
                 .structured_get(shared_id, "user_name")
@@ -2387,8 +2910,16 @@ impl LibreFangKernel {
                 base_system_prompt: manifest.model.system_prompt.clone(),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
                 recalled_memories: vec![], // Recalled in agent_loop, not here
-                skill_summary: self.build_skill_summary(&manifest.skills),
-                skill_prompt_context: self.collect_prompt_context(&manifest.skills),
+                skill_summary: if manifest.skills_disabled {
+                    String::new()
+                } else {
+                    self.build_skill_summary(&manifest.skills)
+                },
+                skill_prompt_context: if manifest.skills_disabled {
+                    String::new()
+                } else {
+                    self.collect_prompt_context(&manifest.skills)
+                },
                 mcp_summary: if mcp_tool_count > 0 {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
@@ -2407,11 +2938,14 @@ impl LibreFangKernel {
                     .workspace
                     .as_ref()
                     .and_then(|w| read_identity_file(w, "MEMORY.md")),
-                canonical_context: self
-                    .memory
-                    .canonical_context(agent_id, None)
-                    .ok()
-                    .and_then(|(s, _)| s),
+                canonical_context: if stable_prefix_mode {
+                    None
+                } else {
+                    self.memory
+                        .canonical_context(agent_id, None)
+                        .ok()
+                        .and_then(|(s, _)| s)
+                },
                 user_name,
                 channel_type: None,
                 is_subagent: manifest
@@ -2454,6 +2988,11 @@ impl LibreFangKernel {
             };
             manifest.model.system_prompt =
                 librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+            // Pass stable_prefix_mode flag to the agent loop via metadata
+            manifest.metadata.insert(
+                STABLE_PREFIX_MODE_METADATA_KEY.to_string(),
+                serde_json::json!(stable_prefix_mode),
+            );
             // Store canonical context separately for injection as user message
             // (keeps system prompt stable across turns for provider prompt caching)
             if let Some(cc_msg) =
@@ -2464,6 +3003,12 @@ impl LibreFangKernel {
                     serde_json::Value::String(cc_msg),
                 );
             }
+
+            // Pass prompt_caching config to the agent loop via metadata.
+            manifest.metadata.insert(
+                "prompt_caching".to_string(),
+                serde_json::Value::Bool(self.config.prompt_caching),
+            );
         }
 
         let is_stable = self.config.mode == librefang_types::config::KernelMode::Stable;
@@ -2491,6 +3036,7 @@ impl LibreFangKernel {
                 temperature: manifest.model.temperature,
                 system: Some(manifest.model.system_prompt.clone()),
                 thinking: None,
+                prompt_caching: false,
             };
             let (complexity, routed_model) = router.select_model(&probe);
             info!(
@@ -3429,7 +3975,16 @@ impl LibreFangKernel {
             }
         }
 
-        let agent_id = self.spawn_agent_with_source(manifest, Some(hand_manifest_path.clone()))?;
+        // Use a deterministic UUID derived from the hand_id so the same hand
+        // always gets the same agent ID across daemon restarts.  This keeps
+        // triggers and cron jobs that reference the UUID stable (#313).
+        let deterministic_id = AgentId::from_hand_id(hand_id);
+        let agent_id = self.spawn_agent_inner(
+            manifest,
+            None,
+            Some(hand_manifest_path.clone()),
+            Some(deterministic_id),
+        )?;
 
         // Restore triggers from the old agent under the new agent ID (#519).
         if !saved_triggers.is_empty() {
@@ -3639,6 +4194,18 @@ impl LibreFangKernel {
                         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
                     *guard = Some(new_config.default_model.clone());
                 }
+                HotAction::UpdateToolPolicy => {
+                    info!(
+                        "Hot-reload: updating tool policy ({} global rules, {} agent rules)",
+                        new_config.tool_policy.global_rules.len(),
+                        new_config.tool_policy.agent_rules.len(),
+                    );
+                    let mut guard = self
+                        .tool_policy_override
+                        .write()
+                        .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                    *guard = Some(new_config.tool_policy.clone());
+                }
                 _ => {
                     // Other hot actions (channels, web, browser, extensions, etc.)
                     // are logged but not applied here — they require subsystem-specific
@@ -3650,6 +4217,11 @@ impl LibreFangKernel {
                 }
             }
         }
+
+        // Invalidate the router manifest cache so newly installed/removed
+        // agents are picked up on the next routing call.
+        router::invalidate_manifest_cache();
+        router::invalidate_hand_route_cache();
     }
 
     /// Publish an event to the bus and evaluate triggers.
@@ -3791,6 +4363,22 @@ impl LibreFangKernel {
     /// Must be called after the kernel is wrapped in `Arc` (e.g., from the daemon).
     /// Iterates the agent registry and starts background tasks for agents with
     /// `Continuous`, `Periodic`, or `Proactive` schedules.
+    /// Hands activated on first boot when no `hand_state.json` exists yet.
+    /// These provide a useful out-of-the-box experience without requiring
+    /// extra API keys or manual setup.
+    const DEFAULT_HANDS: &'static [&'static str] = &[
+        "researcher",
+        "browser",
+        "collector",
+        "analytics",
+        "strategist",
+        "lead",
+        "predictor",
+        "trader",
+        "devops",
+        "apitester",
+    ];
+
     pub fn start_background_agents(self: &Arc<Self>) {
         // Restore previously active hands from persisted state
         let state_path = self.config.home_dir.join("hand_state.json");
@@ -3844,6 +4432,85 @@ impl LibreFangKernel {
                     }
                     Err(e) => warn!(hand = %hand_id, error = %e, "Failed to restore hand"),
                 }
+            }
+        } else if !state_path.exists() {
+            // First boot: activate default hands for out-of-the-box experience
+            info!(
+                "First boot detected — activating {} default hand(s)",
+                Self::DEFAULT_HANDS.len()
+            );
+            for hand_id in Self::DEFAULT_HANDS {
+                match self.activate_hand(hand_id, std::collections::HashMap::new()) {
+                    Ok(inst) => {
+                        info!(hand = %hand_id, instance = %inst.instance_id, "Default hand activated");
+                    }
+                    Err(e) => warn!(hand = %hand_id, error = %e, "Failed to activate default hand"),
+                }
+            }
+            self.persist_hand_state();
+        }
+
+        // ── Startup API key health check ──────────────────────────────────
+        // Verify that configured API keys are present in the environment.
+        // Missing keys are logged as warnings so the operator can fix them
+        // before they cause runtime errors.
+        {
+            let mut missing: Vec<String> = Vec::new();
+
+            // Default LLM provider
+            let llm_env = self
+                .config
+                .resolve_api_key_env(&self.config.default_model.provider);
+            if std::env::var(&llm_env).unwrap_or_default().is_empty() {
+                missing.push(format!(
+                    "LLM ({}): ${}",
+                    self.config.default_model.provider, llm_env
+                ));
+            }
+
+            // Fallback LLM providers
+            for fb in &self.config.fallback_providers {
+                let env_var = self.config.resolve_api_key_env(&fb.provider);
+                if std::env::var(&env_var).unwrap_or_default().is_empty() {
+                    missing.push(format!("LLM fallback ({}): ${}", fb.provider, env_var));
+                }
+            }
+
+            // Search provider
+            let search_env = match self.config.web.search_provider {
+                librefang_types::config::SearchProvider::Brave => {
+                    Some(("Brave", self.config.web.brave.api_key_env.clone()))
+                }
+                librefang_types::config::SearchProvider::Tavily => {
+                    Some(("Tavily", self.config.web.tavily.api_key_env.clone()))
+                }
+                librefang_types::config::SearchProvider::Perplexity => {
+                    Some(("Perplexity", self.config.web.perplexity.api_key_env.clone()))
+                }
+                _ => None,
+            };
+            if let Some((name, env_var)) = search_env {
+                if std::env::var(&env_var).unwrap_or_default().is_empty() {
+                    missing.push(format!("Search ({}): ${}", name, env_var));
+                }
+            }
+
+            if missing.is_empty() {
+                info!("Startup health check: all configured API keys present");
+            } else {
+                warn!(
+                    count = missing.len(),
+                    "Startup health check: missing API keys — affected services may fail"
+                );
+                for m in &missing {
+                    warn!("  ↳ {}", m);
+                }
+                // Notify owner about missing keys
+                self.notify_owner_bg(format!(
+                    "⚠️ Startup: {} API key(s) missing — {}. Set the env vars and restart.",
+                    missing.len(),
+                    missing.join(", ")
+                ));
             }
         }
 
@@ -3901,7 +4568,10 @@ impl LibreFangKernel {
                     catalog
                         .list_providers()
                         .iter()
-                        .filter(|p| !p.key_required)
+                        .filter(|p| {
+                            librefang_runtime::provider_health::is_local_provider(&p.id)
+                                && !p.base_url.is_empty()
+                        })
                         .map(|p| (p.id.clone(), p.base_url.clone()))
                         .collect()
                 };
@@ -3958,6 +4628,60 @@ impl LibreFangKernel {
                     }
                 }
             });
+        }
+
+        // Periodic session retention cleanup (prune expired / excess sessions)
+        {
+            let session_cfg = self.config.session.clone();
+            let needs_cleanup =
+                session_cfg.retention_days > 0 || session_cfg.max_sessions_per_agent > 0;
+            if needs_cleanup && session_cfg.cleanup_interval_hours > 0 {
+                let kernel = Arc::clone(self);
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                        u64::from(session_cfg.cleanup_interval_hours) * 3600,
+                    ));
+                    interval.tick().await; // Skip first immediate tick
+                    loop {
+                        interval.tick().await;
+                        if kernel.supervisor.is_shutting_down() {
+                            break;
+                        }
+                        let mut total = 0u64;
+                        if session_cfg.retention_days > 0 {
+                            match kernel
+                                .memory
+                                .cleanup_expired_sessions(session_cfg.retention_days)
+                            {
+                                Ok(n) => total += n,
+                                Err(e) => {
+                                    warn!("Session retention cleanup (expired) failed: {e}");
+                                }
+                            }
+                        }
+                        if session_cfg.max_sessions_per_agent > 0 {
+                            match kernel
+                                .memory
+                                .cleanup_excess_sessions(session_cfg.max_sessions_per_agent)
+                            {
+                                Ok(n) => total += n,
+                                Err(e) => {
+                                    warn!("Session retention cleanup (excess) failed: {e}");
+                                }
+                            }
+                        }
+                        if total > 0 {
+                            info!("Session retention cleanup: removed {total} session(s)");
+                        }
+                    }
+                });
+                info!(
+                    "Session retention cleanup scheduled every {} hour(s) (retention_days={}, max_per_agent={})",
+                    session_cfg.cleanup_interval_hours,
+                    session_cfg.retention_days,
+                    session_cfg.max_sessions_per_agent,
+                );
+            }
         }
 
         // Periodic memory consolidation (decays stale memory confidence)
@@ -4205,14 +4929,9 @@ impl LibreFangKernel {
                     "OFP peer node started"
                 );
 
-                // SAFETY: These fields are only written once during startup.
-                // We use unsafe to set them because start_background_agents runs
-                // after the Arc is created and the kernel is otherwise immutable.
-                let self_ptr = Arc::as_ptr(self) as *mut LibreFangKernel;
-                unsafe {
-                    (*self_ptr).peer_registry = Some(registry.clone());
-                    (*self_ptr).peer_node = Some(node.clone());
-                }
+                // Safe one-time initialization via OnceLock (replaces previous unsafe pointer mutation).
+                let _ = self.peer_registry.set(registry.clone());
+                let _ = self.peer_node.set(node.clone());
 
                 // Connect to bootstrap peers
                 for peer_addr_str in &self.config.network.bootstrap_peers {
@@ -4487,6 +5206,7 @@ impl LibreFangKernel {
                 provider: agent_provider.clone(),
                 api_key,
                 base_url,
+                vertex_ai: self.config.vertex_ai.clone(),
                 skip_permissions: true,
             };
 
@@ -4535,6 +5255,7 @@ impl LibreFangKernel {
                         .base_url
                         .clone()
                         .or_else(|| self.lookup_provider_url(&fb.provider)),
+                    vertex_ai: self.config.vertex_ai.clone(),
                     skip_permissions: true,
                 };
                 match drivers::create_driver(&config) {
@@ -4906,13 +5627,17 @@ impl LibreFangKernel {
 
         // Look up agent entry for profile, skill/MCP allowlists, and declared tools
         let entry = self.registry.get(agent_id);
-        let (skill_allowlist, mcp_allowlist, tool_profile) = entry
+        if entry.as_ref().is_some_and(|e| e.manifest.tools_disabled) {
+            return Vec::new();
+        }
+        let (skill_allowlist, mcp_allowlist, tool_profile, skills_disabled) = entry
             .as_ref()
             .map(|e| {
                 (
                     e.manifest.skills.clone(),
                     e.manifest.mcp_servers.clone(),
                     e.manifest.profile.clone(),
+                    e.manifest.skills_disabled,
                 )
             })
             .unwrap_or_default();
@@ -4961,8 +5686,10 @@ impl LibreFangKernel {
         };
 
         // Step 2: Add skill-provided tools (filtered by agent's skill allowlist,
-        // then by declared tools).
-        let skill_tools = {
+        // then by declared tools). Skip entirely when skills are disabled.
+        let skill_tools = if skills_disabled {
+            vec![]
+        } else {
             let registry = self
                 .skill_registry
                 .read()
@@ -5044,7 +5771,32 @@ impl LibreFangKernel {
             all_tools.retain(|t| !tool_blocklist.iter().any(|b| b == &t.name));
         }
 
-        // Step 5: Remove shell_exec if exec_policy denies it.
+        // Step 5: Apply global tool_policy rules (deny/allow with glob patterns).
+        // This filters tools based on the kernel-wide tool policy from config.toml.
+        // Check hot-reloadable override first, then fall back to initial config.
+        let effective_policy = self
+            .tool_policy_override
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
+        let effective_policy = effective_policy
+            .as_ref()
+            .unwrap_or(&self.config.tool_policy);
+        if !effective_policy.is_empty() {
+            all_tools.retain(|t| {
+                let result = librefang_runtime::tool_policy::resolve_tool_access(
+                    &t.name,
+                    effective_policy,
+                    0, // depth 0 for top-level available_tools; subagent depth handled elsewhere
+                );
+                matches!(
+                    result,
+                    librefang_runtime::tool_policy::ToolAccessResult::Allowed
+                )
+            });
+        }
+
+        // Step 6: Remove shell_exec if exec_policy denies it.
         let exec_blocks_shell = entry.as_ref().is_some_and(|e| {
             e.manifest
                 .exec_policy
@@ -5398,8 +6150,12 @@ fn infer_provider_from_model(model: &str) -> Option<String> {
             | "moonshot" | "openrouter" | "volcengine" | "doubao" | "dashscope" => {
                 return Some(prefix.to_string());
             }
-            // "kimi" is a brand alias for moonshot
-            "kimi" => {
+            // "z.ai" is a domain alias for the zai provider
+            "z.ai" => {
+                return Some("zai".to_string());
+            }
+            // "kimi" / "kimi2" are brand aliases for moonshot
+            "kimi" | "kimi2" => {
                 return Some("moonshot".to_string());
             }
             _ => {}
@@ -5483,6 +6239,12 @@ async fn cron_deliver_response(
             let _ = kernel
                 .memory
                 .structured_set(agent_id, "delivery.last_channel", kv_val);
+            if let Err(e) = kernel
+                .send_channel_message(channel, to, response, None)
+                .await
+            {
+                tracing::warn!(channel = %channel, to = %to, error = %e, "Cron channel delivery failed");
+            }
         }
         CronDelivery::LastChannel => {
             match kernel
@@ -5498,6 +6260,12 @@ async fn cron_deliver_response(
                             recipient = %recipient,
                             "Cron: delivering to last channel"
                         );
+                        if let Err(e) = kernel
+                            .send_channel_message(channel, recipient, response, None)
+                            .await
+                        {
+                            tracing::warn!(channel = %channel, recipient = %recipient, error = %e, "Cron last_channel delivery failed");
+                        }
                     }
                 }
                 _ => {
@@ -5507,7 +6275,7 @@ async fn cron_deliver_response(
         }
         CronDelivery::Webhook { url } => {
             tracing::debug!(url = %url, "Cron: delivering via webhook");
-            let client = reqwest::Client::builder()
+            let client = librefang_runtime::http_client::client_builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build();
             if let Ok(client) = client {
@@ -5667,6 +6435,20 @@ impl KernelHandle for LibreFangKernel {
             .task_list(status)
             .await
             .map_err(|e| format!("Task list failed: {e}"))
+    }
+
+    async fn task_delete(&self, task_id: &str) -> Result<bool, String> {
+        self.memory
+            .task_delete(task_id)
+            .await
+            .map_err(|e| format!("Task delete failed: {e}"))
+    }
+
+    async fn task_retry(&self, task_id: &str) -> Result<bool, String> {
+        self.memory
+            .task_retry(task_id)
+            .await
+            .map_err(|e| format!("Task retry failed: {e}"))
     }
 
     async fn publish_event(
@@ -6257,6 +7039,92 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    struct EnvVarGuard {
+        key: &'static str,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.key);
+        }
+    }
+
+    fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
+        std::env::set_var(key, value);
+        EnvVarGuard { key }
+    }
+
+    #[test]
+    fn test_collect_rotation_key_specs_dedupes_primary_profile_key() {
+        let _primary = set_test_env("LIBREFANG_TEST_ROTATION_PRIMARY_KEY_A", "key-1");
+        let _secondary = set_test_env("LIBREFANG_TEST_ROTATION_SECONDARY_KEY_A", "key-2");
+        let profiles = [
+            AuthProfile {
+                name: "secondary".to_string(),
+                api_key_env: "LIBREFANG_TEST_ROTATION_SECONDARY_KEY_A".to_string(),
+                priority: 10,
+            },
+            AuthProfile {
+                name: "profile-a".to_string(),
+                api_key_env: "LIBREFANG_TEST_ROTATION_PRIMARY_KEY_A".to_string(),
+                priority: 0,
+            },
+        ];
+
+        let specs = collect_rotation_key_specs(Some(&profiles), Some("key-1"));
+
+        assert_eq!(
+            specs,
+            vec![
+                RotationKeySpec {
+                    name: "profile-a".to_string(),
+                    api_key: "key-1".to_string(),
+                    use_primary_driver: true,
+                },
+                RotationKeySpec {
+                    name: "secondary".to_string(),
+                    api_key: "key-2".to_string(),
+                    use_primary_driver: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_collect_rotation_key_specs_prepends_distinct_primary_and_skips_missing_profiles() {
+        let _secondary = set_test_env("LIBREFANG_TEST_ROTATION_SECONDARY_KEY_B", "key-2");
+        let profiles = [
+            AuthProfile {
+                name: "missing".to_string(),
+                api_key_env: "LIBREFANG_TEST_ROTATION_MISSING_KEY_B".to_string(),
+                priority: 0,
+            },
+            AuthProfile {
+                name: "secondary".to_string(),
+                api_key_env: "LIBREFANG_TEST_ROTATION_SECONDARY_KEY_B".to_string(),
+                priority: 1,
+            },
+        ];
+
+        let specs = collect_rotation_key_specs(Some(&profiles), Some("key-0"));
+
+        assert_eq!(
+            specs,
+            vec![
+                RotationKeySpec {
+                    name: "primary".to_string(),
+                    api_key: "key-0".to_string(),
+                    use_primary_driver: true,
+                },
+                RotationKeySpec {
+                    name: "secondary".to_string(),
+                    api_key: "key-2".to_string(),
+                    use_primary_driver: false,
+                },
+            ]
+        );
+    }
+
     #[test]
     fn test_manifest_to_capabilities() {
         let mut manifest = AgentManifest {
@@ -6458,6 +7326,43 @@ mod tests {
         assert!(
             entry.manifest.tool_blocklist.is_empty(),
             "hand activation should not set a runtime blocklist by default"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn test_available_tools_returns_empty_when_tools_disabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-tools-disabled-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+        let manifest = AgentManifest {
+            name: "no-tools".to_string(),
+            description: "agent with tools disabled".to_string(),
+            author: "test".to_string(),
+            module: "builtin:chat".to_string(),
+            profile: Some(librefang_types::agent::ToolProfile::Full),
+            capabilities: ManifestCapabilities {
+                tools: vec!["file_read".to_string(), "web_fetch".to_string()],
+                ..Default::default()
+            },
+            tools_disabled: true,
+            ..Default::default()
+        };
+
+        let agent_id = kernel.spawn_agent(manifest).expect("spawn should succeed");
+        let tools = kernel.available_tools(agent_id);
+        assert!(
+            tools.is_empty(),
+            "disabled tools should suppress all builtin, skill, and MCP tools"
         );
 
         kernel.shutdown();

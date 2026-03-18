@@ -63,7 +63,7 @@ impl TwistAdapter {
             token: Zeroizing::new(token),
             workspace_id,
             allowed_channels,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -77,7 +77,7 @@ impl TwistAdapter {
     }
 
     /// Validate credentials by fetching the authenticated user's info.
-    async fn validate(&self) -> Result<(String, String), Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/users/get_session_user", TWIST_API_BASE);
         let resp = self
             .client
@@ -102,7 +102,9 @@ impl TwistAdapter {
 
     /// Fetch channels (threads) in the workspace.
     #[allow(dead_code)]
-    async fn fetch_channels(&self) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    async fn fetch_channels(
+        &self,
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/channels/get?workspace_id={}",
             TWIST_API_BASE, self.workspace_id
@@ -132,7 +134,7 @@ impl TwistAdapter {
     async fn fetch_threads(
         &self,
         channel_id: &str,
-    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/threads/get?channel_id={}", TWIST_API_BASE, channel_id);
         let resp = self
             .client
@@ -159,7 +161,7 @@ impl TwistAdapter {
     async fn fetch_comments(
         &self,
         thread_id: &str,
-    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/comments/get?thread_id={}&limit=50",
             TWIST_API_BASE, thread_id
@@ -189,7 +191,7 @@ impl TwistAdapter {
         &self,
         thread_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/comments/add", TWIST_API_BASE);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -224,7 +226,7 @@ impl TwistAdapter {
         channel_id: &str,
         title: &str,
         content: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/threads/add", TWIST_API_BASE);
 
         let body = serde_json::json!({
@@ -274,8 +276,10 @@ impl ChannelAdapter for TwistAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let (user_id, user_name) = self.validate().await?;
         info!("Twist adapter authenticated as {user_name} (id: {user_id})");
@@ -521,7 +525,7 @@ impl ChannelAdapter for TwistAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(text) => text,
             _ => "(Unsupported content type)".to_string(),
@@ -537,7 +541,7 @@ impl ChannelAdapter for TwistAdapter {
         _user: &ChannelUser,
         content: ChannelContent,
         thread_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(text) => text,
             _ => "(Unsupported content type)".to_string(),
@@ -547,12 +551,15 @@ impl ChannelAdapter for TwistAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Twist does not expose a typing indicator API
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

@@ -26,10 +26,10 @@ impl OpenAIDriver {
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
-            client: reqwest::Client::builder()
+            client: crate::http_client::client_builder()
                 .user_agent(crate::USER_AGENT)
                 .build()
-                .unwrap_or_default(),
+                .expect("HTTP client build"),
             extra_headers: Vec::new(),
         }
     }
@@ -37,6 +37,17 @@ impl OpenAIDriver {
     /// True if this provider is Moonshot/Kimi and requires reasoning_content on assistant messages with tool_calls.
     fn kimi_needs_reasoning_content(&self, model: &str) -> bool {
         self.base_url.contains("moonshot") || model.to_lowercase().contains("kimi")
+    }
+
+    /// True if this model is DeepSeek-reasoner (R1).
+    ///
+    /// DeepSeek-reasoner returns `reasoning_content` in assistant responses, but
+    /// for multi-turn conversations the API **rejects** requests that include
+    /// `reasoning_content` on previous assistant messages.  We must strip it from
+    /// all historical assistant messages when building the request payload.
+    fn is_deepseek_reasoner(&self, model: &str) -> bool {
+        let m = model.to_lowercase();
+        m.contains("deepseek-reasoner") || m.contains("deepseek-r1")
     }
 
     /// Create a driver with additional HTTP headers (e.g. for Copilot IDE auth).
@@ -188,7 +199,7 @@ struct OaiResponseMessage {
     content: Option<String>,
     tool_calls: Option<Vec<OaiToolCall>>,
     /// Reasoning/thinking content returned by some models (DeepSeek-R1, Qwen3, etc.)
-    /// via LM Studio, Ollama, and other local inference servers.
+    /// via DeepSeek's official API, LM Studio, Ollama, and other OpenAI-compatible servers.
     reasoning_content: Option<String>,
 }
 
@@ -196,6 +207,17 @@ struct OaiResponseMessage {
 struct OaiUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
+    /// Detailed prompt token breakdown (includes cached token info).
+    #[serde(default)]
+    prompt_tokens_details: Option<OaiPromptTokensDetails>,
+}
+
+/// OpenAI prompt token details (includes cached token count).
+#[derive(Debug, Deserialize, Default)]
+struct OaiPromptTokensDetails {
+    /// Number of prompt tokens served from cache.
+    #[serde(default)]
+    cached_tokens: u64,
 }
 
 #[async_trait]
@@ -317,14 +339,17 @@ impl LlmDriver for OpenAIDriver {
                         }
                     }
                     let has_tool_calls = !tool_calls.is_empty();
+                    let is_deepseek_r = self.is_deepseek_reasoner(&request.model);
                     oai_messages.push(OaiMessage {
                         role: "assistant".to_string(),
                         // ZHIPU (GLM) rejects assistant messages where content is
                         // null or omitted when tool_calls are present (error 1214).
-                        // Always send an empty string so every OpenAI-compat
-                        // provider gets a valid payload.
+                        // DeepSeek-reasoner also requires a non-null content field
+                        // on all assistant messages in multi-turn conversations.
+                        // Always send an empty string for these providers so every
+                        // OpenAI-compat endpoint gets a valid payload.
                         content: if text_parts.is_empty() {
-                            if has_tool_calls {
+                            if has_tool_calls || is_deepseek_r {
                                 Some(OaiMessageContent::Text(String::new()))
                             } else {
                                 None
@@ -338,7 +363,16 @@ impl LlmDriver for OpenAIDriver {
                             Some(tool_calls)
                         },
                         tool_call_id: None,
-                        reasoning_content: if has_tool_calls
+                        // DeepSeek-reasoner: MUST omit reasoning_content on
+                        // all previous assistant messages — the API rejects it.
+                        // Kimi: requires an empty-string reasoning_content when
+                        // tool_calls are present (thinking is disabled for
+                        // multi-turn compatibility).
+                        reasoning_content: if is_deepseek_r {
+                            // Always None — DeepSeek rejects reasoning_content
+                            // on historical assistant turns.
+                            None
+                        } else if has_tool_calls
                             && self.kimi_needs_reasoning_content(&request.model)
                         {
                             Some(String::new())
@@ -366,6 +400,18 @@ impl LlmDriver for OpenAIDriver {
                 },
             })
             .collect();
+
+        // Guard: an empty message list would produce an unparseable API response
+        // (typically "EOF while parsing a value at line 1 column 0").
+        if oai_messages.is_empty() {
+            return Err(LlmError::Api {
+                status: 0,
+                message: "Cannot send completion request with no messages — \
+                          this usually means aggressive history trimming emptied \
+                          the conversation"
+                    .to_string(),
+            });
+        }
 
         let tool_choice = if oai_tools.is_empty() {
             None
@@ -539,8 +585,15 @@ impl LlmDriver for OpenAIDriver {
                 .text()
                 .await
                 .map_err(|e| LlmError::Http(e.to_string()))?;
-            let oai_response: OaiResponse =
+            let raw_json: serde_json::Value =
                 serde_json::from_str(&body).map_err(|e| LlmError::Parse(e.to_string()))?;
+            let cached_prompt_tokens = raw_json
+                .get("usage")
+                .and_then(|u| u.get("prompt_tokens_details"))
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|v| v.as_u64());
+            let oai_response: OaiResponse =
+                serde_json::from_value(raw_json).map_err(|e| LlmError::Parse(e.to_string()))?;
 
             let choice = oai_response
                 .choices
@@ -561,6 +614,7 @@ impl LlmDriver for OpenAIDriver {
                     );
                     content.push(ContentBlock::Thinking {
                         thinking: reasoning.clone(),
+                        provider_metadata: None,
                     });
                 }
             }
@@ -575,6 +629,7 @@ impl LlmDriver for OpenAIDriver {
                         if choice.message.reasoning_content.is_none() {
                             content.push(ContentBlock::Thinking {
                                 thinking: think_text,
+                                provider_metadata: None,
                             });
                         }
                     }
@@ -601,7 +656,7 @@ impl LlmDriver for OpenAIDriver {
                 let thinking_text = content
                     .iter()
                     .find_map(|b| match b {
-                        ContentBlock::Thinking { thinking } => Some(thinking.as_str()),
+                        ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
                         _ => None,
                     })
                     .unwrap_or("");
@@ -618,8 +673,9 @@ impl LlmDriver for OpenAIDriver {
 
             if let Some(calls) = choice.message.tool_calls {
                 for call in calls {
-                    let input: serde_json::Value =
-                        serde_json::from_str(&call.function.arguments).unwrap_or_default();
+                    let input: serde_json::Value = ensure_object(
+                        serde_json::from_str(&call.function.arguments).unwrap_or_default(),
+                    );
                     content.push(ContentBlock::ToolUse {
                         id: call.id.clone(),
                         name: call.function.name.clone(),
@@ -649,9 +705,18 @@ impl LlmDriver for OpenAIDriver {
 
             let mut usage = oai_response
                 .usage
-                .map(|u| TokenUsage {
-                    input_tokens: u.prompt_tokens,
-                    output_tokens: u.completion_tokens,
+                .map(|u| {
+                    let cached = u
+                        .prompt_tokens_details
+                        .as_ref()
+                        .map(|d| d.cached_tokens)
+                        .unwrap_or(0);
+                    TokenUsage {
+                        input_tokens: u.prompt_tokens,
+                        output_tokens: u.completion_tokens,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: cached,
+                    }
                 })
                 .unwrap_or_default();
 
@@ -665,6 +730,13 @@ impl LlmDriver for OpenAIDriver {
                 );
                 usage.output_tokens = 1;
             }
+
+            debug!(
+                prompt_tokens = usage.input_tokens,
+                completion_tokens = usage.output_tokens,
+                cached_prompt_tokens = cached_prompt_tokens.unwrap_or(0),
+                "OpenAI-compatible usage"
+            );
 
             return Ok(CompletionResponse {
                 content,
@@ -774,10 +846,11 @@ impl LlmDriver for OpenAIDriver {
                         }
                     }
                     let has_tool_calls = !tool_calls_out.is_empty();
+                    let is_deepseek_r = self.is_deepseek_reasoner(&request.model);
                     oai_messages.push(OaiMessage {
                         role: "assistant".to_string(),
                         content: if text_parts.is_empty() {
-                            if has_tool_calls {
+                            if has_tool_calls || is_deepseek_r {
                                 Some(OaiMessageContent::Text(String::new()))
                             } else {
                                 None
@@ -791,7 +864,13 @@ impl LlmDriver for OpenAIDriver {
                             Some(tool_calls_out)
                         },
                         tool_call_id: None,
-                        reasoning_content: if has_tool_calls
+                        // DeepSeek-reasoner: MUST omit reasoning_content on
+                        // all previous assistant messages — the API rejects it.
+                        // Kimi: requires an empty-string reasoning_content when
+                        // tool_calls are present.
+                        reasoning_content: if is_deepseek_r {
+                            None
+                        } else if has_tool_calls
                             && self.kimi_needs_reasoning_content(&request.model)
                         {
                             Some(String::new())
@@ -819,6 +898,17 @@ impl LlmDriver for OpenAIDriver {
                 },
             })
             .collect();
+
+        // Guard: an empty message list would produce an unparseable API response.
+        if oai_messages.is_empty() {
+            return Err(LlmError::Api {
+                status: 0,
+                message: "Cannot send streaming request with no messages — \
+                          this usually means aggressive history trimming emptied \
+                          the conversation"
+                    .to_string(),
+            });
+        }
 
         let tool_choice = if oai_tools.is_empty() {
             None
@@ -1008,6 +1098,7 @@ impl LlmDriver for OpenAIDriver {
             let mut tool_accum: Vec<(String, String, String)> = Vec::new();
             let mut finish_reason: Option<String> = None;
             let mut usage = TokenUsage::default();
+            let mut cached_prompt_tokens: u64 = 0;
             let mut chunk_count: u32 = 0;
             let mut sse_line_count: u32 = 0;
 
@@ -1046,6 +1137,14 @@ impl LlmDriver for OpenAIDriver {
                         if let Some(pt) = u["prompt_tokens"].as_u64() {
                             usage.input_tokens = pt;
                         }
+                        if let Some(cached) = u
+                            .get("prompt_tokens_details")
+                            .and_then(|d| d.get("cached_tokens"))
+                            .and_then(|v| v.as_u64())
+                        {
+                            usage.cache_read_input_tokens = cached;
+                            cached_prompt_tokens = cached;
+                        }
                         if let Some(ct) = u["completion_tokens"].as_u64() {
                             usage.output_tokens = ct;
                         }
@@ -1082,7 +1181,7 @@ impl LlmDriver for OpenAIDriver {
                             }
                         }
 
-                        // Reasoning/thinking content delta (DeepSeek-R1, Qwen3 via LM Studio/Ollama)
+                        // Reasoning/thinking content delta (DeepSeek-R1 via official API or local servers, Qwen3, etc.)
                         if let Some(reasoning) = delta["reasoning_content"].as_str() {
                             if !reasoning.is_empty() {
                                 reasoning_content.push_str(reasoning);
@@ -1194,6 +1293,7 @@ impl LlmDriver for OpenAIDriver {
             if !reasoning_content.is_empty() {
                 content.push(ContentBlock::Thinking {
                     thinking: reasoning_content.clone(),
+                    provider_metadata: None,
                 });
             }
 
@@ -1205,6 +1305,7 @@ impl LlmDriver for OpenAIDriver {
                     if reasoning_content.is_empty() {
                         content.push(ContentBlock::Thinking {
                             thinking: think_text,
+                            provider_metadata: None,
                         });
                     }
                 }
@@ -1229,7 +1330,7 @@ impl LlmDriver for OpenAIDriver {
                 let thinking_text = content
                     .iter()
                     .find_map(|b| match b {
-                        ContentBlock::Thinking { thinking } => Some(thinking.as_str()),
+                        ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
                         _ => None,
                     })
                     .unwrap_or("");
@@ -1245,7 +1346,8 @@ impl LlmDriver for OpenAIDriver {
             }
 
             for (id, name, arguments) in &tool_accum {
-                let input: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+                let input: serde_json::Value =
+                    ensure_object(serde_json::from_str(arguments).unwrap_or_default());
                 content.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -1255,14 +1357,14 @@ impl LlmDriver for OpenAIDriver {
                 tool_calls.push(ToolCall {
                     id: id.clone(),
                     name: name.clone(),
-                    input,
+                    input: input.clone(),
                 });
 
                 let _ = tx
                     .send(StreamEvent::ToolUseEnd {
                         id: id.clone(),
                         name: name.clone(),
-                        input: serde_json::from_str(arguments).unwrap_or_default(),
+                        input,
                     })
                     .await;
             }
@@ -1288,6 +1390,13 @@ impl LlmDriver for OpenAIDriver {
                 debug!("Stream has content but no usage stats — setting synthetic output_tokens=1");
                 usage.output_tokens = 1;
             }
+
+            debug!(
+                prompt_tokens = usage.input_tokens,
+                completion_tokens = usage.output_tokens,
+                cached_prompt_tokens,
+                "OpenAI-compatible usage (stream)"
+            );
 
             let _ = tx
                 .send(StreamEvent::ContentComplete { stop_reason, usage })
@@ -1451,7 +1560,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
 
         // Parse args as JSON Value
         let args_value: serde_json::Value =
-            serde_json::from_str(args).unwrap_or(serde_json::json!({}));
+            ensure_object(serde_json::from_str(args).unwrap_or_default());
 
         tool_calls.push(ToolCall {
             id: format!("groq_recovered_{}", tool_calls.len()),
@@ -1475,6 +1584,7 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
                 usage: TokenUsage {
                     input_tokens: 0,
                     output_tokens: 0,
+                    ..Default::default()
                 },
             });
         }
@@ -1488,8 +1598,24 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
         usage: TokenUsage {
             input_tokens: 0,
             output_tokens: 0,
+            ..Default::default()
         },
     })
+}
+
+/// Ensure a `serde_json::Value` is an object.  OpenAI-compatible APIs expect
+/// tool-call arguments to be a JSON object (`{}`), never `null`.  When a tool
+/// has no parameters the deserialized value may be `null` (e.g. from
+/// `Value::default()` on empty/invalid input); this helper normalises it to `{}`.
+fn ensure_object(v: serde_json::Value) -> serde_json::Value {
+    match &v {
+        serde_json::Value::Object(_) => v,
+        serde_json::Value::Null => serde_json::json!({}),
+        other => {
+            warn!(value = ?other, "Tool input was not an object or null, replacing with empty object");
+            serde_json::json!({})
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1523,6 +1649,20 @@ mod tests {
         assert!(result.is_some());
         let resp = result.unwrap();
         assert_eq!(resp.tool_calls[0].name, "shell_exec");
+    }
+
+    #[test]
+    fn test_ensure_object_null_becomes_empty_object() {
+        assert_eq!(
+            ensure_object(serde_json::Value::Null),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn test_ensure_object_preserves_existing_object() {
+        let obj = serde_json::json!({"key": "value"});
+        assert_eq!(ensure_object(obj.clone()), obj);
     }
 
     // ----- rejects_temperature tests -----
@@ -1706,5 +1846,71 @@ mod tests {
         let msg: OaiResponseMessage = serde_json::from_str(json).unwrap();
         assert!(msg.content.is_none());
         assert!(msg.reasoning_content.is_none());
+    }
+
+    // ----- is_deepseek_reasoner tests -----
+
+    #[test]
+    fn test_is_deepseek_reasoner() {
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        assert!(driver.is_deepseek_reasoner("deepseek-reasoner"));
+        assert!(driver.is_deepseek_reasoner("deepseek-r1"));
+        assert!(driver.is_deepseek_reasoner("DeepSeek-Reasoner"));
+        assert!(driver.is_deepseek_reasoner("deepseek-r1-0528"));
+        assert!(!driver.is_deepseek_reasoner("deepseek-chat"));
+        assert!(!driver.is_deepseek_reasoner("deepseek-coder"));
+        assert!(!driver.is_deepseek_reasoner("gpt-4o"));
+    }
+
+    /// Verify that reasoning_content is omitted (None) when building
+    /// assistant messages for deepseek-reasoner, even if the blocks
+    /// contain Thinking content.
+    #[test]
+    fn test_deepseek_reasoner_strips_reasoning_content_from_assistant_msg() {
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let model = "deepseek-reasoner";
+
+        // Simulate building an assistant OaiMessage with tool_calls —
+        // for deepseek-reasoner, reasoning_content must always be None.
+        let has_tool_calls = true;
+        let is_deepseek_r = driver.is_deepseek_reasoner(model);
+        let reasoning_content = if is_deepseek_r {
+            None
+        } else if has_tool_calls && driver.kimi_needs_reasoning_content(model) {
+            Some(String::new())
+        } else {
+            None
+        };
+        assert!(
+            reasoning_content.is_none(),
+            "deepseek-reasoner must never send reasoning_content on assistant messages"
+        );
+    }
+
+    /// Verify that deepseek-reasoner assistant messages always get a non-null
+    /// content field, even when text_parts is empty (thinking-only response).
+    #[test]
+    fn test_deepseek_reasoner_content_never_null() {
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let model = "deepseek-reasoner";
+        let is_deepseek_r = driver.is_deepseek_reasoner(model);
+        let text_parts: Vec<String> = Vec::new(); // empty — thinking-only response
+        let has_tool_calls = false;
+
+        // Simulate the content field logic from complete()/stream()
+        let content: Option<OaiMessageContent> = if text_parts.is_empty() {
+            if has_tool_calls || is_deepseek_r {
+                Some(OaiMessageContent::Text(String::new()))
+            } else {
+                None
+            }
+        } else {
+            Some(OaiMessageContent::Text(text_parts.join("")))
+        };
+
+        assert!(
+            content.is_some(),
+            "deepseek-reasoner assistant messages must always have non-null content for multi-turn"
+        );
     }
 }

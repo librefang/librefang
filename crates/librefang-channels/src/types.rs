@@ -8,6 +8,7 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::Stream;
+use tokio::sync::mpsc;
 
 /// The type of messaging channel.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -124,6 +125,7 @@ pub enum AgentPhase {
 
 impl AgentPhase {
     /// Sanitize a tool name for display (truncate to 64 chars, strip control chars).
+    #[inline]
     pub fn tool_use(name: &str) -> Self {
         let sanitized: String = name.chars().filter(|c| !c.is_control()).take(64).collect();
         Self::ToolUse {
@@ -156,6 +158,7 @@ pub const ALLOWED_REACTION_EMOJI: &[&str] = &[
 ];
 
 /// Get the default emoji for a given agent phase.
+#[inline]
 pub fn default_phase_emoji(phase: &AgentPhase) -> &'static str {
     match phase {
         AgentPhase::Queued => "\u{23F3}",                 // ⏳
@@ -233,17 +236,23 @@ pub trait ChannelAdapter: Send + Sync {
     /// Start receiving messages. Returns a stream of incoming messages.
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>;
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    >;
 
     /// Send a response back to a user on this channel.
     async fn send(
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>>;
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Send a typing indicator (optional — default no-op).
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
@@ -253,12 +262,19 @@ pub trait ChannelAdapter: Send + Sync {
         _user: &ChannelUser,
         _message_id: &str,
         _reaction: &LifecycleReaction,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Ok(())
     }
 
+    /// Whether error messages should be suppressed (logged only) instead of
+    /// posted publicly. Adapters where replies are visible to all followers
+    /// (e.g. Mastodon) should return `true` to avoid leaking internal errors.
+    fn suppress_error_responses(&self) -> bool {
+        false
+    }
+
     /// Stop the adapter and clean up resources.
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>>;
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     /// Get the current health status of this adapter (optional — default returns disconnected).
     fn status(&self) -> ChannelStatus {
@@ -271,15 +287,56 @@ pub trait ChannelAdapter: Send + Sync {
         user: &ChannelUser,
         content: ChannelContent,
         _thread_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.send(user, content).await
+    }
+
+    /// Whether this adapter supports streaming output (progressive message updates).
+    ///
+    /// When true, the bridge will use `send_streaming()` instead of `send()` for
+    /// agent responses, enabling real-time token display.
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    /// Stream a response progressively by consuming text deltas from a channel.
+    ///
+    /// For adapters that support streaming (e.g. Telegram), this sends an initial
+    /// placeholder message, then edits it in-place as new tokens arrive. The
+    /// `thread_id` is used for forum-topic replies on supported platforms.
+    ///
+    /// The `delta_rx` receiver is consumed (ownership transfer) — the adapter
+    /// reads deltas until the channel closes. On error, delivery is partial:
+    /// tokens already sent to the user are not retracted. The bridge layer
+    /// buffers deltas and will fall back to a non-streaming `send()` if this
+    /// method returns an error.
+    ///
+    /// Default implementation collects all deltas and sends as a single message.
+    async fn send_streaming(
+        &self,
+        user: &ChannelUser,
+        mut delta_rx: mpsc::Receiver<String>,
+        _thread_id: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut full_text = String::new();
+        while let Some(delta) = delta_rx.recv().await {
+            full_text.push_str(&delta);
+        }
+        if !full_text.is_empty() {
+            self.send(user, ChannelContent::Text(full_text)).await?;
+        }
+        Ok(())
     }
 }
 
 /// Split a message into chunks of at most `max_len` characters,
 /// preferring to split at newline boundaries.
 ///
+/// HTML-entity-aware: never cuts in the middle of `&...;` sequences
+/// (e.g. `&amp;`, `&lt;`, `&#123;`).
+///
 /// Shared utility used by Telegram, Discord, and Slack adapters.
+#[inline]
 pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
     if text.len() <= max_len {
         return vec![text];
@@ -293,6 +350,10 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
         }
         // Try to split at a newline near the boundary (UTF-8 safe)
         let safe_end = librefang_types::truncate_str(remaining, max_len).len();
+        // Avoid splitting inside an HTML entity (`&...;`).  Walk backwards
+        // from safe_end: if we find `&` without a subsequent `;` before the
+        // boundary, move the split point to just before that `&`.
+        let safe_end = retreat_past_html_entity(remaining, safe_end);
         let split_at = remaining[..safe_end].rfind('\n').unwrap_or(safe_end);
         let (chunk, rest) = remaining.split_at(split_at);
         chunks.push(chunk);
@@ -303,6 +364,27 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<&str> {
             .unwrap_or(rest);
     }
     chunks
+}
+
+/// If `pos` falls inside an HTML entity (`&...;`), return the index of the
+/// `&` so the caller splits before it.  Otherwise return `pos` unchanged.
+///
+/// HTML entities are at most ~10 chars long (`&#1114111;`), so we only
+/// look back a small window.
+fn retreat_past_html_entity(text: &str, pos: usize) -> usize {
+    // Maximum entity length we consider (e.g. `&#1114111;` = 10 chars).
+    const MAX_ENTITY_LEN: usize = 12;
+    let search_start = pos.saturating_sub(MAX_ENTITY_LEN);
+    // Look for the last `&` in the window ending at `pos`.
+    if let Some(rel) = text[search_start..pos].rfind('&') {
+        let amp_pos = search_start + rel;
+        // Check whether there is a matching `;` between the `&` and `pos`.
+        // If not, we are inside an incomplete entity — retreat to `amp_pos`.
+        if !text[amp_pos..pos].contains(';') {
+            return amp_pos;
+        }
+    }
+    pos
 }
 
 #[cfg(test)]

@@ -61,7 +61,7 @@ impl MastodonAdapter {
         Self {
             instance_url,
             access_token: Zeroizing::new(access_token),
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -75,7 +75,7 @@ impl MastodonAdapter {
     }
 
     /// Validate the access token by calling `/api/v1/accounts/verify_credentials`.
-    async fn validate(&self) -> Result<(String, String), Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/v1/accounts/verify_credentials", self.instance_url);
 
         let resp = self
@@ -107,7 +107,7 @@ impl MastodonAdapter {
         text: &str,
         in_reply_to_id: Option<&str>,
         visibility: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/v1/statuses", self.instance_url);
 
         let chunks = split_message(text, MAX_MESSAGE_LEN);
@@ -150,7 +150,7 @@ impl MastodonAdapter {
     async fn fetch_notifications(
         &self,
         since_id: Option<&str>,
-    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
         let mut url = format!(
             "{}/api/v1/notifications?types[]=mention&limit=30",
             self.instance_url
@@ -321,10 +321,18 @@ impl ChannelAdapter for MastodonAdapter {
         ChannelType::Custom("mastodon".to_string())
     }
 
+    /// Mastodon replies are visible to all followers, so suppress error
+    /// messages to avoid posting internal errors publicly.
+    fn suppress_error_responses(&self) -> bool {
+        true
+    }
+
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let (account_id, username) = self.validate().await?;
         info!("Mastodon adapter authenticated as @{username} (id: {account_id})");
@@ -472,10 +480,14 @@ impl ChannelAdapter for MastodonAdapter {
                 let notifications: Vec<serde_json::Value> =
                     poll_resp.json().await.unwrap_or_default();
 
+                // Mastodon returns notifications newest-first. Capture the
+                // first (newest) ID *before* iterating so the next poll
+                // uses the true high-water mark and avoids re-delivery.
+                if let Some(newest) = notifications.first().and_then(|n| n["id"].as_str()) {
+                    last_notification_id = Some(newest.to_string());
+                }
+
                 for notif in &notifications {
-                    if let Some(nid) = notif["id"].as_str() {
-                        last_notification_id = Some(nid.to_string());
-                    }
                     if let Some(mut msg) = parse_mastodon_notification(notif, &own_account_id) {
                         // Inject account_id for multi-bot routing
                         if let Some(ref aid) = account_id {
@@ -501,7 +513,7 @@ impl ChannelAdapter for MastodonAdapter {
         &self,
         _user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 // _user.platform_id is the account_id; we use status_id from metadata for reply
@@ -520,7 +532,7 @@ impl ChannelAdapter for MastodonAdapter {
         _user: &ChannelUser,
         content: ChannelContent,
         thread_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_post_status(&text, Some(thread_id), "unlisted")
@@ -534,12 +546,15 @@ impl ChannelAdapter for MastodonAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Mastodon does not support typing indicators
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
@@ -713,6 +728,18 @@ mod tests {
         assert_eq!(
             msg.metadata.get("visibility").and_then(|v| v.as_str()),
             Some("direct")
+        );
+    }
+
+    #[test]
+    fn test_mastodon_suppress_error_responses() {
+        let adapter = MastodonAdapter::new(
+            "https://mastodon.social".to_string(),
+            "access-token-123".to_string(),
+        );
+        assert!(
+            adapter.suppress_error_responses(),
+            "MastodonAdapter should suppress error responses to avoid posting them publicly"
         );
     }
 }

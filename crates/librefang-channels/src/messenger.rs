@@ -61,7 +61,7 @@ impl MessengerAdapter {
             page_token: Zeroizing::new(page_token),
             verify_token: Zeroizing::new(verify_token),
             webhook_port,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -74,7 +74,7 @@ impl MessengerAdapter {
     }
 
     /// Validate the page token by calling the Graph API to get page info.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/me?access_token={}",
             GRAPH_API_BASE,
@@ -99,7 +99,7 @@ impl MessengerAdapter {
         &self,
         recipient_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/me/messages?access_token={}",
             GRAPH_API_BASE,
@@ -136,7 +136,7 @@ impl MessengerAdapter {
         &self,
         recipient_id: &str,
         action: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/me/messages?access_token={}",
             GRAPH_API_BASE,
@@ -156,7 +156,10 @@ impl MessengerAdapter {
 
     /// Mark a message as seen via sender action.
     #[allow(dead_code)]
-    async fn mark_seen(&self, recipient_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn mark_seen(
+        &self,
+        recipient_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.api_send_action(recipient_id, "mark_seen").await
     }
 }
@@ -274,8 +277,10 @@ impl ChannelAdapter for MessengerAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let page_name = self.validate().await?;
         info!("Messenger adapter authenticated as {page_name}");
@@ -329,7 +334,7 @@ impl ChannelAdapter for MessengerAdapter {
                             if let Some(entries) = body.0["entry"].as_array() {
                                 for entry in entries {
                                     let msgs = parse_messenger_entry(entry);
-                                    for msg in msgs {
+                                    for mut msg in msgs {
                                         // Inject account_id for multi-bot routing
                                         if let Some(ref aid) = *account_id {
                                             msg.metadata.insert(
@@ -380,7 +385,7 @@ impl ChannelAdapter for MessengerAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -431,11 +436,14 @@ impl ChannelAdapter for MessengerAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.api_send_action(&user.platform_id, "typing_on").await
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

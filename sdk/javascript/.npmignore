@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+
+# Test
+test/
+tests/
+*.test.js
+*.spec.js
+
+# Docs
+docs/
+*.md
+!README.md
+
+# Development
+.git/
+.github/
+.vscode/
+.idea/
+
+# Misc
+*.log
+.env
+.env.*

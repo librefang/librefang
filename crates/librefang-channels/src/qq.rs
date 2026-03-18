@@ -64,7 +64,7 @@ impl QqAdapter {
         Self {
             app_id,
             app_secret: Zeroizing::new(app_secret),
-            client: reqwest::Client::builder()
+            client: crate::http_client::client_builder()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("failed to build HTTP client"),
@@ -208,7 +208,7 @@ fn parse_dispatch_event(
     // Strip bot mention prefix (e.g., "/@ Bot " or "<@!botid>")
     let clean_content = content.trim_start_matches('/').trim().to_string();
 
-    let mut msg = ChannelMessage {
+    let msg = ChannelMessage {
         channel: ChannelType::Custom("qq".to_string()),
         platform_message_id: msg_id.clone(),
         sender: ChannelUser {
@@ -239,8 +239,10 @@ impl ChannelAdapter for QqAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         info!("Starting QQ adapter for app_id={}", self.app_id);
 
         // Ensure rustls CryptoProvider is installed for WSS connections.
@@ -379,7 +381,7 @@ impl ChannelAdapter for QqAdapter {
                                             }
 
                                             let data = &payload["d"];
-                                            if let Some((msg, _endpoint, _msg_id)) = parse_dispatch_event(event_type, data) {
+                                            if let Some((mut msg, _endpoint, _msg_id)) = parse_dispatch_event(event_type, data) {
                                                 if allowed_users.is_empty() || allowed_users.iter().any(|u| u == &msg.sender.platform_id) {
                                                     messages_received.fetch_add(1, Ordering::Relaxed);
                                                     // Inject account_id for multi-bot routing
@@ -468,7 +470,7 @@ impl ChannelAdapter for QqAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(ref t) => strip_markdown(t),
             _ => return Ok(()), // QQ adapter only handles text for now
@@ -491,7 +493,7 @@ impl ChannelAdapter for QqAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Stopping QQ adapter");
         let _ = self.shutdown_tx.send(true);
         self.connected.store(false, Ordering::Relaxed);

@@ -115,6 +115,9 @@ async fn test_full_daemon_lifecycle() {
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
+            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
+        )),
     });
 
     let app = Router::new()
@@ -153,7 +156,7 @@ async fn test_full_daemon_lifecycle() {
     assert_eq!(loaded.listen_addr, addr.to_string());
 
     // --- Verify health endpoint ---
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
     let resp = client
         .get(format!("http://{}/api/health", addr))
         .send()
@@ -240,6 +243,9 @@ async fn test_server_immediate_responsiveness() {
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
+        webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
+            format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
+        )),
     });
 
     let app = Router::new()
@@ -254,7 +260,7 @@ async fn test_server_immediate_responsiveness() {
     });
 
     // Hit health endpoint immediately — should respond fast
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
     let start = Instant::now();
     let resp = client
         .get(format!("http://{}/api/health", addr))

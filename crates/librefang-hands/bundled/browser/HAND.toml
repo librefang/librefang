@@ -13,6 +13,10 @@ tools = [
     "file_write", "file_read",
 ]
 
+[routing]
+aliases = ["open website", "navigate to", "fill form", "click button", "web login", "browser automation"]
+weak_aliases = ["web page", "submit form", "web task"]
+
 [[requires]]
 key = "python3"
 label = "Python 3 must be installed"

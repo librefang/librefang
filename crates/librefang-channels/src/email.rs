@@ -146,7 +146,7 @@ impl EmailAdapter {
     /// Build an async SMTP transport for sending emails.
     async fn build_smtp_transport(
         &self,
-    ) -> Result<AsyncSmtpTransport<Tokio1Executor>, Box<dyn std::error::Error>> {
+    ) -> Result<AsyncSmtpTransport<Tokio1Executor>, Box<dyn std::error::Error + Send + Sync>> {
         let creds = Credentials::new(self.username.clone(), self.password.as_str().to_string());
 
         let transport = if self.smtp_port == 465 {
@@ -218,12 +218,15 @@ fn fetch_unseen_emails(
     password: &str,
     folders: &[String],
 ) -> Result<Vec<(String, String, String, String)>, String> {
-    let tls = native_tls::TlsConnector::builder()
-        .build()
+    let tcp = std::net::TcpStream::connect((host, port))
+        .map_err(|e| format!("TCP connect failed: {e}"))?;
+    let tls = rustls_connector::RustlsConnector::new_with_native_certs()
         .map_err(|e| format!("TLS connector error: {e}"))?;
+    let tls_stream = tls
+        .connect(host, tcp)
+        .map_err(|e| format!("TLS handshake failed: {e}"))?;
 
-    let client =
-        imap::connect((host, port), host, &tls).map_err(|e| format!("IMAP connect failed: {e}"))?;
+    let client = imap::Client::new(tls_stream);
 
     // Try LOGIN first; fall back to AUTHENTICATE PLAIN for servers like Lark
     // that reject LOGIN and only support AUTH=PLAIN (SASL).
@@ -324,8 +327,10 @@ impl ChannelAdapter for EmailAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
         let poll_interval = self.poll_interval;
         let imap_host = self.imap_host.clone();
@@ -444,7 +449,7 @@ impl ChannelAdapter for EmailAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 // Parse recipient address
@@ -517,7 +522,7 @@ impl ChannelAdapter for EmailAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

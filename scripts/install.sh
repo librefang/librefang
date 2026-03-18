@@ -20,7 +20,13 @@ detect_platform() {
         *) echo "  Unsupported architecture: $ARCH"; exit 1 ;;
     esac
     case "$OS" in
-        linux) PLATFORM="${ARCH}-unknown-linux-gnu" ;;
+        linux)
+            # Prefer musl (fully static) binaries — they work on any distro
+            # without glibc or libssl dependencies. Fall back to gnu if the
+            # musl asset is unavailable for the requested version.
+            PLATFORM="${ARCH}-unknown-linux-musl"
+            PLATFORM_FALLBACK="${ARCH}-unknown-linux-gnu"
+            ;;
         darwin) PLATFORM="${ARCH}-apple-darwin" ;;
         mingw*|msys*|cygwin*)
             echo ""
@@ -78,10 +84,24 @@ install() {
     trap cleanup EXIT
 
     if ! curl -fsSL "$URL" -o "$ARCHIVE" 2>/dev/null; then
-        echo "  Download failed. The release may not exist for your platform."
-        echo "  Install from source instead:"
-        echo "    cargo install --git https://github.com/$REPO librefang-cli"
-        exit 1
+        # On Linux, fall back from musl to gnu if musl asset is not available
+        if [ -n "${PLATFORM_FALLBACK:-}" ]; then
+            echo "  Static (musl) binary not available, trying glibc build..."
+            PLATFORM="$PLATFORM_FALLBACK"
+            URL="https://github.com/$REPO/releases/download/$VERSION/librefang-$PLATFORM.tar.gz"
+            CHECKSUM_URL="$URL.sha256"
+            if ! curl -fsSL "$URL" -o "$ARCHIVE" 2>/dev/null; then
+                echo "  Download failed. The release may not exist for your platform."
+                echo "  Install from source instead:"
+                echo "    cargo install --git https://github.com/$REPO librefang-cli"
+                exit 1
+            fi
+        else
+            echo "  Download failed. The release may not exist for your platform."
+            echo "  Install from source instead:"
+            echo "    cargo install --git https://github.com/$REPO librefang-cli"
+            exit 1
+        fi
     fi
 
     # Verify checksum if available

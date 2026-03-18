@@ -586,6 +586,8 @@ pub fn read_codex_credential() -> Option<String> {
     parsed
         .get("api_key")
         .or_else(|| parsed.get("token"))
+        // Codex CLI OAuth stores the token nested at tokens.id_token
+        .or_else(|| parsed.get("tokens").and_then(|t| t.get("id_token")))
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
@@ -621,11 +623,13 @@ const BUILTIN_OPENAI: &str = include_str!("../../../catalog/providers/openai.tom
 const BUILTIN_OPENROUTER: &str = include_str!("../../../catalog/providers/openrouter.toml");
 const BUILTIN_PERPLEXITY: &str = include_str!("../../../catalog/providers/perplexity.toml");
 const BUILTIN_QIANFAN: &str = include_str!("../../../catalog/providers/qianfan.toml");
+const BUILTIN_QWEN_CODE: &str = include_str!("../../../catalog/providers/qwen-code.toml");
 const BUILTIN_QWEN: &str = include_str!("../../../catalog/providers/qwen.toml");
 const BUILTIN_REPLICATE: &str = include_str!("../../../catalog/providers/replicate.toml");
 const BUILTIN_SAMBANOVA: &str = include_str!("../../../catalog/providers/sambanova.toml");
 const BUILTIN_TOGETHER: &str = include_str!("../../../catalog/providers/together.toml");
 const BUILTIN_VENICE: &str = include_str!("../../../catalog/providers/venice.toml");
+const BUILTIN_VERTEX_AI: &str = include_str!("../../../catalog/providers/vertex-ai.toml");
 const BUILTIN_VLLM: &str = include_str!("../../../catalog/providers/vllm.toml");
 const BUILTIN_VOLCENGINE_CODING: &str =
     include_str!("../../../catalog/providers/volcengine-coding.toml");
@@ -666,11 +670,13 @@ const BUILTIN_PROVIDER_SOURCES: &[&str] = &[
     BUILTIN_OPENROUTER,
     BUILTIN_PERPLEXITY,
     BUILTIN_QIANFAN,
+    BUILTIN_QWEN_CODE,
     BUILTIN_QWEN,
     BUILTIN_REPLICATE,
     BUILTIN_SAMBANOVA,
     BUILTIN_TOGETHER,
     BUILTIN_VENICE,
+    BUILTIN_VERTEX_AI,
     BUILTIN_VLLM,
     BUILTIN_VOLCENGINE_CODING,
     BUILTIN_VOLCENGINE,
@@ -726,7 +732,7 @@ mod tests {
     #[test]
     fn test_catalog_has_providers() {
         let catalog = ModelCatalog::new();
-        assert_eq!(catalog.list_providers().len(), 39);
+        assert_eq!(catalog.list_providers().len(), 41);
     }
 
     #[test]
@@ -977,6 +983,45 @@ mod tests {
         assert!(catalog.get_provider("moonshot").is_some());
         assert!(catalog.get_provider("qianfan").is_some());
         assert!(catalog.get_provider("bedrock").is_some());
+        assert!(catalog.get_provider("zai").is_some());
+        assert!(catalog.get_provider("zai_coding").is_some());
+        assert!(catalog.get_provider("kimi_coding").is_some());
+    }
+
+    #[test]
+    fn test_zai_models() {
+        let catalog = ModelCatalog::new();
+        // Z.AI chat models
+        let glm5 = catalog.find_model("zai/glm-5-20250605").unwrap();
+        assert_eq!(glm5.provider, "zai");
+        assert_eq!(glm5.tier, ModelTier::Frontier);
+        let glm47 = catalog.find_model("zai/glm-4.7").unwrap();
+        assert_eq!(glm47.provider, "zai");
+        assert_eq!(glm47.tier, ModelTier::Smart);
+        // Z.AI coding models
+        let coding5 = catalog.find_model("glm-5-coding").unwrap();
+        assert_eq!(coding5.provider, "zai_coding");
+        assert_eq!(coding5.tier, ModelTier::Frontier);
+        let coding47 = catalog.find_model("glm-4.7-coding").unwrap();
+        assert_eq!(coding47.provider, "zai_coding");
+        // Aliases
+        assert!(catalog.find_model("zai-glm-5").is_some());
+        assert!(catalog.find_model("glm-5-code").is_some());
+        assert!(catalog.find_model("glm-coding").is_some());
+    }
+
+    #[test]
+    fn test_kimi2_models() {
+        let catalog = ModelCatalog::new();
+        // Kimi K2 and K2.5 models
+        let k2 = catalog.find_model("kimi-k2").unwrap();
+        assert_eq!(k2.provider, "moonshot");
+        assert_eq!(k2.tier, ModelTier::Frontier);
+        let k25 = catalog.find_model("kimi-k2.5").unwrap();
+        assert_eq!(k25.provider, "moonshot");
+        assert_eq!(k25.tier, ModelTier::Frontier);
+        // Alias resolution
+        assert!(catalog.find_model("kimi-k2.5-0711").is_some());
     }
 
     #[test]

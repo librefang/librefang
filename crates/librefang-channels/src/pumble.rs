@@ -54,7 +54,7 @@ impl PumbleAdapter {
         Self {
             bot_token: Zeroizing::new(bot_token),
             webhook_port,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -67,7 +67,7 @@ impl PumbleAdapter {
     }
 
     /// Validate credentials by fetching bot info from the Pumble API.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/auth.test", PUMBLE_API_BASE);
         let resp = self
             .client
@@ -94,7 +94,7 @@ impl PumbleAdapter {
         &self,
         channel_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/messages", PUMBLE_API_BASE);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -226,8 +226,10 @@ impl ChannelAdapter for PumbleAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let bot_id = self.validate().await?;
         info!("Pumble adapter authenticated (bot_id: {bot_id})");
@@ -312,7 +314,7 @@ impl ChannelAdapter for PumbleAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -330,7 +332,7 @@ impl ChannelAdapter for PumbleAdapter {
         user: &ChannelUser,
         content: ChannelContent,
         thread_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(text) => text,
             _ => "(Unsupported content type)".to_string(),
@@ -364,12 +366,15 @@ impl ChannelAdapter for PumbleAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Pumble does not expose a public typing indicator API for bots
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

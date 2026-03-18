@@ -13,6 +13,7 @@ pub mod comms;
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod i18n;
 pub mod manifest_signing;
 pub mod media;
 pub mod memory;
@@ -23,6 +24,7 @@ pub mod serde_compat;
 pub mod taint;
 pub mod tool;
 pub mod tool_compat;
+pub mod tool_policy;
 pub mod webhook;
 
 /// Safely truncate a string to at most `max_bytes`, never splitting a UTF-8 char.

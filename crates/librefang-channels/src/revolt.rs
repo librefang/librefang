@@ -87,7 +87,7 @@ impl RevoltAdapter {
             api_url,
             ws_url,
             allowed_channels: Vec::new(),
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -108,7 +108,7 @@ impl RevoltAdapter {
     }
 
     /// Validate the bot token by fetching the bot's own user info.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/users/@me", self.api_url);
         let resp = self.auth_header(self.client.get(&url)).send().await?;
 
@@ -132,7 +132,7 @@ impl RevoltAdapter {
         &self,
         channel_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/channels/{}/messages", self.api_url, channel_id);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -164,7 +164,7 @@ impl RevoltAdapter {
         channel_id: &str,
         message_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/channels/{}/messages", self.api_url, channel_id);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -311,8 +311,10 @@ impl ChannelAdapter for RevoltAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let bot_info = self.validate().await?;
         info!("Revolt adapter authenticated as {bot_info}");
@@ -483,7 +485,7 @@ impl ChannelAdapter for RevoltAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -505,7 +507,10 @@ impl ChannelAdapter for RevoltAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Revolt typing indicator via REST
         let url = format!("{}/channels/{}/typing", self.api_url, user.platform_id);
 
@@ -514,7 +519,7 @@ impl ChannelAdapter for RevoltAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

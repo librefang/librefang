@@ -13,11 +13,12 @@ librefang-skills = { path = "../librefang-skills" }
 librefang-hands = { path = "../librefang-hands" }
 librefang-extensions = { path = "../librefang-extensions" }
 librefang-wire = { path = "../librefang-wire" }
-librefang-channels = { path = "../librefang-channels" }
+librefang-channels = { path = "../librefang-channels", default-features = false }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
+serde_yaml = { workspace = true }
 dashmap = { workspace = true }
 crossbeam = { workspace = true }
 tracing = { workspace = true }

@@ -3,6 +3,7 @@
 //! Abstracts over multiple LLM providers (Anthropic, OpenAI, Ollama, etc.).
 
 use async_trait::async_trait;
+use librefang_types::config::VertexAiConfig;
 use librefang_types::message::{ContentBlock, Message, StopReason, TokenUsage};
 use librefang_types::tool::{ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
@@ -65,6 +66,13 @@ pub struct CompletionRequest {
     pub system: Option<String>,
     /// Extended thinking configuration (if supported by the model).
     pub thinking: Option<librefang_types::config::ThinkingConfig>,
+    /// Enable prompt caching for providers that support it.
+    ///
+    /// - **Anthropic**: adds `cache_control: {"type": "ephemeral"}` to system
+    ///   message blocks and the last user turn.
+    /// - **OpenAI**: automatic prefix caching (no request changes needed, but
+    ///   cached token counts are parsed from the response).
+    pub prompt_caching: bool,
 }
 
 /// A response from an LLM completion.
@@ -167,6 +175,9 @@ pub struct DriverConfig {
     pub api_key: Option<String>,
     /// Base URL override.
     pub base_url: Option<String>,
+    /// Provider-specific Vertex AI settings from `KernelConfig.vertex_ai`.
+    #[serde(default)]
+    pub vertex_ai: VertexAiConfig,
     /// Skip interactive permission prompts (Claude Code provider only).
     ///
     /// When `true`, adds `--dangerously-skip-permissions` to the spawned
@@ -189,6 +200,16 @@ impl std::fmt::Debug for DriverConfig {
             .field("provider", &self.provider)
             .field("api_key", &self.api_key.as_ref().map(|_| "<redacted>"))
             .field("base_url", &self.base_url)
+            .field("vertex_ai.project_id", &self.vertex_ai.project_id)
+            .field("vertex_ai.region", &self.vertex_ai.region)
+            .field(
+                "vertex_ai.credentials_path",
+                &self
+                    .vertex_ai
+                    .credentials_path
+                    .as_ref()
+                    .map(|_| "<redacted>"),
+            )
             .field("skip_permissions", &self.skip_permissions)
             .finish()
     }
@@ -250,6 +271,7 @@ mod tests {
                 usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    ..Default::default()
                 },
             },
         ];
@@ -278,6 +300,7 @@ mod tests {
                     usage: TokenUsage {
                         input_tokens: 5,
                         output_tokens: 3,
+                        ..Default::default()
                     },
                 })
             }
@@ -293,6 +316,7 @@ mod tests {
             temperature: 0.0,
             system: None,
             thinking: None,
+            prompt_caching: false,
         };
 
         let response = driver.stream(request, tx).await.unwrap();

@@ -8,6 +8,7 @@
 use librefang_types::config::OutputFormat;
 
 /// Format a message for a specific channel output format.
+#[inline]
 pub fn format_for_channel(text: &str, format: OutputFormat) -> String {
     match format {
         OutputFormat::Markdown => text.to_string(),
@@ -19,6 +20,7 @@ pub fn format_for_channel(text: &str, format: OutputFormat) -> String {
 
 /// Format a message for WeCom, using a stronger plain-text conversion to avoid
 /// leaking Markdown syntax into enterprise chat replies.
+#[inline]
 pub fn format_for_wecom(text: &str, format: OutputFormat) -> String {
     match format {
         OutputFormat::PlainText => markdown_to_wecom_plain(text),
@@ -28,74 +30,151 @@ pub fn format_for_wecom(text: &str, format: OutputFormat) -> String {
 
 /// Convert Markdown to Telegram HTML subset.
 ///
-/// Supported tags: `<b>`, `<i>`, `<code>`, `<pre>`, `<a href="">`.
+/// Supported tags: `<b>`, `<i>`, `<code>`, `<pre>`, `<a href="">`, `<blockquote>`.
 fn markdown_to_telegram_html(text: &str) -> String {
-    // Escape HTML special characters first so agent names and other text
-    // don't get interpreted as HTML tags by Telegram's parser.
-    let mut result = text
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-
-    // Bold: **text** → <b>text</b>
-    while let Some(start) = result.find("**") {
-        if let Some(end) = result[start + 2..].find("**") {
-            let end = start + 2 + end;
-            let inner = result[start + 2..end].to_string();
-            result = format!("{}<b>{}</b>{}", &result[..start], inner, &result[end + 2..]);
-        } else {
-            break;
-        }
-    }
-
-    // Italic: *text* → <i>text</i> (but not inside bold tags)
-    // Simple heuristic: match single * not preceded/followed by *
-    let mut out = String::with_capacity(result.len());
-    let chars: Vec<char> = result.chars().collect();
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut blocks = Vec::new();
+    let lines: Vec<&str> = normalized.lines().collect();
     let mut i = 0;
-    let mut in_italic = false;
-    while i < chars.len() {
-        if chars[i] == '*'
-            && (i == 0 || chars[i - 1] != '*')
-            && (i + 1 >= chars.len() || chars[i + 1] != '*')
-        {
-            if in_italic {
-                out.push_str("</i>");
-            } else {
-                out.push_str("<i>");
-            }
-            in_italic = !in_italic;
-        } else {
-            out.push(chars[i]);
-        }
-        i += 1;
-    }
-    result = out;
 
-    // Inline code: `text` → <code>text</code>
-    while let Some(start) = result.find('`') {
-        if let Some(end) = result[start + 1..].find('`') {
-            let end = start + 1 + end;
-            let inner = result[start + 1..end].to_string();
-            result = format!(
-                "{}<code>{}</code>{}",
-                &result[..start],
-                inner,
-                &result[end + 1..]
-            );
-        } else {
-            break;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() {
+            i += 1;
+            continue;
         }
+
+        // Fenced code block
+        if let Some(fence) = fence_delimiter(trimmed) {
+            i += 1;
+            let mut code_lines = Vec::new();
+            while i < lines.len() {
+                let candidate = lines[i].trim();
+                if candidate.starts_with(fence) {
+                    i += 1;
+                    break;
+                }
+                code_lines.push(lines[i]);
+                i += 1;
+            }
+            let code = escape_html(&code_lines.join("\n"));
+            blocks.push(format!("<pre><code>{}</code></pre>", code));
+            continue;
+        }
+
+        // ATX heading (#, ##, ...)
+        if let Some(content) = heading_text(trimmed) {
+            blocks.push(format!("<b>{}</b>", render_inline_markdown(content.trim())));
+            i += 1;
+            continue;
+        }
+
+        // Blockquote
+        if trimmed.starts_with('>') {
+            let mut quote_lines = Vec::new();
+            while i < lines.len() {
+                let current = lines[i].trim();
+                if current.is_empty() || !current.starts_with('>') {
+                    break;
+                }
+                let content = current.strip_prefix('>').unwrap_or(current).trim_start();
+                quote_lines.push(render_inline_markdown(content));
+                i += 1;
+            }
+            blocks.push(format!(
+                "<blockquote>{}</blockquote>",
+                quote_lines.join("\n")
+            ));
+            continue;
+        }
+
+        // Unordered list
+        if let Some(item) = unordered_list_item(trimmed) {
+            let mut items = vec![format!("\u{2022} {}", render_inline_markdown(item.trim()))];
+            i += 1;
+            while i < lines.len() {
+                let current = lines[i].trim();
+                if let Some(next_item) = unordered_list_item(current) {
+                    items.push(format!(
+                        "\u{2022} {}",
+                        render_inline_markdown(next_item.trim())
+                    ));
+                    i += 1;
+                } else if current.is_empty() {
+                    i += 1;
+                    break;
+                } else {
+                    break;
+                }
+            }
+            blocks.push(items.join("\n"));
+            continue;
+        }
+
+        // Ordered list
+        if let Some(item) = ordered_list_item(trimmed) {
+            let mut items = vec![format!("1. {}", render_inline_markdown(item.trim()))];
+            let mut counter = 2;
+            i += 1;
+            while i < lines.len() {
+                let current = lines[i].trim();
+                if let Some(next_item) = ordered_list_item(current) {
+                    items.push(format!(
+                        "{}. {}",
+                        counter,
+                        render_inline_markdown(next_item.trim())
+                    ));
+                    counter += 1;
+                    i += 1;
+                } else if current.is_empty() {
+                    i += 1;
+                    break;
+                } else {
+                    break;
+                }
+            }
+            blocks.push(items.join("\n"));
+            continue;
+        }
+
+        // Paragraph
+        let mut paragraph_lines = vec![trimmed];
+        i += 1;
+        while i < lines.len() {
+            let current = lines[i].trim();
+            if current.is_empty()
+                || fence_delimiter(current).is_some()
+                || heading_text(current).is_some()
+                || current.starts_with('>')
+                || unordered_list_item(current).is_some()
+                || ordered_list_item(current).is_some()
+            {
+                break;
+            }
+            paragraph_lines.push(current);
+            i += 1;
+        }
+        let joined = paragraph_lines.join("\n");
+        blocks.push(render_inline_markdown(&joined));
     }
+
+    blocks.join("\n\n")
+}
+
+/// Render inline Markdown (bold, italic, code, links) to Telegram HTML.
+fn render_inline_markdown(text: &str) -> String {
+    let mut result = escape_html(text);
 
     // Links: [text](url) → <a href="url">text</a>
     while let Some(bracket_start) = result.find('[') {
-        if let Some(bracket_end) = result[bracket_start..].find("](") {
-            let bracket_end = bracket_start + bracket_end;
-            if let Some(paren_end) = result[bracket_end + 2..].find(')') {
-                let paren_end = bracket_end + 2 + paren_end;
-                let link_text = &result[bracket_start + 1..bracket_end];
-                let url = &result[bracket_end + 2..paren_end];
+        if let Some(bracket_end_rel) = result[bracket_start..].find("](") {
+            let bracket_end = bracket_start + bracket_end_rel;
+            if let Some(paren_end_rel) = result[bracket_end + 2..].find(')') {
+                let paren_end = bracket_end + 2 + paren_end_rel;
+                let link_text = result[bracket_start + 1..bracket_end].to_string();
+                let url = result[bracket_end + 2..paren_end].to_string();
                 result = format!(
                     "{}<a href=\"{}\">{}</a>{}",
                     &result[..bracket_start],
@@ -111,7 +190,110 @@ fn markdown_to_telegram_html(text: &str) -> String {
         }
     }
 
-    result
+    // Bold: **text** → <b>text</b>
+    while let Some(start) = result.find("**") {
+        if let Some(end_rel) = result[start + 2..].find("**") {
+            let end = start + 2 + end_rel;
+            let inner = result[start + 2..end].to_string();
+            result = format!("{}<b>{}</b>{}", &result[..start], inner, &result[end + 2..]);
+        } else {
+            break;
+        }
+    }
+
+    // Inline code: `text` → <code>text</code>
+    while let Some(start) = result.find('`') {
+        if let Some(end_rel) = result[start + 1..].find('`') {
+            let end = start + 1 + end_rel;
+            let inner = result[start + 1..end].to_string();
+            result = format!(
+                "{}<code>{}</code>{}",
+                &result[..start],
+                inner,
+                &result[end + 1..]
+            );
+        } else {
+            break;
+        }
+    }
+
+    // Italic: *text* → <i>text</i> (single star only)
+    let mut out = String::with_capacity(result.len());
+    let mut in_italic = false;
+    let mut prev_char = '\0';
+    let bytes = result.as_bytes();
+    for (i, ch) in result.char_indices() {
+        if ch == '*'
+            && prev_char != '*'
+            && (i + ch.len_utf8() >= bytes.len() || bytes[i + ch.len_utf8()] != b'*')
+        {
+            if in_italic {
+                out.push_str("</i>");
+            } else {
+                out.push_str("<i>");
+            }
+            in_italic = !in_italic;
+        } else {
+            out.push(ch);
+        }
+        prev_char = ch;
+    }
+
+    out
+}
+
+/// Escape HTML special characters for Telegram.
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Detect fenced code block delimiter.
+fn fence_delimiter(line: &str) -> Option<&'static str> {
+    if line.starts_with("```") {
+        Some("```")
+    } else if line.starts_with("~~~") {
+        Some("~~~")
+    } else {
+        None
+    }
+}
+
+/// Extract heading text from ATX-style heading.
+fn heading_text(line: &str) -> Option<&str> {
+    let hashes = line.chars().take_while(|c| *c == '#').count();
+    if (1..=6).contains(&hashes) && line.chars().nth(hashes) == Some(' ') {
+        Some(&line[hashes + 1..])
+    } else {
+        None
+    }
+}
+
+/// Extract item text from an unordered list line.
+fn unordered_list_item(line: &str) -> Option<&str> {
+    for prefix in ["- ", "* ", "+ "] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            return Some(rest);
+        }
+    }
+    None
+}
+
+/// Extract item text from an ordered list line.
+fn ordered_list_item(line: &str) -> Option<&str> {
+    let digit_count = line.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digit_count == 0 {
+        return None;
+    }
+    let rest = &line[digit_count..];
+    if let Some(item) = rest.strip_prefix(". ") {
+        Some(item)
+    } else if let Some(item) = rest.strip_prefix(") ") {
+        Some(item)
+    } else {
+        None
+    }
 }
 
 /// Convert Markdown to Slack mrkdwn format.
@@ -280,15 +462,18 @@ fn strip_inline_markdown(mut text: String) -> String {
     text = text.replace('`', "");
 
     let mut out = String::with_capacity(text.len());
-    let chars: Vec<char> = text.chars().collect();
-    for (i, &ch) in chars.iter().enumerate() {
+    let mut prev_char = '\0';
+    let bytes = text.as_bytes();
+    for (i, ch) in text.char_indices() {
         if ch == '*'
-            && (i == 0 || chars[i - 1] != '*')
-            && (i + 1 >= chars.len() || chars[i + 1] != '*')
+            && prev_char != '*'
+            && (i + ch.len_utf8() >= bytes.len() || bytes[i + ch.len_utf8()] != b'*')
         {
+            prev_char = ch;
             continue;
         }
         out.push(ch);
+        prev_char = ch;
     }
     out
 }
@@ -356,17 +541,20 @@ fn markdown_to_plain(text: &str) -> String {
     result = result.replace("**", "");
 
     // Remove italic markers (single *)
-    // Simple approach: remove isolated *
+    // Simple approach: remove isolated * without collecting into Vec<char>
     let mut out = String::with_capacity(result.len());
-    let chars: Vec<char> = result.chars().collect();
-    for (i, &ch) in chars.iter().enumerate() {
+    let mut prev_char = '\0';
+    let bytes = result.as_bytes();
+    for (i, ch) in result.char_indices() {
         if ch == '*'
-            && (i == 0 || chars[i - 1] != '*')
-            && (i + 1 >= chars.len() || chars[i + 1] != '*')
+            && prev_char != '*'
+            && (i + ch.len_utf8() >= bytes.len() || bytes[i + ch.len_utf8()] != b'*')
         {
+            prev_char = ch;
             continue;
         }
         out.push(ch);
+        prev_char = ch;
     }
     result = out;
 
@@ -431,6 +619,36 @@ mod tests {
     fn test_telegram_html_link() {
         let result = markdown_to_telegram_html("[click here](https://example.com)");
         assert_eq!(result, "<a href=\"https://example.com\">click here</a>");
+    }
+
+    #[test]
+    fn test_telegram_html_heading() {
+        let result = markdown_to_telegram_html("## Result");
+        assert_eq!(result, "<b>Result</b>");
+    }
+
+    #[test]
+    fn test_telegram_html_unordered_list() {
+        let result = markdown_to_telegram_html("- alpha\n- beta");
+        assert_eq!(result, "\u{2022} alpha\n\u{2022} beta");
+    }
+
+    #[test]
+    fn test_telegram_html_ordered_list() {
+        let result = markdown_to_telegram_html("1. alpha\n2. beta");
+        assert_eq!(result, "1. alpha\n2. beta");
+    }
+
+    #[test]
+    fn test_telegram_html_fenced_code_block() {
+        let result = markdown_to_telegram_html("```rust\nfn main() {}\n```");
+        assert_eq!(result, "<pre><code>fn main() {}</code></pre>");
+    }
+
+    #[test]
+    fn test_telegram_html_blockquote() {
+        let result = markdown_to_telegram_html("> note\n> second line");
+        assert_eq!(result, "<blockquote>note\nsecond line</blockquote>");
     }
 
     #[test]

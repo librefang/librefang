@@ -1,9 +1,10 @@
 use librefang_types::agent::AgentManifest;
 use regex_lite::Regex;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 const ROUTING_EXCLUDED_TEMPLATES: &[&str] = &["assistant", "router"];
 // Keep this in sync with crates/librefang-cli/src/bundled_agents.rs so the kernel
@@ -88,6 +89,10 @@ const BUNDLED_TEMPLATE_MANIFESTS: &[(&str, &str)] = &[
         include_str!("../../../agents/recruiter/agent.toml"),
     ),
     (
+        "recipe-assistant",
+        include_str!("../../../agents/recipe-assistant/agent.toml"),
+    ),
+    (
         "researcher",
         include_str!("../../../agents/researcher/agent.toml"),
     ),
@@ -161,9 +166,16 @@ struct RouteRule {
     weak: &'static [(&'static str, &'static str)],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
+struct HandRouteCandidate {
+    hand_id: String,
+    strong_phrases: Vec<String>,
+    weak_phrases: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct HandSelection {
-    pub hand_id: Option<&'static str>,
+    pub hand_id: Option<String>,
     pub reason: String,
     pub score: usize,
 }
@@ -182,79 +194,66 @@ struct ManifestRouteCandidate {
     weak_phrases: Vec<String>,
 }
 
-const HAND_RULES: &[RouteRule] = &[
-    RouteRule {
-        target: "collector",
-        strong: &[
-            ("monitor", r"监控|watch|跟踪更新|追踪发布|持续观察|订阅变化"),
-            (
-                "collect",
-                r"收集公开信息|情报收集|公开信息采集|osint|抓取变更",
-            ),
-        ],
-        weak: &[("signal", r"变化检测|变更|signal|signals")],
-    },
-    RouteRule {
-        target: "researcher",
-        strong: &[
-            (
-                "deep research",
-                r"深度调研|深入研究|systematic review|landscape analysis",
-            ),
-            ("compare", r"对比.*方案|对比.*框架|全面对比|研究报告"),
-        ],
-        weak: &[("research", r"调研|研究")],
-    },
-    RouteRule {
-        target: "browser",
-        strong: &[
-            (
-                "browser",
-                r"打开网站|网页登录|点击|表单|下单|browser|navigate",
-            ),
-            ("interactive", r"站内操作|网页操作|填写.*表单|需要登录"),
-        ],
-        weak: &[],
-    },
-    RouteRule {
-        target: "clip",
-        strong: &[
-            ("video", r"视频切片|转录视频|下载视频|字幕提取|clip video"),
-            ("clip", r"剪辑|短视频|分段视频"),
-        ],
-        weak: &[],
-    },
-    RouteRule {
-        target: "predictor",
-        strong: &[
-            ("predict", r"预测|概率判断|胜率|likelihood|forecast this"),
-            ("scenario", r"情景推演|概率校准|趋势预测"),
-        ],
-        weak: &[],
-    },
-    RouteRule {
-        target: "trader",
-        strong: &[
-            (
-                "trade",
-                r"交易|下单|仓位|portfolio|期权|股票操作|paper trade",
-            ),
-            ("market", r"盘前分析|盘后复盘|市场信号|技术面|NVDA|TSLA|BTC"),
-        ],
-        weak: &[("finance-market", r"美股|加密货币|行情")],
-    },
-    RouteRule {
-        target: "lead",
-        strong: &[
-            (
-                "lead",
-                r"线索挖掘|潜在客户|lead gen|prospect list|联系人富化",
-            ),
-            ("sales-search", r"找.*客户|找.*公司名单|联系人整理"),
-        ],
-        weak: &[],
-    },
-];
+// ── Hand routing: data-driven from HAND.toml ────────────────────────────
+
+/// Cached hand route candidates built from bundled HAND.toml definitions.
+/// Invalidated alongside `MANIFEST_CACHE` on hot-reload.
+static HAND_ROUTE_CACHE: OnceLock<Mutex<Option<Vec<HandRouteCandidate>>>> = OnceLock::new();
+
+/// Invalidate the hand route cache (call alongside `invalidate_manifest_cache`).
+pub fn invalidate_hand_route_cache() {
+    if let Some(cache) = HAND_ROUTE_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
+}
+
+fn hand_route_candidates() -> Vec<HandRouteCandidate> {
+    let cache = HAND_ROUTE_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref cached) = *guard {
+        return cached.clone();
+    }
+
+    let candidates = build_hand_route_candidates();
+    *guard = Some(candidates.clone());
+    candidates
+}
+
+fn build_hand_route_candidates() -> Vec<HandRouteCandidate> {
+    let mut candidates = Vec::new();
+
+    // TODO: also scan ~/.librefang/hands/*/HAND.toml for user-installed hands
+    // once hand_route_candidates() receives the home_dir parameter.
+    for (id, toml_content, _skill) in librefang_hands::bundled::bundled_hands() {
+        let Ok(def) = librefang_hands::bundled::parse_bundled(id, toml_content, "") else {
+            continue;
+        };
+
+        // Strong: explicit aliases + description-derived phrases
+        let mut strong = def.routing.aliases.clone();
+        strong.extend(description_phrases(&def.description));
+
+        // Weak: explicit weak_aliases + id-derived tokens
+        let mut weak = def.routing.weak_aliases.clone();
+        weak.extend(
+            def.id
+                .to_lowercase()
+                .split(['-', '_'])
+                .filter(|token| token.len() >= 3 && !GENERIC_ENGLISH_WORDS.contains(token))
+                .map(str::to_string),
+        );
+
+        candidates.push(HandRouteCandidate {
+            hand_id: def.id,
+            strong_phrases: dedupe(strong),
+            weak_phrases: dedupe(weak),
+        });
+    }
+
+    candidates
+}
 
 const TEMPLATE_RULES: &[RouteRule] = &[
     RouteRule {
@@ -516,6 +515,14 @@ const TEMPLATE_RULES: &[RouteRule] = &[
         weak: &[("花销", r"预算|花销|财务")],
     },
     RouteRule {
+        target: "recipe-assistant",
+        strong: &[
+            ("recipe", r"recipe|meal plan|ingredient substitut|portion"),
+            ("食谱", r"食谱|菜谱|做菜|烹饪|膳食计划|配料替换"),
+        ],
+        weak: &[("烹饪", r"菜|做饭|食材|烹饪")],
+    },
+    RouteRule {
         target: "travel-planner",
         strong: &[
             ("travel", r"travel itinerary|trip plan|flight|hotel"),
@@ -563,17 +570,50 @@ const TEMPLATE_RULES: &[RouteRule] = &[
     },
 ];
 
-pub fn auto_select_hand(message: &str) -> HandSelection {
-    let mut scored: Vec<(usize, &'static str, Vec<&'static str>)> = Vec::new();
+/// Minimum score required for a hand match to be considered. A single weak
+/// keyword hit (score 1) is too noisy — require at least one strong hit (3)
+/// or two weak hits (2) to route to a hand.
+const MIN_HAND_SCORE: usize = 2;
 
-    for rule in HAND_RULES {
-        let strong_hits = matched_labels(message, rule.strong);
-        let weak_hits = matched_labels(message, rule.weak);
-        let score = strong_hits.len() * 3 + weak_hits.len();
-        if score > 0 {
+/// Select the best hand for a message using keyword matching.
+///
+/// Keywords are loaded from HAND.toml `[routing]` sections (English-only)
+/// and augmented with description-derived phrases. For cross-lingual
+/// matching, the caller can provide optional `semantic_scores` computed
+/// via embedding cosine similarity against hand descriptions.
+pub fn auto_select_hand(
+    message: &str,
+    semantic_scores: Option<&HashMap<String, f32>>,
+) -> HandSelection {
+    let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
+
+    for candidate in hand_route_candidates() {
+        let strong_hits: Vec<String> = candidate
+            .strong_phrases
+            .iter()
+            .filter(|phrase| phrase_matches(message, phrase))
+            .cloned()
+            .collect();
+        let weak_hits: Vec<String> = candidate
+            .weak_phrases
+            .iter()
+            .filter(|phrase| phrase_matches(message, phrase))
+            .cloned()
+            .collect();
+        let mut score = strong_hits.len() * 3 + weak_hits.len();
+
+        // Blend semantic similarity when available (0.0–1.0 → 0–3 bonus points)
+        if let Some(scores) = semantic_scores {
+            if let Some(&sim) = scores.get(&candidate.hand_id) {
+                let bonus = (sim * 3.0).round() as usize;
+                score += bonus;
+            }
+        }
+
+        if score >= MIN_HAND_SCORE {
             let mut hits = strong_hits;
             hits.extend(weak_hits);
-            scored.push((score, rule.target, hits));
+            scored.push((score, candidate.hand_id.clone(), hits));
         }
     }
 
@@ -586,12 +626,12 @@ pub fn auto_select_hand(message: &str) -> HandSelection {
     }
 
     scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.2.len().cmp(&a.2.len())));
-    let (score, hand_id, hits) = &scored[0];
+    let (score, hand_id, hits) = scored.remove(0);
 
     HandSelection {
-        hand_id: Some(hand_id),
+        hand_id: Some(hand_id.clone()),
         reason: format!("matched {hand_id} via {}", hits.join(", ")),
-        score: *score,
+        score,
     }
 }
 
@@ -707,7 +747,33 @@ fn auto_select_template_from_metadata(
     })
 }
 
+/// Cached manifest route candidates. Invalidated via `invalidate_manifest_cache()`,
+/// which should be called on config hot-reload or agent install/uninstall.
+static MANIFEST_CACHE: OnceLock<Mutex<Option<Vec<ManifestRouteCandidate>>>> = OnceLock::new();
+
+/// Invalidate the cached manifest route candidates so they are rebuilt on the
+/// next routing call. Call this after config hot-reload or agent changes.
+pub fn invalidate_manifest_cache() {
+    if let Some(cache) = MANIFEST_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
+}
+
 fn manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandidate> {
+    let cache = MANIFEST_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref cached) = *guard {
+        return cached.clone();
+    }
+
+    let candidates = build_manifest_route_candidates(agents_dir);
+    *guard = Some(candidates.clone());
+    candidates
+}
+
+fn build_manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandidate> {
     let mut candidates = Vec::new();
 
     for template in all_template_names(agents_dir) {
@@ -820,10 +886,20 @@ fn matched_labels(message: &str, patterns: &[(&'static str, &'static str)]) -> V
         .collect()
 }
 
+/// Global cache of compiled regex patterns (keyed by the raw pattern string).
+/// Avoids recompiling the same patterns on every incoming message.
+static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Regex>>> = OnceLock::new();
+
 fn regex_matches(message: &str, pattern: &str) -> bool {
-    Regex::new(&format!("(?i){pattern}"))
-        .map(|regex| regex.is_match(message))
-        .unwrap_or(false)
+    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let regex = map.entry(pattern.to_string()).or_insert_with(|| {
+        match Regex::new(&format!("(?i){pattern}")) {
+            Ok(r) => r,
+            Err(_) => Regex::new("(?!x)x").unwrap(), // never-match sentinel
+        }
+    });
+    regex.is_match(message)
 }
 
 fn english_variants(text: &str) -> Vec<String> {
@@ -1057,10 +1133,15 @@ mod tests {
     use std::process::Command;
     use tempfile::tempdir;
 
+    /// Helper: call auto_select_hand without semantic scores.
+    fn hand(msg: &str) -> HandSelection {
+        auto_select_hand(msg, None)
+    }
+
     #[test]
     fn test_auto_select_hand_prefers_browser_tasks() {
-        let selection = auto_select_hand("请打开网站并填写表单提交这个请求");
-        assert_eq!(selection.hand_id, Some("browser"));
+        let selection = hand("open website and navigate to the login page");
+        assert_eq!(selection.hand_id, Some("browser".to_string()));
         assert!(selection.score > 0);
     }
 
@@ -1173,6 +1254,267 @@ weak_aliases = ["changelog"]
             assert_eq!(selection.template, expected, "message: {message}");
             assert!(selection.score > 0, "message: {message}");
         }
+    }
+
+    // ── Hand routing: all hands coverage (English keywords from HAND.toml) ──
+
+    #[test]
+    fn test_auto_select_hand_routes_collector() {
+        let sel = hand("please monitor changes on this repo and track updates");
+        assert_eq!(sel.hand_id, Some("collector".to_string()));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_researcher() {
+        let sel = hand("do a deep research and systematic review of the landscape");
+        assert_eq!(sel.hand_id, Some("researcher".to_string()));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_clip() {
+        let sel = hand("clip video and do subtitle extraction");
+        assert_eq!(sel.hand_id, Some("clip".to_string()));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_predictor() {
+        let sel = hand("predict the probability and forecast this outcome");
+        assert_eq!(sel.hand_id, Some("predictor".to_string()));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_trader() {
+        let sel = hand("check my portfolio and do market analysis");
+        assert_eq!(sel.hand_id, Some("trader".to_string()));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_lead() {
+        let sel = hand("do lead generation and build a prospect list");
+        assert_eq!(sel.hand_id, Some("lead".to_string()));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_analytics() {
+        let sel = hand("run data analysis and create a dashboard report");
+        assert_eq!(sel.hand_id, Some("analytics".to_string()));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_apitester() {
+        let sel = hand("run an api test and endpoint test on this service");
+        assert_eq!(sel.hand_id, Some("apitester".to_string()));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_devops() {
+        let sel = hand("set up ci/cd pipeline and infrastructure monitoring");
+        assert_eq!(sel.hand_id, Some("devops".to_string()));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_strategist() {
+        let sel = hand("do a strategic analysis and competitive analysis");
+        assert_eq!(sel.hand_id, Some("strategist".to_string()));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_linkedin() {
+        let sel = hand("optimize my linkedin profile optimization strategy");
+        assert_eq!(sel.hand_id, Some("linkedin".to_string()));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_reddit() {
+        let sel = hand("post on reddit subreddit and monitor replies");
+        assert_eq!(sel.hand_id, Some("reddit".to_string()));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_twitter() {
+        let sel = hand("post a tweet on twitter with scheduled tweet");
+        assert_eq!(sel.hand_id, Some("twitter".to_string()));
+    }
+
+    // ── MIN_HAND_SCORE threshold ────────────────────────────────────
+
+    #[test]
+    fn test_weak_only_single_match_rejected() {
+        // Single weak keyword should be below MIN_HAND_SCORE=2
+        let sel = hand("help me deploy");
+        assert_eq!(sel.hand_id, None, "single weak match should be rejected");
+        assert_eq!(sel.score, 0);
+    }
+
+    #[test]
+    fn test_strong_match_always_passes_threshold() {
+        // A single strong match = score 3 >= MIN_HAND_SCORE(2)
+        let sel = hand("open website please");
+        assert_eq!(sel.hand_id, Some("browser".to_string()));
+        assert!(sel.score >= 2);
+    }
+
+    // ── Negative / boundary tests ───────────────────────────────────
+
+    #[test]
+    fn test_generic_greeting_no_hand_match() {
+        let sel = hand("hello, how is the weather today?");
+        assert_eq!(sel.hand_id, None);
+    }
+
+    #[test]
+    fn test_generic_english_no_hand_match() {
+        let sel = hand("Hello, how are you today?");
+        assert_eq!(sel.hand_id, None);
+    }
+
+    #[test]
+    fn test_coding_request_no_hand_match() {
+        let sel = hand("please write a Rust function for me");
+        assert_eq!(sel.hand_id, None);
+    }
+
+    #[test]
+    fn test_ambiguous_short_message_no_hand_match() {
+        let sel = hand("help me look at this");
+        assert_eq!(sel.hand_id, None);
+    }
+
+    // ── Scoring: strong beats weak ──────────────────────────────────
+
+    #[test]
+    fn test_strong_match_scores_higher_than_weak() {
+        // "deep research" is a strong alias for researcher (score 3+)
+        let strong = hand("do deep research on this topic");
+        // "research" alone is weak for researcher (score 1, rejected)
+        let weak = hand("research this");
+        assert!(strong.score > weak.score);
+    }
+
+    #[test]
+    fn test_multiple_strong_matches_boost_score() {
+        let single = hand("run data analysis");
+        let double = hand("run data analysis and build a dashboard with automated report");
+        assert!(double.score >= single.score);
+    }
+
+    // ── Semantic score blending ─────────────────────────────────────
+
+    #[test]
+    fn test_semantic_scores_boost_hand_selection() {
+        // Without semantic: generic message should not match any hand
+        let without = hand("please help me with this task");
+        assert_eq!(without.hand_id, None);
+
+        // With semantic: simulated high similarity to "collector"
+        let mut scores = HashMap::new();
+        scores.insert("collector".to_string(), 0.9);
+        let with = auto_select_hand("please help me with this task", Some(&scores));
+        assert_eq!(with.hand_id, Some("collector".to_string()));
+        assert!(with.score >= MIN_HAND_SCORE);
+    }
+
+    #[test]
+    fn test_semantic_fallback_routes_chinese_to_collector() {
+        // Chinese input: no English keyword match → score 0 without semantic
+        let without = hand("帮我监控这个网站的变更");
+        assert_eq!(
+            without.hand_id, None,
+            "Chinese should not match English keywords"
+        );
+
+        // With embedding similarity: "帮我监控这个网站的变更" would be semantically
+        // close to collector's description "monitors any target continuously with
+        // change detection". Simulated here with a high cosine score.
+        let mut scores = HashMap::new();
+        scores.insert("collector".to_string(), 0.85);
+        scores.insert("browser".to_string(), 0.3);
+        let with = auto_select_hand("帮我监控这个网站的变更", Some(&scores));
+        assert_eq!(with.hand_id, Some("collector".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_fallback_routes_japanese_to_trader() {
+        // Japanese: "株式取引のポートフォリオを確認して" (check stock trading portfolio)
+        let without = hand("株式取引のポートフォリオを確認して");
+        assert_eq!(without.hand_id, None);
+
+        let mut scores = HashMap::new();
+        scores.insert("trader".to_string(), 0.82);
+        scores.insert("analytics".to_string(), 0.25);
+        let with = auto_select_hand("株式取引のポートフォリオを確認して", Some(&scores));
+        assert_eq!(with.hand_id, Some("trader".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_fallback_routes_korean_to_researcher() {
+        // Korean: "이 주제에 대해 심층 연구를 해주세요" (do deep research on this topic)
+        let mut scores = HashMap::new();
+        scores.insert("researcher".to_string(), 0.88);
+        let with = auto_select_hand("이 주제에 대해 심층 연구를 해주세요", Some(&scores));
+        assert_eq!(with.hand_id, Some("researcher".to_string()));
+    }
+
+    #[test]
+    fn test_semantic_low_similarity_does_not_match() {
+        // All scores below threshold: similarity too low to trigger routing
+        let mut scores = HashMap::new();
+        scores.insert("collector".to_string(), 0.2);
+        scores.insert("browser".to_string(), 0.15);
+        scores.insert("trader".to_string(), 0.1);
+        let sel = auto_select_hand("一些随便的话", Some(&scores));
+        // 0.2 * 3 = 0.6, rounds to 1 — below MIN_HAND_SCORE(2)
+        assert_eq!(sel.hand_id, None, "low similarity should not match");
+    }
+
+    #[test]
+    fn test_semantic_plus_keyword_combined_scoring() {
+        // English keyword gives partial score, semantic boosts it over threshold
+        // "deploy" is a weak alias for devops (score 1, below threshold alone)
+        let keyword_only = hand("help me deploy the service");
+        // May or may not match depending on whether deploy hits weak alias
+        let keyword_score = keyword_only.score;
+
+        // With semantic boost: devops similarity adds bonus points
+        let mut scores = HashMap::new();
+        scores.insert("devops".to_string(), 0.75);
+        let combined = auto_select_hand("help me deploy the service", Some(&scores));
+        assert!(
+            combined.score > keyword_score,
+            "semantic should boost keyword score"
+        );
+        assert_eq!(combined.hand_id, Some("devops".to_string()));
+    }
+
+    #[test]
+    fn test_no_embedding_graceful_degradation() {
+        // When semantic_scores is None, only keyword matching is used.
+        // Non-English input simply gets no match (graceful, not error).
+        let sel = auto_select_hand("请帮我做数据分析", None);
+        assert_eq!(sel.hand_id, None, "should gracefully return no match");
+        assert_eq!(sel.score, 0);
+    }
+
+    #[test]
+    fn test_semantic_does_not_override_strong_keyword() {
+        // If keyword matching strongly matches hand A, but semantic scores
+        // favor hand B, keyword should still win (keyword score is higher).
+        let mut scores = HashMap::new();
+        scores.insert("trader".to_string(), 0.9); // semantic favors trader
+                                                  // But message strongly matches browser via keywords
+        let sel = auto_select_hand("open website and navigate to the login page", Some(&scores));
+        // Browser should win because keyword score (3+) > trader semantic (2-3)
+        assert_eq!(sel.hand_id, Some("browser".to_string()));
+    }
+
+    // ── Cache consistency ───────────────────────────────────────────
+
+    #[test]
+    fn test_hand_route_cache_returns_consistent_results() {
+        let r1 = hand("open website and fill form");
+        let r2 = hand("open website and fill form");
+        assert_eq!(r1.hand_id, r2.hand_id);
+        assert_eq!(r1.score, r2.score);
     }
 
     #[test]

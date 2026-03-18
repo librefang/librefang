@@ -3,31 +3,182 @@
 </p>
 
 <h1 align="center">LibreFang</h1>
-<h3 align="center">自由なAgent OS — Libreは自由を意味する</h3>
+<h3 align="center">自由なエージェントオペレーティングシステム — Libre は自由を意味する</h3>
 
 <p align="center">
-  Rustで書かれたオープンソースAgent OS。137Kコード行。14個のcrate。2,100+テスト。ゼロclippy警告。<br/>
-  <strong><a href="https://github.com/RightNow-AI/openfang">RightNow-AI/openfang</a>からフォーク。真にオープンなガバナンス。コントリビューター歓迎。プロジェクトに役立つPRはマージされます。</strong>
+  Rust で構築されたオープンソース Agent OS。14 クレート。2,100+ テスト。clippy 警告ゼロ。
 </p>
 
 <p align="center">
-  <strong>多言語バージョン：</strong> <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
+  <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
 </p>
 
 <p align="center">
   <a href="https://librefang.ai/">ウェブサイト</a> &bull;
-  <a href="https://github.com/librefang/librefang">GitHub</a> &bull;
-  <a href="../GOVERNANCE.md">ガバナンス</a> &bull;
-  <a href="../CONTRIBUTING.md">コントリビューション</a> &bull;
-  <a href="../SECURITY.md">セキュリティ</a>
+  <a href="https://docs.librefang.ai">ドキュメント</a> &bull;
+  <a href="../CONTRIBUTING.md">コントリビュート</a> &bull;
+  <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
 <p align="center">
+  <a href="https://github.com/librefang/librefang/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/librefang/librefang/ci.yml?style=flat-square&label=CI" alt="CI" /></a>
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT" />
-  <img src="https://img.shields.io/badge/community-maintained-brightgreen?style=flat-square" alt="コミュニティメンテナンス" />
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
-  <img src="https://img.shields.io/github/forks/librefang/librefang?style=flat-square" alt="Forks" />
+  <img src="https://img.shields.io/github/v/release/librefang/librefang?style=flat-square" alt="Latest Release" />
+  <a href="https://discord.gg/DzTYqAZZmc"><img src="https://img.shields.io/discord/1481633471507071129?style=flat-square&logo=discord&label=Discord" alt="Discord" /></a>
+</p>
+
+---
+
+## LibreFang とは？
+
+LibreFang は **エージェントオペレーティングシステム** — Rust でゼロから構築された、自律型 AI エージェントを実行するための完全なプラットフォームです。チャットボットフレームワークでも、Python ラッパーでもありません。
+
+従来のエージェントフレームワークは入力を待ちます。LibreFang は**あなたのために働くエージェント**を実行します — スケジュールに従い、24時間365日、ターゲットの監視、リード生成、ソーシャルメディア管理、ダッシュボードへのレポートを行います。
+
+> LibreFang は [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) のコミュニティフォークで、オープンガバナンスとマージファーストの PR ポリシーを採用しています。詳細は [GOVERNANCE.md](../GOVERNANCE.md) を参照。
+
+<p align="center">
+  <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang ダッシュボード" />
+</p>
+
+## クイックスタート
+
+```bash
+# インストール
+cargo install --git https://github.com/librefang/librefang librefang-cli
+
+# 初期化（プロバイダー設定をガイド）
+librefang init
+
+# 起動 — ダッシュボード http://localhost:4545
+librefang start
+```
+
+<details>
+<summary><strong>Homebrew</strong></summary>
+
+```bash
+brew tap librefang/tap && brew install librefang
+```
+
+</details>
+
+<details>
+<summary><strong>Docker</strong></summary>
+
+```bash
+docker run -p 4545:4545 ghcr.io/librefang/librefang
+```
+
+</details>
+
+<details>
+<summary><strong>クラウドデプロイ</strong></summary>
+
+[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../infra/gcp/README.md)
+
+</details>
+
+## Hands：あなたのために働くエージェント
+
+**Hands** はプリビルトの自律型機能パッケージで、スケジュールに従い独立して動作します。14 個バンドル：
+
+| Hand | 機能 |
+|------|------|
+| **Researcher** | 深い調査 — 複数ソースの相互参照、CRAAP 信頼性評価、引用付きレポート |
+| **Collector** | OSINT 監視 — 変更検出、感情追跡、ナレッジグラフ |
+| **Predictor** | 超予測 — 信頼区間付きのキャリブレーション済み予測 |
+| **Strategist** | 戦略分析 — 市場調査、競合インテリジェンス、事業計画 |
+| **Analytics** | データ分析 — 収集、分析、可視化、自動レポート |
+| **Trader** | 市場インテリジェンス — マルチシグナル分析、リスク管理、ポートフォリオ分析 |
+| **Lead** | 見込み客発見 — ウェブ調査、スコアリング、重複排除、リード配信 |
+| **Twitter** | 自律型 X/Twitter — コンテンツ作成、スケジューリング、承認キュー |
+| **Reddit** | Reddit 管理 — サブレディット監視、投稿、エンゲージメント追跡 |
+| **LinkedIn** | LinkedIn 管理 — コンテンツ作成、ネットワーキング、プロフェッショナル交流 |
+| **Clip** | YouTube からショート動画 — ベストモーメント切り出し、字幕、AI ナレーション |
+| **Browser** | Web 自動化 — Playwright ベース、購入承認ゲート必須 |
+| **API Tester** | API テスト — エンドポイント発見、検証、負荷テスト、回帰検出 |
+| **DevOps** | DevOps 自動化 — CI/CD、インフラ監視、インシデント対応 |
+
+```bash
+librefang hand activate researcher   # すぐに作業開始
+librefang hand status researcher     # 進捗確認
+librefang hand list                  # 全 Hands を表示
+```
+
+独自の Hand を作成: `HAND.toml` + システムプロンプト + `SKILL.md` を定義。[ガイド](../docs/skill-development.md)
+
+## アーキテクチャ
+
+14 の Rust クレート、モジュラーカーネル設計。
+
+```
+librefang-kernel      オーケストレーション、ワークフロー、計量、RBAC、スケジューラ、予算
+librefang-runtime     エージェントループ、3 LLM ドライバ、53 ツール、WASM サンドボックス、MCP、A2A
+librefang-api         140+ REST/WS/SSE エンドポイント、OpenAI 互換 API、ダッシュボード
+librefang-channels    40 メッセージングアダプター、レート制限、DM/グループポリシー
+librefang-memory      SQLite 永続化、ベクトル埋め込み、セッション、圧縮
+librefang-types       コア型、テイント追跡、Ed25519 署名、モデルカタログ
+librefang-skills      60 バンドルスキル、SKILL.md パーサー、FangHub マーケットプレイス
+librefang-hands       14 自律 Hands、HAND.toml パーサー、ライフサイクル管理
+librefang-extensions  25 MCP テンプレート、AES-256-GCM ボールト、OAuth2 PKCE
+librefang-wire        OFP P2P プロトコル、HMAC-SHA256 相互認証
+librefang-cli         CLI、デーモン管理、TUI ダッシュボード、MCP サーバーモード
+librefang-desktop     Tauri 2.0 ネイティブアプリ（トレイ、通知、ショートカット）
+librefang-migrate     OpenClaw、LangChain、AutoGPT マイグレーションエンジン
+xtask                 ビルド自動化
+```
+
+## 主な機能
+
+**40 チャネルアダプター** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、Feishu、LINE、Mastodon、Bluesky 他。[完全リスト](../docs/channel-adapters.md)
+
+**27 LLM プロバイダー** — Anthropic、Gemini、OpenAI、Groq、DeepSeek、OpenRouter、Ollama 他。インテリジェントルーティング、自動フォールバック、コスト追跡。[詳細](../docs/providers.md)
+
+**16 セキュリティレイヤー** — WASM サンドボックス、Merkle 監査証跡、テイント追跡、Ed25519 署名、SSRF 保護、シークレットゼロ化他。[詳細](../docs/comparison.md#16-security-systems--defense-in-depth)
+
+**OpenAI 互換 API** — ドロップインの `/v1/chat/completions` エンドポイント。140+ REST/WS/SSE エンドポイント。[API リファレンス](../docs/api-reference.md)
+
+**クライアント SDK** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — ストリーミング対応の完全な REST クライアント。
+
+**MCP サポート** — MCP クライアントとサーバーを内蔵。IDE 連携、カスタムツール拡張、エージェントパイプライン構築。[詳細](../docs/providers.md)
+
+**A2A プロトコル** — Google Agent-to-Agent プロトコル対応。エージェントシステム間の発見・通信・タスク委譲。[詳細](../docs/api-reference.md)
+
+**デスクトップアプリ** — Tauri 2.0 ネイティブアプリ。システムトレイ、通知、グローバルショートカット。
+
+**OpenClaw マイグレーション** — `librefang migrate --from openclaw` でエージェント、履歴、スキル、設定をインポート。
+
+## 開発
+
+```bash
+cargo build --workspace --lib                            # ビルド
+cargo test --workspace                                   # 2,100+ テスト
+cargo clippy --workspace --all-targets -- -D warnings    # 警告ゼロ
+cargo fmt --all -- --check                               # フォーマットチェック
+```
+
+## 比較
+
+[docs/comparison.md](../docs/comparison.md) で OpenClaw、ZeroClaw、CrewAI、AutoGen、LangGraph とのベンチマークと機能比較を確認できます。
+
+## リンク
+
+- [ドキュメント](https://docs.librefang.ai) &bull; [API リファレンス](../docs/api-reference.md) &bull; [入門ガイド](../docs/getting-started.md) &bull; [トラブルシューティング](../docs/troubleshooting.md)
+- [コントリビュート](../CONTRIBUTING.md) &bull; [ガバナンス](../GOVERNANCE.md) &bull; [セキュリティ](../SECURITY.md)
+- ディスカッション: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [ユースケース](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [機能投票](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [お知らせ](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
+
+## コントリビューター
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="../public/assets/contributors.svg" alt="Contributors" />
+</a>
+
+<p align="center">
+  コード、ドキュメント、翻訳、バグ報告など、あらゆる形の貢献を歓迎します。<br/>
+  <a href="../CONTRIBUTING.md">コントリビュートガイド</a>を確認して、<a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> から始めましょう！
 </p>
 
 <p align="center">
@@ -38,247 +189,4 @@
 
 ---
 
-> **LibreFangは[`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang)のコミュニティフォークです。**
->
-> **「Libre」** は自由を意味します。オープンソースプロジェクトは、ライセンスだけでなく、ガバナンス、コントリビューション、コラボレーションにおいても真にオープンであるべきだと信じています。LibreFangはアップストリームプロジェクトとは根本的に異なる道を歩んでいます：すべてのコントリビューターを歓迎し、すべてのPRを公開でレビューし、プロジェクトに役立つ作業をマージします。
-
-> **コントリビューターへの約束：**
-> - PRがプロジェクトに良い影響を与える場合、**帰属を完全に保持してそのままマージ**します。
-> - PRに改善が必要な場合、**積極的にレビューし具体的な改善提案を提供**してマージを支援します — PRを無言で閉じることはしません。
-> - すべてのコントリビューターを大切にしています。バグ修正、ドキュメント、テスト、機能、パッケージング、翻訳 — すべての貢献が重要です。
-
----
-
-## なぜLibreFang？ — OpenFangとの違い
-
-LibreFangは、オープンソースプロジェクトの運営方法に異なる信念を持つため、[RightNow-AI/openfang](https://github.com/RightNow-AI/openfang)からフォークしました。
-
-### 「Libre」の意味
-
-| | OpenFang | LibreFang |
-|---|---------|-----------|
-| **ライセンス** | MIT + Apache-2.0 | MIT |
-| **ガバナンス** | 単一企業管理 | コミュニティガバナンス、透明な意思決定 |
-| **PRポリシー** | メンテナーの裁量 | 有益な貢献はそのままマージ、その他は改善提案付きの積極的レビュー |
-| **帰属** | 保証なし | コミットとリリースノートで常に保持 |
-| **コントリビューター** | 限定的な関与 | 積極的に歓迎 — あなたが必要です |
-| **レビューSLA** | コミットメントなし | 7日以内に初回応答 |
-
-### 私たちのコミットメント
-
-- **マージ優先。** PRがプロジェクトの前進に役立つなら、マージします。ゲートキーピングなし、「内部で書き直す」もなし。
-- **積極的なコードレビュー。** 修正が必要なPRには詳細で建設的なフィードバックを提供します — 沈黙ではなく。コードのシップを支援します。
-- **完全な帰属保持。** メンテナーがパッチを改変する場合、コミットメタデータ（`Co-authored-by`）とリリースノートにお名前を残します。PRを閉じて非公開で再実装することは[ガバナンス](../GOVERNANCE.md)で明確に禁止されています。
-- **オープンガバナンス。** 技術的決定はissueとPRで行われ、非公開ではありません。[`GOVERNANCE.md`](../GOVERNANCE.md)と[`MAINTAINERS.md`](../MAINTAINERS.md)を参照してください。
-- **ぜひ参加してください。** アクティブなコントリビューターはLibreFang GitHub orgへの参加が招待されます。継続的に貢献するコアパーティシパントにはコミット権限とプロジェクト方針への発言権が与えられます。
-
----
-
-## LibreFangとは？
-
-LibreFangは**オープンソースAgent OS**です — チャットbotフレームワークではなく、LLMをラップしたPythonでもなく、「マルチエージェントオーケストレータ」。Rustでゼロから構築された自律型エージェントのための完全なオペレーティングシステムです。
-
-従来のエージェントフレームワークはあなたの入力を待ちます。LibreFangは**あなたのために働く自律型エージェント**を実行します — スケジュールに従って、24時間365日稼働し、ナレッジグラフを構築し、ターゲットを監視し、リードを生成し、ソーシャルメディアを管理し、ダッシュボードに結果を報告します。
-
-プロジェクトウェブサイトは[librefang.ai](https://librefang.ai/)で公開中です。LibreFangを試す最快の方法は今もソースからのインストールです。
-
-```bash
-cargo install --git https://github.com/librefang/librefang librefang-cli
-librefang init
-librefang start
-# ダッシュボード：http://localhost:4545
-```
-
-**または Homebrew でインストール：**
-```bash
-brew tap librefang/tap
-brew install librefang
-```
-
-<a id="docker"></a>
-
-**または Docker で実行：**
-```bash
-docker run -p 4545:4545 ghcr.io/librefang/librefang
-# ダッシュボード：http://localhost:4545
-```
-
----
-
-## コア機能
-
-### 🤖 Hands：実際にタスクを実行するエージェント
-
-*"従来のエージェントはあなたの入力を待ちます。Handsはあなたのために働きます。"*
-
-**Hands**はLibreFangのコアイノベーション — 事前に構築された自律型能力パッケージで、独立して実行され、スケジュールに従って、あなたにプロンプトを入力させることなく動作します。これはチャットbotではありません。これは朝6時に起きて、競合他社を研究し、ナレッジグラフを構築し、発見を評価し、あなたのコーヒーを飲む前にレポートをTelegramに送ってくるエージェントです。
-
-各Handには以下が含まれます：
-- **HAND.toml** — ツール、要件、ダッシュボード指標を宣言するマニフェスト
-- **System Prompt** — 多段階オペレーションマニュアル（一行ではなく、500語以上の専門家手続き）
-- **SKILL.md** — ランタイムにコンテキストに注入されるドメイン専門知識リファレンス
-- **Guardrails** — 機密操作の承認ゲート（例：Browser Handは購入前に承認が必要）
-
-すべてバイナリにコンパイルされます。ダウンロード不要、pip install不要、Docker pull不要。
-
-### 7つのバンドルされたHands
-
-| Hand | 機能 |
-|------|------|
-| **Clip** | YouTube URLを取得、ダウンロード、最高瞬間を識別、字幕とサムネイル付きの短い縦型ビデオに裁断、オプションでAIナレーションを追加、TelegramとWhatsAppに公開。8段階パイプライン。FFmpeg + yt-dlp + 5 STTバックエンド。 |
-| **Lead** | 毎日実行。ICPに一致する潜在顧客を発見、Webリサーチでエンリッチ、0-100でスコア付け、既存データベースと重複排除、CSV/JSON/Markdownで適格リードを配信。時間とともにICPプロファイルを構築。 |
-| **Collector** | OSINTグレードのインテリジェンス。ターゲットを与える（会社、人、トピック）。継続的に監視 — 変更検出、センチメント追跡、ナレッジグラフ構築、重要な変化時にクリティカルアラートを配信。 |
-| **Predictor** | スーパフォーキャスティングエンジン。複数のソースから信号を収集、校准推理チェーンを構築、置信区間で予測、独自の精度をBrierスコアで追跡。反対モードあり — 意図的にコンセンサスに異議を唱える。 |
-| **Researcher** | 深い自律的研究者。複数のソースを相互参照、CRAAP基準（通貨性、相関性、権威性、正確性、目的）で信頼性を評価、引用付きAPAフォーマットレポートを生成、多言語サポート。 |
-| **Twitter** | 自律的Twitter/Xアカウントマネージャー。7つのローテーション形式でコンテンツを作成、最適なエンゲージメントのために投稿をスケジュール、メンションに返信、パフォーマンス指標を跟踪。承認キューあり — あなたのOKなしでは投稿しません。 |
-| **Browser** | Web自動化エージェント。サイトをナビゲート、フォームに入力、ボタンをクリック、複数ステップワークフローを処理。Playwrightブリッジとセッション永続化を使用。**強制購入承認ゲート** — 明確な確認なしにあなたのお金を使うことはありません。 |
-
----
-
-## 16層のセキュリティシステム — 多層防御
-
-LibreFangは後付けでセキュリティを追加しません。每一層が独立してテスト可能で、単一障害点なしで動作します。
-
-| # | システム | 機能 |
-|---|---------|------|
-| 1 | **WASM二層メーターサンドボックス** | ツールコードは燃料メーター + epoch中断付きのWebAssemblyで実行。ウォッチドレッドが暴走コードをkill。 |
-| 2 | **Merkleハッシュチェーン監査トレイル** | 各操作は暗号化で前のものにリンク。1つのエントリを改ざんするとチェーン全体が破損。 |
-| 3 | **情報フローテイント追跡** | ラベルが実行中传播 — ソースからシンクまでsecretsを追跡。 |
-| 4 | **Ed25519署名エージェントマニフェスト** | 各エージェントのアイデンティティと能力セットは暗号化署名済み。 |
-| 5 | **SSRF保護** | プライベートIP、クラウドメタデータエンドポイント、DNS rebinding攻撃をブロック。 |
-| 6 | **Secretゼロ化** | `Zeroizing<String>`が不要になった瞬間にAPIキーをメモリから即座にワイプ。 |
-| 7 | **OFP相互認証** | HMAC-SHA256 nonceベース、P2Pネットワーキング用の定数時間検証。 |
-| 8 | **キャパビリティゲート** | 役割ベースアクセス制御 — エージェントが所需ツールを宣言、カーネルが強制。 |
-| 9 | **セキュリティヘッダー** | CSP、X-Frame-Options、HSTS、X-Content-Type-Options、すべてのレスポンスに適用。 |
-| 10 | **ヘルスエンドポイント修整** | パブリックヘルスチェックは最小情報を返す。完全診断には認証が必要。 |
-| 11 | **サブプロセスサンドボックス** | `env_clear()` + 選択的変数パススルー。クロスプラットフォームkillを持つプロセスツリー分離。 |
-| 12 | **プロンプトインジェクションスキャナー** | オーバーライド試行、データ抽出パターン、スキル内のシェル参照インジェクションを検出。 |
-| 13 | **ループガード** | SHA256ベースのツール呼び出しループ検出とサーキットブレーカー。ping-pongパターンを処理。 |
-| 14 | **セッション修復** | 7段階メッセージ履歴検証と破損からの自動回復。 |
-| 15 | **パストラバーサル防止** | 正規化とシンボリックリンクエスケープ防止。`../`はここでは機能しません。 |
-| 16 | **GCRAレートリミッター** | コスト認識のトークンバケットレートリミット、per-IP追跡と古いクリーンアップ付き。 |
-
----
-
-## アーキテクチャ
-
-14個のRust crate。137,728行のコード。モジュール式カーネルデザイン。
-
-```
-librefang-kernel      オーケストレーション、ワークフロー、计量、RBAC、スケジューラー、予算追跡
-librefang-runtime     エージェントループ、3つのLLM驱动、53ツール、WASMサンドボックス、MCP、A2A
-librefang-api         140+ REST/WS/SSEエンドポイント、OpenAI互換API、ダッシュボード
-librefang-channels    40メッセージアダプター、レートリミット付き
-librefang-memory      SQLite永続化、ベクトル埋め込み、カノニカルセッション、compaction
-librefang-types       コアタイプ、テイント追跡、Ed25519マニフェスト署名、モデルカタログ
-librefang-skills      60バンドルスキル、SKILL.mdパーサー、FangHubマーケットプレイス
-librefang-hands       7つの自律型Hands、HAND.tomlパーサー、ライフサイクル管理
-librefang-extensions  25 MCPテンプレート、AES-256-GCM資格情報ボールト、OAuth2 PKCE
-librefang-wire        OFP P2Pプロトコル、HMAC-SHA256相互認証付き
-librefang-cli         CLI、Daemon管理、TUIダッシュボード、MCPサーバーモード
-librefang-desktop     Tauri 2.0ネイティブアプリ（システムトレイ、通知、グローバルショートカット）
-librefang-migrate     OpenClaw、LangChain、AutoGPT移行エンジン
-xtask                ビルド自動化
-```
-
----
-
-## クイックスタート
-
-```bash
-# 1. インストール
-cargo install --git https://github.com/librefang/librefang librefang-cli
-
-# 2. 初期化 — プロバイダー設定ウォークスルー
-librefang init
-
-# 3. デーモン起動
-librefang start
-
-# 4. ダッシュボード：http://localhost:4545
-
-# 5. Handをアクティブ化 — あなたのために働き始める
-librefang hand activate researcher
-
-# 6. エージェントとチャット
-librefang chat researcher
-> "AIエージェントフレームワークの新兴トレンドは？"
-
-# 7. 事前構築エージェントをスポーン
-librefang agent spawn coder
-```
-
----
-
-## 開発
-
-```bash
-# ワークスペースビルド
-cargo build --workspace --lib
-
-# 全テスト実行 (2,100+)
-cargo test --workspace
-
-# Lint（警告ゼロ必須）
-cargo clippy --workspace --all-targets -- -D warnings
-
-# フォーマット
-cargo fmt --all -- --check
-```
-
----
-
-## 安定性に関する注意
-
-LibreFangはpre-1.0です。アーキテクチャは堅実、テストスイートは包括的、セキュリティモデルは包括的。也就是：
-
-- **破壊的変更**はv1.0までのマイナーバージョン間で発生する可能性あり
-- **一部のHands**は他よりも成熟している（BrowserとResearcherが最も实战経験済み）
-- **エッジケース**は存在します — 発見したら[issueを開いて](https://github.com/librefang/librefang/issues)
-- v1.0まで本番デプロイでは**特定のコミットにピン留め**を
-
-私たちは快速リリース、快速修正。目標：2026年中に堅実なv1.0をリリース。
-
----
-
-## セキュリティ
-
-セキュリティ脆弱性を報告するには[SECURITY.md](../SECURITY.md)の私人レポート流程に従ってください。
-
----
-
-## ライセンス
-
-MITライセンス。LICENSEファイルを参照してください。
-
----
-
-## リンク
-
-- [GitHub](https://github.com/librefang/librefang)
-- [ウェブサイト](https://librefang.ai/)
-- [ドキュメント](https://docs.librefang.ai)
-- [コントリビューションガイド](../CONTRIBUTING.md)
-- [ガバナンス](../GOVERNANCE.md)
-- [メンテナー](../MAINTAINERS.md)
-- [セキュリティポリシー](../SECURITY.md)
-- [コミュニティディスカッション](https://github.com/librefang/librefang/discussions) — 質問、アイデア共有、作品紹介
-- [Discord](https://discord.gg/DzTYqAZZmc) — リアルタイムコミュニティチャット
-
----
-
-## コントリビューター
-
-LibreFangに貢献してくださった皆様に感謝します！
-
-<a href="https://github.com/librefang/librefang/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
-</a>
-
-> 参加しませんか？[コントリビューションガイド](../CONTRIBUTING.md)をご覧ください — 多くのタスクはRustの経験不要です。
-
----
-
-<p align="center">
-  <strong>Rustで構築。16層セキュリティ。実際にあなたのために働くエージェント。</strong>
-</p>
+<p align="center">MIT ライセンス</p>

@@ -1,0 +1,237 @@
+name: "Release / Notify"
+
+on:
+  workflow_run:
+    workflows:
+      - "Release / Shell"
+      - "Release / Desktop"
+      - "Release / Docker"
+      - "Release / SDK"
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+  discussions: write
+
+jobs:
+  check_and_notify:
+    name: Consolidated Release Notification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check all release workflows and notify
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
+          BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
+          BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
+        run: |
+          if [ -z "$DISCORD_WEBHOOK_URL" ]; then
+            echo "No Discord release webhook configured, skipping"
+            exit 0
+          fi
+
+          # Get tag from triggering workflow run
+          TAG="${{ github.event.workflow_run.head_branch }}"
+
+          # Only proceed for release tags
+          if [[ ! "$TAG" =~ ^v ]]; then
+            echo "Not a release tag ($TAG), skipping"
+            exit 0
+          fi
+
+          VERSION="${TAG#v}"
+          VERSION="${VERSION%-*}"
+
+          echo "Checking release workflows for tag $TAG..."
+
+          # Check status of all 4 workflows for this tag
+          ALL_DONE=true
+          SHELL_STATUS="pending"
+          DESKTOP_STATUS="pending"
+          DOCKER_STATUS="pending"
+          SDK_STATUS="pending"
+
+          check_workflow() {
+            local wf_name="$1"
+            local status
+            status=$(gh run list \
+              --repo "${{ github.repository }}" \
+              --workflow "$wf_name" \
+              --branch "$TAG" \
+              --limit 1 \
+              --json status,conclusion \
+              --jq '.[0] | if .status == "completed" then .conclusion else "running" end' \
+              2>/dev/null) || true
+
+            if [ -z "$status" ]; then
+              echo "not_found"
+            else
+              echo "$status"
+            fi
+          }
+
+          SHELL_STATUS=$(check_workflow "Release / Shell")
+          DESKTOP_STATUS=$(check_workflow "Release / Desktop")
+          DOCKER_STATUS=$(check_workflow "Release / Docker")
+          SDK_STATUS=$(check_workflow "Release / SDK")
+
+          echo "Shell:   $SHELL_STATUS"
+          echo "Desktop: $DESKTOP_STATUS"
+          echo "Docker:  $DOCKER_STATUS"
+          echo "SDK:     $SDK_STATUS"
+
+          # Check if all workflows have completed
+          for status in "$SHELL_STATUS" "$DESKTOP_STATUS" "$DOCKER_STATUS" "$SDK_STATUS"; do
+            if [ "$status" = "running" ] || [ "$status" = "pending" ] || [ "$status" = "not_found" ]; then
+              ALL_DONE=false
+              break
+            fi
+          done
+
+          if [ "$ALL_DONE" = "false" ]; then
+            echo "Not all workflows completed yet, waiting for next trigger"
+            exit 0
+          fi
+
+          # All workflows completed — build consolidated notification
+          emoji() {
+            if [ "$1" = "success" ]; then echo "✅"; else echo "❌"; fi
+          }
+
+          CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md | head -20)
+          if [ -z "$CHANGES" ]; then
+            CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
+          fi
+
+          # Count successes
+          TOTAL=4
+          SUCCESS=0
+          for s in "$SHELL_STATUS" "$DESKTOP_STATUS" "$DOCKER_STATUS" "$SDK_STATUS"; do
+            [ "$s" = "success" ] && SUCCESS=$((SUCCESS + 1))
+          done
+
+          if [ "$SUCCESS" -eq "$TOTAL" ]; then
+            HEADER="🚀 **LibreFang $VERSION Released!**"
+          else
+            HEADER="⚠️ **LibreFang $VERSION Release — $SUCCESS/$TOTAL succeeded**"
+          fi
+
+          CONTENT=$(cat <<MSG_EOF
+          $HEADER
+
+          $CHANGES
+
+          **Build Status:**
+          $(emoji "$SHELL_STATUS") CLI (macOS / Linux / Windows)
+          $(emoji "$DESKTOP_STATUS") Desktop (.msi / .dmg / .AppImage / .deb)
+          $(emoji "$DOCKER_STATUS") Docker + Deploy (Fly.io / Render)
+          $(emoji "$SDK_STATUS") SDKs (npm / PyPI / crates.io / Go)
+
+          📦 [Download](https://github.com/librefang/librefang/releases/tag/$TAG) | 📖 [Changelog](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) | ⭐ [Star us](https://github.com/librefang/librefang)
+          MSG_EOF
+          )
+
+          CONTENT=$(echo "$CONTENT" | sed 's/^          //')
+
+          printf '%s' "$CONTENT" | jq -Rs '{content: .}' | \
+            curl -s -X POST -H "Content-Type: application/json" -d @- "$DISCORD_WEBHOOK_URL"
+
+          echo "✓ Discord notification sent"
+
+          # --- Bluesky post ---
+          if [ -z "$BLUESKY_HANDLE" ] || [ -z "$BLUESKY_APP_PASSWORD" ]; then
+            echo "No Bluesky credentials configured, skipping"
+            exit 0
+          fi
+
+          # Authenticate
+          BSKY_SESSION=$(jq -n \
+            --arg id "$BLUESKY_HANDLE" \
+            --arg pw "$BLUESKY_APP_PASSWORD" \
+            '{identifier: $id, password: $pw}' | \
+            curl -s -X POST "https://bsky.social/xrpc/com.atproto.server.createSession" \
+              -H "Content-Type: application/json" -d @-) || true
+
+          BSKY_TOKEN=$(echo "$BSKY_SESSION" | jq -r '.accessJwt // empty')
+          BSKY_DID=$(echo "$BSKY_SESSION" | jq -r '.did // empty')
+
+          if [ -z "$BSKY_TOKEN" ]; then
+            echo "⚠ Bluesky auth failed, skipping"
+            exit 0
+          fi
+
+          # Build post text (max 300 graphemes for Bluesky)
+          RELEASE_URL="https://github.com/librefang/librefang/releases/tag/$TAG"
+          BSKY_CHANGES=$(echo "$CHANGES" | head -5 | sed 's/^- /- /')
+          BSKY_TEXT=$(printf 'LibreFang v%s released!\n\n%s\n\n%s' "$VERSION" "$BSKY_CHANGES" "$RELEASE_URL")
+
+          # Truncate to 300 graphemes (cut on valid UTF-8 boundary using python)
+          BSKY_TEXT=$(python3 -c "import sys; t=sys.stdin.read(); print(t[:297]+'...' if len(t)>300 else t, end='')" <<< "$BSKY_TEXT")
+
+          # Detect link facet for the URL (byte offsets for UTF-8)
+          URL_START=$(python3 -c "import sys; t,u=sys.argv[1],sys.argv[2]; i=t.find(u); print(len(t[:i].encode('utf-8')) if i>=0 else -1)" "$BSKY_TEXT" "$RELEASE_URL")
+          URL_END=$((URL_START + $(echo -n "$RELEASE_URL" | wc -c)))
+
+          # Build facets JSON only if URL was found in text
+          if [ "$URL_START" -ge 0 ]; then
+            FACETS_ARG=$(jq -n \
+              --arg url "$RELEASE_URL" \
+              --argjson start "$URL_START" \
+              --argjson end "$URL_END" \
+              '[{ index: { byteStart: $start, byteEnd: $end }, features: [{ "$type": "app.bsky.richtext.facet#link", uri: $url }] }]')
+          else
+            FACETS_ARG='[]'
+          fi
+
+          # Create post
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+          BSKY_PAYLOAD=$(jq -n \
+            --arg text "$BSKY_TEXT" \
+            --arg now "$NOW" \
+            --arg did "$BSKY_DID" \
+            --argjson facets "$FACETS_ARG" \
+            '{
+              repo: $did,
+              collection: "app.bsky.feed.post",
+              record: {
+                "$type": "app.bsky.feed.post",
+                text: $text,
+                createdAt: $now,
+                facets: $facets
+              }
+            }')
+
+          curl -s -X POST "https://bsky.social/xrpc/com.atproto.repo.createRecord" \
+            -H "Authorization: Bearer $BSKY_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$BSKY_PAYLOAD" > /dev/null
+
+          echo "✓ Bluesky post published"
+
+          # --- GitHub Discussion announcement ---
+          ARTICLE_FILE="articles/release-${VERSION}.md"
+          if [ -f "$ARTICLE_FILE" ]; then
+            DISC_BODY=$(sed '/^```markdown$/d; /^```$/d' "$ARTICLE_FILE" | awk 'BEGIN{s=0} /^---$/{s++; next} s<2{next} {print}')
+            DISC_TITLE="LibreFang ${VERSION} Released"
+            REPO_ID="R_kgDORkvylw"
+            CATEGORY_ID="DIC_kwDORkvyl84C4NIY"
+
+            RESULT=$(gh api graphql -f query='
+              mutation($repoId: ID!, $catId: ID!, $title: String!, $body: String!) {
+                createDiscussion(input: {repositoryId: $repoId, categoryId: $catId, title: $title, body: $body}) {
+                  discussion { url }
+                }
+              }' -f repoId="$REPO_ID" -f catId="$CATEGORY_ID" -f title="$DISC_TITLE" -f body="$DISC_BODY" 2>&1) || true
+
+            DISC_URL=$(echo "$RESULT" | jq -r '.data.createDiscussion.discussion.url // empty' 2>/dev/null)
+            if [ -n "$DISC_URL" ]; then
+              echo "✓ Discussion created: $DISC_URL"
+            else
+              echo "⚠ Discussion creation failed: $RESULT"
+            fi
+          else
+            echo "No article found at $ARTICLE_FILE, skipping discussion"
+          fi

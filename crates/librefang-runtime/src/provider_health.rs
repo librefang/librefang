@@ -10,6 +10,25 @@
 use dashmap::DashMap;
 use std::time::{Duration, Instant};
 
+/// Enriched metadata for a discovered model (Ollama-specific fields are optional).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscoveredModelInfo {
+    /// Model name/ID (e.g., "llama3.2:latest").
+    pub name: String,
+    /// Parameter count string from Ollama (e.g., "8.0B").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parameter_size: Option<String>,
+    /// Quantization level (e.g., "Q4_K_M", "Q8_0").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantization_level: Option<String>,
+    /// Model family (e.g., "llama", "gemma").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    /// On-disk size in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
 /// Result of probing a provider endpoint.
 #[derive(Debug, Clone, Default)]
 pub struct ProbeResult {
@@ -19,17 +38,19 @@ pub struct ProbeResult {
     pub latency_ms: u64,
     /// Model IDs discovered from the provider's listing endpoint.
     pub discovered_models: Vec<String>,
+    /// Enriched model metadata (populated for Ollama, empty for others).
+    pub discovered_model_info: Vec<DiscoveredModelInfo>,
     /// Error message if the probe failed.
     pub error: Option<String>,
 }
 
-/// Check if a provider is a local provider (no key required, localhost URL).
+/// Check if a provider is a local HTTP provider that supports health probing.
 ///
-/// Returns true for `"ollama"`, `"vllm"`, `"lmstudio"`.
+/// Returns true for `"ollama"`, `"vllm"`, `"lmstudio"`, and `"lemonade"`.
 pub fn is_local_provider(provider: &str) -> bool {
     matches!(
         provider.to_lowercase().as_str(),
-        "ollama" | "vllm" | "lmstudio"
+        "ollama" | "vllm" | "lmstudio" | "lemonade"
     )
 }
 
@@ -99,7 +120,7 @@ impl Default for ProbeCache {
 pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
     let start = Instant::now();
 
-    let client = match reqwest::Client::builder()
+    let client = match crate::http_client::client_builder()
         .connect_timeout(Duration::from_secs(PROBE_CONNECT_TIMEOUT_SECS))
         .timeout(Duration::from_secs(PROBE_TIMEOUT_SECS))
         .build()
@@ -162,37 +183,68 @@ pub async fn probe_provider(provider: &str, base_url: &str) -> ProbeResult {
 
     let latency_ms = start.elapsed().as_millis() as u64;
 
-    // Parse model names
-    let models = if is_ollama {
-        // Ollama: { "models": [ { "name": "llama3.2:latest", ... }, ... ] }
-        body.get("models")
+    // Parse model names and metadata
+    let (models, model_info) = if is_ollama {
+        // Ollama: { "models": [ { "name": "llama3.2:latest", "size": 12345, "details": { ... } }, ... ] }
+        let arr = body
+            .get("models")
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|m| {
-                        m.get("name")
-                            .and_then(|n| n.as_str())
-                            .map(|s| s.to_string())
-                    })
-                    .collect()
+            .cloned()
+            .unwrap_or_default();
+
+        let names: Vec<String> = arr
+            .iter()
+            .filter_map(|m| {
+                m.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|s| s.to_string())
             })
-            .unwrap_or_default()
+            .collect();
+
+        let info: Vec<DiscoveredModelInfo> = arr
+            .iter()
+            .filter_map(|m| {
+                let name = m.get("name").and_then(|n| n.as_str())?.to_string();
+                let details = m.get("details");
+                Some(DiscoveredModelInfo {
+                    name,
+                    parameter_size: details
+                        .and_then(|d| d.get("parameter_size"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    quantization_level: details
+                        .and_then(|d| d.get("quantization_level"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    family: details
+                        .and_then(|d| d.get("family"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    size: m.get("size").and_then(|v| v.as_u64()),
+                })
+            })
+            .collect();
+
+        (names, info)
     } else {
         // OpenAI-compatible: { "data": [ { "id": "model-name", ... }, ... ] }
-        body.get("data")
+        let names = body
+            .get("data")
             .and_then(|v| v.as_array())
             .map(|arr| {
                 arr.iter()
                     .filter_map(|m| m.get("id").and_then(|n| n.as_str()).map(|s| s.to_string()))
                     .collect()
             })
-            .unwrap_or_default()
+            .unwrap_or_default();
+        (names, vec![])
     };
 
     ProbeResult {
         reachable: true,
         latency_ms,
         discovered_models: models,
+        discovered_model_info: model_info,
         error: None,
     }
 }
@@ -229,7 +281,7 @@ pub async fn probe_model(
 ) -> Result<u64, String> {
     let start = Instant::now();
 
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
@@ -280,6 +332,7 @@ mod tests {
         assert!(is_local_provider("OLLAMA"));
         assert!(is_local_provider("vllm"));
         assert!(is_local_provider("lmstudio"));
+        assert!(is_local_provider("lemonade"));
     }
 
     #[test]
@@ -288,6 +341,8 @@ mod tests {
         assert!(!is_local_provider("anthropic"));
         assert!(!is_local_provider("gemini"));
         assert!(!is_local_provider("groq"));
+        assert!(!is_local_provider("claude-code"));
+        assert!(!is_local_provider("qwen-code"));
     }
 
     #[test]
@@ -348,6 +403,7 @@ mod tests {
             reachable: true,
             latency_ms: 42,
             discovered_models: vec!["llama3".into()],
+            discovered_model_info: vec![],
             error: None,
         };
         cache.insert("ollama", result.clone());
@@ -362,5 +418,37 @@ mod tests {
         let cache = ProbeCache::default();
         assert!(cache.get("anything").is_none());
         assert_eq!(cache.ttl, Duration::from_secs(PROBE_CACHE_TTL_SECS));
+    }
+
+    #[test]
+    fn test_discovered_model_info_serialization() {
+        let info = DiscoveredModelInfo {
+            name: "llama3.2:latest".to_string(),
+            parameter_size: Some("3.2B".to_string()),
+            quantization_level: Some("Q4_K_M".to_string()),
+            family: Some("llama".to_string()),
+            size: Some(1_928_000_000),
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["name"], "llama3.2:latest");
+        assert_eq!(json["parameter_size"], "3.2B");
+        assert_eq!(json["quantization_level"], "Q4_K_M");
+        assert_eq!(json["family"], "llama");
+        assert_eq!(json["size"], 1_928_000_000_u64);
+    }
+
+    #[test]
+    fn test_discovered_model_info_skips_none_fields() {
+        let info = DiscoveredModelInfo {
+            name: "gpt-4".to_string(),
+            parameter_size: None,
+            quantization_level: None,
+            family: None,
+            size: None,
+        };
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["name"], "gpt-4");
+        assert!(json.get("parameter_size").is_none());
+        assert!(json.get("quantization_level").is_none());
     }
 }

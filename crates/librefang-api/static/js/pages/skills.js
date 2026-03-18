@@ -361,7 +361,8 @@ function skillsPage() {
           }));
         }
       }
-      this.installingSlug = null;
+      var self = this;
+      this.$nextTick(function() { self.installingSlug = null; });
     },
 
     // Uninstall

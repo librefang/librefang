@@ -40,7 +40,7 @@ impl SignalAdapter {
         Self {
             api_url,
             phone_number,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             allowed_users,
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
@@ -58,7 +58,7 @@ impl SignalAdapter {
         &self,
         recipient: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/v2/send", self.api_url);
 
         let body = serde_json::json!({
@@ -80,7 +80,9 @@ impl SignalAdapter {
 
     /// Receive messages from signal-cli REST API.
     #[allow(dead_code)]
-    async fn receive_messages(&self) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    async fn receive_messages(
+        &self,
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/v1/receive/{}", self.api_url, self.phone_number);
 
         let resp = self.client.get(&url).send().await?;
@@ -111,8 +113,10 @@ impl ChannelAdapter for SignalAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
         let api_url = self.api_url.clone();
         let phone_number = self.phone_number.clone();
@@ -234,7 +238,7 @@ impl ChannelAdapter for SignalAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -247,7 +251,7 @@ impl ChannelAdapter for SignalAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

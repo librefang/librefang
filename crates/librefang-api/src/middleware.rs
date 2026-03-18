@@ -4,15 +4,50 @@
 //! - Request ID generation and propagation
 //! - Per-endpoint structured request logging
 //! - In-memory rate limiting (per IP)
+//! - Accept-Language header parsing for i18n error responses
 
 use axum::body::Body;
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
+use librefang_types::i18n;
 use std::time::Instant;
 use tracing::info;
 
 /// Request ID header name (standard).
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
+
+/// Resolved language code extracted from the `Accept-Language` header.
+///
+/// Inserted into request extensions by the [`accept_language`] middleware so
+/// that downstream route handlers can produce localized error messages.
+#[derive(Clone, Debug)]
+pub struct RequestLanguage(pub &'static str);
+
+/// Middleware: parse `Accept-Language` header and store the resolved language
+/// in request extensions for downstream handlers.
+///
+/// Also sets the `Content-Language` response header to indicate which language
+/// was used.
+pub async fn accept_language(mut request: Request<Body>, next: Next) -> Response<Body> {
+    let lang = request
+        .headers()
+        .get("accept-language")
+        .and_then(|v| v.to_str().ok())
+        .map(i18n::parse_accept_language)
+        .unwrap_or(i18n::DEFAULT_LANGUAGE);
+
+    request.extensions_mut().insert(RequestLanguage(lang));
+
+    let mut response = next.run(request).await;
+
+    if let Ok(header_val) = lang.parse() {
+        response
+            .headers_mut()
+            .insert("content-language", header_val);
+    }
+
+    response
+}
 
 /// Middleware: inject a unique request ID and log the request/response.
 pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Body> {
@@ -43,6 +78,76 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
     response
 }
 
+/// API version headers middleware.
+///
+/// Adds `X-API-Version` to every response so clients always know which version
+/// they are talking to. When a request targets `/api/v1/...` the header reflects
+/// `v1`; for the unversioned `/api/...` alias it returns the latest version.
+///
+/// Also performs content-type negotiation: if the `Accept` header contains
+/// `application/vnd.librefang.<version>+json` the response version header
+/// reflects the negotiated version. If the requested version is unknown the
+/// server returns `406 Not Acceptable`.
+pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response<Body> {
+    let path = request.uri().path().to_string();
+
+    let path_version = crate::versioning::version_from_path(&path);
+    let accept_version = request
+        .headers()
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::versioning::version_from_accept_header);
+
+    // Check Accept header for version negotiation
+    let requested_accept_version = request
+        .headers()
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .and_then(crate::versioning::requested_version_from_accept_header);
+
+    // Validate negotiated version if provided
+    if path_version.is_none() {
+        if let Some(ver) = requested_accept_version {
+            let known = crate::server::API_VERSIONS.iter().any(|(v, _)| *v == ver);
+            if !known {
+                return Response::builder()
+                    .status(StatusCode::NOT_ACCEPTABLE)
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "error": format!("Unsupported API version: {ver}"),
+                            "available": crate::server::API_VERSIONS
+                                .iter()
+                                .map(|(v, _)| *v)
+                                .collect::<Vec<_>>(),
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap_or_default();
+            }
+        }
+    }
+
+    let mut response = next.run(request).await;
+
+    // Determine the version to report. Explicit path versions win over headers.
+    let version = if let Some(ver) = path_version {
+        ver.to_string()
+    } else if let Some(ver) = accept_version {
+        ver.to_string()
+    } else {
+        crate::server::API_VERSION_LATEST.to_string()
+    };
+
+    if let Ok(val) = version.parse() {
+        response.headers_mut().insert("x-api-version", val);
+    } else {
+        tracing::warn!("Failed to set X-API-Version header: {:?}", version);
+    }
+
+    response
+}
+
 /// Bearer token authentication middleware.
 ///
 /// When `api_key` is non-empty (after trimming), requests to non-public
@@ -57,8 +162,19 @@ pub async fn auth(
     // SECURITY: Capture method early for method-aware public endpoint checks.
     let method = request.method().clone();
 
-    // Shutdown is loopback-only (CLI on same machine) — skip token auth
-    let path = request.uri().path();
+    // Shutdown is loopback-only (CLI on same machine) — skip token auth.
+    // Normalize versioned paths: /api/v1/foo → /api/foo so public endpoint
+    // checks work identically for both /api/ and /api/v1/ prefixes.
+    let raw_path = request.uri().path().to_string();
+    let normalized;
+    let path: &str = if raw_path.starts_with("/api/v1/") {
+        normalized = format!("/api{}", &raw_path[7..]);
+        normalized.as_str()
+    } else if raw_path == "/api/v1" {
+        "/api"
+    } else {
+        &raw_path
+    };
     if path == "/api/shutdown" {
         let is_loopback = request
             .extensions()
@@ -81,6 +197,7 @@ pub async fn auth(
         || path == "/favicon.ico"
         || (path == "/.well-known/agent.json" && is_get)
         || (path.starts_with("/a2a/") && is_get)
+        || path == "/api/versions"
         || path == "/api/health"
         || path == "/api/health/detail"
         || path == "/api/status"
@@ -114,7 +231,12 @@ pub async fn auth(
         || (path == "/api/workflows" && is_get)
         || path == "/api/logs/stream"  // SSE stream, read-only
         || (path.starts_with("/api/cron/") && is_get)
-        || path.starts_with("/api/providers/github-copilot/oauth/");
+        || path.starts_with("/api/providers/github-copilot/oauth/")
+        // OAuth/OIDC auth flow endpoints must be accessible without API key
+        // (they are the authentication entry points themselves).
+        || (path == "/api/auth/providers" && is_get)
+        || (path.starts_with("/api/auth/login") && is_get)
+        || path == "/api/auth/callback";
 
     if is_public {
         return next.run(request).await;
@@ -173,16 +295,25 @@ pub async fn auth(
     }
 
     // Determine error message: was a credential provided but wrong, or missing entirely?
+    // Use the request language (set by accept_language middleware) for i18n.
+    let lang = request
+        .extensions()
+        .get::<RequestLanguage>()
+        .map(|rl| rl.0)
+        .unwrap_or(i18n::DEFAULT_LANGUAGE);
+    let translator = i18n::ErrorTranslator::new(lang);
+
     let credential_provided = header_auth.is_some() || query_auth.is_some();
     let error_msg = if credential_provided {
-        "Invalid API key"
+        translator.t("api-error-auth-invalid-key")
     } else {
-        "Missing Authorization: Bearer <api_key> header"
+        translator.t("api-error-auth-missing-header")
     };
 
     Response::builder()
         .status(StatusCode::UNAUTHORIZED)
         .header("www-authenticate", "Bearer")
+        .header("content-language", lang)
         .body(Body::from(
             serde_json::json!({"error": error_msg}).to_string(),
         ))
@@ -221,9 +352,121 @@ pub async fn security_headers(request: Request<Body>, next: Next) -> Response<Bo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::get;
+    use axum::Router;
+    use tower::ServiceExt;
 
     #[test]
     fn test_request_id_header_constant() {
         assert_eq!(REQUEST_ID_HEADER, "x-request-id");
+    }
+
+    #[tokio::test]
+    async fn test_api_version_header_prefers_explicit_path_version() {
+        let app = Router::new()
+            .route("/api/v1/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(api_version_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/health")
+                    .header("accept", "application/vnd.librefang.v99+json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-api-version"], "v1");
+    }
+
+    #[tokio::test]
+    async fn test_api_version_header_rejects_unknown_vendor_version_on_alias() {
+        let app = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(api_version_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header("accept", "application/vnd.librefang.v99+json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+    }
+
+    #[tokio::test]
+    async fn test_api_version_header_accepts_vendor_media_type_with_parameters() {
+        let app = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(api_version_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header("accept", "application/vnd.librefang.v1+json; charset=utf-8")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-api-version"], "v1");
+    }
+
+    #[tokio::test]
+    async fn test_api_version_header_ignores_non_json_vendor_media_type() {
+        let app = Router::new()
+            .route("/api/health", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(api_version_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header("accept", "application/vnd.librefang.v1+xml")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["x-api-version"], "v1");
+    }
+
+    #[tokio::test]
+    async fn test_api_version_header_is_added_to_unauthorized_responses() {
+        let app = Router::new()
+            .route("/api/private", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                "secret".to_string(),
+                auth,
+            ))
+            .layer(axum::middleware::from_fn(api_version_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/private")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.headers()["x-api-version"], "v1");
     }
 }

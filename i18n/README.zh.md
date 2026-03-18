@@ -6,28 +6,179 @@
 <h3 align="center">自由的 Agent 操作系统 — Libre 意味着自由</h3>
 
 <p align="center">
-  使用 Rust 编写的开源 Agent OS。137K 代码行。14 个 crate。2,100+ 测试。零 clippy 警告。<br/>
-  <strong>派生自 <a href="https://github.com/RightNow-AI/openfang">RightNow-AI/openfang</a>。真正的开放治理。欢迎贡献者。有益的 PR 直接合并。</strong>
+  使用 Rust 构建的开源 Agent OS。14 个 crate。2,100+ 测试。零 clippy 警告。
 </p>
 
 <p align="center">
-  <strong>多语言版本：</strong> <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
+  <a href="../README.md">English</a> | <a href="README.zh.md">中文</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.es.md">Español</a> | <a href="README.de.md">Deutsch</a>
 </p>
 
 <p align="center">
   <a href="https://librefang.ai/">网站</a> &bull;
-  <a href="https://github.com/librefang/librefang">GitHub</a> &bull;
-  <a href="../GOVERNANCE.md">治理</a> &bull;
+  <a href="https://docs.librefang.ai">文档</a> &bull;
   <a href="../CONTRIBUTING.md">贡献</a> &bull;
-  <a href="../SECURITY.md">安全</a>
+  <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
 <p align="center">
+  <a href="https://github.com/librefang/librefang/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/librefang/librefang/ci.yml?style=flat-square&label=CI" alt="CI" /></a>
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat-square" alt="Rust" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="MIT" />
-  <img src="https://img.shields.io/badge/community-maintained-brightgreen?style=flat-square" alt="社区维护" />
   <img src="https://img.shields.io/github/stars/librefang/librefang?style=flat-square" alt="Stars" />
-  <img src="https://img.shields.io/github/forks/librefang/librefang?style=flat-square" alt="Forks" />
+  <img src="https://img.shields.io/github/v/release/librefang/librefang?style=flat-square" alt="Latest Release" />
+  <a href="https://discord.gg/DzTYqAZZmc"><img src="https://img.shields.io/discord/1481633471507071129?style=flat-square&logo=discord&label=Discord" alt="Discord" /></a>
+</p>
+
+---
+
+## 什么是 LibreFang？
+
+LibreFang 是一个 **Agent 操作系统** — 用 Rust 从头构建的完整自主 AI 智能体运行平台。不是聊天机器人框架，不是 Python 包装器。
+
+传统智能体框架等待你的输入。LibreFang 运行**为你工作的智能体** — 按计划全天候运行，监控目标、生成线索、管理社交媒体，并向控制台报告。
+
+> LibreFang 是 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) 的社区分支，采用开放治理和合并优先的 PR 政策。详见 [GOVERNANCE.md](../GOVERNANCE.md)。
+
+<p align="center">
+  <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang 控制台" />
+</p>
+
+## 快速开始
+
+```bash
+# 安装
+cargo install --git https://github.com/librefang/librefang librefang-cli
+
+# 初始化（引导你完成服务商配置）
+librefang init
+
+# 启动 — 控制台 http://localhost:4545
+librefang start
+```
+
+<details>
+<summary><strong>Homebrew</strong></summary>
+
+```bash
+brew tap librefang/tap && brew install librefang
+```
+
+</details>
+
+<details>
+<summary><strong>Docker</strong></summary>
+
+```bash
+docker run -p 4545:4545 ghcr.io/librefang/librefang
+```
+
+</details>
+
+<details>
+<summary><strong>云部署</strong></summary>
+
+[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../infra/gcp/README.md)
+
+</details>
+
+## Hands：为你工作的智能体
+
+**Hands** 是预置的自主能力包，按计划独立运行，无需提示。内置 14 个：
+
+| Hand | 功能 |
+|------|------|
+| **Researcher** | 深度研究 — 多源交叉引用、CRAAP 可信度评估、带引用的报告 |
+| **Collector** | OSINT 监控 — 变化检测、情感追踪、知识图谱 |
+| **Predictor** | 超级预测 — 带置信区间的校准预测 |
+| **Strategist** | 战略分析 — 市场研究、竞争情报、商业规划 |
+| **Analytics** | 数据分析 — 数据采集、分析、可视化、自动报告 |
+| **Trader** | 市场情报 — 多信号分析、风险管理、投资组合分析 |
+| **Lead** | 潜客发现 — 网络研究、评分、去重、合格线索交付 |
+| **Twitter** | 自主 X/Twitter — 内容创作、定时发布、审批队列 |
+| **Reddit** | Reddit 管理 — 子版块监控、发帖、互动追踪 |
+| **LinkedIn** | LinkedIn 管理 — 内容创作、社交拓展、职业互动 |
+| **Clip** | YouTube 转短视频 — 裁剪精华、字幕、AI 配音 |
+| **Browser** | Web 自动化 — 基于 Playwright，购买操作强制审批 |
+| **API Tester** | API 测试 — 端点发现、验证、负载测试、回归检测 |
+| **DevOps** | DevOps 自动化 — CI/CD、基础设施监控、事件响应 |
+
+```bash
+librefang hand activate researcher   # 立即开始工作
+librefang hand status researcher     # 查看进度
+librefang hand list                  # 查看所有 Hands
+```
+
+自定义 Hand：定义 `HAND.toml` + 系统提示词 + `SKILL.md`。[指南](../docs/skill-development.md)
+
+## 架构
+
+14 个 Rust crate，模块化内核设计。
+
+```
+librefang-kernel      编排、工作流、计量、RBAC、调度、预算
+librefang-runtime     智能体循环、3 个 LLM 驱动器、53 个工具、WASM 沙箱、MCP、A2A
+librefang-api         140+ REST/WS/SSE 端点、OpenAI 兼容 API、控制台
+librefang-channels    40 个消息适配器，速率限制、DM/群组策略
+librefang-memory      SQLite 持久化、向量嵌入、会话、压缩
+librefang-types       核心类型、污点追踪、Ed25519 签名、模型目录
+librefang-skills      60 个内置技能、SKILL.md 解析器、FangHub 市场
+librefang-hands       14 个自主 Hands、HAND.toml 解析器、生命周期管理
+librefang-extensions  25 个 MCP 模板、AES-256-GCM 保险库、OAuth2 PKCE
+librefang-wire        OFP P2P 协议、HMAC-SHA256 双向认证
+librefang-cli         CLI、守护进程管理、TUI 控制台、MCP 服务器模式
+librefang-desktop     Tauri 2.0 原生应用（托盘、通知、快捷键）
+librefang-migrate     OpenClaw、LangChain、AutoGPT 迁移引擎
+xtask                 构建自动化
+```
+
+## 核心特性
+
+**40 个渠道适配器** — Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email、Teams、Google Chat、飞书、LINE、Mastodon、Bluesky 等。[完整列表](../docs/channel-adapters.md)
+
+**27 个 LLM 服务商** — Anthropic、Gemini、OpenAI、Groq、DeepSeek、OpenRouter、Ollama 等。智能路由、自动回退、成本追踪。[详情](../docs/providers.md)
+
+**16 层安全体系** — WASM 沙箱、Merkle 审计链、污点追踪、Ed25519 签名、SSRF 防护、密钥清零等。[详情](../docs/comparison.md#16-security-systems--defense-in-depth)
+
+**OpenAI 兼容 API** — 即插即用的 `/v1/chat/completions` 端点。140+ REST/WS/SSE 端点。[API 参考](../docs/api-reference.md)
+
+**客户端 SDK** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — 完整 REST 客户端，支持流式传输。
+
+**MCP 支持** — 内置 MCP 客户端和服务器。连接 IDE、扩展自定义工具、组合智能体管道。[详情](../docs/providers.md)
+
+**A2A 协议** — 支持 Google Agent-to-Agent 协议。跨智能体系统发现、通信和任务委派。[详情](../docs/api-reference.md)
+
+**桌面应用** — Tauri 2.0 原生应用，支持系统托盘、通知和全局快捷键。
+
+**OpenClaw 迁移** — `librefang migrate --from openclaw` 导入智能体、历史、技能和配置。
+
+## 开发
+
+```bash
+cargo build --workspace --lib                            # 构建
+cargo test --workspace                                   # 2,100+ 测试
+cargo clippy --workspace --all-targets -- -D warnings    # 零警告
+cargo fmt --all -- --check                               # 格式化检查
+```
+
+## 对比
+
+查看 [docs/comparison.md](../docs/comparison.md) 了解 LibreFang 与 OpenClaw、ZeroClaw、CrewAI、AutoGen、LangGraph 的基准测试和功能对比。
+
+## 链接
+
+- [文档](https://docs.librefang.ai) &bull; [API 参考](../docs/api-reference.md) &bull; [入门指南](../docs/getting-started.md) &bull; [故障排除](../docs/troubleshooting.md)
+- [贡献](../CONTRIBUTING.md) &bull; [治理](../GOVERNANCE.md) &bull; [安全](../SECURITY.md)
+- 讨论: [问答](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [用例展示](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [功能投票](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [公告](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
+
+## 贡献者
+
+<a href="https://github.com/librefang/librefang/graphs/contributors">
+  <img src="../public/assets/contributors.svg" alt="Contributors" />
+</a>
+
+<p align="center">
+  我们欢迎各种形式的贡献 — 代码、文档、翻译、Bug 报告。<br/>
+  查看 <a href="../CONTRIBUTING.md">贡献指南</a>，从一个 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> 开始吧！
 </p>
 
 <p align="center">
@@ -38,247 +189,4 @@
 
 ---
 
-> **LibreFang 是 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) 的社区分支。**
->
-> **"Libre"** 意味着自由。我们选择这个名字，因为我们相信开源项目应该是真正开放的——不仅仅是许可证开放，更是治理、贡献和协作的全方位开放。LibreFang 走的是一条与上游项目截然不同的路：我们欢迎每一位贡献者，公开审查每一个 PR，合并一切有益于项目的工作。
-
-> **我们对贡献者的承诺：**
-> - 如果你的 PR 对项目有积极帮助，**我们会原样合并**，保留完整署名。
-> - 如果你的 PR 需要改进，**我们会积极 review 并提出具体的改进意见**，帮助你把 PR 推到可合并状态——我们不会无声关闭 PR。
-> - 每一位贡献者都受到重视。Bug 修复、文档、测试、新功能、打包、翻译——所有贡献都很重要。
-
----
-
-## 为什么选择 LibreFang？——与 OpenFang 的区别
-
-LibreFang 从 [RightNow-AI/openfang](https://github.com/RightNow-AI/openfang) 分支而来，因为我们相信一种不同的开源项目运作方式。
-
-### "Libre" 意味着什么
-
-| | OpenFang | LibreFang |
-|---|---------|-----------|
-| **许可证** | MIT + Apache-2.0 | MIT |
-| **治理模式** | 单一公司控制 | 社区治理，决策透明 |
-| **PR 政策** | 取决于维护者意愿 | 有益贡献直接合并；需改进的 PR 会收到积极的 review 和改进建议 |
-| **署名** | 无保障 | 始终保留在 commit 和 release notes 中 |
-| **贡献者** | 参与度有限 | 积极欢迎——我们需要你 |
-| **Review 响应** | 无承诺 | 7 天内首次响应 |
-
-### 我们的承诺
-
-- **合并优先。** 如果你的 PR 对项目发展有帮助，我们合并它。不搞门禁，不"内部重写"。
-- **积极代码审查。** 需要修改的 PR 会收到详细、建设性的反馈——不是沉默。我们帮你把代码推上线。
-- **完整署名。** 维护者改编你的补丁时，你的名字会保留在 commit 元数据（`Co-authored-by`）和发布说明中。关闭 PR 后私自重新实现的行为在我们的[治理文档](../GOVERNANCE.md)中被明确禁止。
-- **开放治理。** 技术决策在 issue 和 PR 中公开进行，不在幕后。参见 [`GOVERNANCE.md`](../GOVERNANCE.md) 和 [`MAINTAINERS.md`](../MAINTAINERS.md)。
-- **加入我们。** 活跃的贡献者会被邀请加入 LibreFang GitHub 组织。持续贡献的核心参与者将获得 commit 权限，并在项目方向上拥有发言权。
-
----
-
-## 什么是 LibreFang？
-
-LibreFang 是一个**开源 Agent 操作系统**——不是聊天机器人框架，不是围绕 LLM 的 Python 包装器，也不是"多智能体编排器"。它是一个为自主智能体构建的完整操作系统，使用 Rust 从头构建并公开维护。
-
-传统的智能体框架等待你输入内容。LibreFang 运行**为你工作的自主智能体**——按计划运行，7x24 小时，构建知识图谱、监控目标、生成潜在客户、管理你的社交媒体，并向你的仪表板报告结果。
-
-项目网站已在 [librefang.ai](https://librefang.ai/) 上线。今天，最快的试用 LibreFang 的方式仍然是从源码安装。
-
-```bash
-cargo install --git https://github.com/librefang/librefang librefang-cli
-librefang init
-librefang start
-# 仪表板地址：http://localhost:4545
-```
-
-**或者使用 Homebrew 安装：**
-```bash
-brew tap librefang/tap
-brew install librefang
-```
-
-<a id="docker"></a>
-
-**或者使用 Docker 运行：**
-```bash
-docker run -p 4545:4545 ghcr.io/librefang/librefang
-# 仪表板地址：http://localhost:4545
-```
-
----
-
-## 核心特性
-
-### 🤖 Hands：真正做事的智能体
-
-*"传统智能体等待你输入。Hands 为你工作。"*
-
-**Hands** 是 LibreFang 的核心创新——预构建的自主能力包，独立运行，按计划执行，无需你提示。它不是聊天机器人。这是一个在早上 6 点醒来的智能体，研究你的竞争对手，构建知识图谱，对发现进行评分，在你有咖啡之前将报告发送到你的 Telegram。
-
-每个 Hand 包含：
-- **HAND.toml** — 声明工具、设置、要求和仪表板指标的清单
-- **System Prompt** — 多阶段操作手册（不是一句话——这些是 500+ 字的专家程序）
-- **SKILL.md** — 运行时注入上下文的领域专业知识参考
-- **Guardrails** — 敏感操作的批准门（例如，Browser Hand 需要在任何购买前获得批准）
-
-全部编译进二进制文件。无需下载，无需 pip install，无需 Docker pull。
-
-### 7 个内置 Hands
-
-| Hand | 功能 |
-|------|------|
-| **Clip** | 获取 YouTube URL，下载，识别最佳时刻，裁剪成带字幕和缩略图的短视频，可选添加 AI 配音，发布到 Telegram 和 WhatsApp。8 阶段管道。FFmpeg + yt-dlp + 5 个 STT 后端。 |
-| **Lead** | 每日运行。发现符合你的 ICP 的潜在客户，用网络研究丰富它们，评分 0-100，与现有数据库去重，以 CSV/JSON/Markdown 交付合格线索。随着时间推移构建 ICP 档案。 |
-| **Collector** | OSINT 级情报。你给一个目标（公司、人、主题）。它持续监控——变化检测、情感追踪、知识图谱构建，在重要变化时发送关键警报。 |
-| **Predictor** | 超级预测引擎。从多个来源收集信号，构建校准的推理链，用置信区间进行预测，使用 Brier 分数跟踪自己的准确性。有反向模式——故意与共识争辩。 |
-| **Researcher** | 深度自主研究员。交叉引用多个来源，使用 CRAAP 标准评估可信度（货币性、相关性、权威性、准确性、目的），生成带引用的 APA 格式报告，支持多语言。 |
-| **Twitter** | 自主 Twitter/X 账户管理器。以 7 种轮换格式创建内容，为最佳参与度安排帖子，回复提及，跟踪绩效指标。有批准队列——未经你确认 nothing posts。 |
-| **Browser** | Web 自动化智能体。导航网站，填写表单，点击按钮，处理多步骤工作流。使用 Playwright 桥接和会话持久化。**强制购买批准门**——未经明确确认永远不会花你的钱。 |
-
----
-
-## 16 层安全系统 — 纵深防御
-
-LibreFang 不是事后才添加安全。每一层都是独立可测试的，无单点故障运行。
-
-| # | 系统 | 功能 |
-|---|------|------|
-| 1 | **WASM 双重计量沙箱** | 工具代码在 WebAssembly 中运行，带燃料计量 + epoch 中断。看门狗线程杀死失控代码。 |
-| 2 | **Merkle 哈希链审计追踪** | 每个操作都加密链接到前一个。篡改一条记录整个链就断裂。 |
-| 3 | **信息流污染追踪** | 标签在执行中传播——从源到汇跟踪 secrets。 |
-| 4 | **Ed25519 签名智能体清单** | 每个智能体身份和能力集都是加密签名的。 |
-| 5 | **SSRF 保护** | 阻止私有 IP、云元数据端点和 DNS 重新绑定攻击。 |
-| 6 | **Secret 零化** | `Zeroizing<String>` 在不再需要时立即从内存中擦除 API 密钥。 |
-| 7 | **OFP 双向认证** | HMAC-SHA256 nonce-based，常数时间验证用于 P2P 网络。 |
-| 8 | **能力门** | 基于角色的访问控制——智能体声明所需工具，内核强制执行。 |
-| 9 | **安全头** | CSP、X-Frame-Options、HSTS、X-Content-Type-Options 在每个响应上。 |
-| 10 | **健康端点编辑** | 公共健康检查返回最少信息。完整诊断需要认证。 |
-| 11 | **子进程沙箱** | `env_clear()` + 选择性变量传递。进程树隔离与跨平台 kill。 |
-| 12 | **提示注入扫描器** | 检测 override 尝试、数据外泄模式和技能中的 shell 引用注入。 |
-| 13 | **循环守卫** | 基于 SHA256 的工具调用循环检测与断路器。处理 ping-pong 模式。 |
-| 14 | **会话修复** | 7 阶段消息历史验证和自动从损坏中恢复。 |
-| 15 | **路径遍历防护** | 规范化与符号链接转义预防。`../` 在这里不起作用。 |
-| 16 | **GCRA 速率限制器** | 成本感知的令牌桶速率限制，带 per-IP 追踪和过期清理。 |
-
----
-
-## 架构
-
-14 个 Rust crate。137,728 行代码。模块化内核设计。
-
-```
-librefang-kernel      编排、工作流、计量、RBAC、调度、预算追踪
-librefang-runtime     智能体循环、3 个 LLM 驱动、53 个工具、WASM 沙箱、MCP、A2A
-librefang-api         140+ REST/WS/SSE 端点、OpenAI 兼容 API、仪表板
-librefang-channels    40 个消息适配器，带速率限制
-librefang-memory      SQLite 持久化、向量嵌入、规范会话、压缩
-librefang-types       核心类型、污染追踪、Ed25519 清单签名、模型目录
-librefang-skills      60 个内置技能、SKILL.md 解析器、FangHub 市场
-librefang-hands       7 个自主 Hands、HAND.toml 解析器、生命周期管理
-librefang-extensions  25 个 MCP 模板、AES-256-GCM 凭据保险库、OAuth2 PKCE
-librefang-wire        OFP P2P 协议，带 HMAC-SHA256 双向认证
-librefang-cli         CLI，带守护进程管理、TUI 仪表板、MCP 服务器模式
-librefang-desktop     Tauri 2.0 原生应用（系统托盘、通知、全局快捷键）
-librefang-migrate     OpenClaw、LangChain、AutoGPT 迁移引擎
-xtask                构建自动化
-```
-
----
-
-## 快速开始
-
-```bash
-# 1. 安装
-cargo install --git https://github.com/librefang/librefang librefang-cli
-
-# 2. 初始化 — 引导你完成提供商设置
-librefang init
-
-# 3. 启动守护进程
-librefang start
-
-# 4. 仪表板地址：http://localhost:4545
-
-# 5. 激活一个 Hand — 它开始为你工作
-librefang hand activate researcher
-
-# 6. 与智能体聊天
-librefang chat researcher
-> "AI 智能体框架有哪些新兴趋势？"
-
-# 7. 生成一个预构建的智能体
-librefang agent spawn coder
-```
-
----
-
-## 开发
-
-```bash
-# 构建工作空间
-cargo build --workspace --lib
-
-# 运行所有测试 (2,100+)
-cargo test --workspace
-
-# Lint（必须是 0 警告）
-cargo clippy --workspace --all-targets -- -D warnings
-
-# 格式化
-cargo fmt --all -- --check
-```
-
----
-
-## 稳定性说明
-
-LibreFang 是 pre-1.0。架构稳固，测试套件全面，安全模型全面。也就是说：
-
-- **破坏性变更** 可能在 minor 版本之间发生，直到 v1.0
-- **一些 Hands** 比其他的更成熟（Browser 和 Researcher 是经过实战检验的）
-- **边缘情况** 存在——如果你发现了一个，[开 issue](https://github.com/librefang/librefang/issues)
-- 在生产部署中**锁定到特定 commit**，直到 v1.0
-
-我们快速发布，快速修复。目标是 2026 年中发布可靠的 v1.0。
-
----
-
-## 安全
-
-要报告安全漏洞，请遵循 [SECURITY.md](../SECURITY.md) 中的私人报告流程。
-
----
-
-## 许可证
-
-MIT 许可证。详见 LICENSE 文件。
-
----
-
-## 链接
-
-- [GitHub](https://github.com/librefang/librefang)
-- [网站](https://librefang.ai/)
-- [文档](https://docs.librefang.ai)
-- [贡献指南](../CONTRIBUTING.md)
-- [治理](../GOVERNANCE.md)
-- [维护者](../MAINTAINERS.md)
-- [安全策略](../SECURITY.md)
-- [社区讨论](https://github.com/librefang/librefang/discussions) — 提问、分享想法、展示作品
-- [Discord](https://discord.gg/DzTYqAZZmc) — 实时社区交流
-
----
-
-## 贡献者
-
-感谢所有为 LibreFang 做出贡献的人！
-
-<a href="https://github.com/librefang/librefang/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=librefang/librefang&max=100&columns=12" />
-</a>
-
-> 想加入吗？查看我们的[贡献指南](../CONTRIBUTING.md) — 许多任务不需要 Rust 经验。
-
----
-
-<p align="center">
-  <strong>使用 Rust 构建。16 层安全保障。真正为你工作的智能体。</strong>
-</p>
+<p align="center">MIT 许可证</p>

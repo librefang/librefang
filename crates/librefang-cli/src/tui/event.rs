@@ -246,7 +246,7 @@ pub fn spawn_daemon_detect(tx: mpsc::Sender<AppEvent>) {
         let mut agent_count = 0u64;
 
         if let Some(ref u) = url {
-            if let Ok(client) = reqwest::blocking::Client::builder()
+            if let Ok(client) = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(2))
                 .build()
             {
@@ -335,7 +335,7 @@ pub fn spawn_daemon_stream(
     std::thread::spawn(move || {
         use std::io::{BufRead, BufReader, Read};
 
-        let client = reqwest::blocking::Client::builder()
+        let client = crate::http_client::client_builder()
             .timeout(Duration::from_secs(300))
             .build()
             .unwrap();
@@ -421,6 +421,7 @@ pub fn spawn_daemon_stream(
                             usage: librefang_types::message::TokenUsage {
                                 input_tokens: total_input_tokens,
                                 output_tokens: total_output_tokens,
+                                ..Default::default()
                             },
                         }));
                     }
@@ -434,11 +435,13 @@ pub fn spawn_daemon_stream(
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens: total_input_tokens,
                 output_tokens: total_output_tokens,
+                ..Default::default()
             },
             iterations: 0,
             cost_usd: None,
             silent: false,
             directives: Default::default(),
+            decision_traces: Vec::new(),
         })));
     });
 }
@@ -449,7 +452,7 @@ fn daemon_fallback(
     agent_id: &str,
     message: &str,
 ) -> Result<AgentLoopResult, String> {
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http_client::client_builder()
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| e.to_string())?;
@@ -470,11 +473,13 @@ fn daemon_fallback(
             total_usage: librefang_types::message::TokenUsage {
                 input_tokens,
                 output_tokens,
+                ..Default::default()
             },
             iterations: body["iterations"].as_u64().unwrap_or(0) as u32,
             cost_usd: body["cost_usd"].as_f64(),
             silent: false,
             directives: Default::default(),
+            decision_traces: Vec::new(),
         })
     } else {
         Err(body["error"]
@@ -487,7 +492,7 @@ fn daemon_fallback(
 /// Spawn a background thread that spawns an agent on the daemon.
 pub fn spawn_daemon_agent(base_url: String, toml_content: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || {
-        let client = reqwest::blocking::Client::builder()
+        let client = crate::http_client::client_builder()
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap();
@@ -528,10 +533,10 @@ pub fn spawn_daemon_agent(base_url: String, toml_content: String, tx: mpsc::Send
 pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
 
             if let Ok(resp) = client.get(format!("{base_url}/api/status")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -584,10 +589,10 @@ pub fn spawn_fetch_dashboard(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 pub fn spawn_fetch_channels(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
 
             if let Ok(resp) = client.get(format!("{base_url}/api/channels")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -637,10 +642,10 @@ pub fn spawn_fetch_channels(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
 pub fn spawn_test_channel(backend: BackendRef, channel: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(10))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
 
             match client
                 .post(format!("{base_url}/api/channels/{channel}/test"))
@@ -685,10 +690,10 @@ pub fn spawn_test_channel(backend: BackendRef, channel: String, tx: mpsc::Sender
 pub fn spawn_fetch_workflows(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
 
             if let Ok(resp) = client.get(format!("{base_url}/api/workflows")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -724,10 +729,10 @@ pub fn spawn_fetch_workflow_runs(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
 
             if let Ok(resp) = client
                 .get(format!("{base_url}/api/workflows/{workflow_id}/runs"))
@@ -766,10 +771,10 @@ pub fn spawn_run_workflow(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(60))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
 
             match client
                 .post(format!("{base_url}/api/workflows/{workflow_id}/run"))
@@ -807,10 +812,10 @@ pub fn spawn_create_workflow(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(10))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
 
             match client
                 .post(format!("{base_url}/api/workflows"))
@@ -843,10 +848,10 @@ pub fn spawn_create_workflow(
 pub fn spawn_fetch_triggers(backend: BackendRef, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
 
             if let Ok(resp) = client.get(format!("{base_url}/api/triggers")).send() {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
@@ -886,10 +891,10 @@ pub fn spawn_create_trigger(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(10))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
 
             match client
                 .post(format!("{base_url}/api/triggers"))
@@ -924,10 +929,10 @@ pub fn spawn_create_trigger(
 pub fn spawn_delete_trigger(backend: BackendRef, trigger_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
 
             match client
                 .delete(format!("{base_url}/api/triggers/{trigger_id}"))
@@ -955,10 +960,10 @@ pub fn spawn_delete_trigger(backend: BackendRef, trigger_id: String, tx: mpsc::S
 pub fn spawn_kill_agent(backend: BackendRef, agent_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
 
             match client
                 .delete(format!("{base_url}/api/agents/{agent_id}"))
@@ -999,10 +1004,10 @@ pub fn spawn_kill_agent(backend: BackendRef, agent_id: String, tx: mpsc::Sender<
 pub fn spawn_fetch_agent_skills(backend: BackendRef, agent_id: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
             if let Ok(resp) = client
                 .get(format!("{base_url}/api/agents/{agent_id}/skills"))
                 .send()
@@ -1063,10 +1068,10 @@ pub fn spawn_fetch_agent_mcp_servers(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
             if let Ok(resp) = client
                 .get(format!("{base_url}/api/agents/{agent_id}/mcp_servers"))
                 .send()
@@ -1137,10 +1142,10 @@ pub fn spawn_update_agent_skills(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
             match client
                 .put(format!("{base_url}/api/agents/{agent_id}/skills"))
                 .json(&serde_json::json!({"skills": skills}))
@@ -1179,10 +1184,10 @@ pub fn spawn_update_agent_mcp_servers(
 ) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(5))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
             match client
                 .put(format!("{base_url}/api/agents/{agent_id}/mcp_servers"))
                 .json(&serde_json::json!({"mcp_servers": servers}))
@@ -1217,10 +1222,10 @@ pub fn spawn_update_agent_mcp_servers(
 // ── New screen spawn functions ───────────────────────────────────────────────
 
 fn daemon_client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
+    crate::http_client::client_builder()
         .timeout(Duration::from_secs(5))
         .build()
-        .unwrap_or_else(|_| reqwest::blocking::Client::new())
+        .unwrap_or_else(|_| crate::http_client::new_client())
 }
 
 /// Fetch sessions list.
@@ -1979,10 +1984,10 @@ pub fn spawn_delete_provider_key(backend: BackendRef, name: String, tx: mpsc::Se
 pub fn spawn_test_provider(backend: BackendRef, name: String, tx: mpsc::Sender<AppEvent>) {
     std::thread::spawn(move || match backend {
         BackendRef::Daemon(base_url) => {
-            let client = reqwest::blocking::Client::builder()
+            let client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(15))
                 .build()
-                .unwrap_or_else(|_| reqwest::blocking::Client::new());
+                .unwrap_or_else(|_| crate::http_client::new_client());
             let start = std::time::Instant::now();
             match client
                 .post(format!("{base_url}/api/providers/{name}/test"))

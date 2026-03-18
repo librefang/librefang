@@ -65,15 +65,15 @@ impl NostrAdapter {
         self
     }
 
-    /// Derive a public key hex string from the private key.
-    /// In a real implementation this would use secp256k1 scalar multiplication.
-    /// For now, returns a placeholder derived from the private key hash.
+    /// Derive the x-only public key (NIP-01) from the hex-encoded private key
+    /// using secp256k1 scalar-base multiplication.
     fn derive_pubkey(&self) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        self.private_key.as_str().hash(&mut hasher);
-        format!("{:064x}", hasher.finish())
+        use k256::schnorr::SigningKey;
+        let sk_bytes =
+            hex::decode(self.private_key.as_str()).expect("private key must be valid hex");
+        let signing_key = SigningKey::from_bytes(&sk_bytes)
+            .expect("private key must be a valid secp256k1 scalar");
+        hex::encode(signing_key.verifying_key().to_bytes())
     }
 
     /// Build a NIP-01 REQ message for subscribing to DMs (kind 4).
@@ -125,7 +125,7 @@ impl NostrAdapter {
         &self,
         recipient_pubkey: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
         for chunk in chunks {
@@ -170,8 +170,10 @@ impl ChannelAdapter for NostrAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let pubkey = self.derive_pubkey();
         info!(
             "Nostr adapter starting (pubkey: {}...)",
@@ -196,6 +198,7 @@ impl ChannelAdapter for NostrAdapter {
             let own_pubkey = own_pubkey.clone();
             let seen_events = Arc::clone(&seen_events);
             let _private_key = private_key.clone();
+            let account_id = account_id.clone();
             let mut relay_shutdown_rx = shutdown_rx.clone();
 
             tokio::spawn(async move {
@@ -418,7 +421,7 @@ impl ChannelAdapter for NostrAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -431,12 +434,15 @@ impl ChannelAdapter for NostrAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Nostr does not have a typing indicator protocol
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
@@ -446,10 +452,13 @@ impl ChannelAdapter for NostrAdapter {
 mod tests {
     use super::*;
 
+    /// Valid 32-byte hex private key for testing (do NOT use in production).
+    const TEST_PRIVKEY: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
     #[test]
     fn test_nostr_adapter_creation() {
         let adapter = NostrAdapter::new(
-            "deadbeef".repeat(8),
+            TEST_PRIVKEY.to_string(),
             vec!["wss://relay.damus.io".to_string()],
         );
         assert_eq!(adapter.name(), "nostr");
@@ -461,21 +470,26 @@ mod tests {
 
     #[test]
     fn test_nostr_private_key_zeroized() {
-        let key = "a".repeat(64);
-        let adapter = NostrAdapter::new(key.clone(), vec!["wss://relay.example.com".to_string()]);
-        assert_eq!(adapter.private_key.as_str(), key);
+        let adapter = NostrAdapter::new(
+            TEST_PRIVKEY.to_string(),
+            vec!["wss://relay.example.com".to_string()],
+        );
+        assert_eq!(adapter.private_key.as_str(), TEST_PRIVKEY);
     }
 
     #[test]
     fn test_nostr_derive_pubkey() {
-        let adapter = NostrAdapter::new("deadbeef".repeat(8), vec![]);
+        let adapter = NostrAdapter::new(TEST_PRIVKEY.to_string(), vec![]);
         let pubkey = adapter.derive_pubkey();
+        // x-only secp256k1 public key is 32 bytes = 64 hex chars
         assert_eq!(pubkey.len(), 64);
+        // Must be deterministic
+        assert_eq!(pubkey, adapter.derive_pubkey());
     }
 
     #[test]
     fn test_nostr_build_subscription() {
-        let adapter = NostrAdapter::new("abc123".to_string(), vec![]);
+        let adapter = NostrAdapter::new(TEST_PRIVKEY.to_string(), vec![]);
         let pubkey = adapter.derive_pubkey();
         let sub = adapter.build_subscription(&pubkey);
         assert!(sub.contains("REQ"));
@@ -485,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_nostr_build_event() {
-        let adapter = NostrAdapter::new("abc123".to_string(), vec![]);
+        let adapter = NostrAdapter::new(TEST_PRIVKEY.to_string(), vec![]);
         let event = adapter.build_event("recipient_pubkey_hex", "Hello Nostr!");
         assert!(event.contains("EVENT"));
         assert!(event.contains("Hello Nostr!"));
@@ -495,7 +509,7 @@ mod tests {
     #[test]
     fn test_nostr_multiple_relays() {
         let adapter = NostrAdapter::new(
-            "key".to_string(),
+            TEST_PRIVKEY.to_string(),
             vec![
                 "wss://relay1.example.com".to_string(),
                 "wss://relay2.example.com".to_string(),

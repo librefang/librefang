@@ -113,9 +113,24 @@ pub enum HookEvent {
 pub struct AgentId(pub Uuid);
 
 impl AgentId {
+    /// A fixed namespace UUID for deriving deterministic hand-agent IDs.
+    /// Generated once via UUID v4; never changes.
+    const HAND_NAMESPACE: Uuid = Uuid::from_bytes([
+        0x9b, 0x6a, 0xe3, 0x2d, 0x7a, 0x4f, 0x4c, 0x1e, 0x8d, 0x0f, 0xa1, 0xb2, 0xc3, 0xd4, 0xe5,
+        0xf6,
+    ]);
+
     /// Generate a new random AgentId.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
+    }
+
+    /// Generate a deterministic AgentId for a hand agent.
+    ///
+    /// Uses UUID v5 (SHA-1) with a fixed namespace so the same `hand_id`
+    /// always maps to the same UUID across daemon restarts.
+    pub fn from_hand_id(hand_id: &str) -> Self {
+        Self(Uuid::new_v5(&Self::HAND_NAMESPACE, hand_id.as_bytes()))
     }
 }
 
@@ -449,6 +464,9 @@ pub struct AgentManifest {
     /// Installed skill references (empty = all skills available).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub skills: Vec<String>,
+    /// Explicitly disable all skills, overriding the empty-list = all-skills default.
+    #[serde(default)]
+    pub skills_disabled: bool,
     /// MCP server allowlist (empty = all connected MCP servers available).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub mcp_servers: Vec<String>,
@@ -484,6 +502,9 @@ pub struct AgentManifest {
     /// Tool blocklist — these tools are excluded (applied after allowlist).
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub tool_blocklist: Vec<String>,
+    /// Explicitly disable all tools, overriding profile / capability / filter expansion.
+    #[serde(default)]
+    pub tools_disabled: bool,
 }
 
 fn default_true() -> bool {
@@ -507,6 +528,7 @@ impl Default for AgentManifest {
             profile: None,
             tools: HashMap::new(),
             skills: Vec::new(),
+            skills_disabled: false,
             mcp_servers: Vec::new(),
             metadata: HashMap::new(),
             tags: Vec::new(),
@@ -518,6 +540,7 @@ impl Default for AgentManifest {
             exec_policy: None,
             tool_allowlist: Vec::new(),
             tool_blocklist: Vec::new(),
+            tools_disabled: false,
         }
     }
 }
@@ -665,6 +688,20 @@ mod tests {
         let display = format!("{}", id);
         assert!(!display.is_empty());
         assert_eq!(display.len(), 36); // UUID v4 string length
+    }
+
+    #[test]
+    fn test_agent_id_from_hand_id_deterministic() {
+        let a = AgentId::from_hand_id("browser");
+        let b = AgentId::from_hand_id("browser");
+        assert_eq!(a, b, "same hand_id must produce same AgentId");
+    }
+
+    #[test]
+    fn test_agent_id_from_hand_id_differs_per_hand() {
+        let a = AgentId::from_hand_id("browser");
+        let b = AgentId::from_hand_id("coder");
+        assert_ne!(a, b, "different hand_ids must produce different AgentIds");
     }
 
     #[test]

@@ -5,6 +5,7 @@
 
 mod bundled_agents;
 mod dotenv;
+mod http_client;
 pub mod i18n;
 mod launcher;
 mod mcp;
@@ -112,12 +113,18 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Initialize LibreFang (create ~/.librefang/ and default config).
+    #[command(
+        long_about = "Initialize LibreFang by creating the ~/.librefang/ directory and a default config.toml.\n\nThis is the first command you should run after installing LibreFang. It sets up\nthe data directory, writes a default configuration, and optionally prompts for\nan API key.\n\nExamples:\n  librefang init              # Interactive setup with prompts\n  librefang init --quick      # Non-interactive, just write defaults (CI/scripts)"
+    )]
     Init {
         /// Quick mode: no prompts, just write config + .env (for CI/scripts).
         #[arg(long)]
         quick: bool,
     },
     /// Start the LibreFang kernel daemon (API server + kernel).
+    #[command(
+        long_about = "Start the LibreFang kernel daemon, which runs the API server and agent runtime.\n\nBy default the daemon detaches into the background. Use --foreground to keep it\nattached to the current terminal, or --tail to detach but stream logs.\n\nExamples:\n  librefang start                # Start daemon in the background\n  librefang start --tail         # Start and follow log output\n  librefang start --foreground   # Run in the foreground (Ctrl+C to stop)"
+    )]
     Start {
         /// Follow the daemon log after launching it in the background.
         #[arg(long, conflicts_with_all = ["foreground", "spawned"])]
@@ -130,6 +137,9 @@ enum Commands {
         spawned: bool,
     },
     /// Restart the running daemon (or start it if not running).
+    #[command(
+        long_about = "Restart the running daemon, or start it if it is not already running.\n\nThis stops the current daemon process and launches a fresh one. Useful after\nchanging configuration or updating the binary.\n\nExamples:\n  librefang restart              # Restart in the background\n  librefang restart --tail       # Restart and follow log output\n  librefang restart --foreground # Restart in the foreground"
+    )]
     Restart {
         /// Follow the daemon log after launching it in the background.
         #[arg(long, conflicts_with = "foreground")]
@@ -139,19 +149,31 @@ enum Commands {
         foreground: bool,
     },
     /// Spawn an agent by template name or manifest path.
+    #[command(
+        long_about = "Spawn a new agent from a built-in template or a manifest file.\n\nIf no target is given, an interactive picker is shown. You can also pass\na template name (e.g. \"coder\") or a path to a TOML manifest.\n\nExamples:\n  librefang spawn               # Interactive template picker\n  librefang spawn coder         # Spawn from the \"coder\" template\n  librefang spawn ./agent.toml  # Spawn from a manifest file\n  librefang spawn coder --name my-agent  # Override agent name\n  librefang spawn coder --dry-run        # Preview without spawning"
+    )]
     Spawn(SpawnAliasArgs),
     /// List running agents (alias for `agent list`).
+    #[command(
+        long_about = "List all currently running agents.\n\nThis is a convenience alias for `librefang agent list`.\n\nExamples:\n  librefang agents          # Pretty-printed table\n  librefang agents --json   # JSON output for scripting"
+    )]
     Agents {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
     },
     /// Kill a running agent by ID (alias for `agent kill`).
+    #[command(
+        long_about = "Kill a running agent by its UUID.\n\nThis is a convenience alias for `librefang agent kill`.\n\nExamples:\n  librefang kill 550e8400-e29b-41d4-a716-446655440000"
+    )]
     Kill {
         /// Agent ID (UUID).
         agent_id: String,
     },
     /// Update the CLI to the latest published release.
+    #[command(
+        long_about = "Update the LibreFang CLI binary to the latest published GitHub release.\n\nBy default, downloads and installs the latest release. Use --check to see if\nan update is available without installing, or --version to pin a specific tag.\n\nExamples:\n  librefang update                   # Install latest release\n  librefang update --check           # Check for updates only\n  librefang update --version v0.4.0  # Install a specific version"
+    )]
     Update {
         /// Check whether a newer release exists without installing it.
         #[arg(long)]
@@ -161,42 +183,78 @@ enum Commands {
         version: Option<String>,
     },
     /// Stop the running daemon.
+    #[command(
+        long_about = "Stop the running LibreFang daemon.\n\nSends a shutdown signal to the background daemon process. If no daemon is\nrunning, this is a no-op.\n\nExamples:\n  librefang stop"
+    )]
     Stop,
     /// Manage agents (new, list, chat, kill, spawn) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Manage agents: create, list, chat, kill, and configure.\n\nExamples:\n  librefang agent new              # Interactive template picker\n  librefang agent new coder        # Spawn from template\n  librefang agent list             # List all agents\n  librefang agent chat <ID>        # Chat with an agent\n  librefang agent kill <ID>        # Kill an agent\n  librefang agent set <ID> model gpt-4o  # Change agent model"
+    )]
     Agent(AgentCommands),
     /// Manage workflows (list, create, run) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Manage multi-step workflows that chain agents together.\n\nExamples:\n  librefang workflow list                      # List workflows\n  librefang workflow create workflow.json      # Create from file\n  librefang workflow run <ID> \"summarize this\" # Run a workflow"
+    )]
     Workflow(WorkflowCommands),
     /// Manage event triggers (list, create, delete) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Manage event triggers that fire agents on system events.\n\nTriggers let agents react to lifecycle events, other agents spawning, or\ncustom patterns.\n\nExamples:\n  librefang trigger list                   # List all triggers\n  librefang trigger list --agent-id <ID>   # Filter by agent\n  librefang trigger create <AGENT_ID> '{\"lifecycle\":{}}' --prompt \"Event: {{event}}\"\n  librefang trigger delete <TRIGGER_ID>"
+    )]
     Trigger(TriggerCommands),
     /// Migrate from another agent framework to LibreFang.
+    #[command(
+        long_about = "Migrate agents and configuration from another framework to LibreFang.\n\nSupported sources: openclaw, langchain, autogpt.\n\nExamples:\n  librefang migrate --from langchain\n  librefang migrate --from autogpt --source-dir ./my-agents\n  librefang migrate --from openclaw --dry-run  # Preview changes"
+    )]
     Migrate(MigrateArgs),
     /// Manage skills (install, list, search, create, remove) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Manage agent skills: install from FangHub, list, search, test, and publish.\n\nSkills extend agent capabilities with tools, integrations, and custom logic.\n\nExamples:\n  librefang skill install web-search   # Install from FangHub\n  librefang skill list                 # List installed skills\n  librefang skill search \"code review\" # Search FangHub\n  librefang skill test ./my-skill      # Validate a local skill\n  librefang skill create               # Scaffold a new skill\n  librefang skill publish              # Publish to FangHub"
+    )]
     Skill(SkillCommands),
     /// Manage channel integrations (setup, test, enable, disable) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Manage messaging channel integrations (Telegram, Discord, Slack, etc.).\n\nChannels connect your agents to external messaging platforms.\n\nExamples:\n  librefang channel list              # Show configured channels\n  librefang channel setup telegram    # Interactive Telegram setup\n  librefang channel setup             # Interactive channel picker\n  librefang channel test telegram     # Send a test message\n  librefang channel enable telegram   # Enable a channel\n  librefang channel disable telegram  # Disable without removing config"
+    )]
     Channel(ChannelCommands),
     /// Manage hands (list, activate, status, pause, info) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Manage hands (autonomous execution modules for agents).\n\nHands give agents the ability to take actions in the real world, such as\nbrowsing the web, managing files, or interacting with APIs.\n\nExamples:\n  librefang hand list                # List available hands\n  librefang hand active              # Show active hand instances\n  librefang hand activate clip       # Activate a hand by ID\n  librefang hand deactivate clip     # Deactivate a hand\n  librefang hand info clip           # Show hand details\n  librefang hand check-deps clip     # Check dependencies\n  librefang hand install-deps clip   # Install missing deps\n  librefang hand pause clip          # Pause a running hand\n  librefang hand resume clip         # Resume a paused hand"
+    )]
     Hand(HandCommands),
     /// Show or edit configuration (show, edit, get, set, keys) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Show, edit, and manage the LibreFang configuration.\n\nExamples:\n  librefang config show                           # Print current config\n  librefang config edit                           # Open in $EDITOR\n  librefang config get default_model.provider     # Get a value\n  librefang config set api_listen 0.0.0.0:8080    # Set a value\n  librefang config unset api.cors_origin          # Remove a key\n  librefang config set-key groq                   # Save API key interactively\n  librefang config delete-key groq                # Remove an API key\n  librefang config test-key groq                  # Test connectivity"
+    )]
     Config(ConfigCommands),
     /// Quick chat with the default agent.
+    #[command(
+        long_about = "Start an interactive chat session with the default agent.\n\nOptionally specify an agent name or ID to chat with a specific agent.\nType your messages and press Enter; Ctrl+C or Ctrl+D to exit.\n\nExamples:\n  librefang chat              # Chat with the default agent\n  librefang chat coder        # Chat with the \"coder\" agent\n  librefang chat 550e8400...  # Chat with an agent by ID"
+    )]
     Chat {
         /// Optional agent name or ID to chat with.
         agent: Option<String>,
     },
     /// Show kernel status.
+    #[command(
+        long_about = "Show the current status of the LibreFang kernel daemon.\n\nDisplays uptime, active agents, loaded skills, and resource usage.\n\nExamples:\n  librefang status          # Pretty-printed status\n  librefang status --json   # JSON output for scripting"
+    )]
     Status {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
     },
     /// Run diagnostic health checks.
+    #[command(
+        long_about = "Run diagnostic health checks on your LibreFang installation.\n\nChecks config files, data directories, API keys, daemon connectivity,\nand installed dependencies. Use --repair to auto-fix common issues.\n\nExamples:\n  librefang doctor            # Run all checks\n  librefang doctor --repair   # Auto-fix missing dirs/config\n  librefang doctor --json     # JSON output for CI pipelines"
+    )]
     Doctor {
         /// Output as JSON for scripting.
         #[arg(long)]
@@ -206,16 +264,28 @@ enum Commands {
         repair: bool,
     },
     /// Open the web dashboard in the default browser.
+    #[command(
+        long_about = "Open the LibreFang web dashboard in your default browser.\n\nRequires the daemon to be running (serves at http://127.0.0.1:4545/ by default).\n\nExamples:\n  librefang dashboard"
+    )]
     Dashboard,
     /// Generate shell completion scripts.
+    #[command(
+        long_about = "Generate shell completion scripts for your shell.\n\nOutput the completion script to stdout. Redirect to a file and source it\nin your shell profile.\n\nExamples:\n  librefang completion bash > ~/.bashrc.d/librefang.bash\n  librefang completion zsh  > ~/.zfunc/_librefang\n  librefang completion fish > ~/.config/fish/completions/librefang.fish"
+    )]
     Completion {
         /// Shell to generate completions for.
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
     /// Start MCP (Model Context Protocol) server over stdio.
+    #[command(
+        long_about = "Start the MCP (Model Context Protocol) server over stdio.\n\nThis exposes LibreFang capabilities to MCP-compatible clients such as\nClaude Code, Cursor, and other AI editors.\n\nExamples:\n  librefang mcp   # Start MCP server (communicates over stdin/stdout)"
+    )]
     Mcp,
     /// Add an integration (one-click MCP server setup).
+    #[command(
+        long_about = "Add an integration by name with one-click setup.\n\nInstalls and configures an MCP server integration. Optionally provide\nan API key inline.\n\nExamples:\n  librefang add github                    # Interactive key prompt\n  librefang add slack --key xoxb-...      # Provide key inline\n  librefang add notion"
+    )]
     Add {
         /// Integration name (e.g., "github", "slack", "notion").
         name: String,
@@ -224,42 +294,75 @@ enum Commands {
         key: Option<String>,
     },
     /// Remove an installed integration.
+    #[command(
+        long_about = "Remove a previously installed integration.\n\nExamples:\n  librefang remove github\n  librefang remove slack"
+    )]
     Remove {
         /// Integration name.
         name: String,
     },
     /// List or search integrations.
+    #[command(
+        long_about = "List all available integrations, or search by keyword.\n\nExamples:\n  librefang integrations            # List all integrations\n  librefang integrations \"code\"     # Search for code-related integrations"
+    )]
     Integrations {
         /// Search query (optional — lists all if omitted).
         query: Option<String>,
     },
     /// Authenticate with a provider (chatgpt) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Authenticate with external providers.\n\nExamples:\n  librefang auth chatgpt   # Browser-based ChatGPT session token flow"
+    )]
     Auth(AuthCommands),
     /// Manage the credential vault (init, set, list, remove) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Manage the encrypted credential vault for storing API keys and tokens.\n\nExamples:\n  librefang vault init            # Initialize the vault\n  librefang vault set GROQ_API_KEY  # Store a credential (prompts for value)\n  librefang vault list            # List stored keys (values hidden)\n  librefang vault remove GROQ_API_KEY  # Remove a credential"
+    )]
     Vault(VaultCommands),
     /// Scaffold a new skill or integration template.
+    #[command(
+        long_about = "Scaffold a new skill or integration from a template.\n\nCreates boilerplate files for developing a custom skill or integration.\n\nExamples:\n  librefang new skill         # Scaffold a new skill\n  librefang new integration   # Scaffold a new integration"
+    )]
     New {
         /// What to scaffold.
         #[arg(value_enum)]
         kind: ScaffoldKind,
     },
     /// Launch the interactive terminal dashboard.
+    #[command(
+        long_about = "Launch the interactive terminal dashboard (TUI).\n\nProvides a full-screen terminal interface for managing agents, viewing logs,\nand monitoring system status.\n\nExamples:\n  librefang tui"
+    )]
     Tui,
     /// Browse models, aliases, and providers [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Browse and manage LLM models, aliases, and providers.\n\nExamples:\n  librefang models list                  # List all models\n  librefang models list --provider groq  # Filter by provider\n  librefang models aliases               # Show model aliases\n  librefang models providers             # List providers and auth status\n  librefang models set gpt-4o            # Set default model"
+    )]
     Models(ModelsCommands),
     /// Daemon control (start, stop, status) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Low-level daemon control commands.\n\nExamples:\n  librefang gateway start          # Start the daemon\n  librefang gateway stop           # Stop the daemon\n  librefang gateway restart        # Restart the daemon\n  librefang gateway status         # Show daemon status"
+    )]
     Gateway(GatewayCommands),
     /// Manage execution approvals (list, approve, reject) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Manage execution approvals for agent actions that require human review.\n\nWhen agents request to perform sensitive operations, approval requests are\nqueued here for human review.\n\nExamples:\n  librefang approvals list          # List pending approvals\n  librefang approvals approve <ID>  # Approve a request\n  librefang approvals reject <ID>   # Reject a request"
+    )]
     Approvals(ApprovalsCommands),
     /// Manage scheduled jobs (list, create, delete, enable, disable) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Manage cron-style scheduled jobs that run agents on a recurring basis.\n\nExamples:\n  librefang cron list\n  librefang cron create my-agent \"0 */6 * * *\" \"Check for updates\"\n  librefang cron create my-agent \"0 9 * * 1\" \"Weekly report\" --name weekly-report\n  librefang cron enable <ID>\n  librefang cron disable <ID>\n  librefang cron delete <ID>"
+    )]
     Cron(CronCommands),
     /// List conversation sessions.
+    #[command(
+        long_about = "List conversation sessions stored by agents.\n\nOptionally filter by agent name or ID.\n\nExamples:\n  librefang sessions              # List all sessions\n  librefang sessions coder        # Filter by agent name\n  librefang sessions --json       # JSON output for scripting"
+    )]
     Sessions {
         /// Optional agent name or ID to filter by.
         agent: Option<String>,
@@ -268,6 +371,9 @@ enum Commands {
         json: bool,
     },
     /// Tail the LibreFang log file.
+    #[command(
+        long_about = "Tail the LibreFang daemon log file.\n\nShows recent log lines and optionally follows new output in real time.\n\nExamples:\n  librefang logs                  # Show last 50 lines\n  librefang logs --lines 100      # Show last 100 lines\n  librefang logs -f                # Follow log output\n  librefang logs --lines 20 -f    # Show 20 lines then follow"
+    )]
     Logs {
         /// Number of lines to show.
         #[arg(long, default_value = "50")]
@@ -277,40 +383,70 @@ enum Commands {
         follow: bool,
     },
     /// Quick daemon health check.
+    #[command(
+        long_about = "Perform a quick health check on the running daemon.\n\nReturns basic connectivity and status info. For comprehensive diagnostics,\nuse `librefang doctor` instead.\n\nExamples:\n  librefang health          # Pretty-printed output\n  librefang health --json   # JSON output for monitoring"
+    )]
     Health {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
     },
     /// Security tools and audit trail [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Security tools: view status, audit trail, and verify integrity.\n\nExamples:\n  librefang security status          # Security summary\n  librefang security audit           # Show recent audit entries\n  librefang security audit --limit 50  # Show more entries\n  librefang security verify          # Verify Merkle chain integrity"
+    )]
     Security(SecurityCommands),
     /// Search and manage agent memory (KV store) [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Search and manage agent memory (key-value store).\n\nEach agent has its own KV namespace for persisting data across sessions.\n\nExamples:\n  librefang memory list coder          # List all keys for \"coder\" agent\n  librefang memory get coder my-key    # Get a specific value\n  librefang memory set coder my-key \"hello\"  # Set a value\n  librefang memory delete coder my-key       # Delete a key"
+    )]
     Memory(MemoryCommands),
     /// Device pairing and token management [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Manage paired devices and remote access tokens.\n\nExamples:\n  librefang devices list          # List paired devices\n  librefang devices pair          # Start pairing flow\n  librefang devices remove <ID>   # Remove a device"
+    )]
     Devices(DevicesCommands),
     /// Generate device pairing QR code.
+    #[command(
+        long_about = "Generate a QR code for pairing a mobile device.\n\nDisplays a QR code in the terminal that can be scanned to pair a device.\n\nExamples:\n  librefang qr"
+    )]
     Qr,
     /// Webhook helpers and trigger management [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Manage webhook triggers that invoke agents via HTTP callbacks.\n\nExamples:\n  librefang webhooks list                          # List webhooks\n  librefang webhooks create coder https://...      # Create a webhook\n  librefang webhooks test <ID>                     # Send test payload\n  librefang webhooks delete <ID>                   # Delete a webhook"
+    )]
     Webhooks(WebhooksCommands),
     /// Interactive onboarding wizard.
+    #[command(
+        long_about = "Run the interactive onboarding wizard.\n\nWalks you through initial configuration: API keys, default model, channels,\nand your first agent.\n\nExamples:\n  librefang onboard          # Full interactive wizard\n  librefang onboard --quick  # Non-interactive quick setup"
+    )]
     Onboard {
         /// Quick non-interactive mode.
         #[arg(long)]
         quick: bool,
     },
     /// Quick non-interactive initialization.
+    #[command(
+        long_about = "Quick non-interactive initialization (alias for `init --quick`).\n\nWrites default config and data directories without prompts.\n\nExamples:\n  librefang setup          # Quick init\n  librefang setup --quick  # Same behavior"
+    )]
     Setup {
         /// Quick mode (same as `init --quick`).
         #[arg(long)]
         quick: bool,
     },
     /// Interactive setup wizard for credentials and channels.
+    #[command(
+        long_about = "Launch the interactive setup wizard for credentials and channels.\n\nGuides you through configuring API keys, messaging channels, and other\nintegration settings.\n\nExamples:\n  librefang configure"
+    )]
     Configure,
     /// Send a one-shot message to an agent.
+    #[command(
+        long_about = "Send a single message to an agent and print the response.\n\nUnlike `chat`, this does not start an interactive session. Useful for\nscripting and automation.\n\nExamples:\n  librefang message coder \"Fix the bug in main.rs\"\n  librefang message coder \"Summarize this file\" --json"
+    )]
     Message {
         /// Agent name or ID.
         agent: String,
@@ -321,15 +457,24 @@ enum Commands {
         json: bool,
     },
     /// System info and version [*].
-    #[command(subcommand)]
+    #[command(
+        subcommand,
+        long_about = "Display system information and version details.\n\nExamples:\n  librefang system info          # Detailed system info\n  librefang system version       # Version information"
+    )]
     System(SystemCommands),
     /// Reset local config and state.
+    #[command(
+        long_about = "Reset local configuration and state to defaults.\n\nRemoves the ~/.librefang/ directory and all its contents. You will be\nprompted for confirmation unless --confirm is passed.\n\nExamples:\n  librefang reset            # Interactive confirmation\n  librefang reset --confirm  # Skip confirmation (for scripts)"
+    )]
     Reset {
         /// Skip confirmation prompt.
         #[arg(long)]
         confirm: bool,
     },
     /// Completely uninstall LibreFang from your system.
+    #[command(
+        long_about = "Completely uninstall LibreFang from your system.\n\nRemoves the binary, data directory, config files, and all related state.\nUse --keep-config to preserve config.toml, .env, and secrets.env.\n\nExamples:\n  librefang uninstall                     # Interactive confirmation\n  librefang uninstall --confirm           # Skip confirmation\n  librefang uninstall --confirm --keep-config  # Keep config files"
+    )]
     Uninstall {
         /// Skip confirmation prompt (also --yes).
         #[arg(long, alias = "yes")]
@@ -343,15 +488,27 @@ enum Commands {
 #[derive(Subcommand)]
 enum VaultCommands {
     /// Initialize the credential vault.
+    #[command(
+        long_about = "Initialize the encrypted credential vault.\n\nCreates the vault storage file if it does not exist.\n\nExamples:\n  librefang vault init"
+    )]
     Init,
     /// Store a credential in the vault.
+    #[command(
+        long_about = "Store a credential in the vault (prompts for the value securely).\n\nExamples:\n  librefang vault set GROQ_API_KEY\n  librefang vault set OPENAI_API_KEY"
+    )]
     Set {
         /// Credential key (env var name).
         key: String,
     },
     /// List all keys in the vault (values are hidden).
+    #[command(
+        long_about = "List all credential keys stored in the vault.\n\nValues are hidden for security; only key names are displayed.\n\nExamples:\n  librefang vault list"
+    )]
     List,
     /// Remove a credential from the vault.
+    #[command(
+        long_about = "Remove a credential from the vault by key name.\n\nExamples:\n  librefang vault remove GROQ_API_KEY"
+    )]
     Remove {
         /// Credential key.
         key: String,
@@ -361,6 +518,9 @@ enum VaultCommands {
 #[derive(Subcommand)]
 enum AuthCommands {
     /// Authenticate with ChatGPT (browser-based session token flow).
+    #[command(
+        long_about = "Authenticate with ChatGPT using a browser-based session token flow.\n\nOpens a browser window for you to log in and extract a session token.\n\nExamples:\n  librefang auth chatgpt"
+    )]
     Chatgpt,
 }
 
@@ -420,23 +580,38 @@ enum MigrateSourceArg {
 #[derive(Subcommand)]
 enum SkillCommands {
     /// Install a skill from FangHub or a local directory.
+    #[command(
+        long_about = "Install a skill from FangHub, a local directory, or a git URL.\n\nExamples:\n  librefang skill install web-search\n  librefang skill install ./my-skill\n  librefang skill install https://github.com/user/skill.git"
+    )]
     Install {
         /// Skill name, local path, or git URL.
         source: String,
     },
     /// List installed skills.
+    #[command(
+        long_about = "List all skills currently installed in this LibreFang instance.\n\nExamples:\n  librefang skill list"
+    )]
     List,
     /// Remove an installed skill.
+    #[command(
+        long_about = "Remove an installed skill by name.\n\nExamples:\n  librefang skill remove web-search"
+    )]
     Remove {
         /// Skill name.
         name: String,
     },
     /// Search FangHub for skills.
+    #[command(
+        long_about = "Search the FangHub registry for available skills.\n\nExamples:\n  librefang skill search \"web scraping\"\n  librefang skill search github"
+    )]
     Search {
         /// Search query.
         query: String,
     },
     /// Validate a local skill and optionally execute one tool.
+    #[command(
+        long_about = "Validate a local skill manifest and optionally execute one of its tools.\n\nDefaults to the current directory if no path is given. Runs the first\ndeclared tool unless --tool is specified.\n\nExamples:\n  librefang skill test                              # Test skill in cwd\n  librefang skill test ./my-skill                   # Test specific skill\n  librefang skill test --tool search --input '{}'   # Run a specific tool"
+    )]
     Test {
         /// Skill directory, skill.toml, SKILL.md, or package.json. Defaults to the current directory.
         path: Option<PathBuf>,
@@ -448,6 +623,9 @@ enum SkillCommands {
         input: Option<String>,
     },
     /// Package a local skill and publish it to a FangHub GitHub release.
+    #[command(
+        long_about = "Package a local skill and publish it to a FangHub GitHub release.\n\nBundles the skill into a zip file and uploads it as a GitHub release asset.\nUse --dry-run to validate and package without uploading.\n\nExamples:\n  librefang skill publish\n  librefang skill publish ./my-skill\n  librefang skill publish --repo myorg/my-skill --tag v1.0.0\n  librefang skill publish --dry-run"
+    )]
     Publish {
         /// Skill directory, skill.toml, SKILL.md, or package.json. Defaults to the current directory.
         path: Option<PathBuf>,
@@ -465,29 +643,47 @@ enum SkillCommands {
         dry_run: bool,
     },
     /// Create a new skill scaffold.
+    #[command(
+        long_about = "Scaffold a new skill project with boilerplate files.\n\nCreates a skill.toml, SKILL.md, and starter tool implementation.\n\nExamples:\n  librefang skill create"
+    )]
     Create,
 }
 
 #[derive(Subcommand)]
 enum ChannelCommands {
     /// List configured channels and their status.
+    #[command(
+        long_about = "List all configured channels and show their current status (enabled/disabled).\n\nExamples:\n  librefang channel list"
+    )]
     List,
     /// Interactive setup wizard for a channel.
+    #[command(
+        long_about = "Run the interactive setup wizard for a messaging channel.\n\nIf no channel name is given, shows an interactive picker.\n\nExamples:\n  librefang channel setup            # Interactive picker\n  librefang channel setup telegram   # Set up Telegram\n  librefang channel setup discord    # Set up Discord"
+    )]
     Setup {
         /// Channel name (telegram, discord, slack, whatsapp, etc.). Shows picker if omitted.
         channel: Option<String>,
     },
     /// Test a channel by sending a test message.
+    #[command(
+        long_about = "Send a test message through a configured channel to verify connectivity.\n\nExamples:\n  librefang channel test telegram\n  librefang channel test slack"
+    )]
     Test {
         /// Channel name.
         channel: String,
     },
     /// Enable a channel.
+    #[command(
+        long_about = "Enable a previously configured channel.\n\nExamples:\n  librefang channel enable telegram"
+    )]
     Enable {
         /// Channel name.
         channel: String,
     },
     /// Disable a channel without removing its configuration.
+    #[command(
+        long_about = "Disable a channel without removing its configuration.\n\nThe channel can be re-enabled later without reconfiguring.\n\nExamples:\n  librefang channel disable telegram"
+    )]
     Disable {
         /// Channel name.
         channel: String,
@@ -497,50 +693,83 @@ enum ChannelCommands {
 #[derive(Subcommand)]
 enum HandCommands {
     /// List all available hands.
+    #[command(
+        long_about = "List all available hands (autonomous execution modules).\n\nExamples:\n  librefang hand list"
+    )]
     List,
     /// Show currently active hand instances.
+    #[command(
+        long_about = "Show currently active hand instances and their runtime state.\n\nExamples:\n  librefang hand active"
+    )]
     Active,
     /// Show active status for a hand or hand instance.
+    #[command(
+        long_about = "Show active status for a specific hand or all active hands.\n\nExamples:\n  librefang hand status          # Show all active hands\n  librefang hand status clip     # Show status for \"clip\" hand"
+    )]
     Status {
         /// Optional hand ID or instance ID. Shows all active hands if omitted.
         id: Option<String>,
     },
     /// Install a hand from a local directory containing HAND.toml.
+    #[command(
+        long_about = "Install a hand from a local directory.\n\nThe directory must contain a HAND.toml manifest file.\n\nExamples:\n  librefang hand install ./my-hand"
+    )]
     Install {
         /// Path to the hand directory (must contain HAND.toml).
         path: String,
     },
     /// Activate a hand by ID.
+    #[command(
+        long_about = "Activate a hand, making it available for agent use.\n\nExamples:\n  librefang hand activate clip\n  librefang hand activate researcher"
+    )]
     Activate {
         /// Hand ID (e.g. "clip", "lead", "researcher").
         id: String,
     },
     /// Deactivate an active hand by hand ID.
+    #[command(
+        long_about = "Deactivate a running hand, stopping its execution.\n\nExamples:\n  librefang hand deactivate clip"
+    )]
     Deactivate {
         /// Hand ID.
         id: String,
     },
     /// Show detailed info about a hand.
+    #[command(
+        long_about = "Show detailed information about a hand including its capabilities,\ndependencies, and configuration.\n\nExamples:\n  librefang hand info clip"
+    )]
     Info {
         /// Hand ID.
         id: String,
     },
     /// Check dependency status for a hand.
+    #[command(
+        long_about = "Check whether all required dependencies for a hand are installed.\n\nExamples:\n  librefang hand check-deps clip"
+    )]
     CheckDeps {
         /// Hand ID.
         id: String,
     },
     /// Install missing dependencies for a hand.
+    #[command(
+        long_about = "Install any missing dependencies required by a hand.\n\nExamples:\n  librefang hand install-deps clip"
+    )]
     InstallDeps {
         /// Hand ID.
         id: String,
     },
     /// Pause a running hand by hand ID or instance ID.
+    #[command(
+        long_about = "Pause a running hand without fully deactivating it.\n\nThe hand can be resumed later with `hand resume`.\n\nExamples:\n  librefang hand pause clip"
+    )]
     Pause {
         /// Hand ID or instance ID.
         id: String,
     },
     /// Resume a paused hand by hand ID or instance ID.
+    #[command(
+        long_about = "Resume a previously paused hand.\n\nExamples:\n  librefang hand resume clip"
+    )]
     Resume {
         /// Hand ID or instance ID.
         id: String,
@@ -550,15 +779,27 @@ enum HandCommands {
 #[derive(Subcommand)]
 enum ConfigCommands {
     /// Show the current configuration.
+    #[command(
+        long_about = "Print the current LibreFang configuration to stdout.\n\nExamples:\n  librefang config show"
+    )]
     Show,
     /// Open the configuration file in your editor.
+    #[command(
+        long_about = "Open ~/.librefang/config.toml in your default $EDITOR.\n\nExamples:\n  librefang config edit"
+    )]
     Edit,
     /// Get a config value by dotted key path (e.g. "default_model.provider").
+    #[command(
+        long_about = "Get a single configuration value by its dotted key path.\n\nExamples:\n  librefang config get default_model.provider\n  librefang config get api_listen"
+    )]
     Get {
         /// Dotted key path (e.g. "default_model.provider", "api_listen").
         key: String,
     },
     /// Set a config value (warning: strips TOML comments).
+    #[command(
+        long_about = "Set a configuration value by dotted key path.\n\nNote: This rewrites the TOML file and will strip comments.\n\nExamples:\n  librefang config set api_listen 0.0.0.0:8080\n  librefang config set default_model.provider groq"
+    )]
     Set {
         /// Dotted key path.
         key: String,
@@ -566,21 +807,33 @@ enum ConfigCommands {
         value: String,
     },
     /// Remove a config key (warning: strips TOML comments).
+    #[command(
+        long_about = "Remove a configuration key from config.toml.\n\nNote: This rewrites the TOML file and will strip comments.\n\nExamples:\n  librefang config unset api.cors_origin"
+    )]
     Unset {
         /// Dotted key path to remove (e.g. "api.cors_origin").
         key: String,
     },
     /// Save an API key to ~/.librefang/.env (prompts interactively).
+    #[command(
+        long_about = "Save an API key for a provider to ~/.librefang/.env.\n\nPrompts securely for the key value.\n\nExamples:\n  librefang config set-key groq\n  librefang config set-key openai\n  librefang config set-key anthropic"
+    )]
     SetKey {
         /// Provider name (groq, anthropic, openai, gemini, deepseek, etc.).
         provider: String,
     },
     /// Remove an API key from ~/.librefang/.env.
+    #[command(
+        long_about = "Remove a stored API key from ~/.librefang/.env.\n\nExamples:\n  librefang config delete-key groq"
+    )]
     DeleteKey {
         /// Provider name.
         provider: String,
     },
     /// Test provider connectivity with the stored API key.
+    #[command(
+        long_about = "Test connectivity to a provider using the stored API key.\n\nMakes a lightweight API call to verify the key is valid.\n\nExamples:\n  librefang config test-key groq\n  librefang config test-key openai"
+    )]
     TestKey {
         /// Provider name.
         provider: String,
@@ -590,29 +843,47 @@ enum ConfigCommands {
 #[derive(Subcommand)]
 enum AgentCommands {
     /// Spawn a new agent from a template (interactive or by name).
+    #[command(
+        long_about = "Spawn a new agent from a built-in template.\n\nIf no template name is given, shows an interactive picker with all\navailable templates.\n\nExamples:\n  librefang agent new            # Interactive picker\n  librefang agent new coder      # Spawn a \"coder\" agent\n  librefang agent new assistant   # Spawn an \"assistant\" agent"
+    )]
     New {
         /// Template name (e.g., "coder", "assistant"). Interactive picker if omitted.
         template: Option<String>,
     },
     /// Spawn a new agent from a manifest file.
+    #[command(
+        long_about = "Spawn a new agent from a TOML manifest file.\n\nExamples:\n  librefang agent spawn ./agent.toml\n  librefang agent spawn ./agent.toml --name my-agent\n  librefang agent spawn ./agent.toml --dry-run"
+    )]
     Spawn(AgentSpawnArgs),
     /// List all running agents.
+    #[command(
+        long_about = "List all currently running agents with their IDs, names, and status.\n\nExamples:\n  librefang agent list          # Pretty-printed table\n  librefang agent list --json   # JSON output for scripting"
+    )]
     List {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
     },
     /// Interactive chat with an agent.
+    #[command(
+        long_about = "Start an interactive chat session with an agent by its UUID.\n\nType messages and press Enter. Use Ctrl+C or Ctrl+D to exit.\n\nExamples:\n  librefang agent chat 550e8400-e29b-41d4-a716-446655440000"
+    )]
     Chat {
         /// Agent ID (UUID).
         agent_id: String,
     },
     /// Kill an agent.
+    #[command(
+        long_about = "Terminate a running agent by its UUID.\n\nExamples:\n  librefang agent kill 550e8400-e29b-41d4-a716-446655440000"
+    )]
     Kill {
         /// Agent ID (UUID).
         agent_id: String,
     },
     /// Set an agent property (e.g., model).
+    #[command(
+        long_about = "Set a property on a running agent.\n\nCurrently supports changing the model.\n\nExamples:\n  librefang agent set <ID> model gpt-4o\n  librefang agent set <ID> model claude-sonnet"
+    )]
     Set {
         /// Agent ID (UUID).
         agent_id: String,
@@ -626,13 +897,22 @@ enum AgentCommands {
 #[derive(Subcommand)]
 enum WorkflowCommands {
     /// List all registered workflows.
+    #[command(
+        long_about = "List all registered workflows.\n\nExamples:\n  librefang workflow list"
+    )]
     List,
     /// Create a workflow from a JSON file.
+    #[command(
+        long_about = "Create a new workflow from a JSON definition file.\n\nThe file should describe the workflow steps, agents, and routing logic.\n\nExamples:\n  librefang workflow create my-workflow.json"
+    )]
     Create {
         /// Path to a JSON file describing the workflow.
         file: PathBuf,
     },
     /// Run a workflow by ID.
+    #[command(
+        long_about = "Run a registered workflow by its UUID with the given input.\n\nExamples:\n  librefang workflow run <ID> \"Summarize the quarterly report\""
+    )]
     Run {
         /// Workflow ID (UUID).
         workflow_id: String,
@@ -644,12 +924,18 @@ enum WorkflowCommands {
 #[derive(Subcommand)]
 enum TriggerCommands {
     /// List all triggers (optionally filtered by agent).
+    #[command(
+        long_about = "List all event triggers, optionally filtered by agent ID.\n\nExamples:\n  librefang trigger list\n  librefang trigger list --agent-id <UUID>"
+    )]
     List {
         /// Optional agent ID to filter by.
         #[arg(long)]
         agent_id: Option<String>,
     },
     /// Create a trigger for an agent.
+    #[command(
+        long_about = "Create an event trigger that fires an agent when a matching event occurs.\n\nThe pattern is a JSON object describing what events to match. Use the\n{{event}} placeholder in the prompt template.\n\nExamples:\n  librefang trigger create <AGENT_ID> '{\"lifecycle\":{}}'\n  librefang trigger create <AGENT_ID> '{\"agent_spawned\":{\"name_pattern\":\"*\"}}' \\\n    --prompt \"New agent: {{event}}\" --max-fires 10"
+    )]
     Create {
         /// Agent ID (UUID) that owns the trigger.
         agent_id: String,
@@ -663,6 +949,9 @@ enum TriggerCommands {
         max_fires: u64,
     },
     /// Delete a trigger by ID.
+    #[command(
+        long_about = "Delete a trigger by its UUID.\n\nExamples:\n  librefang trigger delete <TRIGGER_ID>"
+    )]
     Delete {
         /// Trigger ID (UUID).
         trigger_id: String,
@@ -672,6 +961,9 @@ enum TriggerCommands {
 #[derive(Subcommand)]
 enum ModelsCommands {
     /// List available models (optionally filter by provider).
+    #[command(
+        long_about = "List all available LLM models, optionally filtered by provider.\n\nExamples:\n  librefang models list\n  librefang models list --provider groq\n  librefang models list --json"
+    )]
     List {
         /// Filter by provider name.
         #[arg(long)]
@@ -681,18 +973,27 @@ enum ModelsCommands {
         json: bool,
     },
     /// Show model aliases (shorthand names).
+    #[command(
+        long_about = "Show model alias mappings (shorthand names to full model IDs).\n\nExamples:\n  librefang models aliases\n  librefang models aliases --json"
+    )]
     Aliases {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
     },
     /// List known LLM providers and their auth status.
+    #[command(
+        long_about = "List known LLM providers and whether their API keys are configured.\n\nExamples:\n  librefang models providers\n  librefang models providers --json"
+    )]
     Providers {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
     },
     /// Set the default model for the daemon.
+    #[command(
+        long_about = "Set the default LLM model for the daemon.\n\nIf no model is specified, shows an interactive picker.\n\nExamples:\n  librefang models set              # Interactive picker\n  librefang models set gpt-4o       # Set by alias\n  librefang models set claude-sonnet"
+    )]
     Set {
         /// Model ID or alias (e.g. "gpt-4o", "claude-sonnet"). Interactive picker if omitted.
         model: Option<String>,
@@ -702,6 +1003,9 @@ enum ModelsCommands {
 #[derive(Subcommand)]
 enum GatewayCommands {
     /// Start the kernel daemon.
+    #[command(
+        long_about = "Start the kernel daemon.\n\nExamples:\n  librefang gateway start\n  librefang gateway start --tail\n  librefang gateway start --foreground"
+    )]
     Start {
         /// Follow the daemon log after launching it in the background.
         #[arg(long, conflicts_with = "foreground")]
@@ -711,6 +1015,9 @@ enum GatewayCommands {
         foreground: bool,
     },
     /// Restart the kernel daemon.
+    #[command(
+        long_about = "Restart the kernel daemon (stop then start).\n\nExamples:\n  librefang gateway restart\n  librefang gateway restart --tail"
+    )]
     Restart {
         /// Follow the daemon log after launching it in the background.
         #[arg(long, conflicts_with = "foreground")]
@@ -720,8 +1027,14 @@ enum GatewayCommands {
         foreground: bool,
     },
     /// Stop the running daemon.
+    #[command(
+        long_about = "Stop the running kernel daemon.\n\nExamples:\n  librefang gateway stop"
+    )]
     Stop,
     /// Show daemon status.
+    #[command(
+        long_about = "Show the current daemon status.\n\nExamples:\n  librefang gateway status\n  librefang gateway status --json"
+    )]
     Status {
         /// Output as JSON for scripting.
         #[arg(long)]
@@ -732,17 +1045,26 @@ enum GatewayCommands {
 #[derive(Subcommand)]
 enum ApprovalsCommands {
     /// List pending approvals.
+    #[command(
+        long_about = "List pending execution approvals that require human review.\n\nExamples:\n  librefang approvals list\n  librefang approvals list --json"
+    )]
     List {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
     },
     /// Approve a pending request.
+    #[command(
+        long_about = "Approve a pending agent execution request.\n\nExamples:\n  librefang approvals approve <ID>"
+    )]
     Approve {
         /// Approval ID.
         id: String,
     },
     /// Reject a pending request.
+    #[command(
+        long_about = "Reject a pending agent execution request.\n\nExamples:\n  librefang approvals reject <ID>"
+    )]
     Reject {
         /// Approval ID.
         id: String,
@@ -752,12 +1074,18 @@ enum ApprovalsCommands {
 #[derive(Subcommand)]
 enum CronCommands {
     /// List scheduled jobs.
+    #[command(
+        long_about = "List all scheduled cron jobs.\n\nExamples:\n  librefang cron list\n  librefang cron list --json"
+    )]
     List {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
     },
     /// Create a new scheduled job.
+    #[command(
+        long_about = "Create a new cron-style scheduled job.\n\nThe agent will receive the given prompt each time the cron expression fires.\n\nExamples:\n  librefang cron create my-agent \"0 */6 * * *\" \"Check for updates\"\n  librefang cron create my-agent \"0 9 * * 1\" \"Weekly summary\" --name weekly-report"
+    )]
     Create {
         /// Agent name or ID to run.
         agent: String,
@@ -770,16 +1098,25 @@ enum CronCommands {
         name: Option<String>,
     },
     /// Delete a scheduled job.
+    #[command(
+        long_about = "Delete a scheduled job by ID.\n\nExamples:\n  librefang cron delete <ID>"
+    )]
     Delete {
         /// Job ID.
         id: String,
     },
     /// Enable a disabled job.
+    #[command(
+        long_about = "Re-enable a previously disabled cron job.\n\nExamples:\n  librefang cron enable <ID>"
+    )]
     Enable {
         /// Job ID.
         id: String,
     },
     /// Disable a job without deleting it.
+    #[command(
+        long_about = "Disable a cron job without deleting it.\n\nThe job can be re-enabled later with `cron enable`.\n\nExamples:\n  librefang cron disable <ID>"
+    )]
     Disable {
         /// Job ID.
         id: String,
@@ -789,12 +1126,18 @@ enum CronCommands {
 #[derive(Subcommand)]
 enum SecurityCommands {
     /// Show security status summary.
+    #[command(
+        long_about = "Show a summary of the current security posture.\n\nExamples:\n  librefang security status\n  librefang security status --json"
+    )]
     Status {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
     },
     /// Show recent audit trail entries.
+    #[command(
+        long_about = "Show recent entries from the security audit trail.\n\nExamples:\n  librefang security audit\n  librefang security audit --limit 50\n  librefang security audit --json"
+    )]
     Audit {
         /// Maximum number of entries to show.
         #[arg(long, default_value = "20")]
@@ -804,12 +1147,18 @@ enum SecurityCommands {
         json: bool,
     },
     /// Verify audit trail integrity (Merkle chain).
+    #[command(
+        long_about = "Verify the integrity of the audit trail using its Merkle chain.\n\nReports whether the chain is intact or has been tampered with.\n\nExamples:\n  librefang security verify"
+    )]
     Verify,
 }
 
 #[derive(Subcommand)]
 enum MemoryCommands {
     /// List KV pairs for an agent.
+    #[command(
+        long_about = "List all key-value pairs stored in an agent's memory.\n\nExamples:\n  librefang memory list coder\n  librefang memory list coder --json"
+    )]
     List {
         /// Agent name or ID.
         agent: String,
@@ -818,6 +1167,9 @@ enum MemoryCommands {
         json: bool,
     },
     /// Get a specific KV value.
+    #[command(
+        long_about = "Get the value of a specific key from an agent's memory.\n\nExamples:\n  librefang memory get coder my-key\n  librefang memory get coder my-key --json"
+    )]
     Get {
         /// Agent name or ID.
         agent: String,
@@ -828,6 +1180,9 @@ enum MemoryCommands {
         json: bool,
     },
     /// Set a KV value.
+    #[command(
+        long_about = "Store a key-value pair in an agent's memory.\n\nExamples:\n  librefang memory set coder my-key \"hello world\""
+    )]
     Set {
         /// Agent name or ID.
         agent: String,
@@ -837,6 +1192,9 @@ enum MemoryCommands {
         value: String,
     },
     /// Delete a KV pair.
+    #[command(
+        long_about = "Delete a key-value pair from an agent's memory.\n\nExamples:\n  librefang memory delete coder my-key"
+    )]
     Delete {
         /// Agent name or ID.
         agent: String,
@@ -848,14 +1206,23 @@ enum MemoryCommands {
 #[derive(Subcommand)]
 enum DevicesCommands {
     /// List paired devices.
+    #[command(
+        long_about = "List all devices currently paired with this LibreFang instance.\n\nExamples:\n  librefang devices list\n  librefang devices list --json"
+    )]
     List {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
     },
     /// Start a new device pairing flow.
+    #[command(
+        long_about = "Start the device pairing flow to connect a new device.\n\nExamples:\n  librefang devices pair"
+    )]
     Pair,
     /// Remove a paired device.
+    #[command(
+        long_about = "Remove a previously paired device by its ID.\n\nExamples:\n  librefang devices remove <DEVICE_ID>"
+    )]
     Remove {
         /// Device ID.
         id: String,
@@ -865,12 +1232,18 @@ enum DevicesCommands {
 #[derive(Subcommand)]
 enum WebhooksCommands {
     /// List configured webhooks.
+    #[command(
+        long_about = "List all configured webhook triggers.\n\nExamples:\n  librefang webhooks list\n  librefang webhooks list --json"
+    )]
     List {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
     },
     /// Create a new webhook trigger.
+    #[command(
+        long_about = "Create a new webhook trigger for an agent.\n\nThe agent will be invoked when the webhook URL receives a POST request.\n\nExamples:\n  librefang webhooks create coder https://example.com/hook"
+    )]
     Create {
         /// Agent name or ID.
         agent: String,
@@ -878,11 +1251,17 @@ enum WebhooksCommands {
         url: String,
     },
     /// Delete a webhook.
+    #[command(
+        long_about = "Delete a webhook trigger by its ID.\n\nExamples:\n  librefang webhooks delete <ID>"
+    )]
     Delete {
         /// Webhook ID.
         id: String,
     },
     /// Send a test payload to a webhook.
+    #[command(
+        long_about = "Send a test payload to a webhook to verify connectivity.\n\nExamples:\n  librefang webhooks test <ID>"
+    )]
     Test {
         /// Webhook ID.
         id: String,
@@ -892,12 +1271,18 @@ enum WebhooksCommands {
 #[derive(Subcommand)]
 enum SystemCommands {
     /// Show detailed system info.
+    #[command(
+        long_about = "Show detailed system information including OS, architecture,\nhome directory, config path, and resource usage.\n\nExamples:\n  librefang system info\n  librefang system info --json"
+    )]
     Info {
         /// Output as JSON for scripting.
         #[arg(long)]
         json: bool,
     },
     /// Show version information.
+    #[command(
+        long_about = "Show the LibreFang version, build info, and commit hash.\n\nExamples:\n  librefang system version\n  librefang system version --json"
+    )]
     Version {
         /// Output as JSON for scripting.
         #[arg(long)]
@@ -905,11 +1290,11 @@ enum SystemCommands {
     },
 }
 
-fn init_tracing_stderr() {
+fn init_tracing_stderr(log_level: &str) {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
         )
         .init();
 }
@@ -947,7 +1332,7 @@ fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContex
 }
 
 /// Redirect tracing to a log file so it doesn't corrupt the ratatui TUI.
-fn init_tracing_file() {
+fn init_tracing_file(log_level: &str) {
     let log_dir = cli_librefang_home();
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("tui.log");
@@ -957,7 +1342,7 @@ fn init_tracing_file() {
             tracing_subscriber::fmt()
                 .with_env_filter(
                     tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
                 )
                 .with_writer(std::sync::Mutex::new(file))
                 .with_ansi(false)
@@ -978,6 +1363,18 @@ fn load_language_from_config() -> Option<String> {
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: toml::Value = toml::from_str(&content).ok()?;
     config.get("language")?.as_str().map(|s| s.to_string())
+}
+
+/// Load just the `log_level` field from config.toml without fully deserializing.
+/// Returns the configured level (e.g. "debug", "warn") or falls back to "info".
+fn load_log_level_from_config() -> String {
+    let level = (|| -> Option<String> {
+        let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+        let content = std::fs::read_to_string(&config_path).ok()?;
+        let config: toml::Value = toml::from_str(&content).ok()?;
+        config.get("log_level")?.as_str().map(|s| s.to_string())
+    })();
+    level.unwrap_or_else(|| "info".to_string())
 }
 
 fn main() {
@@ -1002,13 +1399,15 @@ fn main() {
             Some(Commands::Agent(AgentCommands::Chat { .. }))
         );
 
+    let log_level = load_log_level_from_config();
+
     if is_tui_mode {
-        init_tracing_file();
+        init_tracing_file(&log_level);
     } else {
         // CLI subcommands: install Ctrl+C handler for clean interrupt of
         // blocking read_line calls, and trace to stderr.
         install_ctrlc_handler();
-        init_tracing_stderr();
+        init_tracing_stderr(&log_level);
     }
 
     match cli.command {
@@ -1255,7 +1654,7 @@ fn find_daemon_in_home(home_dir: &std::path::Path) -> Option<String> {
     let addr = info.listen_addr.replace("0.0.0.0", "127.0.0.1");
     let url = format!("http://{addr}/api/health");
 
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http_client::client_builder()
         .connect_timeout(std::time::Duration::from_secs(1))
         .timeout(std::time::Duration::from_secs(2))
         .build()
@@ -1283,7 +1682,7 @@ pub(crate) fn daemon_client() -> reqwest::blocking::Client {
 
 fn daemon_client_with_api_key(api_key: Option<&str>) -> reqwest::blocking::Client {
     let mut builder =
-        reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(120));
+        crate::http_client::client_builder().timeout(std::time::Duration::from_secs(120));
 
     if let Some(key) = api_key {
         let mut headers = reqwest::header::HeaderMap::new();
@@ -2778,7 +3177,7 @@ decay_rate = 0.05
             checks.push(serde_json::json!({"check": "cli_version", "status": "ok", "version": current_version}));
 
             // Try to fetch latest release from GitHub (best-effort, 3s timeout)
-            let version_client = reqwest::blocking::Client::builder()
+            let version_client = crate::http_client::client_builder()
                 .timeout(std::time::Duration::from_secs(3))
                 .build();
             if let Ok(client) = version_client {
@@ -5369,7 +5768,7 @@ pub(crate) fn test_api_key(provider: &str, env_var: &str) -> bool {
         Err(_) => return false,
     };
 
-    let client = match reqwest::blocking::Client::builder()
+    let client = match crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
     {
@@ -7682,7 +8081,7 @@ fn fetch_latest_release_tag() -> Result<String, String> {
 }
 
 fn update_http_client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
+    crate::http_client::client_builder()
         .user_agent(format!("librefang-cli/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(60))
         .build()

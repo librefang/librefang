@@ -89,6 +89,11 @@ pub enum ContentBlock {
     Thinking {
         /// The thinking/reasoning text.
         thinking: String,
+        /// Provider-specific metadata (e.g. Gemini `thoughtSignature`).
+        /// Opaque to the core — drivers read/write this to round-trip
+        /// fields the provider requires on subsequent requests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<serde_json::Value>,
     },
     /// Catch-all for unrecognized content block types (forward compatibility).
     #[serde(other)]
@@ -141,7 +146,7 @@ impl MessageContent {
                 .map(|b| match b {
                     ContentBlock::Text { text, .. } => text.len(),
                     ContentBlock::ToolResult { content, .. } => content.len(),
-                    ContentBlock::Thinking { thinking } => thinking.len(),
+                    ContentBlock::Thinking { thinking, .. } => thinking.len(),
                     ContentBlock::ToolUse { .. }
                     | ContentBlock::Image { .. }
                     | ContentBlock::Unknown => 0,
@@ -221,6 +226,13 @@ pub struct TokenUsage {
     pub input_tokens: u64,
     /// Tokens generated in the output.
     pub output_tokens: u64,
+    /// Tokens written to the prompt cache (Anthropic `cache_creation_input_tokens`).
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    /// Tokens read from the prompt cache (Anthropic `cache_read_input_tokens`,
+    /// OpenAI `prompt_tokens_details.cached_tokens`).
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
 }
 
 impl TokenUsage {
@@ -265,8 +277,33 @@ mod tests {
         let usage = TokenUsage {
             input_tokens: 100,
             output_tokens: 50,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
         };
         assert_eq!(usage.total(), 150);
+    }
+
+    #[test]
+    fn test_token_usage_default_cache_fields() {
+        let usage = TokenUsage::default();
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 0);
+    }
+
+    #[test]
+    fn test_token_usage_cache_deserialization() {
+        let json = r#"{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":30,"cache_read_input_tokens":70}"#;
+        let usage: TokenUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.cache_creation_input_tokens, 30);
+        assert_eq!(usage.cache_read_input_tokens, 70);
+    }
+
+    #[test]
+    fn test_token_usage_cache_deserialization_missing_fields() {
+        let json = r#"{"input_tokens":100,"output_tokens":50}"#;
+        let usage: TokenUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.cache_creation_input_tokens, 0);
+        assert_eq!(usage.cache_read_input_tokens, 0);
     }
 
     #[test]

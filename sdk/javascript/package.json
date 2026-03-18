@@ -1,17 +1,40 @@
 {
   "name": "@librefang/sdk",
-  "version": "0.4.3-beta4-20260314",
+  "version": "0.5.7-20260318",
   "description": "Official JavaScript/TypeScript client for the LibreFang Agent OS REST API",
   "main": "index.js",
   "types": "index.d.ts",
-  "keywords": ["librefang", "agent", "ai", "llm", "sdk"],
+  "keywords": ["librefang", "agent", "ai", "llm", "autonomous-agent", "sdk"],
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/librefang/librefang"
+    "url": "https://github.com/librefang/librefang",
+    "directory": "sdk/javascript"
+  },
+  "homepage": "https://librefang.ai",
+  "bugs": {
+    "url": "https://github.com/librefang/librefang/issues"
   },
   "engines": {
     "node": ">=18.0.0"
   },
-  "files": ["index.js", "index.d.ts"]
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ],
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "require": "./index.js"
+    }
+  },
+  "type": "commonjs",
+  "scripts": {
+    "test": "node examples/basic.js"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  }
 }
