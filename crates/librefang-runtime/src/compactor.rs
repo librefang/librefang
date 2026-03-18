@@ -1356,10 +1356,10 @@ mod tests {
     fn test_estimate_str_tokens_mixed_content() {
         // Pure ASCII
         let ascii_est = estimate_str_tokens("hello world"); // 11 chars -> ~3 tokens
-        assert!(ascii_est >= 2 && ascii_est <= 5);
+        assert!((2..=5).contains(&ascii_est));
         // Pure CJK
         let cjk_est = estimate_str_tokens("\u{4f60}\u{597d}\u{4e16}\u{754c}"); // 4 CJK chars -> ~6 tokens
-        assert!(cjk_est >= 4 && cjk_est <= 8);
+        assert!((4..=8).contains(&cjk_est));
         // Mixed
         let mixed_est = estimate_str_tokens("Hello \u{4f60}\u{597d}");
         assert!(
