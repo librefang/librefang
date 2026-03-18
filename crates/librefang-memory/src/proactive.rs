@@ -1349,7 +1349,10 @@ impl ProactiveMemoryStore {
                 continue;
             }
 
-            // Keep the most recently created one as the "winner"
+            // Keep the most recently created memory as the "winner".
+            // Note: MemoryItem doesn't expose accessed_at; created_at is the best
+            // available signal here. The newest duplicate typically has the most
+            // up-to-date content from the latest extraction.
             let Some(winner) = group.iter().max_by_key(|m| m.created_at).cloned() else {
                 continue;
             };
