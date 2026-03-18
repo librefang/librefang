@@ -1,8 +1,8 @@
 //! Pluggable context engine — lifecycle hooks for context management.
 //!
-//! Inspired by OpenClaw's ContextEngine, this trait lets developers plug in
-//! their own strategies for memory recall, message assembly, compaction, and
-//! post-turn bookkeeping without modifying the core agent loop.
+//! This trait lets developers plug in their own strategies for memory recall,
+//! message assembly, compaction, and post-turn bookkeeping without modifying
+//! the core agent loop.
 //!
 //! # Lifecycle
 //!
