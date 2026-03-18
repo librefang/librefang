@@ -1015,10 +1015,10 @@ pub async fn get_cron_job(
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron_scheduler.get_job(job_id) {
-                Some(job) => (
+            match state.kernel.cron_scheduler.get_meta(job_id) {
+                Some(meta) => (
                     StatusCode::OK,
-                    Json(serde_json::to_value(&job).unwrap_or_default()),
+                    Json(serde_json::to_value(&meta).unwrap_or_default()),
                 ),
                 None => (
                     StatusCode::NOT_FOUND,
