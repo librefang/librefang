@@ -2632,7 +2632,10 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
             return;
         }
 
-        let agents = body.as_array();
+        let agents = body
+            .get("items")
+            .and_then(|v| v.as_array())
+            .or_else(|| body.as_array());
 
         match agents {
             Some(agents) if agents.is_empty() => println!("{}", i18n::t("agent-no-agents")),
