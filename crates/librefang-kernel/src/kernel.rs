@@ -257,6 +257,8 @@ pub struct LibreFangKernel {
     /// Cached embeddings of hand descriptions for semantic routing.
     /// Maps hand_id → embedding vector. Populated lazily on first routing call.
     hand_desc_embeddings: tokio::sync::RwLock<Option<std::collections::HashMap<String, Vec<f32>>>>,
+    /// Pluggable context engine for memory recall, assembly, and compaction.
+    pub context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
 }
@@ -1139,6 +1141,24 @@ impl LibreFangKernel {
             config.queue.concurrency.subagent_lane as u32,
         );
 
+        // Build the pluggable context engine from config
+        let context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>> = {
+            let ce_config = librefang_runtime::context_engine::ContextEngineConfig {
+                context_window_tokens: 200_000, // default, overridden per-agent at call time
+                stable_prefix_mode: config.stable_prefix_mode,
+                max_recall_results: 5,
+            };
+            let emb_arc: Option<
+                Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>,
+            > = embedding_driver.as_ref().map(|d| Arc::clone(d));
+            Some(librefang_runtime::context_engine::build_context_engine(
+                &config.context_engine,
+                ce_config,
+                Arc::new(memory.clone()),
+                emb_arc,
+            ))
+        };
+
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1192,6 +1212,7 @@ impl LibreFangKernel {
             decision_traces: dashmap::DashMap::new(),
             command_queue,
             hand_desc_embeddings: tokio::sync::RwLock::new(None),
+            context_engine,
             self_handle: OnceLock::new(),
         };
 
@@ -2120,7 +2141,7 @@ impl LibreFangKernel {
                 ctx_window,
                 Some(&kernel_clone.process_manager),
                 None, // content_blocks (streaming path uses text only for now)
-                None, // context_engine
+                kernel_clone.context_engine.as_deref(),
             )
             .await;
 
@@ -3122,7 +3143,7 @@ impl LibreFangKernel {
             ctx_window,
             Some(&self.process_manager),
             content_blocks,
-            None, // context_engine
+            self.context_engine.as_deref(),
         )
         .await
         .map_err(KernelError::LibreFang)?;

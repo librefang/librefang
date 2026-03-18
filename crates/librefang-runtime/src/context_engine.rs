@@ -350,6 +350,263 @@ impl ContextEngine for DefaultContextEngine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Scriptable context engine — wraps DefaultContextEngine + Python script hooks
+// ---------------------------------------------------------------------------
+
+/// Context engine that delegates to a [`DefaultContextEngine`] for heavy
+/// operations (assemble, compact) and optionally invokes Python scripts
+/// for light lifecycle hooks (ingest, after_turn).
+///
+/// This allows users to customize context management without recompiling:
+///
+/// ```toml
+/// [context_engine.hooks]
+/// ingest = "~/.librefang/plugins/my_recall.py"
+/// after_turn = "~/.librefang/plugins/my_indexer.py"
+/// ```
+///
+/// Scripts use the same JSON stdin/stdout protocol as Python agents:
+///
+/// **ingest hook** receives:
+/// ```json
+/// {"type": "ingest", "agent_id": "...", "message": "..."}
+/// ```
+/// Returns:
+/// ```json
+/// {"type": "ingest_result", "memories": [{"content": "remembered fact"}]}
+/// ```
+///
+/// **after_turn hook** receives:
+/// ```json
+/// {"type": "after_turn", "agent_id": "...", "messages": [...]}
+/// ```
+/// Returns:
+/// ```json
+/// {"type": "ok"}
+/// ```
+pub struct ScriptableContextEngine {
+    inner: DefaultContextEngine,
+    ingest_script: Option<String>,
+    after_turn_script: Option<String>,
+}
+
+impl ScriptableContextEngine {
+    /// Create a scriptable context engine from config.
+    pub fn new(
+        inner: DefaultContextEngine,
+        hooks: &librefang_types::config::ContextEngineHooks,
+    ) -> Self {
+        Self {
+            inner,
+            ingest_script: hooks.ingest.clone(),
+            after_turn_script: hooks.after_turn.clone(),
+        }
+    }
+
+    /// Resolve a script path, expanding `~` to the user's home directory.
+    fn resolve_script_path(path: &str) -> String {
+        if let Some(rest) = path.strip_prefix("~/") {
+            if let Ok(home) = std::env::var("HOME") {
+                return format!("{home}/{rest}");
+            }
+        }
+        path.to_string()
+    }
+
+    /// Run a Python hook script with JSON input, return parsed JSON output.
+    async fn run_hook(
+        script_path: &str,
+        input: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let resolved = Self::resolve_script_path(script_path);
+
+        // Validate path safety
+        crate::python_runtime::validate_script_path(&resolved)
+            .map_err(|e| format!("Hook script validation failed: {e}"))?;
+
+        if !std::path::Path::new(&resolved).exists() {
+            return Err(format!("Hook script not found: {resolved}"));
+        }
+
+        let config = crate::python_runtime::PythonConfig {
+            timeout_secs: 30, // hooks should be fast
+            ..Default::default()
+        };
+
+        let input_str =
+            serde_json::to_string(&input).map_err(|e| format!("Serialize input: {e}"))?;
+
+        let result = crate::python_runtime::run_python_agent(
+            &resolved,
+            input.get("agent_id").and_then(|v| v.as_str()).unwrap_or(""),
+            &input_str,
+            &serde_json::json!({}),
+            &config,
+        )
+        .await
+        .map_err(|e| format!("Hook script failed: {e}"))?;
+
+        // Try to parse response as JSON
+        serde_json::from_str(&result.response)
+            .unwrap_or_else(|_| serde_json::json!({"text": result.response}));
+
+        serde_json::from_str(&result.response).map_err(|e| format!("Parse hook output: {e}"))
+    }
+}
+
+#[async_trait]
+impl ContextEngine for ScriptableContextEngine {
+    async fn bootstrap(&self, config: &ContextEngineConfig) -> LibreFangResult<()> {
+        // Validate hook scripts exist at startup
+        if let Some(ref path) = self.ingest_script {
+            let resolved = Self::resolve_script_path(path);
+            if !std::path::Path::new(&resolved).exists() {
+                warn!("Ingest hook script not found: {resolved}");
+            } else {
+                debug!("Ingest hook configured: {resolved}");
+            }
+        }
+        if let Some(ref path) = self.after_turn_script {
+            let resolved = Self::resolve_script_path(path);
+            if !std::path::Path::new(&resolved).exists() {
+                warn!("After-turn hook script not found: {resolved}");
+            } else {
+                debug!("After-turn hook configured: {resolved}");
+            }
+        }
+        self.inner.bootstrap(config).await
+    }
+
+    async fn ingest(&self, agent_id: AgentId, user_message: &str) -> LibreFangResult<IngestResult> {
+        // If no ingest script, delegate entirely to default engine
+        let Some(ref script) = self.ingest_script else {
+            return self.inner.ingest(agent_id, user_message).await;
+        };
+
+        // Run default recall first (for embedding-based memories)
+        let default_result = self.inner.ingest(agent_id, user_message).await?;
+
+        // Run the Python hook for additional/custom recall
+        let input = serde_json::json!({
+            "type": "ingest",
+            "agent_id": agent_id.0.to_string(),
+            "message": user_message,
+        });
+
+        match Self::run_hook(script, input).await {
+            Ok(output) => {
+                // Merge hook memories with default memories
+                let mut memories = default_result.recalled_memories;
+                if let Some(hook_memories) = output.get("memories").and_then(|m| m.as_array()) {
+                    for mem in hook_memories {
+                        if let Some(content) = mem.get("content").and_then(|c| c.as_str()) {
+                            memories.push(MemoryFragment {
+                                id: librefang_types::memory::MemoryId::new(),
+                                agent_id,
+                                content: content.to_string(),
+                                embedding: None,
+                                metadata: std::collections::HashMap::new(),
+                                source: librefang_types::memory::MemorySource::System,
+                                confidence: 1.0,
+                                created_at: chrono::Utc::now(),
+                                accessed_at: chrono::Utc::now(),
+                                access_count: 0,
+                                scope: "hook".to_string(),
+                            });
+                        }
+                    }
+                }
+                Ok(IngestResult {
+                    recalled_memories: memories,
+                })
+            }
+            Err(e) => {
+                warn!("Ingest hook failed, using default result: {e}");
+                Ok(default_result)
+            }
+        }
+    }
+
+    async fn assemble(
+        &self,
+        messages: &mut Vec<Message>,
+        system_prompt: &str,
+        tools: &[ToolDefinition],
+    ) -> LibreFangResult<AssembleResult> {
+        // Always delegate to Rust — too performance-critical for Python
+        self.inner.assemble(messages, system_prompt, tools).await
+    }
+
+    async fn compact(
+        &self,
+        agent_id: AgentId,
+        messages: &[Message],
+        driver: Arc<dyn LlmDriver>,
+    ) -> LibreFangResult<CompactionResult> {
+        // Always delegate to Rust — requires LLM driver access
+        self.inner.compact(agent_id, messages, driver).await
+    }
+
+    async fn after_turn(&self, agent_id: AgentId, messages: &[Message]) -> LibreFangResult<()> {
+        // Run default after_turn first
+        self.inner.after_turn(agent_id, messages).await?;
+
+        // If no after_turn script, we're done
+        let Some(ref script) = self.after_turn_script else {
+            return Ok(());
+        };
+
+        // Build a compact representation of messages (not full content, to keep it fast)
+        let msg_summaries: Vec<serde_json::Value> = messages
+            .iter()
+            .map(|m| {
+                serde_json::json!({
+                    "role": format!("{:?}", m.role).to_lowercase(),
+                    "content": m.content.text_content().chars().take(500).collect::<String>(),
+                })
+            })
+            .collect();
+
+        let input = serde_json::json!({
+            "type": "after_turn",
+            "agent_id": agent_id.0.to_string(),
+            "messages": msg_summaries,
+        });
+
+        // Fire and don't block on failure — after_turn is best-effort
+        match Self::run_hook(script, input).await {
+            Ok(_) => debug!("After-turn hook completed"),
+            Err(e) => warn!("After-turn hook failed: {e}"),
+        }
+
+        Ok(())
+    }
+
+    fn truncate_tool_result(&self, content: &str) -> String {
+        self.inner.truncate_tool_result(content)
+    }
+}
+
+/// Build a context engine from config.
+///
+/// Returns a `DefaultContextEngine` if no hooks are configured,
+/// or a `ScriptableContextEngine` if any Python hooks are set.
+pub fn build_context_engine(
+    toml_config: &librefang_types::config::ContextEngineTomlConfig,
+    runtime_config: ContextEngineConfig,
+    memory: Arc<MemorySubstrate>,
+    embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
+) -> Box<dyn ContextEngine> {
+    let default = DefaultContextEngine::new(runtime_config, memory, embedding_driver);
+
+    if toml_config.hooks.ingest.is_some() || toml_config.hooks.after_turn.is_some() {
+        Box::new(ScriptableContextEngine::new(default, &toml_config.hooks))
+    } else {
+        Box::new(default)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,9 +691,9 @@ mod tests {
         let mut messages: Vec<Message> = (0..20)
             .map(|i| {
                 if i % 2 == 0 {
-                    Message::user(&format!("msg{}: {}", i, "x".repeat(200)))
+                    Message::user(format!("msg{}: {}", i, "x".repeat(200)))
                 } else {
-                    Message::assistant(&format!("msg{}: {}", i, "x".repeat(200)))
+                    Message::assistant(format!("msg{}: {}", i, "x".repeat(200)))
                 }
             })
             .collect();
