@@ -7747,7 +7747,7 @@ fn cmd_devices_remove(id: &str) {
 fn cmd_webhooks_list(json: bool) {
     let base = require_daemon("webhooks list");
     let client = daemon_client();
-    let body = daemon_json(client.get(format!("{base}/api/triggers")).send());
+    let body = daemon_json(client.get(format!("{base}/api/webhooks")).send());
     if json {
         println!(
             "{}",
@@ -7764,13 +7764,18 @@ fn cmd_webhooks_list(json: bool) {
             println!("No webhooks configured.");
             return;
         }
-        println!("{:<38} {:<16} URL", "ID", "AGENT");
-        println!("{}", "-".repeat(80));
+        println!("{:<38} {:<20} {:<10} URL", "ID", "NAME", "ENABLED");
+        println!("{}", "-".repeat(90));
         for w in arr {
             println!(
-                "{:<38} {:<16} {}",
+                "{:<38} {:<20} {:<10} {}",
                 w["id"].as_str().unwrap_or("?"),
-                w["agent_id"].as_str().unwrap_or("?"),
+                w["name"].as_str().unwrap_or("?"),
+                if w["enabled"].as_bool().unwrap_or(false) {
+                    "yes"
+                } else {
+                    "no"
+                },
                 w["url"].as_str().unwrap_or(""),
             );
         }
@@ -7786,13 +7791,20 @@ fn cmd_webhooks_create(agent: &str, url: &str) {
     let base = require_daemon("webhooks create");
     let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
+
+    // Derive a name from the URL hostname
+    let name = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+        .unwrap_or_else(|| "webhook".to_string());
+
     let body = daemon_json(
         client
-            .post(format!("{base}/api/triggers"))
+            .post(format!("{base}/api/webhooks"))
             .json(&serde_json::json!({
-                "agent_id": agent,
-                "pattern": {"webhook": {"url": url}},
-                "prompt_template": "Webhook event: {{event}}",
+                "name": format!("{agent}-{name}"),
+                "url": url,
+                "events": ["all"],
             }))
             .send(),
     );
@@ -7809,7 +7821,7 @@ fn cmd_webhooks_create(agent: &str, url: &str) {
 fn cmd_webhooks_delete(id: &str) {
     let base = require_daemon("webhooks delete");
     let client = daemon_client();
-    let body = daemon_json(client.delete(format!("{base}/api/triggers/{id}")).send());
+    let body = daemon_json(client.delete(format!("{base}/api/webhooks/{id}")).send());
     if body.get("error").is_some() {
         ui::error(&i18n::t_args(
             "webhook-delete-failed",
@@ -7823,7 +7835,7 @@ fn cmd_webhooks_delete(id: &str) {
 fn cmd_webhooks_test(id: &str) {
     let base = require_daemon("webhooks test");
     let client = daemon_client();
-    let body = daemon_json(client.post(format!("{base}/api/triggers/{id}/test")).send());
+    let body = daemon_json(client.post(format!("{base}/api/webhooks/{id}/test")).send());
     if body["success"].as_bool().unwrap_or(false) {
         ui::success(&i18n::t_args("webhook-test-ok", &[("id", id)]));
     } else {
