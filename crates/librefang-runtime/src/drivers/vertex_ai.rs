@@ -2,23 +2,26 @@
 //!
 //! Uses the same Gemini generateContent API format but authenticates via
 //! Google Cloud OAuth2 (service account JSON key or Application Default
-//! Credentials) instead of API keys.
-
-use async_trait::async_trait;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+//! Credentials via gcloud CLI) instead of API keys.
+//!
+//! Endpoint format:
+//! ```text
+//! https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google/models/{model}:generateContent
+//! ```
+//!
+//! Token acquisition supports two methods:
+//! 1. **Service account JSON** — reads the key file and exchanges a JWT for a token
+//! 2. **gcloud CLI** — runs `gcloud auth print-access-token` (fallback default)
+//!
+//! Tokens are cached with a ~50 minute TTL and auto-refreshed before expiry.
 
 use crate::llm_driver::{
     CompletionRequest, CompletionResponse, DriverConfig, LlmDriver, LlmError, StreamEvent,
 };
-
-/// Vertex AI LLM driver.
-pub struct VertexAiDriver {
-    project_id: String,
-    region: String,
-    token_manager: Arc<RwLock<TokenManager>>,
-    client: reqwest::Client,
-}
+use async_trait::async_trait;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+use tracing::debug;
 
 // ─── OAuth2 token management ────────────────────────────────────────
 
@@ -296,7 +299,6 @@ fn asn1_read_content(data: &[u8]) -> Result<(&[u8], &[u8]), String> {
         }
         (len, 1 + num_bytes)
     };
-
     if data.len() < offset + len {
         return Err("ASN.1 content exceeds available data".into());
     }
@@ -543,7 +545,15 @@ impl BigUint {
     }
 }
 
-// ─── Driver construction ────────────────────────────────────────────
+// ─── Vertex AI driver ───────────────────────────────────────────────
+
+/// Vertex AI LLM driver.
+pub struct VertexAiDriver {
+    project_id: String,
+    region: String,
+    token_manager: Arc<RwLock<TokenManager>>,
+    client: reqwest::Client,
+}
 
 impl VertexAiDriver {
     /// Create a new Vertex AI driver.
@@ -737,12 +747,13 @@ impl LlmDriver for VertexAiDriver {
         );
 
         let mut last_error = None;
-        for attempt in 0..3 {
+        for attempt in 0..3u64 {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(500 * (1 << attempt))).await;
             }
 
             let token = self.token_manager.write().await.get_token().await?;
+            debug!(url = %url, attempt, "Sending Vertex AI request");
 
             let resp = self
                 .client
@@ -817,12 +828,13 @@ impl LlmDriver for VertexAiDriver {
         );
 
         let mut last_error = None;
-        for attempt in 0..3 {
+        for attempt in 0..3u64 {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(500 * (1 << attempt))).await;
             }
 
             let token = self.token_manager.write().await.get_token().await?;
+            debug!(url = %url, attempt, "Sending Vertex AI streaming request");
 
             let resp = self
                 .client
@@ -944,6 +956,22 @@ mod tests {
         };
         let region = resolve_region(&config);
         assert_eq!(region, "us-central1");
+    }
+
+    #[test]
+    fn test_resolve_region_explicit() {
+        let config = DriverConfig {
+            provider: "vertex-ai".to_string(),
+            api_key: None,
+            base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig {
+                region: Some("europe-west4".to_string()),
+                ..Default::default()
+            },
+            skip_permissions: true,
+        };
+        let region = resolve_region(&config);
+        assert_eq!(region, "europe-west4");
     }
 
     #[test]
