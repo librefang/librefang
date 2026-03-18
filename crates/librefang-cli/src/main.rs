@@ -2751,15 +2751,16 @@ fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
     match field {
         "model" => {
             if let Some(base) = find_daemon() {
+                let agent_id = resolve_agent_id(&base, agent_id_str);
                 let client = daemon_client();
                 let body = daemon_json(
                     client
-                        .put(format!("{base}/api/agents/{agent_id_str}/model"))
+                        .put(format!("{base}/api/agents/{agent_id}/model"))
                         .json(&serde_json::json!({"model": value}))
                         .send(),
                 );
                 if body.get("status").is_some() {
-                    println!("Agent {agent_id_str} model set to {value}.");
+                    println!("Agent {agent_id} model set to {value}.");
                 } else {
                     eprintln!(
                         "Failed to set model: {}",
