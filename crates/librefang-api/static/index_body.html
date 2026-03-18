@@ -3294,8 +3294,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
         <div class="page-body">
           <!-- Tabs -->
           <div style="display:flex;gap:16px;margin-bottom:16px;border-bottom:1px solid var(--border)">
-            <button :class="tab==='installed'?'tab-active':''" @click="tab='installed'" style="padding:8px 16px;background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;color:var(--text-secondary)" :style="tab==='installed'?'border-color:var(--primary);color:var(--text-primary):'''" data-i18n="pluginsPage.installedTab">Installed</button>
-            <button :class="tab==='registry'?'tab-active':''" @click="tab='registry'" style="padding:8px 16px;background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;color:var(--text-secondary)" :style="tab==='registry'?'border-color:var(--primary);color:var(--text-primary):'''" data-i18n="pluginsPage.registryTab">Registry</button>
+            <button :class="tab==='installed'?'tab-active':''" @click="tab='installed'" style="padding:8px 16px;background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;color:var(--text-secondary)" :style="tab==='installed'?'border-color:var(--primary);color:var(--text-primary)':''" data-i18n="pluginsPage.installedTab">Installed</button>
+            <button :class="tab==='registry'?'tab-active':''" @click="tab='registry'" style="padding:8px 16px;background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;color:var(--text-secondary)" :style="tab==='registry'?'border-color:var(--primary);color:var(--text-primary)':''" data-i18n="pluginsPage.registryTab">Registry</button>
           </div>
 
           <!-- Installed Tab -->

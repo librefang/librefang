@@ -225,6 +225,22 @@ fn install_from_local(src: &Path, plugins_dir: &Path) -> Result<PluginInfo, Stri
     get_plugin_info(&manifest.name)
 }
 
+/// Validate that a GitHub repo string looks like `owner/repo`.
+fn validate_github_repo(repo: &str) -> Result<(), String> {
+    let parts: Vec<&str> = repo.split('/').collect();
+    if parts.len() != 2
+        || parts[0].is_empty()
+        || parts[1].is_empty()
+        || repo.contains("..")
+        || repo.contains(' ')
+    {
+        return Err(format!(
+            "Invalid GitHub repo '{repo}': must be 'owner/repo'"
+        ));
+    }
+    Ok(())
+}
+
 /// Install from a GitHub plugin registry (`owner/repo`).
 async fn install_from_registry(
     name: &str,
@@ -232,6 +248,7 @@ async fn install_from_registry(
     plugins_dir: &Path,
 ) -> Result<PluginInfo, String> {
     validate_plugin_name(name)?;
+    validate_github_repo(github_repo)?;
     let target_dir = plugins_dir.join(name);
     if target_dir.exists() {
         return Err(format!(
@@ -300,6 +317,7 @@ pub struct RegistryPluginEntry {
 
 /// List available plugin directory names from a GitHub registry.
 pub async fn list_registry_plugins(github_repo: &str) -> Result<Vec<RegistryPluginEntry>, String> {
+    validate_github_repo(github_repo)?;
     let url = format!("https://api.github.com/repos/{github_repo}/contents/plugins");
     let client = reqwest::Client::builder()
         .user_agent(crate::USER_AGENT)
