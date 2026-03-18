@@ -199,7 +199,7 @@ struct OaiResponseMessage {
     content: Option<String>,
     tool_calls: Option<Vec<OaiToolCall>>,
     /// Reasoning/thinking content returned by some models (DeepSeek-R1, Qwen3, etc.)
-    /// via LM Studio, Ollama, and other local inference servers.
+    /// via DeepSeek's official API, LM Studio, Ollama, and other OpenAI-compatible servers.
     reasoning_content: Option<String>,
 }
 
@@ -339,14 +339,17 @@ impl LlmDriver for OpenAIDriver {
                         }
                     }
                     let has_tool_calls = !tool_calls.is_empty();
+                    let is_deepseek_r = self.is_deepseek_reasoner(&request.model);
                     oai_messages.push(OaiMessage {
                         role: "assistant".to_string(),
                         // ZHIPU (GLM) rejects assistant messages where content is
                         // null or omitted when tool_calls are present (error 1214).
-                        // Always send an empty string so every OpenAI-compat
-                        // provider gets a valid payload.
+                        // DeepSeek-reasoner also requires a non-null content field
+                        // on all assistant messages in multi-turn conversations.
+                        // Always send an empty string for these providers so every
+                        // OpenAI-compat endpoint gets a valid payload.
                         content: if text_parts.is_empty() {
-                            if has_tool_calls {
+                            if has_tool_calls || is_deepseek_r {
                                 Some(OaiMessageContent::Text(String::new()))
                             } else {
                                 None
@@ -365,7 +368,7 @@ impl LlmDriver for OpenAIDriver {
                         // Kimi: requires an empty-string reasoning_content when
                         // tool_calls are present (thinking is disabled for
                         // multi-turn compatibility).
-                        reasoning_content: if self.is_deepseek_reasoner(&request.model) {
+                        reasoning_content: if is_deepseek_r {
                             // Always None — DeepSeek rejects reasoning_content
                             // on historical assistant turns.
                             None
@@ -841,10 +844,11 @@ impl LlmDriver for OpenAIDriver {
                         }
                     }
                     let has_tool_calls = !tool_calls_out.is_empty();
+                    let is_deepseek_r = self.is_deepseek_reasoner(&request.model);
                     oai_messages.push(OaiMessage {
                         role: "assistant".to_string(),
                         content: if text_parts.is_empty() {
-                            if has_tool_calls {
+                            if has_tool_calls || is_deepseek_r {
                                 Some(OaiMessageContent::Text(String::new()))
                             } else {
                                 None
@@ -862,7 +866,7 @@ impl LlmDriver for OpenAIDriver {
                         // all previous assistant messages — the API rejects it.
                         // Kimi: requires an empty-string reasoning_content when
                         // tool_calls are present.
-                        reasoning_content: if self.is_deepseek_reasoner(&request.model) {
+                        reasoning_content: if is_deepseek_r {
                             None
                         } else if has_tool_calls
                             && self.kimi_needs_reasoning_content(&request.model)
@@ -1175,7 +1179,7 @@ impl LlmDriver for OpenAIDriver {
                             }
                         }
 
-                        // Reasoning/thinking content delta (DeepSeek-R1, Qwen3 via LM Studio/Ollama)
+                        // Reasoning/thinking content delta (DeepSeek-R1 via official API or local servers, Qwen3, etc.)
                         if let Some(reasoning) = delta["reasoning_content"].as_str() {
                             if !reasoning.is_empty() {
                                 reasoning_content.push_str(reasoning);
@@ -1865,7 +1869,8 @@ mod tests {
         // Simulate building an assistant OaiMessage with tool_calls —
         // for deepseek-reasoner, reasoning_content must always be None.
         let has_tool_calls = true;
-        let reasoning_content = if driver.is_deepseek_reasoner(model) {
+        let is_deepseek_r = driver.is_deepseek_reasoner(model);
+        let reasoning_content = if is_deepseek_r {
             None
         } else if has_tool_calls && driver.kimi_needs_reasoning_content(model) {
             Some(String::new())
@@ -1875,6 +1880,33 @@ mod tests {
         assert!(
             reasoning_content.is_none(),
             "deepseek-reasoner must never send reasoning_content on assistant messages"
+        );
+    }
+
+    /// Verify that deepseek-reasoner assistant messages always get a non-null
+    /// content field, even when text_parts is empty (thinking-only response).
+    #[test]
+    fn test_deepseek_reasoner_content_never_null() {
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let model = "deepseek-reasoner";
+        let is_deepseek_r = driver.is_deepseek_reasoner(model);
+        let text_parts: Vec<String> = Vec::new(); // empty — thinking-only response
+        let has_tool_calls = false;
+
+        // Simulate the content field logic from complete()/stream()
+        let content: Option<OaiMessageContent> = if text_parts.is_empty() {
+            if has_tool_calls || is_deepseek_r {
+                Some(OaiMessageContent::Text(String::new()))
+            } else {
+                None
+            }
+        } else {
+            Some(OaiMessageContent::Text(text_parts.join("")))
+        };
+
+        assert!(
+            content.is_some(),
+            "deepseek-reasoner assistant messages must always have non-null content for multi-turn"
         );
     }
 }
