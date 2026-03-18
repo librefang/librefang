@@ -915,7 +915,7 @@ pub async fn memory_count_agent(
     path = "/api/memory/agents/{id}/relations",
     tag = "proactive-memory",
     params(("id" = String, Path, description = "Agent ID")),
-    request_body = Vec<librefang_types::memory::RelationTriple>,
+    request_body = serde_json::Value,
     responses((status = 200, description = "Relations stored", body = serde_json::Value))
 )]
 pub async fn memory_store_relations(
