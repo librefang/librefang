@@ -19,6 +19,12 @@ pub fn validate_plugin_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Plugin name cannot be empty".to_string());
     }
+    if name.len() > 128 {
+        return Err(format!(
+            "Invalid plugin name: exceeds maximum length of 128 characters (got {})",
+            name.len()
+        ));
+    }
     if name.contains('/') || name.contains('\\') || name.contains("..") || name == "." {
         return Err(format!(
             "Invalid plugin name '{name}': must be a simple identifier (no /, \\, or ..)"
@@ -39,7 +45,20 @@ pub fn validate_plugin_name(name: &str) -> Result<(), String> {
 /// Default plugin directory: `~/.librefang/plugins/`.
 pub fn plugins_dir() -> PathBuf {
     dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| {
+            warn!("HOME directory not set; using temporary directory for plugins");
+            #[cfg(unix)]
+            let fallback = PathBuf::from("/tmp/librefang");
+            #[cfg(windows)]
+            let fallback = PathBuf::from(
+                std::env::var("TEMP")
+                    .unwrap_or_else(|_| r"C:\Temp".to_string()),
+            )
+            .join("librefang");
+            #[cfg(not(any(unix, windows)))]
+            let fallback = PathBuf::from(".librefang");
+            fallback
+        })
         .join(".librefang")
         .join("plugins")
 }
@@ -157,8 +176,29 @@ pub async fn install_plugin(source: &PluginSource) -> Result<PluginInfo, String>
 
 /// Install from a local directory by copying.
 fn install_from_local(src: &Path, plugins_dir: &Path) -> Result<PluginInfo, String> {
+    // Canonicalize the source path to resolve symlinks and relative components
+    let canonical_src = src
+        .canonicalize()
+        .map_err(|e| format!("Failed to resolve local path '{}': {e}", src.display()))?;
+
+    // Reject paths that still contain '..' after canonicalization (should not happen, but defense in depth)
+    if canonical_src
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "Refusing to install from path with '..' components: {}",
+            canonical_src.display()
+        ));
+    }
+
+    warn!(
+        path = %canonical_src.display(),
+        "Installing plugin from local path"
+    );
+
     // Validate source has a plugin.toml
-    let manifest = load_plugin_manifest(src)?;
+    let manifest = load_plugin_manifest(&canonical_src)?;
     // Validate manifest name is safe for use as a directory name
     validate_plugin_name(&manifest.name)?;
     let target_dir = plugins_dir.join(&manifest.name);
@@ -171,7 +211,8 @@ fn install_from_local(src: &Path, plugins_dir: &Path) -> Result<PluginInfo, Stri
         ));
     }
 
-    copy_dir_recursive(src, &target_dir).map_err(|e| format!("Failed to copy plugin: {e}"))?;
+    copy_dir_recursive(&canonical_src, &target_dir)
+        .map_err(|e| format!("Failed to copy plugin: {e}"))?;
 
     info!(plugin = manifest.name, "Installed plugin from local path");
     get_plugin_info(&manifest.name)
@@ -224,7 +265,7 @@ async fn install_from_registry(name: &str, plugins_dir: &Path) -> Result<PluginI
     // Download each file — cleanup on failure
     let download_result = async {
         for file in &files {
-            download_github_entry(&client, file, &target_dir).await?;
+            download_github_entry(&client, file, &target_dir, 0).await?;
         }
         Ok::<(), String>(())
     }
@@ -448,8 +489,14 @@ pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
         return Ok("No requirements.txt found — nothing to install".to_string());
     }
 
+    warn!(
+        plugin = plugin_name,
+        requirements = %requirements.display(),
+        "Installing Python requirements with pip3 --user"
+    );
+
     let output = tokio::process::Command::new("pip3")
-        .args(["install", "-r"])
+        .args(["install", "--user", "-r"])
         .arg(&requirements)
         .output()
         .await
@@ -478,11 +525,30 @@ struct GitHubContent {
 }
 
 /// Recursively download a GitHub directory entry.
+///
+/// `depth` limits recursion to prevent unbounded traversal (max 10 levels).
 async fn download_github_entry(
     client: &reqwest::Client,
     entry: &GitHubContent,
     target_dir: &Path,
+    depth: usize,
 ) -> Result<(), String> {
+    if depth > 10 {
+        return Err("GitHub directory recursion depth exceeded (max 10 levels)".to_string());
+    }
+
+    // Validate entry.name to prevent path traversal attacks
+    if entry.name.contains('/')
+        || entry.name.contains('\\')
+        || entry.name.contains("..")
+        || entry.name.contains('\0')
+    {
+        return Err(format!(
+            "Refusing to download entry with unsafe name: '{}'",
+            entry.name
+        ));
+    }
+
     let target_path = target_dir.join(&entry.name);
 
     match entry.content_type.as_str() {
@@ -529,7 +595,8 @@ async fn download_github_entry(
                 .map_err(|e| format!("Failed to parse dir listing: {e}"))?;
 
             for sub_entry in &sub_entries {
-                Box::pin(download_github_entry(client, sub_entry, &target_path)).await?;
+                Box::pin(download_github_entry(client, sub_entry, &target_path, depth + 1))
+                    .await?;
             }
         }
         other => {

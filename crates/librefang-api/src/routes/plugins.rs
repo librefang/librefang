@@ -198,7 +198,14 @@ pub async fn uninstall_plugin(Json(body): Json<serde_json::Value>) -> impl IntoR
             StatusCode::OK,
             Json(serde_json::json!({"removed": true, "name": name})),
         ),
-        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": e}))),
+        Err(e) => {
+            let status = if e.contains("not installed") || e.contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(serde_json::json!({"error": e})))
+        }
     }
 }
 

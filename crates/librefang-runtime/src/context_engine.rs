@@ -441,8 +441,6 @@ impl ScriptableContextEngine {
         .map_err(|e| format!("Hook script failed: {e}"))?;
 
         // Parse response as JSON; wrap plain-text output gracefully
-        serde_json::from_str(&result.response)
-            .unwrap_or_else(|_| serde_json::json!({"text": result.response}));
         Ok(serde_json::from_str(&result.response)
             .unwrap_or_else(|_| serde_json::json!({"text": result.response})))
     }
