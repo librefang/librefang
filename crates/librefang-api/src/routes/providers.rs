@@ -433,7 +433,12 @@ pub async fn get_provider(
         )
         .await;
 
-        attach_probe_result(&mut entry, &probe, &provider.id, &state.kernel.model_catalog);
+        attach_probe_result(
+            &mut entry,
+            &probe,
+            &provider.id,
+            &state.kernel.model_catalog,
+        );
     } else if librefang_runtime::provider_health::is_local_provider(&provider.id) {
         entry["is_local"] = serde_json::json!(true);
     }

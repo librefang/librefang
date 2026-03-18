@@ -1092,7 +1092,7 @@ async fn parse_telegram_update(
         ChannelContent::Location { lat, lon }
     } else {
         // Unsupported message type (stickers, polls, etc.)
-        debug!("Telegram: dropping update {update_id} — unsupported message type (no text/photo/document/voice/location)");
+        debug!("Telegram: dropping update {update_id} — unsupported message type (no text/photo/document/voice/video/video_note/location)");
         return None;
     };
 

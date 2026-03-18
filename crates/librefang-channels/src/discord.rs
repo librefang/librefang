@@ -524,6 +524,9 @@ async fn parse_discord_message(
 
     // Determine content: first check for attachments, then fall back to text/commands.
     // If both text and attachments exist, attachments take priority (text goes into caption/metadata).
+    // NOTE: Attachments take priority over slash commands. If a user sends
+    // `/command args` with an attachment, the command text becomes the
+    // attachment caption rather than being parsed as a command.
     let content = if has_attachments {
         parse_discord_attachment(attachments.unwrap(), content_text)
     } else if content_text.starts_with('/') {
@@ -595,6 +598,12 @@ fn parse_discord_attachment(
     companion_text: &str,
 ) -> ChannelContent {
     // Take the first attachment (most common case; multi-attachment is rare for bots).
+    if attachments.len() > 1 {
+        warn!(
+            "Discord: {} additional attachment(s) ignored, only first processed",
+            attachments.len() - 1
+        );
+    }
     let att = match attachments.first() {
         Some(a) => a,
         None => {
@@ -640,6 +649,12 @@ fn parse_discord_attachment(
             duration_seconds: 0,
         }
     } else {
+        if !companion_text.is_empty() {
+            warn!(
+                "Discord file attachment has companion text that cannot be sent as caption: {:?}",
+                companion_text
+            );
+        }
         ChannelContent::File { url, filename }
     }
 }
