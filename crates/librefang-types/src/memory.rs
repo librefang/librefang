@@ -192,7 +192,7 @@ impl Default for ProactiveMemoryConfig {
 /// A relationship triple extracted from conversation (subject, relation, object).
 ///
 /// Example: ("Alice", "works_at", "Acme Corp")
-#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelationTriple {
     /// Subject entity name.
     pub subject: String,

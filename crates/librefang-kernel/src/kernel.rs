@@ -4997,7 +4997,9 @@ impl LibreFangKernel {
                                                 tracing::warn!(job = %job_name, timeout_s, "Cron workflow timed out");
                                                 kernel.cron_scheduler.record_failure(
                                                     job_id,
-                                                    &format!("workflow timed out after {timeout_s}s"),
+                                                    &format!(
+                                                        "workflow timed out after {timeout_s}s"
+                                                    ),
                                                 );
                                             }
                                         }

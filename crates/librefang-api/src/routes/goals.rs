@@ -272,7 +272,9 @@ pub async fn update_goal_by_id(
                 if !goals.iter().any(|g| g["id"].as_str() == Some(pid)) {
                     return (
                         StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({"error": format!("Parent goal '{}' not found", pid)})),
+                        Json(
+                            serde_json::json!({"error": format!("Parent goal '{}' not found", pid)}),
+                        ),
                     );
                 }
                 // Detect indirect cycles: walk ancestor chain from `pid` upward.
@@ -295,7 +297,9 @@ pub async fn update_goal_by_id(
                         Some(ref ap) if ap == &id => {
                             return (
                                 StatusCode::BAD_REQUEST,
-                                Json(serde_json::json!({"error": "Circular parent reference detected"})),
+                                Json(
+                                    serde_json::json!({"error": "Circular parent reference detected"}),
+                                ),
                             );
                         }
                         Some(ap) => ancestor = Some(ap),
