@@ -259,6 +259,8 @@ pub struct LibreFangKernel {
     /// Cached embeddings of hand descriptions for semantic routing.
     /// Maps hand_id → embedding vector. Populated lazily on first routing call.
     hand_desc_embeddings: tokio::sync::RwLock<Option<std::collections::HashMap<String, Vec<f32>>>>,
+    /// Pluggable context engine for memory recall, assembly, and compaction.
+    pub context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
 }
@@ -638,6 +640,10 @@ impl LibreFangKernel {
         for w in &warnings {
             warn!("Config: {}", w);
         }
+
+        // Initialise global HTTP proxy settings so all outbound reqwest
+        // clients pick up proxy configuration from config.toml / env vars.
+        librefang_runtime::http_client::init_proxy(config.proxy.clone());
 
         // Ensure data directory exists
         std::fs::create_dir_all(&config.data_dir)
@@ -1141,6 +1147,30 @@ impl LibreFangKernel {
             config.queue.concurrency.subagent_lane as u32,
         );
 
+        // Build the pluggable context engine from config
+        let context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>> = {
+            let ce_config = librefang_runtime::context_engine::ContextEngineConfig {
+                context_window_tokens: 200_000, // default, overridden per-agent at call time
+                stable_prefix_mode: config.stable_prefix_mode,
+                max_recall_results: 5,
+            };
+            let emb_arc: Option<
+                Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>,
+            > = embedding_driver.as_ref().map(Arc::clone);
+            let engine = librefang_runtime::context_engine::build_context_engine(
+                &config.context_engine,
+                ce_config,
+                memory.clone(),
+                emb_arc,
+            );
+            // TODO: Call engine.bootstrap(&ce_config).await here once Kernel::new
+            // is made async. Currently Kernel::new is synchronous so we cannot
+            // invoke the async bootstrap(). ScriptableContextEngine validates
+            // hook script paths in bootstrap — without this call, validation is
+            // deferred until the first hook invocation.
+            Some(engine)
+        };
+
         let kernel = Self {
             config,
             registry: AgentRegistry::new(),
@@ -1195,6 +1225,7 @@ impl LibreFangKernel {
             decision_traces: dashmap::DashMap::new(),
             command_queue,
             hand_desc_embeddings: tokio::sync::RwLock::new(None),
+            context_engine,
             self_handle: OnceLock::new(),
         };
 
@@ -2156,6 +2187,7 @@ impl LibreFangKernel {
                 Some(&kernel_clone.process_manager),
                 None, // content_blocks (streaming path uses text only for now)
                 kernel_clone.proactive_memory.get().cloned(),
+                kernel_clone.context_engine.as_deref(),
             )
             .await;
 
@@ -3169,6 +3201,7 @@ impl LibreFangKernel {
             Some(&self.process_manager),
             content_blocks,
             proactive_memory,
+            self.context_engine.as_deref(),
         )
         .await
         .map_err(KernelError::LibreFang)?;
@@ -3731,9 +3764,35 @@ impl LibreFangKernel {
         let driver = self.resolve_driver(&entry.manifest)?;
         let model = entry.manifest.model.model.clone();
 
-        let result = compact_session(driver, &model, &session, &config)
-            .await
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?;
+        // Resolve the agent's actual context window from the model catalog
+        let agent_ctx_window = self
+            .model_catalog
+            .read()
+            .ok()
+            .and_then(|cat| {
+                cat.find_model(&entry.manifest.model.model)
+                    .map(|m| m.context_window as usize)
+            })
+            .unwrap_or(200_000);
+
+        // Delegate to the context engine when available, otherwise fall back
+        // to the built-in compactor directly.
+        let result = if let Some(engine) = self.context_engine.as_deref() {
+            engine
+                .compact(
+                    agent_id,
+                    &session.messages,
+                    Arc::clone(&driver),
+                    &model,
+                    agent_ctx_window,
+                )
+                .await
+                .map_err(KernelError::LibreFang)?
+        } else {
+            compact_session(driver, &model, &session, &config)
+                .await
+                .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?
+        };
 
         // Store the LLM summary in the canonical session
         self.memory
@@ -6337,7 +6396,7 @@ async fn cron_deliver_response(
         }
         CronDelivery::Webhook { url } => {
             tracing::debug!(url = %url, "Cron: delivering via webhook");
-            let client = librefang_runtime::http_client::client_builder()
+            let client = librefang_runtime::http_client::proxied_client_builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build();
             if let Ok(client) = client {

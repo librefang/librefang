@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "0.5.6-20260317"
+    "version": "0.5.7-20260318"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -1692,6 +1692,39 @@
                 "schema": {}
               }
             }
+          }
+        }
+      }
+    },
+    "/api/approvals/{id}": {
+      "get": {
+        "tags": [
+          "approvals"
+        ],
+        "summary": "GET /api/approvals/{id} — Get a single approval request by ID.",
+        "operationId": "get_approval",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Approval ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Single approval request",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Approval not found"
           }
         }
       }
@@ -3807,6 +3840,42 @@
       }
     },
     "/api/integrations/{id}": {
+      "get": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "GET /api/integrations/:id — Get a single integration by ID.",
+        "operationId": "get_integration",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Integration ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Integration detail",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Integration not found",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "tags": [
           "integrations"
@@ -5160,6 +5229,37 @@
       }
     },
     "/api/sessions/{id}": {
+      "get": {
+        "tags": [
+          "sessions"
+        ],
+        "summary": "GET /api/sessions/:id — Get a single session by ID.",
+        "operationId": "get_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session found",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Session not found"
+          }
+        }
+      },
       "delete": {
         "tags": [
           "sessions"

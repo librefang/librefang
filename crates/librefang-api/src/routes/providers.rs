@@ -252,7 +252,7 @@ fn attach_probe_result(
     entry: &mut serde_json::Value,
     probe: &librefang_runtime::provider_health::ProbeResult,
     provider_id: &str,
-    catalog: &std::sync::RwLock<librefang_types::model_catalog::ModelCatalog>,
+    catalog: &std::sync::RwLock<librefang_runtime::model_catalog::ModelCatalog>,
 ) {
     entry["is_local"] = serde_json::json!(true);
     entry["reachable"] = serde_json::json!(probe.reachable);
@@ -865,7 +865,7 @@ pub async fn test_provider(
 
     let start = std::time::Instant::now();
     let api_key_val = api_key.unwrap_or_default();
-    let client = librefang_runtime::http_client::client_builder()
+    let client = librefang_runtime::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("HTTP client build");

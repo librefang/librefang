@@ -1372,7 +1372,7 @@ pub async fn test_channel(
 
 /// Send a real test message to a specific channel/chat on the given platform.
 async fn send_channel_test_message(channel_name: &str, target_id: &str) -> Result<(), String> {
-    let client = librefang_runtime::http_client::new_client();
+    let client = librefang_runtime::http_client::proxied_client();
     let test_msg = "LibreFang test message — your channel is connected!";
 
     match channel_name {

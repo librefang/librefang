@@ -1166,6 +1166,68 @@ impl Default for QueueConcurrencyConfig {
     }
 }
 
+/// HTTP proxy configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [proxy]
+/// http_proxy = "http://proxy.corp.example:8080"
+/// https_proxy = "http://proxy.corp.example:8080"
+/// no_proxy = "localhost,127.0.0.1,.internal.corp"
+/// ```
+///
+/// Environment variables `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` are also
+/// respected as fallbacks when the config fields are empty.
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// HTTP proxy URL (e.g. `http://proxy:8080`).
+    /// Falls back to `HTTP_PROXY` / `http_proxy` env var.
+    #[serde(default)]
+    pub http_proxy: Option<String>,
+    /// HTTPS proxy URL (e.g. `http://proxy:8080`).
+    /// Falls back to `HTTPS_PROXY` / `https_proxy` env var.
+    #[serde(default)]
+    pub https_proxy: Option<String>,
+    /// Comma-separated list of hosts/domains that should bypass the proxy.
+    /// Falls back to `NO_PROXY` / `no_proxy` env var.
+    #[serde(default)]
+    pub no_proxy: Option<String>,
+}
+
+impl std::fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field(
+                "http_proxy",
+                &self.http_proxy.as_deref().map(redact_proxy_url),
+            )
+            .field(
+                "https_proxy",
+                &self.https_proxy.as_deref().map(redact_proxy_url),
+            )
+            .field("no_proxy", &self.no_proxy)
+            .finish()
+    }
+}
+
+/// Redact credentials from a proxy URL for safe logging.
+///
+/// Turns `http://user:pass@host:port/path` into `http://***@host:port/path`.
+/// Returns the URL unchanged if it contains no `@` (no credentials).
+pub fn redact_proxy_url(url: &str) -> String {
+    // Find the scheme separator "://"
+    if let Some(scheme_end) = url.find("://") {
+        let after_scheme = &url[scheme_end + 3..];
+        // If there is an `@`, credentials are present before it
+        if let Some(at_pos) = after_scheme.find('@') {
+            let host_and_rest = &after_scheme[at_pos..]; // includes '@'
+            return format!("{}://***{}", &url[..scheme_end], host_and_rest);
+        }
+    }
+    url.to_string()
+}
+
 /// Top-level kernel configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1312,6 +1374,9 @@ pub struct KernelConfig {
     /// Sidecar channel adapters (external process-based).
     #[serde(default)]
     pub sidecar_channels: Vec<SidecarChannelConfig>,
+    /// HTTP proxy configuration for all outbound connections.
+    #[serde(default)]
+    pub proxy: ProxyConfig,
     /// Enable LLM provider prompt caching (default: true).
     ///
     /// When enabled, the runtime adds provider-specific cache hints to system
@@ -1335,6 +1400,9 @@ pub struct KernelConfig {
     /// Proactive memory (mem0-style) configuration.
     #[serde(default)]
     pub proactive_memory: crate::memory::ProactiveMemoryConfig,
+    /// Pluggable context engine configuration.
+    #[serde(default)]
+    pub context_engine: ContextEngineTomlConfig,
 }
 
 /// Vertex AI provider configuration.
@@ -1403,6 +1471,106 @@ pub struct VertexAiConfig {
 /// token_url = "https://github.com/login/oauth/access_token"
 /// userinfo_url = "https://api.github.com/user"
 /// client_id = "your-github-client-id"
+/// Pluggable context engine configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [context_engine]
+/// engine = "default"     # built-in engine: "default"
+///
+/// [context_engine.hooks]
+/// ingest = "~/.librefang/plugins/my_recall.py"
+/// after_turn = "~/.librefang/plugins/my_indexer.py"
+/// ```
+///
+/// Heavy hooks (`assemble`, `compact`) always run in Rust for performance.
+/// Light hooks (`ingest`, `after_turn`) can be overridden with Python scripts
+/// using the same JSON stdin/stdout protocol as Python agents.
+///
+/// # Usage
+///
+/// **Simple (plugin-based):**
+/// ```toml
+/// [context_engine]
+/// plugin = "qdrant-recall"   # resolves to ~/.librefang/plugins/qdrant-recall/
+/// ```
+///
+/// **Manual (direct hook paths):**
+/// ```toml
+/// [context_engine.hooks]
+/// ingest = "~/.librefang/scripts/my_recall.py"
+/// after_turn = "~/.librefang/scripts/my_indexer.py"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextEngineTomlConfig {
+    /// Built-in engine name. Default: `"default"`.
+    pub engine: String,
+    /// Plugin name. Resolves to `~/.librefang/plugins/<name>/plugin.toml`.
+    /// Takes precedence over manual `hooks` if set.
+    pub plugin: Option<String>,
+    /// Optional Python script hooks that override specific lifecycle methods.
+    pub hooks: ContextEngineHooks,
+}
+
+impl Default for ContextEngineTomlConfig {
+    fn default() -> Self {
+        Self {
+            engine: "default".to_string(),
+            plugin: None,
+            hooks: ContextEngineHooks::default(),
+        }
+    }
+}
+
+/// Python script overrides for individual context engine lifecycle hooks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextEngineHooks {
+    /// Python script for the `ingest` hook (called on new user message).
+    /// Receives: `{"type": "ingest", "agent_id": "...", "message": "..."}`
+    /// Returns: `{"type": "ingest_result", "memories": [{"content": "..."}]}`
+    pub ingest: Option<String>,
+    /// Python script for the `after_turn` hook (called after each turn).
+    /// Receives: `{"type": "after_turn", "agent_id": "...", "messages": [...]}`
+    /// Returns: `{"type": "ok"}` (acknowledgement)
+    pub after_turn: Option<String>,
+}
+
+/// Plugin manifest — parsed from `~/.librefang/plugins/<name>/plugin.toml`.
+///
+/// # Example `plugin.toml`
+///
+/// ```toml
+/// name = "qdrant-recall"
+/// version = "0.1.0"
+/// description = "Vector recall via Qdrant"
+/// author = "librefang"
+///
+/// [hooks]
+/// ingest = "hooks/ingest.py"      # relative to plugin dir
+/// after_turn = "hooks/after_turn.py"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginManifest {
+    /// Plugin name (must match directory name).
+    pub name: String,
+    /// Semver version string.
+    pub version: String,
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Plugin author.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Hook script paths, relative to the plugin directory.
+    #[serde(default)]
+    pub hooks: ContextEngineHooks,
+    /// Python dependencies file (relative to plugin dir, default: `requirements.txt`).
+    #[serde(default)]
+    pub requirements: Option<String>,
+}
+
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"
 /// scopes = ["read:user", "user:email"]
 /// ```
@@ -1779,12 +1947,14 @@ impl Default for KernelConfig {
             vertex_ai: VertexAiConfig::default(),
             oauth: OAuthConfig::default(),
             sidecar_channels: Vec::new(),
+            proxy: ProxyConfig::default(),
             prompt_caching: default_prompt_caching(),
             session: SessionConfig::default(),
             queue: QueueConfig::default(),
             external_auth: ExternalAuthConfig::default(),
             tool_policy: crate::tool_policy::ToolPolicy::default(),
             proactive_memory: crate::memory::ProactiveMemoryConfig::default(),
+            context_engine: ContextEngineTomlConfig::default(),
         }
     }
 }
@@ -2927,6 +3097,11 @@ impl Default for BlueskyConfig {
 }
 
 /// Feishu/Lark Open Platform channel adapter configuration.
+///
+/// Feishu (CN) and Lark (international) share the same API — set `region` to
+/// `"intl"` for Lark or `"cn"` (default) for Feishu. The `receive_mode` field
+/// controls whether the adapter uses a webhook HTTP server or a long-lived
+/// WebSocket connection (default) to receive events.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FeishuConfig {
@@ -2934,8 +3109,20 @@ pub struct FeishuConfig {
     pub app_id: String,
     /// Env var name holding the app secret.
     pub app_secret_env: String,
-    /// Port for the incoming webhook.
+    /// API region: `"cn"` for Feishu (default) or `"intl"` for Lark.
+    #[serde(default)]
+    pub region: String,
+    /// How to receive inbound events: `"websocket"` (default) or `"webhook"`.
+    #[serde(default = "default_receive_mode")]
+    pub receive_mode: String,
+    /// Port for the incoming webhook (only used when `receive_mode = "webhook"`).
     pub webhook_port: u16,
+    /// Verification token for webhook event validation (webhook mode only).
+    #[serde(default)]
+    pub verification_token: Option<String>,
+    /// Encrypt key for webhook event decryption (webhook mode only).
+    #[serde(default)]
+    pub encrypt_key: Option<String>,
     /// Unique identifier for this bot instance (used for multi-bot routing).
     #[serde(default)]
     pub account_id: Option<String>,
@@ -2946,12 +3133,20 @@ pub struct FeishuConfig {
     pub overrides: ChannelOverrides,
 }
 
+fn default_receive_mode() -> String {
+    "websocket".to_string()
+}
+
 impl Default for FeishuConfig {
     fn default() -> Self {
         Self {
             app_id: String::new(),
             app_secret_env: "FEISHU_APP_SECRET".to_string(),
+            region: "cn".to_string(),
+            receive_mode: "websocket".to_string(),
             webhook_port: 8453,
+            verification_token: None,
+            encrypt_key: None,
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
@@ -4677,5 +4872,48 @@ mod tests {
         assert!(SignalConfig::default().account_id.is_none());
         assert!(MatrixConfig::default().account_id.is_none());
         assert!(EmailConfig::default().account_id.is_none());
+    }
+
+    #[test]
+    fn test_redact_proxy_url_with_credentials() {
+        assert_eq!(
+            redact_proxy_url("http://user:pass@proxy.example.com:8080"),
+            "http://***@proxy.example.com:8080"
+        );
+    }
+
+    #[test]
+    fn test_redact_proxy_url_without_credentials() {
+        assert_eq!(
+            redact_proxy_url("http://proxy.example.com:8080"),
+            "http://proxy.example.com:8080"
+        );
+    }
+
+    #[test]
+    fn test_redact_proxy_url_empty() {
+        assert_eq!(redact_proxy_url(""), "");
+    }
+
+    #[test]
+    fn test_proxy_config_debug_redacts_credentials() {
+        let cfg = ProxyConfig {
+            http_proxy: Some("http://admin:secret@proxy:8080".to_string()),
+            https_proxy: Some("http://proxy:8080".to_string()),
+            no_proxy: Some("localhost".to_string()),
+        };
+        let debug = format!("{:?}", cfg);
+        assert!(
+            !debug.contains("secret"),
+            "credentials leaked in Debug output: {debug}"
+        );
+        assert!(
+            !debug.contains("admin"),
+            "username leaked in Debug output: {debug}"
+        );
+        assert!(
+            debug.contains("***"),
+            "Debug output should contain redacted marker"
+        );
     }
 }

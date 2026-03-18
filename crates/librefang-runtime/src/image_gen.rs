@@ -30,7 +30,7 @@ pub async fn generate_image(request: &ImageGenRequest) -> Result<ImageGenResult,
         body["quality"] = serde_json::json!(request.quality);
     }
 
-    let client = crate::http_client::new_client();
+    let client = crate::http_client::proxied_client();
     let response = client
         .post("https://api.openai.com/v1/images/generations")
         .header("Authorization", format!("Bearer {}", api_key))

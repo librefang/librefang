@@ -650,6 +650,7 @@ pub fn inject_attachments_into_session(
     session.messages.push(Message {
         role: Role::User,
         content: MessageContent::Blocks(image_blocks),
+        pinned: false,
     });
 
     if let Err(e) = kernel.memory.save_session(&session) {
@@ -667,7 +668,7 @@ pub async fn resolve_url_attachments(
 ) -> Vec<librefang_types::message::ContentBlock> {
     use base64::Engine;
 
-    let client = librefang_runtime::http_client::client_builder()
+    let client = librefang_runtime::http_client::proxied_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .expect("HTTP client build");

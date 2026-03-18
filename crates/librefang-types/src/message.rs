@@ -9,6 +9,13 @@ pub struct Message {
     pub role: Role,
     /// The content of the message.
     pub content: MessageContent,
+    /// Whether this message is pinned (protected from overflow trimming).
+    ///
+    /// Pinned messages are preserved during context overflow recovery,
+    /// ensuring critical early messages (system constraints, user rules,
+    /// important context) are not lost when trimming.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 /// The role of a message sender in an LLM conversation.
@@ -177,6 +184,7 @@ impl Message {
         Self {
             role: Role::System,
             content: MessageContent::Text(content.into()),
+            pinned: false,
         }
     }
 
@@ -185,6 +193,7 @@ impl Message {
         Self {
             role: Role::User,
             content: MessageContent::Text(content.into()),
+            pinned: false,
         }
     }
 
@@ -193,6 +202,7 @@ impl Message {
         Self {
             role: Role::User,
             content: MessageContent::Blocks(blocks),
+            pinned: false,
         }
     }
 
@@ -201,6 +211,7 @@ impl Message {
         Self {
             role: Role::Assistant,
             content: MessageContent::Text(content.into()),
+            pinned: false,
         }
     }
 }
