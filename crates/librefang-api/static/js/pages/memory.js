@@ -116,10 +116,15 @@ function memoryPage() {
       LibreFangAPI.request('GET', this.listEndpoint).then(function(data) {
         self.memories = data.memories || [];
         self.totalMemories = data.total || self.memories.length;
+        // Clamp offset if total shrunk (e.g. memories deleted by another tab)
+        if (self.pageOffset >= self.totalMemories && self.totalMemories > 0) {
+          self.pageOffset = Math.max(0, (Math.ceil(self.totalMemories / self.pageLimit) - 1) * self.pageLimit);
+        }
         self.loading = false;
       }).catch(function() {
         self.memories = [];
         self.totalMemories = 0;
+        self.pageOffset = 0;
         self.loading = false;
       });
     },

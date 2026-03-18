@@ -165,7 +165,17 @@ impl SemanticStore {
                 params.push(Box::new(before.to_rfc3339()));
                 param_idx += 1;
             }
-            // TODO: metadata filtering not yet implemented (requires JSON field extraction)
+            // Metadata filtering via json_extract
+            for (key, value) in &f.metadata {
+                if let Some(s) = value.as_str() {
+                    sql.push_str(&format!(
+                        " AND json_extract(metadata, '$.{}') = ?{param_idx}",
+                        key.replace('\'', "''")
+                    ));
+                    params.push(Box::new(s.to_string()));
+                    param_idx += 1;
+                }
+            }
             let _ = param_idx;
         }
 
@@ -611,6 +621,59 @@ impl SemanticStore {
         }
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(count as u64)
+    }
+
+    /// Count non-deleted memories grouped by category (from JSON metadata).
+    ///
+    /// For a specific agent, pass `Some(agent_id)`. For global stats, pass `None`.
+    /// Uses `json_extract` to avoid loading all rows into memory.
+    pub fn count_by_category(
+        &self,
+        agent_id: Option<AgentId>,
+    ) -> LibreFangResult<HashMap<String, usize>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
+            if let Some(aid) = agent_id {
+                (
+                    "SELECT json_extract(metadata, '$.category') AS cat, COUNT(*) \
+                     FROM memories WHERE agent_id = ?1 AND deleted = 0 AND cat IS NOT NULL \
+                     GROUP BY cat"
+                        .to_string(),
+                    vec![Box::new(aid.0.to_string())],
+                )
+            } else {
+                (
+                    "SELECT json_extract(metadata, '$.category') AS cat, COUNT(*) \
+                     FROM memories WHERE deleted = 0 AND cat IS NOT NULL \
+                     GROUP BY cat"
+                        .to_string(),
+                    vec![],
+                )
+            };
+
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                let cat: String = row.get(0)?;
+                let count: i64 = row.get(1)?;
+                Ok((cat, count as usize))
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let mut map = HashMap::new();
+        for row in rows {
+            let (cat, count) = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            map.insert(cat, count);
+        }
+        Ok(map)
     }
 }
 

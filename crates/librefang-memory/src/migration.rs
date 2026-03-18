@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 8;
+const SCHEMA_VERSION: u32 = 9;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -41,6 +41,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 8 {
         migrate_v8(conn)?;
+    }
+
+    if current_version < 9 {
+        migrate_v9(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -323,6 +327,29 @@ fn migrate_v8(conn: &Connection) -> Result<(), rusqlite::Error> {
 
         INSERT OR IGNORE INTO migrations (version, applied_at, description)
         VALUES (8, datetime('now'), 'Add audit_entries table for persistent Merkle audit trail');
+        ",
+    )?;
+    Ok(())
+}
+
+/// Version 9: Add performance indexes for proactive memory queries.
+fn migrate_v9(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        -- Composite index for recall ordering (confidence DESC, accessed_at DESC)
+        CREATE INDEX IF NOT EXISTS idx_memories_confidence_accessed
+            ON memories(deleted, agent_id, confidence DESC, accessed_at DESC);
+
+        -- Index for confidence decay queries (accessed_at filtering on non-deleted)
+        CREATE INDEX IF NOT EXISTS idx_memories_decay
+            ON memories(deleted, accessed_at);
+
+        -- Index for lowest-confidence eviction queries
+        CREATE INDEX IF NOT EXISTS idx_memories_eviction
+            ON memories(deleted, agent_id, confidence ASC, created_at ASC);
+
+        INSERT OR IGNORE INTO migrations (version, applied_at, description)
+        VALUES (9, datetime('now'), 'Add performance indexes for proactive memory queries');
         ",
     )?;
     Ok(())

@@ -436,6 +436,27 @@ impl ProactiveMemoryStore {
         }
     }
 
+    /// Run periodic maintenance tasks (decay + session cleanup) if enough time has elapsed.
+    ///
+    /// This is safe to call frequently — each sub-task is rate-limited to at most once per hour.
+    /// Called from search, auto_retrieve, and consolidate to ensure maintenance happens
+    /// regardless of which code path is exercised.
+    fn maybe_run_maintenance(&self) {
+        self.maybe_decay_confidence();
+        self.maybe_cleanup_expired();
+
+        // Prevent unbounded growth of consolidation_counters HashMap.
+        // Agents that call auto_memorize < 10 times accumulate stale entries.
+        if let Ok(mut counters) = self.consolidation_counters.lock() {
+            if counters.len() > 1000 {
+                let mut entries: Vec<(String, u32)> = counters.drain().collect();
+                entries.sort_by(|a, b| b.1.cmp(&a.1));
+                entries.truncate(500);
+                *counters = entries.into_iter().collect();
+            }
+        }
+    }
+
     /// Export all memories for an agent as a flat JSON-serializable list.
     pub fn export_all(&self, agent_id: &str) -> LibreFangResult<Vec<MemoryExportItem>> {
         let aid = Self::parse_agent_id(agent_id)?;
@@ -467,7 +488,10 @@ impl ProactiveMemoryStore {
                     confidence: frag.confidence as f64,
                     created_at: frag.created_at.to_rfc3339(),
                     updated_at,
-                    metadata: serde_json::to_value(&frag.metadata).unwrap_or_default(),
+                    metadata: serde_json::to_value(&frag.metadata).unwrap_or_else(|e| {
+                        tracing::warn!("Failed to serialize metadata during export: {e}");
+                        serde_json::Value::Object(Default::default())
+                    }),
                 }
             })
             .collect();
@@ -1049,14 +1073,8 @@ impl ProactiveMemoryStore {
         let agent_count = self.semantic.count(agent_id, Some(scopes::AGENT))? as usize;
         let total = user_count + session_count + agent_count;
 
-        // For category breakdown, still need to load items (categories are in metadata)
-        let all_items = self.retrieve_memory_items(agent_id, None, None)?;
-        let mut categories: HashMap<String, usize> = HashMap::new();
-        for item in &all_items {
-            if let Some(ref cat) = item.category {
-                *categories.entry(cat.clone()).or_default() += 1;
-            }
-        }
+        // Use SQL GROUP BY to count categories without loading all items into memory
+        let categories = self.semantic.count_by_category(Some(agent_id))?;
 
         Ok(MemoryStats {
             total,
@@ -1079,15 +1097,8 @@ impl ProactiveMemoryStore {
         let agent_count = self.semantic.count_all(Some(scopes::AGENT))? as usize;
         let total = user_count + session_count + agent_count;
 
-        // For category breakdown, use semantic recall with no agent filter
-        // Limit to 10000 to avoid unbounded queries; increase if needed
-        let all_frags = self.semantic.recall("", 10_000, None)?;
-        let mut categories: HashMap<String, usize> = HashMap::new();
-        for frag in &all_frags {
-            if let Some(cat) = frag.metadata.get("category").and_then(|v| v.as_str()) {
-                *categories.entry(cat.to_string()).or_default() += 1;
-            }
-        }
+        // Use SQL GROUP BY to count categories without loading all items into memory
+        let categories = self.semantic.count_by_category(None)?;
 
         Ok(MemoryStats {
             total,
@@ -1328,6 +1339,7 @@ impl ProactiveMemoryStore {
     ///
     /// Returns the number of memories merged (soft-deleted).
     pub async fn consolidate(&self, user_id: &str) -> LibreFangResult<u64> {
+        self.maybe_run_maintenance();
         let agent_id = Self::parse_agent_id(user_id)?;
         let groups = self.find_duplicates(user_id, None).await?;
         let mut merged_count = 0u64;
@@ -1338,7 +1350,9 @@ impl ProactiveMemoryStore {
             }
 
             // Keep the most recently created one as the "winner"
-            let winner = group.iter().max_by_key(|m| m.created_at).cloned().unwrap();
+            let Some(winner) = group.iter().max_by_key(|m| m.created_at).cloned() else {
+                continue;
+            };
 
             // Soft-delete all others
             for item in &group {
@@ -1501,6 +1515,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
         user_id: &str,
         limit: usize,
     ) -> LibreFangResult<Vec<MemoryItem>> {
+        self.maybe_run_maintenance();
         let agent_id = Self::parse_agent_id(user_id)?;
 
         // Filter by agent to avoid cross-agent leakage
@@ -2094,11 +2109,8 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
             return Ok(Vec::new());
         }
 
-        // Run confidence decay at most once per hour
-        self.maybe_decay_confidence();
-
-        // Run session TTL cleanup at most once per hour
-        self.maybe_cleanup_expired();
+        // Run periodic maintenance (decay + session TTL cleanup), rate-limited
+        self.maybe_run_maintenance();
 
         let agent_id = Self::parse_agent_id(user_id)?;
 

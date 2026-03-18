@@ -66,6 +66,15 @@ fn default_user_id() -> String {
     "00000000-0000-0000-0000-000000000000".to_string()
 }
 
+/// Log the full error server-side but return a generic message to the client.
+fn internal_error(e: impl std::fmt::Display) -> (StatusCode, Json<serde_json::Value>) {
+    tracing::error!("Memory operation failed: {e}");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({"error": "Internal server error"})),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/memory/search?q=...&limit=10
 // ---------------------------------------------------------------------------
@@ -97,10 +106,7 @@ pub async fn memory_search(
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -147,10 +153,7 @@ pub async fn memory_list(
                 })),
             )
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -180,10 +183,7 @@ pub async fn memory_get_user(
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -220,10 +220,7 @@ pub async fn memory_add(
             StatusCode::CREATED,
             Json(serde_json::json!({ "added": items.len(), "memories": items })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -267,10 +264,7 @@ pub async fn memory_update(
             );
         }
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            );
+            return internal_error(e);
         }
     };
 
@@ -286,10 +280,7 @@ pub async fn memory_update(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Memory not found"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -324,10 +315,7 @@ pub async fn memory_delete(
             );
         }
         Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e.to_string()})),
-            );
+            return internal_error(e);
         }
     };
 
@@ -340,10 +328,7 @@ pub async fn memory_delete(
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Memory not found"})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -367,10 +352,7 @@ pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
     // Aggregate stats across ALL agents so the dashboard shows global totals
     match store.stats_all().await {
         Ok(stats) => (StatusCode::OK, Json(serde_json::json!(stats))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -400,10 +382,7 @@ pub async fn memory_reset_agent(
             StatusCode::OK,
             Json(serde_json::json!({"reset": true, "deleted_count": count})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -459,10 +438,7 @@ pub async fn memory_clear_level(
                 "deleted_count": count,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -510,10 +486,7 @@ pub async fn memory_list_agent(
                 })),
             )
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -549,10 +522,7 @@ pub async fn memory_search_agent(
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -579,10 +549,7 @@ pub async fn memory_stats_agent(
 
     match store.stats(&agent_id).await {
         Ok(stats) => (StatusCode::OK, Json(serde_json::json!(stats))),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -615,10 +582,7 @@ pub async fn memory_duplicates(
                 "groups": groups,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -655,10 +619,7 @@ pub async fn memory_history(
                 })),
             )
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -691,10 +652,7 @@ pub async fn memory_consolidate(
                 "merged_count": merged,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -727,10 +685,7 @@ pub async fn memory_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResp
                 "session_ttl_hours": store.config().session_ttl_hours,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -764,10 +719,7 @@ pub async fn memory_export_agent(
                 "memories": items,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
 
@@ -802,9 +754,6 @@ pub async fn memory_import_agent(
                 "agent_id": agent_id,
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
-        ),
+        Err(e) => internal_error(e),
     }
 }
