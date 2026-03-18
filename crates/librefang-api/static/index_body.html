@@ -4596,6 +4596,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <button @click="toggleAddForm()" class="btn btn-secondary" :class="{ 'btn-primary': showAddForm }" x-text="t('memoryPage.addMemory', 'Add Memory')">Add Memory</button>
           <button @click="consolidateAgent()" class="btn btn-secondary" x-show="selectedAgentId" x-text="t('memoryPage.consolidate', 'Consolidate')">Consolidate</button>
           <button @click="cleanupExpired()" class="btn btn-secondary" x-text="t('memoryPage.cleanup', 'Cleanup Expired')">Cleanup Expired</button>
+          <button @click="bulkDelete()" class="btn btn-danger" x-show="selectedIds.length > 0" x-text="'Delete ' + selectedIds.length + ' selected'">Delete selected</button>
         </div>
 
         <!-- Manual memory creation form -->
@@ -4618,6 +4619,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <table class="data-table">
             <thead>
               <tr>
+                <th style="width:32px"><input type="checkbox" @change="selectAll()" :checked="selectedIds.length === memories.length && memories.length > 0"></th>
                 <th data-i18n="memoryPage.content">Content</th>
                 <th data-i18n="memoryPage.level">Level</th>
                 <th data-i18n="memoryPage.category">Category</th>
@@ -4628,6 +4630,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             <tbody>
               <template x-for="mem in memories" :key="mem.id">
                 <tr>
+                  <td><input type="checkbox" :checked="selectedIds.indexOf(mem.id) !== -1" @change="toggleSelect(mem.id)"></td>
                   <td x-text="mem.content" style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></td>
                   <td><span class="badge" :class="'badge-' + mem.level" x-text="mem.level"></span></td>
                   <td x-text="mem.category || '—'" style="color:var(--text-secondary)"></td>

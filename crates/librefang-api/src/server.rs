@@ -224,6 +224,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::post(routes::memory_cleanup),
         )
         .route(
+            "/memory/bulk-delete",
+            axum::routing::post(routes::memory_bulk_delete),
+        )
+        .route(
             "/memory/items/{memory_id}",
             axum::routing::put(routes::memory_update).delete(routes::memory_delete),
         )

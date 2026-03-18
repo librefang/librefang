@@ -333,6 +333,66 @@ pub async fn memory_delete(
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/memory/bulk-delete — Delete multiple memories at once
+// ---------------------------------------------------------------------------
+
+/// Bulk-delete multiple memories by ID.
+#[utoipa::path(
+    post,
+    path = "/api/memory/bulk-delete",
+    tag = "proactive-memory",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Bulk delete results", body = serde_json::Value))
+)]
+pub async fn memory_bulk_delete(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let store = match get_pm_store(&state) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    let ids: Vec<String> = match body.get("ids").and_then(|v| v.as_array()) {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing 'ids' array"})),
+            );
+        }
+    };
+
+    let mut deleted = 0usize;
+    let mut failed = 0usize;
+    for id in &ids {
+        let agent_id = match store.find_agent_id_for_memory(id) {
+            Ok(Some(aid)) => aid.0.to_string(),
+            _ => {
+                failed += 1;
+                continue;
+            }
+        };
+        match store.delete(id, &agent_id).await {
+            Ok(true) => deleted += 1,
+            _ => failed += 1,
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "deleted": deleted,
+            "failed": failed,
+            "total": ids.len(),
+        })),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/memory/stats
 // ---------------------------------------------------------------------------
 

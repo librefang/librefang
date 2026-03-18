@@ -19,6 +19,9 @@ function memoryPage() {
     agents: [],
     selectedAgentId: '',
 
+    // Bulk selection
+    selectedIds: [],
+
     // Manual memory creation form
     showAddForm: false,
     addForm: { content: '' },
@@ -233,6 +236,33 @@ function memoryPage() {
         self.loadMemories();
       }).catch(function() {
         LibreFangToast.error(self.t('memoryPage.cleanupFailed', 'Failed to cleanup'));
+      });
+    },
+
+    toggleSelect: function(id) {
+      var idx = this.selectedIds.indexOf(id);
+      if (idx === -1) { this.selectedIds.push(id); } else { this.selectedIds.splice(idx, 1); }
+    },
+
+    selectAll: function() {
+      if (this.selectedIds.length === this.memories.length) {
+        this.selectedIds = [];
+      } else {
+        this.selectedIds = this.memories.map(function(m) { return m.id; });
+      }
+    },
+
+    bulkDelete: function() {
+      var self = this;
+      if (!self.selectedIds.length) return;
+      if (!confirm(self.t('memoryPage.confirmBulkDelete', 'Delete {count} selected memories?', { count: self.selectedIds.length }))) return;
+      LibreFangAPI.request('POST', '/api/memory/bulk-delete', { ids: self.selectedIds }).then(function(data) {
+        LibreFangToast.success(self.t('memoryPage.bulkDeleted', '{count} memories deleted', { count: data.deleted || 0 }));
+        self.selectedIds = [];
+        self.loadStats();
+        self.loadMemories();
+      }).catch(function() {
+        LibreFangToast.error(self.t('memoryPage.bulkDeleteFailed', 'Failed to delete selected memories'));
       });
     }
   };
