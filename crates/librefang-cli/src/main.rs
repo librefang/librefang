@@ -2703,14 +2703,15 @@ fn cmd_agent_chat(config: Option<PathBuf>, agent_id_str: &str) {
 
 fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
     if let Some(base) = find_daemon() {
+        let agent_id = resolve_agent_id(&base, agent_id_str);
         let client = daemon_client();
         let body = daemon_json(
             client
-                .delete(format!("{base}/api/agents/{agent_id_str}"))
+                .delete(format!("{base}/api/agents/{agent_id}"))
                 .send(),
         );
         if body.get("status").is_some() {
-            println!("{}", i18n::t_args("agent-killed", &[("id", agent_id_str)]));
+            println!("{}", i18n::t_args("agent-killed", &[("id", &agent_id)]));
         } else {
             eprintln!(
                 "{}",
@@ -7753,12 +7754,37 @@ fn cmd_webhooks_test(id: &str) {
     }
 }
 
+/// Resolve an agent name-or-id to a UUID by querying the daemon.
+fn resolve_agent_id(base: &str, name_or_id: &str) -> String {
+    if uuid::Uuid::try_parse(name_or_id).is_ok() {
+        return name_or_id.to_string();
+    }
+    let client = daemon_client();
+    let body = daemon_json(client.get(format!("{base}/api/agents")).send());
+    let agents = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array());
+    if let Some(arr) = agents {
+        if let Some(agent) = arr
+            .iter()
+            .find(|a| a["name"].as_str() == Some(name_or_id))
+        {
+            if let Some(id) = agent["id"].as_str() {
+                return id.to_string();
+            }
+        }
+    }
+    name_or_id.to_string()
+}
+
 fn cmd_message(agent: &str, text: &str, json: bool) {
     let base = require_daemon("message");
+    let agent_id = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
-            .post(format!("{base}/api/agents/{agent}/message"))
+            .post(format!("{base}/api/agents/{agent_id}/message"))
             .json(&serde_json::json!({"message": text}))
             .send(),
     );
