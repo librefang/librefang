@@ -346,11 +346,11 @@ impl ProactiveMemoryStore {
                 })?;
                 let old_mid = MemoryId(old_uuid);
 
-                // Capture old content for version history before overwriting
-                let old_content = self
-                    .semantic
-                    .get_by_id(old_mid, false)?
-                    .map(|f| f.content)
+                // Single fetch to avoid TOCTOU race between reading content and metadata
+                let old_frag = self.semantic.get_by_id(old_mid, false)?;
+                let old_content = old_frag
+                    .as_ref()
+                    .map(|f| f.content.clone())
                     .unwrap_or_default();
 
                 let mut metadata = item.metadata.clone();
@@ -366,7 +366,7 @@ impl ProactiveMemoryStore {
                 );
 
                 // Build version history chain
-                if let Some(old_frag) = self.semantic.get_by_id(old_mid, false)? {
+                if let Some(ref old_frag) = old_frag {
                     if let Some(existing_history) = old_frag.metadata.get("version_history") {
                         // Append to existing history
                         let mut history = existing_history.clone();
@@ -605,6 +605,125 @@ impl ProactiveMemoryStore {
             auto_retrieve_enabled: self.config.auto_retrieve,
             llm_extraction: self.config.extraction_model.is_some(),
         })
+    }
+
+    /// Get memory statistics across ALL agents.
+    ///
+    /// Used by the dashboard to show global memory stats.
+    pub async fn stats_all(&self) -> LibreFangResult<MemoryStats> {
+        let user_count = self.semantic.count_all(Some(scopes::USER))? as usize;
+        let session_count = self.semantic.count_all(Some(scopes::SESSION))? as usize;
+        let agent_count = self.semantic.count_all(Some(scopes::AGENT))? as usize;
+        let total = user_count + session_count + agent_count;
+
+        // For category breakdown, use semantic recall with no agent filter
+        let all_frags = self.semantic.recall("", 500, None)?;
+        let mut categories: HashMap<String, usize> = HashMap::new();
+        for frag in &all_frags {
+            if let Some(cat) = frag.metadata.get("category").and_then(|v| v.as_str()) {
+                *categories.entry(cat.to_string()).or_default() += 1;
+            }
+        }
+
+        Ok(MemoryStats {
+            total,
+            user_count,
+            session_count,
+            agent_count,
+            categories,
+            auto_memorize_enabled: self.config.auto_memorize,
+            auto_retrieve_enabled: self.config.auto_retrieve,
+            llm_extraction: self.config.extraction_model.is_some(),
+        })
+    }
+
+    /// List memories across ALL agents, optionally filtered by category.
+    ///
+    /// Used by the dashboard to show all memories without agent scoping.
+    pub async fn list_all(&self, category: Option<&str>) -> LibreFangResult<Vec<MemoryItem>> {
+        // Use semantic recall with no agent filter to get all memories
+        let results = self.semantic.recall("", 500, None)?;
+
+        let items: Vec<MemoryItem> = results
+            .into_iter()
+            .filter(|frag| {
+                if let Some(target_cat) = category {
+                    frag.metadata.get("category").and_then(|v| v.as_str()) == Some(target_cat)
+                } else {
+                    true
+                }
+            })
+            .map(|frag| {
+                let level = MemoryLevel::from(frag.scope.as_str());
+                MemoryItem {
+                    id: frag.id.to_string(),
+                    content: frag.content,
+                    level,
+                    category: frag
+                        .metadata
+                        .get("category")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    metadata: frag.metadata,
+                    created_at: frag.created_at,
+                }
+            })
+            .collect();
+
+        Ok(items)
+    }
+
+    /// Search memories across ALL agents by semantic similarity.
+    ///
+    /// Used by the dashboard to search all memories without agent scoping.
+    pub async fn search_all(&self, query: &str, limit: usize) -> LibreFangResult<Vec<MemoryItem>> {
+        // Use vector search if embedding driver available, with no agent filter
+        let results = if let Some(ref emb) = self.embedding {
+            if let Ok(qe) = emb.embed_one(query).await {
+                self.semantic
+                    .recall_with_embedding(query, limit, None, Some(&qe))?
+            } else {
+                self.semantic.recall(query, limit, None)?
+            }
+        } else {
+            self.semantic.recall(query, limit, None)?
+        };
+
+        let items: Vec<MemoryItem> = results
+            .into_iter()
+            .map(|frag| {
+                let level = MemoryLevel::from(frag.scope.as_str());
+                MemoryItem {
+                    id: frag.id.to_string(),
+                    content: frag.content,
+                    level,
+                    category: frag
+                        .metadata
+                        .get("category")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    metadata: frag.metadata,
+                    created_at: frag.created_at,
+                }
+            })
+            .take(limit)
+            .collect();
+
+        Ok(items)
+    }
+
+    /// Look up the real agent_id for a memory by its ID.
+    ///
+    /// Used by delete/update handlers that don't know which agent owns the memory.
+    pub fn find_agent_id_for_memory(&self, memory_id: &str) -> LibreFangResult<Option<AgentId>> {
+        let uuid = uuid::Uuid::parse_str(memory_id)
+            .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
+        let mid = MemoryId(uuid);
+
+        match self.semantic.get_by_id(mid, false)? {
+            Some(frag) => Ok(Some(frag.agent_id)),
+            None => Ok(None),
+        }
     }
 
     /// Reset (soft-delete) ALL memories for a user/agent.
@@ -1036,6 +1155,14 @@ impl ProactiveMemory for ProactiveMemoryStore {
             level.scope_str(),
             HashMap::new(),
         )?;
+
+        // Also store in KV so get()/list()/stats() can find it
+        let item = MemoryItem::new(content, level);
+        if let Ok(json) = serde_json::to_value(&item) {
+            let _ = self
+                .structured
+                .set(agent_id, &format!("memory:{}", item.id), json);
+        }
 
         Ok(())
     }

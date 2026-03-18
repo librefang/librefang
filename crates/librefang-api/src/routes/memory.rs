@@ -87,9 +87,9 @@ pub async fn memory_search(
         Err(e) => return e,
     };
 
-    let user_id = default_user_id();
     let limit = params.limit.min(100);
-    match store.search(&params.q, &user_id, limit).await {
+    // Search across ALL agents so the dashboard shows all memories
+    match store.search_all(&params.q, limit).await {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
@@ -124,8 +124,8 @@ pub async fn memory_list(
         Err(e) => return e,
     };
 
-    let user_id = default_user_id();
-    match store.list(&user_id, params.category.as_deref()).await {
+    // List across ALL agents so the dashboard shows all memories
+    match store.list_all(params.category.as_deref()).await {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
@@ -233,8 +233,27 @@ pub async fn memory_update(
         Err(e) => return e,
     };
 
-    let user_id = default_user_id();
-    match store.update(&memory_id, &user_id, &body.content).await {
+    // Look up the real agent_id that owns this memory so KV cleanup works correctly
+    let real_agent_id = match store.find_agent_id_for_memory(&memory_id) {
+        Ok(Some(aid)) => aid.0.to_string(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Memory not found"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            );
+        }
+    };
+
+    match store
+        .update(&memory_id, &real_agent_id, &body.content)
+        .await
+    {
         Ok(true) => (
             StatusCode::OK,
             Json(serde_json::json!({"updated": true, "memory_id": memory_id})),
@@ -271,8 +290,24 @@ pub async fn memory_delete(
         Err(e) => return e,
     };
 
-    let user_id = default_user_id();
-    match store.delete(&memory_id, &user_id).await {
+    // Look up the real agent_id that owns this memory so KV cleanup works correctly
+    let real_agent_id = match store.find_agent_id_for_memory(&memory_id) {
+        Ok(Some(aid)) => aid.0.to_string(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Memory not found"})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e.to_string()})),
+            );
+        }
+    };
+
+    match store.delete(&memory_id, &real_agent_id).await {
         Ok(true) => (
             StatusCode::OK,
             Json(serde_json::json!({"deleted": true, "memory_id": memory_id})),
@@ -292,7 +327,7 @@ pub async fn memory_delete(
 // GET /api/memory/stats
 // ---------------------------------------------------------------------------
 
-/// Get memory statistics for the default user.
+/// Get memory statistics across all agents.
 #[utoipa::path(
     get,
     path = "/api/memory/stats",
@@ -305,8 +340,8 @@ pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
         Err(e) => return e,
     };
 
-    let user_id = default_user_id();
-    match store.stats(&user_id).await {
+    // Aggregate stats across ALL agents so the dashboard shows global totals
+    match store.stats_all().await {
         Ok(stats) => (StatusCode::OK, Json(serde_json::json!(stats))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -372,7 +407,24 @@ pub async fn memory_clear_level(
         Err(e) => return e,
     };
 
-    let level = librefang_types::memory::MemoryLevel::from(level_str.as_str());
+    // Validate the level string before conversion to avoid silently
+    // defaulting to Session and deleting the wrong memories.
+    let level = match level_str.to_lowercase().as_str() {
+        "user" | "user_memory" | "session" | "session_memory" | "agent" | "agent_memory" => {
+            librefang_types::memory::MemoryLevel::from(level_str.as_str())
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "Invalid memory level '{}'. Must be one of: user, session, agent",
+                        level_str
+                    )
+                })),
+            );
+        }
+    };
 
     match store.clear_level(&agent_id, level) {
         Ok(count) => (

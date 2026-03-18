@@ -121,8 +121,8 @@ impl SemanticStore {
 
         // Text search filter (only when no embeddings — vector search handles relevance)
         if query_embedding.is_none() && !query.is_empty() {
-            sql.push_str(&format!(" AND content LIKE ?{param_idx}"));
-            params.push(Box::new(format!("%{query}%")));
+            sql.push_str(&format!(" AND content LIKE ?{param_idx} ESCAPE '\\'"));
+            params.push(Box::new(format!("%{}%", escape_like(query))));
             param_idx += 1;
         }
 
@@ -148,8 +148,20 @@ impl SemanticStore {
                     .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
                 sql.push_str(&format!(" AND source = ?{param_idx}"));
                 params.push(Box::new(source_str));
-                let _ = param_idx;
+                param_idx += 1;
             }
+            if let Some(ref after) = f.after {
+                sql.push_str(&format!(" AND created_at > ?{param_idx}"));
+                params.push(Box::new(after.to_rfc3339()));
+                param_idx += 1;
+            }
+            if let Some(ref before) = f.before {
+                sql.push_str(&format!(" AND created_at < ?{param_idx}"));
+                params.push(Box::new(before.to_rfc3339()));
+                param_idx += 1;
+            }
+            // TODO: metadata filtering not yet implemented (requires JSON field extraction)
+            let _ = param_idx;
         }
 
         sql.push_str(" ORDER BY accessed_at DESC, access_count DESC");
@@ -513,6 +525,36 @@ impl SemanticStore {
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(count as u64)
     }
+
+    /// Count memories across ALL agents, optionally filtered by scope.
+    pub fn count_all(&self, scope: Option<&str>) -> LibreFangResult<u64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let count: i64 = if let Some(s) = scope {
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories WHERE scope = ?1 AND deleted = 0",
+                rusqlite::params![s],
+                |row| row.get(0),
+            )
+        } else {
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories WHERE deleted = 0",
+                [],
+                |row| row.get(0),
+            )
+        }
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(count as u64)
+    }
+}
+
+/// Escape LIKE special characters (`%`, `_`, `\`) in user-supplied search strings.
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 /// Compute cosine similarity between two vectors.

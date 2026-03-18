@@ -141,6 +141,9 @@
 .badge-muted { background: rgba(148,163,184,0.12); color: var(--text-dim); }
 .badge-info { background: rgba(59,130,246,0.12); color: var(--info); }
 .badge-dim { background: rgba(148,163,184,0.08); color: var(--text-dim); font-size: 0.65rem; padding: 2px 6px; }
+.badge-user { background: rgba(168,85,247,0.12); color: #a855f7; }
+.badge-session { background: rgba(20,184,166,0.12); color: #14b8a6; }
+.badge-agent { background: rgba(245,158,11,0.12); color: var(--warning); }
 .text-danger { color: var(--error); }
 
 /* Tables */
