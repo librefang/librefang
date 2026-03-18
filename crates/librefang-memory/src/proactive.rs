@@ -1325,9 +1325,12 @@ fn extract_search_keywords(content: &str) -> String {
     if words.is_empty() {
         content.to_string()
     } else {
-        // Join top words with % for broader LIKE matching
-        // e.g. "dark%mode%editor" matches content containing all words in order
-        words.join("%")
+        // Return the longest keyword for LIKE matching; decide_action handles dedup
+        words
+            .iter()
+            .max_by_key(|w| w.len())
+            .unwrap_or(&words[0])
+            .to_string()
     }
 }
 
