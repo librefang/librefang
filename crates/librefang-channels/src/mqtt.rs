@@ -165,6 +165,9 @@ impl MqttAdapter {
             opts.set_credentials(user.clone(), pass.as_str());
         }
 
+        // NOTE: TLS not yet supported. Port 8883 connections will need
+        // future work to call opts.set_transport(Transport::tls(...)).
+
         opts
     }
 
@@ -235,7 +238,7 @@ impl MqttAdapter {
             content,
             target_agent: target_agent.map(|id| id.into()),
             timestamp: Utc::now(),
-            is_group: true,
+            is_group: false,
             thread_id: None,
             metadata,
         };
@@ -271,22 +274,18 @@ impl ChannelAdapter for MqttAdapter {
         let opts = self.build_mqtt_options();
         let (client, mut eventloop) = AsyncClient::new(opts, EVENT_CHANNEL_CAPACITY);
 
-        // Subscribe to all configured topics
-        let qos = self.qos.to_rumqttc();
-        for topic in &self.subscribe_topics {
-            client.subscribe(topic.as_str(), qos).await?;
-            info!("MQTT: subscribed to topic '{topic}'");
-        }
-
         // Store client for sending responses
         {
             let mut lock = self.client.write().await;
-            *lock = Some(client);
+            *lock = Some(client.clone());
         }
 
         let (tx, rx) = mpsc::channel::<ChannelMessage>(CHANNEL_BUFFER);
         let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = self.account_id.clone();
+        let subscribe_topics = self.subscribe_topics.clone();
+        let qos = self.qos.to_rumqttc();
+        let client_clone = client;
 
         tokio::spawn(async move {
             loop {
@@ -316,6 +315,13 @@ impl ChannelAdapter for MqttAdapter {
                             }
                             Ok(Event::Incoming(Packet::ConnAck(_))) => {
                                 info!("MQTT: connected to broker");
+                                for topic in &subscribe_topics {
+                                    if let Err(e) = client_clone.subscribe(topic.as_str(), qos).await {
+                                        warn!("MQTT: failed to subscribe to '{topic}': {e}");
+                                    } else {
+                                        info!("MQTT: subscribed to topic '{topic}'");
+                                    }
+                                }
                             }
                             Ok(_) => {
                                 // Other events (PingResp, SubAck, etc.) — ignore
