@@ -318,16 +318,16 @@ impl ContextEngine for DefaultContextEngine {
 
     async fn compact(
         &self,
-        _agent_id: AgentId,
+        agent_id: AgentId,
         messages: &[Message],
         driver: Arc<dyn LlmDriver>,
     ) -> LibreFangResult<CompactionResult> {
         // Build a temporary session for the compactor
         let session = librefang_memory::session::Session {
             id: librefang_types::agent::SessionId::new(),
-            agent_id: _agent_id,
+            agent_id,
             messages: messages.to_vec(),
-            context_window_tokens: 0,
+            context_window_tokens: self.config.context_window_tokens,
             label: None,
         };
 
@@ -447,11 +447,11 @@ impl ScriptableContextEngine {
         .await
         .map_err(|e| format!("Hook script failed: {e}"))?;
 
-        // Try to parse response as JSON
+        // Parse response as JSON; wrap plain-text output gracefully
         serde_json::from_str(&result.response)
             .unwrap_or_else(|_| serde_json::json!({"text": result.response}));
-
-        serde_json::from_str(&result.response).map_err(|e| format!("Parse hook output: {e}"))
+        Ok(serde_json::from_str(&result.response)
+            .unwrap_or_else(|_| serde_json::json!({"text": result.response})))
     }
 }
 
@@ -574,11 +574,14 @@ impl ContextEngine for ScriptableContextEngine {
             "messages": msg_summaries,
         });
 
-        // Fire and don't block on failure — after_turn is best-effort
-        match Self::run_hook(script, input).await {
-            Ok(_) => debug!("After-turn hook completed"),
-            Err(e) => warn!("After-turn hook failed: {e}"),
-        }
+        // Spawn as fire-and-forget — after_turn is best-effort, don't block the agent
+        let script = script.clone();
+        tokio::spawn(async move {
+            match Self::run_hook(&script, input).await {
+                Ok(_) => debug!("After-turn hook completed"),
+                Err(e) => warn!("After-turn hook failed: {e}"),
+            }
+        });
 
         Ok(())
     }
@@ -604,12 +607,28 @@ pub fn plugins_dir() -> std::path::PathBuf {
 ///
 /// Hook paths in the manifest are relative to the plugin directory — this
 /// function resolves them to absolute paths so the script runner can find them.
+/// Validate that a plugin name is a safe directory component (no path traversal).
+fn validate_plugin_name(name: &str) -> LibreFangResult<()> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name == "."
+    {
+        return Err(LibreFangError::Internal(format!(
+            "Invalid plugin name '{name}': must be a simple identifier (no /, \\, or ..)"
+        )));
+    }
+    Ok(())
+}
+
 pub fn load_plugin(
     plugin_name: &str,
 ) -> LibreFangResult<(
     librefang_types::config::PluginManifest,
     librefang_types::config::ContextEngineHooks,
 )> {
+    validate_plugin_name(plugin_name)?;
     let plugin_dir = plugins_dir().join(plugin_name);
     let manifest_path = plugin_dir.join("plugin.toml");
 
