@@ -11,9 +11,13 @@ fn init_tls_config() -> rustls::ClientConfig {
     if added == 0 {
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
-    rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth()
+    rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::aws_lc_rs::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions()
+    .expect("default protocol versions")
+    .with_root_certificates(root_store)
+    .with_no_client_auth()
 }
 
 pub fn client_builder() -> reqwest::ClientBuilder {

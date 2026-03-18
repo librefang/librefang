@@ -9,9 +9,13 @@ pub fn client_builder() -> ClientBuilder {
     if added == 0 {
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
-    let tls_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
+    let tls_config = rustls::ClientConfig::builder_with_provider(
+        rustls::crypto::aws_lc_rs::default_provider().into(),
+    )
+    .with_safe_default_protocol_versions()
+    .expect("default protocol versions")
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
     ClientBuilder::new().use_preconfigured_tls(tls_config)
 }
 
