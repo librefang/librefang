@@ -2565,14 +2565,15 @@ impl LibreFangKernel {
             None => return std::collections::HashMap::new(),
         };
 
-        // Lazily build hand description embeddings on first call
+        // Lazily build hand description embeddings on first call.
+        // If embedding fails, we leave the cache as None so it retries next time
+        // (transient network errors should not permanently disable semantic routing).
         {
             let read_guard = self.hand_desc_embeddings.read().await;
             if read_guard.is_none() {
                 drop(read_guard);
                 let mut write_guard = self.hand_desc_embeddings.write().await;
                 if write_guard.is_none() {
-                    let mut desc_map = std::collections::HashMap::new();
                     let hands = librefang_hands::bundled::bundled_hands();
                     let mut ids = Vec::new();
                     let mut descriptions = Vec::new();
@@ -2587,6 +2588,7 @@ impl LibreFangKernel {
                     let desc_refs: Vec<&str> = descriptions.iter().map(|s| s.as_str()).collect();
                     match driver.embed(&desc_refs).await {
                         Ok(embeddings) => {
+                            let mut desc_map = std::collections::HashMap::new();
                             for (id, emb) in ids.into_iter().zip(embeddings) {
                                 desc_map.insert(id, emb);
                             }
@@ -2594,24 +2596,31 @@ impl LibreFangKernel {
                                 hands = desc_map.len(),
                                 "Cached hand description embeddings for semantic routing"
                             );
+                            *write_guard = Some(desc_map);
                         }
                         Err(e) => {
-                            warn!(error = %e, "Failed to embed hand descriptions — semantic routing disabled");
+                            // Leave as None so next request retries
+                            warn!(error = %e, "Failed to embed hand descriptions — will retry next request");
                         }
                     }
-                    *write_guard = Some(desc_map);
                 }
             }
         }
 
-        // Embed the user message
-        let msg_embedding = match driver.embed_one(message).await {
-            Ok(emb) => emb,
-            Err(e) => {
-                debug!(error = %e, "Failed to embed message for semantic routing");
-                return std::collections::HashMap::new();
-            }
-        };
+        // Embed the user message (with timeout to avoid blocking routing)
+        let embed_fut = driver.embed_one(message);
+        let msg_embedding =
+            match tokio::time::timeout(std::time::Duration::from_secs(2), embed_fut).await {
+                Ok(Ok(emb)) => emb,
+                Ok(Err(e)) => {
+                    debug!(error = %e, "Failed to embed message for semantic routing");
+                    return std::collections::HashMap::new();
+                }
+                Err(_) => {
+                    debug!("Embedding timed out (2s) — skipping semantic routing");
+                    return std::collections::HashMap::new();
+                }
+            };
 
         // Compute cosine similarity against each hand
         let read_guard = self.hand_desc_embeddings.read().await;

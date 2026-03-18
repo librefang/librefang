@@ -224,6 +224,8 @@ fn hand_route_candidates() -> Vec<HandRouteCandidate> {
 fn build_hand_route_candidates() -> Vec<HandRouteCandidate> {
     let mut candidates = Vec::new();
 
+    // TODO: also scan ~/.librefang/hands/*/HAND.toml for user-installed hands
+    // once hand_route_candidates() receives the home_dir parameter.
     for (id, toml_content, _skill) in librefang_hands::bundled::bundled_hands() {
         let Ok(def) = librefang_hands::bundled::parse_bundled(id, toml_content, "") else {
             continue;
