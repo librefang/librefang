@@ -168,15 +168,25 @@ pub async fn update_budget(
     let config_ptr = &state.kernel.config as *const librefang_types::config::KernelConfig
         as *mut librefang_types::config::KernelConfig;
 
-    // Apply updates
+    // Apply updates — accept both config field names (max_hourly_usd) and
+    // GET response field names (hourly_limit) so read-modify-write works.
     unsafe {
-        if let Some(v) = body["max_hourly_usd"].as_f64() {
+        if let Some(v) = body["max_hourly_usd"]
+            .as_f64()
+            .or_else(|| body["hourly_limit"].as_f64())
+        {
             (*config_ptr).budget.max_hourly_usd = v;
         }
-        if let Some(v) = body["max_daily_usd"].as_f64() {
+        if let Some(v) = body["max_daily_usd"]
+            .as_f64()
+            .or_else(|| body["daily_limit"].as_f64())
+        {
             (*config_ptr).budget.max_daily_usd = v;
         }
-        if let Some(v) = body["max_monthly_usd"].as_f64() {
+        if let Some(v) = body["max_monthly_usd"]
+            .as_f64()
+            .or_else(|| body["monthly_limit"].as_f64())
+        {
             (*config_ptr).budget.max_monthly_usd = v;
         }
         if let Some(v) = body["alert_threshold"].as_f64() {
