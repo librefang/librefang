@@ -1289,6 +1289,7 @@ pub async fn get_agent(
             "mode": entry.mode,
             "profile": entry.manifest.profile,
             "created_at": entry.created_at.to_rfc3339(),
+            "last_active": entry.last_active.to_rfc3339(),
             "session_id": entry.session_id.0.to_string(),
             "model": {
                 "provider": entry.manifest.model.provider,
