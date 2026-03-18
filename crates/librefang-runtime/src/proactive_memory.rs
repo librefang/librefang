@@ -230,8 +230,10 @@ impl MemoryExtractor for LlmMemoryExtractor {
         &self,
         messages: &[serde_json::Value],
     ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
-        // Build a condensed version of the conversation for the LLM
+        // Build a condensed version of the conversation for the LLM.
         // Skip system messages — only include user and assistant roles.
+        // Cap total text to ~8000 chars to avoid exceeding extraction model context.
+        const MAX_EXTRACTION_CHARS: usize = 8000;
         let mut conversation_text = String::new();
         for msg in messages {
             let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
@@ -241,6 +243,10 @@ impl MemoryExtractor for LlmMemoryExtractor {
             let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if !content.is_empty() {
                 conversation_text.push_str(&format!("{role}: {content}\n"));
+                if conversation_text.len() > MAX_EXTRACTION_CHARS {
+                    conversation_text.truncate(MAX_EXTRACTION_CHARS);
+                    break;
+                }
             }
         }
 
@@ -392,15 +398,24 @@ fn parse_decision_response(
 
     let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
 
-    match parsed.get("action").and_then(|v| v.as_str()) {
-        Some("NOOP") | Some("noop") => Ok(MemoryAction::Noop),
-        Some("UPDATE") | Some("update") => {
-            let existing_id = parsed
-                .get("existing_id")
-                .and_then(|v| v.as_str())
-                .map(String::from);
+    let action_str = parsed
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_uppercase();
 
-            // Validate the ID exists in our candidates
+    match action_str.as_str() {
+        "NOOP" => Ok(MemoryAction::Noop),
+        "ADD" => Ok(MemoryAction::Add),
+        "UPDATE" => {
+            // Read existing_id as string OR number (LLM may return either)
+            let existing_id = parsed.get("existing_id").and_then(|v| {
+                v.as_str()
+                    .map(String::from)
+                    .or_else(|| v.as_u64().map(|n| n.to_string()))
+            });
+
+            // Validate the ID exists in our candidates (UUID match)
             if let Some(ref id) = existing_id {
                 let valid = existing_memories.iter().any(|m| m.id.to_string() == *id);
                 if valid {
@@ -425,7 +440,9 @@ fn parse_decision_response(
             // updating the first candidate — let consolidation merge later.
             Ok(MemoryAction::Add)
         }
-        _ => Ok(MemoryAction::Noop),
+        // Unparseable or unknown action — default to ADD (safe: may duplicate,
+        // but at least new information is not silently dropped)
+        _ => Ok(MemoryAction::Add),
     }
 }
 
@@ -671,9 +688,19 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_decision_response_invalid_defaults_to_noop() {
+    fn test_parse_decision_response_invalid_defaults_to_add() {
         let fragments = vec![];
         let result = parse_decision_response("garbage", &fragments).unwrap();
-        assert_eq!(result, MemoryAction::Noop);
+        assert_eq!(result, MemoryAction::Add);
+    }
+
+    #[test]
+    fn test_parse_decision_response_add_case_insensitive() {
+        let fragments = vec![];
+        for action in &["ADD", "add", "Add"] {
+            let input = format!(r#"{{"action": "{}"}}"#, action);
+            let result = parse_decision_response(&input, &fragments).unwrap();
+            assert_eq!(result, MemoryAction::Add);
+        }
     }
 }

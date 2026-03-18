@@ -850,10 +850,8 @@ function settingsPage() {
         ];
         // Only set extraction_model if non-empty, otherwise set to empty string to clear it
         fields.push({ path: 'proactive_memory.extraction_model', value: this.pmSettings.extraction_model || '' });
-        // Save categories as comma-separated string to TOML array
-        if (this.pmSettings.extract_categories && this.pmSettings.extract_categories.length > 0) {
-          fields.push({ path: 'proactive_memory.extract_categories', value: this.pmSettings.extract_categories });
-        }
+        // Always save categories (empty array clears them)
+        fields.push({ path: 'proactive_memory.extract_categories', value: this.pmSettings.extract_categories || [] });
 
         for (var i = 0; i < fields.length; i++) {
           await LibreFangAPI.post('/api/config/set', { path: fields[i].path, value: fields[i].value });

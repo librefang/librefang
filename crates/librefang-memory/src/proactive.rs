@@ -1422,6 +1422,7 @@ impl ProactiveMemoryStore {
             if used[i] {
                 continue;
             }
+            used[i] = true; // Mark seed so it cannot be absorbed into a later group
             let mut group = vec![all_items[i].clone()];
             let a_lower = all_items[i].content.to_lowercase();
 
@@ -2021,6 +2022,13 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
                 Err(e) => {
                     tracing::warn!("auto_memorize decision failed for memory: {}", e);
                 }
+            }
+        }
+
+        // Enforce per-agent memory cap after storing new memories
+        if !stored_memories.is_empty() {
+            if let Err(e) = self.evict_if_over_cap(agent_id, 0) {
+                tracing::warn!("auto_memorize eviction check failed: {}", e);
             }
         }
 
