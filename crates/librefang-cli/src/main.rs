@@ -7483,6 +7483,7 @@ fn cmd_security_verify() {
 
 fn cmd_memory_list(agent: &str, json: bool) {
     let base = require_daemon("memory list");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
@@ -7525,6 +7526,7 @@ fn cmd_memory_list(agent: &str, json: bool) {
 
 fn cmd_memory_get(agent: &str, key: &str, json: bool) {
     let base = require_daemon("memory get");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
@@ -7550,6 +7552,7 @@ fn cmd_memory_get(agent: &str, key: &str, json: bool) {
 
 fn cmd_memory_set(agent: &str, key: &str, value: &str) {
     let base = require_daemon("memory set");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
@@ -7572,6 +7575,7 @@ fn cmd_memory_set(agent: &str, key: &str, value: &str) {
 
 fn cmd_memory_delete(agent: &str, key: &str) {
     let base = require_daemon("memory delete");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
