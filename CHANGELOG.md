@@ -36,10 +36,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Fix rustfmt in a2a_agent_card handler (#1181) (@houko)
 
-### Other
-
-- V0.6.0-20260318 (#1164) (@houko)
-
 ## [0.6.0] - 2026-03-18
 
 ### Added
@@ -91,10 +87,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Skip version bump PRs in changelog generation (#1123) (@houko)
 - Bump setup-python v5→v6 and create-pull-request v7→v8 (#1161) (@houko)
-
-### Other
-
-- V0.5.7-20260318 (#1116) (@houko)
 
 ## [0.5.7] - 2026-03-18
 
