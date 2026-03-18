@@ -165,15 +165,18 @@ impl SemanticStore {
                 params.push(Box::new(before.to_rfc3339()));
                 param_idx += 1;
             }
-            // Metadata filtering via json_extract
+            // Metadata filtering via json_extract (keys must be alphanumeric/underscore only)
             for (key, value) in &f.metadata {
                 if let Some(s) = value.as_str() {
-                    sql.push_str(&format!(
-                        " AND json_extract(metadata, '$.{}') = ?{param_idx}",
-                        key.replace('\'', "''")
-                    ));
-                    params.push(Box::new(s.to_string()));
-                    param_idx += 1;
+                    // Reject keys with non-alphanumeric characters to prevent injection
+                    if key.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        sql.push_str(&format!(
+                            " AND json_extract(metadata, '$.{}') = ?{param_idx}",
+                            key
+                        ));
+                        params.push(Box::new(s.to_string()));
+                        param_idx += 1;
+                    }
                 }
             }
             let _ = param_idx;
@@ -640,7 +643,8 @@ impl SemanticStore {
             if let Some(aid) = agent_id {
                 (
                     "SELECT json_extract(metadata, '$.category') AS cat, COUNT(*) \
-                     FROM memories WHERE agent_id = ?1 AND deleted = 0 AND cat IS NOT NULL \
+                     FROM memories WHERE agent_id = ?1 AND deleted = 0 \
+                     AND json_extract(metadata, '$.category') IS NOT NULL \
                      GROUP BY cat"
                         .to_string(),
                     vec![Box::new(aid.0.to_string())],
@@ -648,7 +652,8 @@ impl SemanticStore {
             } else {
                 (
                     "SELECT json_extract(metadata, '$.category') AS cat, COUNT(*) \
-                     FROM memories WHERE deleted = 0 AND cat IS NOT NULL \
+                     FROM memories WHERE deleted = 0 \
+                     AND json_extract(metadata, '$.category') IS NOT NULL \
                      GROUP BY cat"
                         .to_string(),
                     vec![],
