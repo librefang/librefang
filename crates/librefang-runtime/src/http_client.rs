@@ -78,7 +78,7 @@ pub fn init_proxy(cfg: ProxyConfig) {
                 std::env::set_var("http_proxy", url);
             } else {
                 tracing::warn!(
-                    "http_proxy has invalid scheme (expected http://, https://, or socks5://): {}",
+                    "http_proxy has invalid scheme (expected http://, https://, socks5://, or socks5h://): {}",
                     librefang_types::config::redact_proxy_url(url)
                 );
             }
@@ -91,7 +91,7 @@ pub fn init_proxy(cfg: ProxyConfig) {
                 std::env::set_var("https_proxy", url);
             } else {
                 tracing::warn!(
-                    "https_proxy has invalid scheme (expected http://, https://, or socks5://): {}",
+                    "https_proxy has invalid scheme (expected http://, https://, socks5://, or socks5h://): {}",
                     librefang_types::config::redact_proxy_url(url)
                 );
             }
@@ -108,7 +108,10 @@ pub fn init_proxy(cfg: ProxyConfig) {
 
 /// Check if a proxy URL has a valid scheme.
 fn is_valid_proxy_url(url: &str) -> bool {
-    url.starts_with("http://") || url.starts_with("https://") || url.starts_with("socks5://")
+    url.starts_with("http://")
+        || url.starts_with("https://")
+        || url.starts_with("socks5://")
+        || url.starts_with("socks5h://")
 }
 
 /// Return the active proxy config (global or default-empty).
@@ -138,7 +141,9 @@ pub fn proxied_client_builder() -> reqwest::ClientBuilder {
 
 /// Convenience: build a ready-to-use proxy-aware [`reqwest::Client`].
 pub fn proxied_client() -> reqwest::Client {
-    proxied_client_builder().build().unwrap_or_default()
+    proxied_client_builder()
+        .build()
+        .expect("HTTP client with proxy/TLS config should always build")
 }
 
 /// Backward-compatible alias for [`proxied_client_builder`].
@@ -236,6 +241,7 @@ mod tests {
         assert!(is_valid_proxy_url("http://proxy:8080"));
         assert!(is_valid_proxy_url("https://proxy:8080"));
         assert!(is_valid_proxy_url("socks5://proxy:1080"));
+        assert!(is_valid_proxy_url("socks5h://proxy:1080"));
         assert!(!is_valid_proxy_url("ftp://proxy:21"));
         assert!(!is_valid_proxy_url("proxy:8080"));
         assert!(!is_valid_proxy_url(""));
