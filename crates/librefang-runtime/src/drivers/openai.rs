@@ -591,6 +591,7 @@ impl LlmDriver for OpenAIDriver {
                     );
                     content.push(ContentBlock::Thinking {
                         thinking: reasoning.clone(),
+                        provider_metadata: None,
                     });
                 }
             }
@@ -605,6 +606,7 @@ impl LlmDriver for OpenAIDriver {
                         if choice.message.reasoning_content.is_none() {
                             content.push(ContentBlock::Thinking {
                                 thinking: think_text,
+                                provider_metadata: None,
                             });
                         }
                     }
@@ -631,7 +633,7 @@ impl LlmDriver for OpenAIDriver {
                 let thinking_text = content
                     .iter()
                     .find_map(|b| match b {
-                        ContentBlock::Thinking { thinking } => Some(thinking.as_str()),
+                        ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
                         _ => None,
                     })
                     .unwrap_or("");
@@ -1260,6 +1262,7 @@ impl LlmDriver for OpenAIDriver {
             if !reasoning_content.is_empty() {
                 content.push(ContentBlock::Thinking {
                     thinking: reasoning_content.clone(),
+                    provider_metadata: None,
                 });
             }
 
@@ -1271,6 +1274,7 @@ impl LlmDriver for OpenAIDriver {
                     if reasoning_content.is_empty() {
                         content.push(ContentBlock::Thinking {
                             thinking: think_text,
+                            provider_metadata: None,
                         });
                     }
                 }
@@ -1295,7 +1299,7 @@ impl LlmDriver for OpenAIDriver {
                 let thinking_text = content
                     .iter()
                     .find_map(|b| match b {
-                        ContentBlock::Thinking { thinking } => Some(thinking.as_str()),
+                        ContentBlock::Thinking { thinking, .. } => Some(thinking.as_str()),
                         _ => None,
                     })
                     .unwrap_or("");

@@ -319,7 +319,21 @@ pub(crate) fn convert_messages(
                                 },
                             });
                         }
-                        ContentBlock::Thinking { .. } => {}
+                        ContentBlock::Thinking {
+                            thinking,
+                            provider_metadata,
+                        } => {
+                            let thought_signature = provider_metadata
+                                .as_ref()
+                                .and_then(|m| m.get("thought_signature"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            parts.push(GeminiPart::Text {
+                                text: thinking.clone(),
+                                thought: true,
+                                thought_signature,
+                            });
+                        }
                         _ => {}
                     }
                 }
@@ -413,7 +427,14 @@ fn convert_response(resp: GeminiResponse) -> Result<CompletionResponse, LlmError
                             if thought {
                                 // Internal reasoning from a thinking model —
                                 // surface as a Thinking block, not regular text.
-                                content.push(ContentBlock::Thinking { thinking: text });
+                                // Preserve thought_signature so it can be
+                                // echoed back on subsequent requests.
+                                let provider_metadata = thought_signature
+                                    .map(|sig| serde_json::json!({ "thought_signature": sig }));
+                                content.push(ContentBlock::Thinking {
+                                    thinking: text,
+                                    provider_metadata,
+                                });
                             } else {
                                 // Preserve thought_signature in provider_metadata so
                                 // it gets echoed back on the next request.  Gemini
@@ -534,6 +555,7 @@ pub(crate) async fn stream_gemini_sse(
     let mut text_content = String::new();
     let mut thinking_content = String::new();
     let mut text_thought_sig: Option<String> = None;
+    let mut thinking_thought_sig: Option<String> = None;
     let mut fn_calls: Vec<(String, serde_json::Value, Option<String>)> = Vec::new();
     let mut finish_reason: Option<String> = None;
     let mut usage = TokenUsage::default();
@@ -588,15 +610,22 @@ pub(crate) async fn stream_gemini_sse(
                                         let _ = tx
                                             .send(StreamEvent::ThinkingDelta { text: text.clone() })
                                             .await;
+                                        // Capture thought_signature for the
+                                        // thinking block separately from text.
+                                        if thought_signature.is_some() {
+                                            thinking_thought_sig = thought_signature.clone();
+                                        }
                                     } else {
                                         text_content.push_str(text);
                                         let _ = tx
                                             .send(StreamEvent::TextDelta { text: text.clone() })
                                             .await;
+                                        // Capture thought_signature for text
+                                        // parts (last one wins across chunks).
+                                        if thought_signature.is_some() {
+                                            text_thought_sig = thought_signature.clone();
+                                        }
                                     }
-                                }
-                                if thought_signature.is_some() {
-                                    text_thought_sig = thought_signature.clone();
                                 }
                             }
                             GeminiPart::FunctionCall {
@@ -643,8 +672,11 @@ pub(crate) async fn stream_gemini_sse(
 
     // Thinking blocks come first (matches Anthropic convention).
     if !thinking_content.is_empty() {
+        let provider_metadata = thinking_thought_sig
+            .map(|sig| serde_json::json!({ "thought_signature": sig }));
         content.push(ContentBlock::Thinking {
             thinking: thinking_content,
+            provider_metadata,
         });
     }
 
@@ -865,6 +897,8 @@ impl LlmDriver for GeminiDriver {
             let mut thinking_content = String::new();
             // Thought signature for accumulated text content (last one wins)
             let mut text_thought_sig: Option<String> = None;
+            // Thought signature for accumulated thinking content (last one wins)
+            let mut thinking_thought_sig: Option<String> = None;
             // Track function calls: (name, args_json, thought_signature)
             let mut fn_calls: Vec<(String, serde_json::Value, Option<String>)> = Vec::new();
             let mut finish_reason: Option<String> = None;
@@ -924,6 +958,12 @@ impl LlmDriver for GeminiDriver {
                                                         text: text.clone(),
                                                     })
                                                     .await;
+                                                // Capture thought_signature for the
+                                                // thinking block separately from text.
+                                                if thought_signature.is_some() {
+                                                    thinking_thought_sig =
+                                                        thought_signature.clone();
+                                                }
                                             } else {
                                                 text_content.push_str(text);
                                                 let _ = tx
@@ -931,12 +971,12 @@ impl LlmDriver for GeminiDriver {
                                                         text: text.clone(),
                                                     })
                                                     .await;
+                                                // Capture thought_signature for text
+                                                // parts (last one wins across chunks).
+                                                if thought_signature.is_some() {
+                                                    text_thought_sig = thought_signature.clone();
+                                                }
                                             }
-                                        }
-                                        // Capture thought signature for text parts
-                                        // (last one wins across streamed chunks).
-                                        if thought_signature.is_some() {
-                                            text_thought_sig = thought_signature.clone();
                                         }
                                     }
                                     GeminiPart::FunctionCall {
@@ -983,8 +1023,11 @@ impl LlmDriver for GeminiDriver {
 
             // Thinking blocks come first (matches Anthropic convention).
             if !thinking_content.is_empty() {
+                let provider_metadata = thinking_thought_sig
+                    .map(|sig| serde_json::json!({ "thought_signature": sig }));
                 content.push(ContentBlock::Thinking {
                     thinking: thinking_content,
+                    provider_metadata,
                 });
             }
 
@@ -1855,5 +1898,158 @@ mod tests {
             serialized["functionCall"].get("thoughtSignature").is_none(),
             "thoughtSignature must be at part level, NOT inside functionCall"
         );
+    }
+
+    // --- Issue #825: Thinking block thought_signature round-trip tests ---
+
+    #[test]
+    fn test_thought_true_produces_thinking_block() {
+        // A GeminiResponse with thought: true should produce ContentBlock::Thinking
+        let resp = GeminiResponse {
+            candidates: vec![GeminiCandidate {
+                content: Some(GeminiContent {
+                    role: Some("model".to_string()),
+                    parts: vec![GeminiPart::Text {
+                        text: "Let me reason through this...".to_string(),
+                        thought: true,
+                        thought_signature: None,
+                    }],
+                }),
+                finish_reason: Some("STOP".to_string()),
+            }],
+            usage_metadata: Some(GeminiUsageMetadata {
+                prompt_token_count: 10,
+                candidates_token_count: 8,
+            }),
+        };
+
+        let completion = convert_response(resp).unwrap();
+        assert_eq!(completion.content.len(), 1);
+        match &completion.content[0] {
+            ContentBlock::Thinking { thinking, .. } => {
+                assert_eq!(thinking, "Let me reason through this...");
+            }
+            other => panic!("Expected Thinking block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_thought_signature_preserved_on_thinking() {
+        // thought=true + thought_signature should store the signature
+        // in the Thinking block's provider_metadata
+        let resp = GeminiResponse {
+            candidates: vec![GeminiCandidate {
+                content: Some(GeminiContent {
+                    role: Some("model".to_string()),
+                    parts: vec![GeminiPart::Text {
+                        text: "Internal reasoning here".to_string(),
+                        thought: true,
+                        thought_signature: Some("think_sig_999".to_string()),
+                    }],
+                }),
+                finish_reason: Some("STOP".to_string()),
+            }],
+            usage_metadata: None,
+        };
+
+        let completion = convert_response(resp).unwrap();
+        match &completion.content[0] {
+            ContentBlock::Thinking {
+                thinking,
+                provider_metadata,
+            } => {
+                assert_eq!(thinking, "Internal reasoning here");
+                let meta = provider_metadata
+                    .as_ref()
+                    .expect("provider_metadata should be set on thinking block with signature");
+                assert_eq!(meta["thought_signature"], "think_sig_999");
+            }
+            other => panic!("Expected Thinking block, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_thinking_block_round_trip() {
+        // A ContentBlock::Thinking with provider_metadata should convert back
+        // to GeminiPart::Text { thought: true, thought_signature } via
+        // convert_messages().
+        let messages = vec![
+            Message::user("Explain quantum computing"),
+            Message {
+                role: Role::Assistant,
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Thinking {
+                        thinking: "Let me think step by step...".to_string(),
+                        provider_metadata: Some(
+                            serde_json::json!({ "thought_signature": "think_sig_round" }),
+                        ),
+                    },
+                    ContentBlock::Text {
+                        text: "Here is my explanation.".to_string(),
+                        provider_metadata: None,
+                    },
+                ]),
+            },
+        ];
+
+        let (contents, _) = convert_messages(&messages, &None);
+        let model_turn = &contents[1];
+        assert_eq!(model_turn.role.as_deref(), Some("model"));
+        assert_eq!(model_turn.parts.len(), 2);
+
+        // First part: thinking -> Text { thought: true }
+        match &model_turn.parts[0] {
+            GeminiPart::Text {
+                text,
+                thought,
+                thought_signature,
+            } => {
+                assert_eq!(text, "Let me think step by step...");
+                assert!(thought, "thought should be true for thinking blocks");
+                assert_eq!(
+                    thought_signature.as_deref(),
+                    Some("think_sig_round"),
+                    "thought_signature should be preserved from provider_metadata"
+                );
+            }
+            other => panic!("Expected Text part, got {:?}", other),
+        }
+
+        // Second part: regular text -> Text { thought: false }
+        match &model_turn.parts[1] {
+            GeminiPart::Text {
+                text,
+                thought,
+                thought_signature,
+            } => {
+                assert_eq!(text, "Here is my explanation.");
+                assert!(!thought, "thought should be false for regular text");
+                assert!(
+                    thought_signature.is_none(),
+                    "thought_signature should be None for text without metadata"
+                );
+            }
+            other => panic!("Expected Text part, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_thought_false_serde_skip() {
+        // When thought is false, it should not appear in the serialized JSON
+        let part = GeminiPart::Text {
+            text: "Regular text".to_string(),
+            thought: false,
+            thought_signature: None,
+        };
+        let json = serde_json::to_value(&part).unwrap();
+        assert!(
+            json.get("thought").is_none(),
+            "thought: false should be skipped in serialization"
+        );
+        assert!(
+            json.get("thoughtSignature").is_none(),
+            "thoughtSignature: None should be skipped in serialization"
+        );
+        assert_eq!(json["text"], "Regular text");
     }
 }
