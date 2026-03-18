@@ -6854,7 +6854,18 @@ fn cmd_models_aliases(json: bool) {
             );
             return;
         }
-        if let Some(obj) = body.as_object() {
+        if let Some(arr) = body.get("aliases").and_then(|v| v.as_array()) {
+            println!("{:<30} RESOLVES TO", "ALIAS");
+            println!("{}", "-".repeat(60));
+            for entry in arr {
+                println!(
+                    "{:<30} {}",
+                    entry["alias"].as_str().unwrap_or("?"),
+                    entry["model_id"].as_str().unwrap_or("?"),
+                );
+            }
+        } else if let Some(obj) = body.as_object() {
+            // Fallback for plain {alias: model_id} format
             println!("{:<30} RESOLVES TO", "ALIAS");
             println!("{}", "-".repeat(60));
             for (alias, target) in obj {
