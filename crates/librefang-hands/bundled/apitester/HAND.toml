@@ -5,6 +5,10 @@ category = "development"
 icon = "\U0001F50C"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
+[routing]
+aliases = ["api test", "endpoint test", "load test", "regression test", "api discovery"]
+weak_aliases = ["api debug", "request validation", "swagger", "openapi", "postman"]
+
 # ─── Configurable settings ───────────────────────────────────────────────────
 
 [[settings]]

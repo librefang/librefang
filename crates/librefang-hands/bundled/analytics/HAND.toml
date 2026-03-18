@@ -5,6 +5,10 @@ category = "data"
 icon = "\U0001F4CA"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
+[routing]
+aliases = ["data analysis", "data visualization", "dashboard", "automated report", "statistical analysis"]
+weak_aliases = ["visualization", "chart", "histogram", "csv analysis", "excel analysis", "data pipeline", "etl"]
+
 [[requires]]
 key = "python3"
 label = "Python 3"

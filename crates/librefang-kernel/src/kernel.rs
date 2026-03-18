@@ -44,6 +44,25 @@ use tracing::{debug, info, warn};
 
 const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
+/// Cosine similarity between two f32 vectors. Returns 0.0 on dimension mismatch.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom < f32::EPSILON {
+        0.0
+    } else {
+        dot / denom
+    }
+}
+
 /// The main LibreFang kernel — coordinates all subsystems.
 /// Stub LLM driver used when no providers are configured.
 /// Returns a helpful error so the dashboard still boots and users can configure providers.
@@ -226,11 +245,18 @@ pub struct LibreFangKernel {
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
     agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// Cooldown tracker for hand routing failures. Maps hand_id → (expiry, consecutive_failures).
+    /// Prevents the router from repeatedly dispatching to a hand that keeps failing.
+    /// After `MAX_HAND_FAILURES` consecutive failures the hand is auto-deactivated.
+    hand_route_cooldowns: dashmap::DashMap<String, (std::time::Instant, u32)>,
     /// Per-agent decision traces from the most recent message exchange.
     /// Stored for retrieval via `/api/agents/{id}/traces`.
     pub decision_traces: dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
     /// Command queue with lane-based concurrency control.
     pub command_queue: librefang_runtime::command_lane::CommandQueue,
+    /// Cached embeddings of hand descriptions for semantic routing.
+    /// Maps hand_id → embedding vector. Populated lazily on first routing call.
+    hand_desc_embeddings: tokio::sync::RwLock<Option<std::collections::HashMap<String, Vec<f32>>>>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
 }
@@ -931,10 +957,21 @@ impl LibreFangKernel {
         // Initialize web tools (multi-provider search + SSRF-protected fetch + caching)
         let cache_ttl = std::time::Duration::from_secs(config.web.cache_ttl_minutes * 60);
         let web_cache = Arc::new(librefang_runtime::web_cache::WebCache::new(cache_ttl));
+        let brave_auth_profiles: Vec<(String, u32)> = config
+            .auth_profiles
+            .get("brave")
+            .map(|profiles| {
+                profiles
+                    .iter()
+                    .map(|p| (p.api_key_env.clone(), p.priority))
+                    .collect()
+            })
+            .unwrap_or_default();
         let web_ctx = librefang_runtime::web_search::WebToolsContext {
             search: librefang_runtime::web_search::WebSearchEngine::new(
                 config.web.clone(),
                 web_cache.clone(),
+                brave_auth_profiles,
             ),
             fetch: librefang_runtime::web_fetch::WebFetchEngine::new(
                 config.web.fetch.clone(),
@@ -1151,8 +1188,10 @@ impl LibreFangKernel {
             default_model_override: std::sync::RwLock::new(None),
             tool_policy_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
+            hand_route_cooldowns: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
             command_queue,
+            hand_desc_embeddings: tokio::sync::RwLock::new(None),
             self_handle: OnceLock::new(),
         };
 
@@ -2320,6 +2359,11 @@ impl LibreFangKernel {
         })
     }
 
+    /// Duration to suppress routing to a hand after a dispatch failure.
+    const HAND_ROUTE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+    /// Auto-deactivate a hand after this many consecutive routing failures.
+    const MAX_HAND_FAILURES: u32 = 3;
+
     async fn execute_router_agent(
         &self,
         entry: &AgentEntry,
@@ -2328,17 +2372,53 @@ impl LibreFangKernel {
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
     ) -> KernelResult<AgentLoopResult> {
-        let hand_selection = router::auto_select_hand(message);
+        // ── Semantic scoring (optional) ──────────────────────────────────
+        // When an embedding driver is available, compute cosine similarity
+        // between the user message and cached hand description embeddings.
+        // This enables cross-lingual routing (e.g. Chinese input matching
+        // English hand descriptions) without hardcoding per-language keywords.
+        let semantic_scores = self.compute_hand_semantic_scores(message).await;
+        let semantic_ref = if semantic_scores.is_empty() {
+            None
+        } else {
+            Some(&semantic_scores)
+        };
+
+        let hand_selection = router::auto_select_hand(message, semantic_ref);
         let template_selection =
             router::auto_select_template(message, &self.config.home_dir.join("agents"));
 
-        if let Some(hand_id) = hand_selection.hand_id {
+        // ── Route decision trace ──
+        info!(
+            router = %entry.name,
+            hand_candidate = hand_selection.hand_id.as_deref().unwrap_or("none"),
+            hand_score = hand_selection.score,
+            hand_reason = %hand_selection.reason,
+            template_candidate = %template_selection.template,
+            template_score = template_selection.score,
+            template_reason = %template_selection.reason,
+            semantic_available = semantic_ref.is_some(),
+            "Route decision: scoring complete"
+        );
+
+        // ── Compare hand vs template score and pick the best ──
+        let hand_id_ref = hand_selection.hand_id.as_deref();
+        let hand_usable = hand_id_ref
+            .is_some_and(|hid| !self.is_hand_cooled_down(hid) && self.hand_requirements_met(hid));
+
+        let prefer_hand = hand_usable && hand_selection.score >= template_selection.score;
+
+        if prefer_hand {
+            let hand_id = hand_id_ref.unwrap();
             info!(
                 router = %entry.name,
                 route_type = "hand",
                 target = hand_id,
+                hand_score = hand_selection.score,
+                template = %template_selection.template,
+                template_score = template_selection.score,
                 reason = %hand_selection.reason,
-                "Router selected hand"
+                "Router selected hand (score comparison)"
             );
             match self
                 .execute_routed_hand(
@@ -2349,14 +2429,26 @@ impl LibreFangKernel {
                 )
                 .await
             {
-                Ok(result) => return Ok(result),
-                Err(err) => warn!(
-                    router = %entry.name,
-                    hand_id,
-                    error = %err,
-                    "Router hand dispatch failed, falling back"
-                ),
+                Ok(result) => {
+                    // Success — clear any previous failure count
+                    self.hand_route_cooldowns.remove(hand_id);
+                    return Ok(result);
+                }
+                Err(err) => {
+                    self.record_hand_failure(hand_id, &entry.name, &err);
+                }
             }
+        } else if let Some(ref hand_id) = hand_selection.hand_id {
+            // Log why hand was skipped despite matching
+            info!(
+                router = %entry.name,
+                hand = %hand_id,
+                hand_score = hand_selection.score,
+                template = %template_selection.template,
+                template_score = template_selection.score,
+                hand_usable,
+                "Route decision: skipped hand"
+            );
         }
 
         if template_selection.score > 0 {
@@ -2402,6 +2494,210 @@ impl LibreFangKernel {
             content_blocks,
         )
         .await
+    }
+
+    /// Record a hand dispatch failure: apply cooldown, increment failure count,
+    /// and auto-deactivate after `MAX_HAND_FAILURES` consecutive failures.
+    fn record_hand_failure(&self, hand_id: &str, router_name: &str, err: &KernelError) {
+        let failures = self
+            .hand_route_cooldowns
+            .get(hand_id)
+            .map(|e| e.1)
+            .unwrap_or(0)
+            + 1;
+
+        if failures >= Self::MAX_HAND_FAILURES {
+            warn!(
+                router = %router_name,
+                hand = %hand_id,
+                consecutive_failures = failures,
+                error = %err,
+                "Hand exceeded max failures — auto-deactivating"
+            );
+            // Try to deactivate the hand
+            if let Some(instance_id) = self.active_hand_instance_id(hand_id) {
+                if let Err(e) = self.hand_registry.deactivate(instance_id) {
+                    warn!(hand = %hand_id, error = %e, "Failed to auto-deactivate hand");
+                } else {
+                    info!(hand = %hand_id, "Hand auto-deactivated after repeated failures");
+                    self.persist_hand_state();
+                    self.notify_owner_bg(format!(
+                        "⚠️ Hand `{hand_id}` auto-deactivated after {failures} consecutive failures. Re-activate with: librefang hand activate {hand_id}"
+                    ));
+                }
+            }
+            self.hand_route_cooldowns.remove(hand_id);
+        } else {
+            warn!(
+                router = %router_name,
+                hand = %hand_id,
+                consecutive_failures = failures,
+                error = %err,
+                "Router hand dispatch failed, applying cooldown"
+            );
+            self.hand_route_cooldowns.insert(
+                hand_id.to_string(),
+                (
+                    std::time::Instant::now() + Self::HAND_ROUTE_COOLDOWN,
+                    failures,
+                ),
+            );
+        }
+    }
+
+    /// Fire-and-forget notification to the owner user via all configured channels.
+    ///
+    /// Best-effort: logs warnings on failure but never blocks the caller.
+    fn notify_owner_bg(&self, message: String) {
+        let weak = match self.self_handle.get() {
+            Some(w) => w.clone(),
+            None => return,
+        };
+        tokio::spawn(async move {
+            let kernel = match weak.upgrade() {
+                Some(k) => k,
+                None => return,
+            };
+            // Find the owner user and their channel bindings
+            let owner = kernel.config.users.iter().find(|u| u.role == "owner");
+            let bindings = match owner {
+                Some(u) => u.channel_bindings.clone(),
+                None => return, // no owner configured — nothing to notify
+            };
+            for (channel, platform_id) in &bindings {
+                if kernel.channel_adapters.contains_key(channel.as_str()) {
+                    if let Err(e) = kernel
+                        .send_channel_message(channel, platform_id, &message, None)
+                        .await
+                    {
+                        warn!(channel = %channel, error = %e, "Failed to send owner notification");
+                    }
+                }
+            }
+        });
+    }
+
+    /// Compute semantic similarity scores between a message and all hand descriptions.
+    ///
+    /// Uses the embedding driver to vectorize the message and computes cosine
+    /// similarity against cached hand description embeddings. Returns an empty
+    /// map if no embedding driver is configured (graceful degradation).
+    async fn compute_hand_semantic_scores(
+        &self,
+        message: &str,
+    ) -> std::collections::HashMap<String, f32> {
+        let driver = match &self.embedding_driver {
+            Some(d) => d,
+            None => return std::collections::HashMap::new(),
+        };
+
+        // Lazily build hand description embeddings on first call.
+        // If embedding fails, we leave the cache as None so it retries next time
+        // (transient network errors should not permanently disable semantic routing).
+        {
+            let read_guard = self.hand_desc_embeddings.read().await;
+            if read_guard.is_none() {
+                drop(read_guard);
+                let mut write_guard = self.hand_desc_embeddings.write().await;
+                if write_guard.is_none() {
+                    let hands = librefang_hands::bundled::bundled_hands();
+                    let mut ids = Vec::new();
+                    let mut descriptions = Vec::new();
+                    for (id, toml_content, _) in &hands {
+                        if let Ok(def) =
+                            librefang_hands::bundled::parse_bundled(id, toml_content, "")
+                        {
+                            ids.push(def.id.clone());
+                            descriptions.push(def.description.clone());
+                        }
+                    }
+                    let desc_refs: Vec<&str> = descriptions.iter().map(|s| s.as_str()).collect();
+                    match driver.embed(&desc_refs).await {
+                        Ok(embeddings) => {
+                            let mut desc_map = std::collections::HashMap::new();
+                            for (id, emb) in ids.into_iter().zip(embeddings) {
+                                desc_map.insert(id, emb);
+                            }
+                            info!(
+                                hands = desc_map.len(),
+                                "Cached hand description embeddings for semantic routing"
+                            );
+                            *write_guard = Some(desc_map);
+                        }
+                        Err(e) => {
+                            // Leave as None so next request retries
+                            warn!(error = %e, "Failed to embed hand descriptions — will retry next request");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Embed the user message (with timeout to avoid blocking routing)
+        let embed_fut = driver.embed_one(message);
+        let msg_embedding =
+            match tokio::time::timeout(std::time::Duration::from_secs(2), embed_fut).await {
+                Ok(Ok(emb)) => emb,
+                Ok(Err(e)) => {
+                    debug!(error = %e, "Failed to embed message for semantic routing");
+                    return std::collections::HashMap::new();
+                }
+                Err(_) => {
+                    debug!("Embedding timed out (2s) — skipping semantic routing");
+                    return std::collections::HashMap::new();
+                }
+            };
+
+        // Compute cosine similarity against each hand
+        let read_guard = self.hand_desc_embeddings.read().await;
+        let Some(ref desc_embeddings) = *read_guard else {
+            return std::collections::HashMap::new();
+        };
+
+        desc_embeddings
+            .iter()
+            .map(|(hand_id, desc_emb)| {
+                let sim = cosine_similarity(&msg_embedding, desc_emb);
+                (hand_id.clone(), sim)
+            })
+            .collect()
+    }
+
+    /// Check if a hand is in cooldown after a recent dispatch failure.
+    fn is_hand_cooled_down(&self, hand_id: &str) -> bool {
+        if let Some(entry) = self.hand_route_cooldowns.get(hand_id) {
+            let (expiry, failures) = *entry;
+            if std::time::Instant::now() < expiry {
+                debug!(hand = %hand_id, failures, "Hand still in route cooldown, skipping");
+                return true;
+            }
+            // Cooldown expired — remove entry
+            drop(entry);
+            self.hand_route_cooldowns.remove(hand_id);
+        }
+        false
+    }
+
+    /// Check if a hand's requirements (binaries, API keys) are satisfied.
+    /// Returns true if requirements cannot be checked (hand not in registry)
+    /// to avoid blocking legitimate routing.
+    fn hand_requirements_met(&self, hand_id: &str) -> bool {
+        match self.hand_registry.check_requirements(hand_id) {
+            Ok(results) => {
+                for (req, satisfied) in &results {
+                    if !satisfied {
+                        info!(
+                            hand = %hand_id,
+                            requirement = %req.label,
+                            "Hand requirement not met, skipping auto-route"
+                        );
+                        return false;
+                    }
+                }
+                true
+            }
+            Err(_) => true, // hand not found in registry — let it through
+        }
     }
 
     async fn execute_routed_hand(
@@ -2497,6 +2793,18 @@ impl LibreFangKernel {
                     .and_then(|definition| self.registry.find_by_name(&definition.agent.name))
                     .map(|entry| entry.id)
             })
+    }
+
+    /// Get the instance UUID for an active hand (for deactivation).
+    fn active_hand_instance_id(&self, hand_id: &str) -> Option<uuid::Uuid> {
+        self.hand_registry
+            .list_instances()
+            .into_iter()
+            .find(|instance| {
+                instance.hand_id == hand_id
+                    && instance.status == librefang_hands::HandStatus::Active
+            })
+            .map(|instance| instance.instance_id)
     }
 
     fn wrap_routed_result(result: AgentLoopResult) -> AgentLoopResult {
@@ -3909,6 +4217,11 @@ impl LibreFangKernel {
                 }
             }
         }
+
+        // Invalidate the router manifest cache so newly installed/removed
+        // agents are picked up on the next routing call.
+        router::invalidate_manifest_cache();
+        router::invalidate_hand_route_cache();
     }
 
     /// Publish an event to the bus and evaluate triggers.
@@ -4050,6 +4363,22 @@ impl LibreFangKernel {
     /// Must be called after the kernel is wrapped in `Arc` (e.g., from the daemon).
     /// Iterates the agent registry and starts background tasks for agents with
     /// `Continuous`, `Periodic`, or `Proactive` schedules.
+    /// Hands activated on first boot when no `hand_state.json` exists yet.
+    /// These provide a useful out-of-the-box experience without requiring
+    /// extra API keys or manual setup.
+    const DEFAULT_HANDS: &'static [&'static str] = &[
+        "researcher",
+        "browser",
+        "collector",
+        "analytics",
+        "strategist",
+        "lead",
+        "predictor",
+        "trader",
+        "devops",
+        "apitester",
+    ];
+
     pub fn start_background_agents(self: &Arc<Self>) {
         // Restore previously active hands from persisted state
         let state_path = self.config.home_dir.join("hand_state.json");
@@ -4103,6 +4432,85 @@ impl LibreFangKernel {
                     }
                     Err(e) => warn!(hand = %hand_id, error = %e, "Failed to restore hand"),
                 }
+            }
+        } else if !state_path.exists() {
+            // First boot: activate default hands for out-of-the-box experience
+            info!(
+                "First boot detected — activating {} default hand(s)",
+                Self::DEFAULT_HANDS.len()
+            );
+            for hand_id in Self::DEFAULT_HANDS {
+                match self.activate_hand(hand_id, std::collections::HashMap::new()) {
+                    Ok(inst) => {
+                        info!(hand = %hand_id, instance = %inst.instance_id, "Default hand activated");
+                    }
+                    Err(e) => warn!(hand = %hand_id, error = %e, "Failed to activate default hand"),
+                }
+            }
+            self.persist_hand_state();
+        }
+
+        // ── Startup API key health check ──────────────────────────────────
+        // Verify that configured API keys are present in the environment.
+        // Missing keys are logged as warnings so the operator can fix them
+        // before they cause runtime errors.
+        {
+            let mut missing: Vec<String> = Vec::new();
+
+            // Default LLM provider
+            let llm_env = self
+                .config
+                .resolve_api_key_env(&self.config.default_model.provider);
+            if std::env::var(&llm_env).unwrap_or_default().is_empty() {
+                missing.push(format!(
+                    "LLM ({}): ${}",
+                    self.config.default_model.provider, llm_env
+                ));
+            }
+
+            // Fallback LLM providers
+            for fb in &self.config.fallback_providers {
+                let env_var = self.config.resolve_api_key_env(&fb.provider);
+                if std::env::var(&env_var).unwrap_or_default().is_empty() {
+                    missing.push(format!("LLM fallback ({}): ${}", fb.provider, env_var));
+                }
+            }
+
+            // Search provider
+            let search_env = match self.config.web.search_provider {
+                librefang_types::config::SearchProvider::Brave => {
+                    Some(("Brave", self.config.web.brave.api_key_env.clone()))
+                }
+                librefang_types::config::SearchProvider::Tavily => {
+                    Some(("Tavily", self.config.web.tavily.api_key_env.clone()))
+                }
+                librefang_types::config::SearchProvider::Perplexity => {
+                    Some(("Perplexity", self.config.web.perplexity.api_key_env.clone()))
+                }
+                _ => None,
+            };
+            if let Some((name, env_var)) = search_env {
+                if std::env::var(&env_var).unwrap_or_default().is_empty() {
+                    missing.push(format!("Search ({}): ${}", name, env_var));
+                }
+            }
+
+            if missing.is_empty() {
+                info!("Startup health check: all configured API keys present");
+            } else {
+                warn!(
+                    count = missing.len(),
+                    "Startup health check: missing API keys — affected services may fail"
+                );
+                for m in &missing {
+                    warn!("  ↳ {}", m);
+                }
+                // Notify owner about missing keys
+                self.notify_owner_bg(format!(
+                    "⚠️ Startup: {} API key(s) missing — {}. Set the env vars and restart.",
+                    missing.len(),
+                    missing.join(", ")
+                ));
             }
         }
 

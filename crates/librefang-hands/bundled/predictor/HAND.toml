@@ -5,6 +5,10 @@ category = "data"
 icon = "\U0001F52E"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query"]
 
+[routing]
+aliases = ["predict", "forecast", "probability", "likelihood", "scenario analysis"]
+weak_aliases = ["trend analysis", "calibration"]
+
 # ─── Configurable settings ───────────────────────────────────────────────────
 
 [[settings]]

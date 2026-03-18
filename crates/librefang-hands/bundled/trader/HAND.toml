@@ -5,6 +5,10 @@ category = "data"
 icon = "\U0001F4C8"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
+[routing]
+aliases = ["trade", "portfolio", "market analysis", "paper trade", "stock trading"]
+weak_aliases = ["market signal", "technical analysis", "position sizing"]
+
 # ─── Configurable settings ───────────────────────────────────────────────────
 
 [[settings]]
