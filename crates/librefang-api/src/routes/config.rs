@@ -1476,6 +1476,9 @@ pub(crate) fn json_to_toml_value(value: &serde_json::Value) -> toml::Value {
             }
         }
         serde_json::Value::Bool(b) => toml::Value::Boolean(*b),
+        serde_json::Value::Array(arr) => {
+            toml::Value::Array(arr.iter().map(json_to_toml_value).collect())
+        }
         _ => toml::Value::String(value.to_string()),
     }
 }

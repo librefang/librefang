@@ -224,14 +224,13 @@ function app() {
       });
 
       // Hash routing
-      var validPages = ['overview','agents','sessions','approvals','comms','workflows','scheduler','channels','skills','hands','analytics','logs','runtime','settings','wizard'];
+      var validPages = ['overview','agents','sessions','approvals','comms','workflows','scheduler','channels','skills','hands','analytics','logs','runtime','settings','wizard','memory'];
       var pageRedirects = {
         'chat': 'agents',
         'templates': 'agents',
         'triggers': 'workflows',
         'cron': 'scheduler',
         'schedules': 'scheduler',
-        'memory': 'sessions',
         'audit': 'logs',
         'security': 'settings',
         'peers': 'settings',

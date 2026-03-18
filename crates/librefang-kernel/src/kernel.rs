@@ -1207,6 +1207,7 @@ impl LibreFangKernel {
             let extraction_model = pm_config
                 .extraction_model
                 .clone()
+                .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| kernel.config.default_model.model.clone());
             let llm = Some((Arc::clone(&kernel.default_driver) as _, extraction_model));
             let store = if let Some(ref emb) = kernel.embedding_driver {
