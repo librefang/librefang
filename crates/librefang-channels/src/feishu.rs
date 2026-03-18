@@ -34,19 +34,14 @@ use zeroize::Zeroizing;
 // ---------------------------------------------------------------------------
 
 /// Feishu/Lark API region.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FeishuRegion {
     /// China mainland — `open.feishu.cn`
+    #[default]
     Cn,
     /// International — `open.larksuite.com`
     Intl,
-}
-
-impl Default for FeishuRegion {
-    fn default() -> Self {
-        Self::Cn
-    }
 }
 
 impl FeishuRegion {
@@ -102,19 +97,14 @@ impl FeishuRegion {
 // ---------------------------------------------------------------------------
 
 /// How the adapter receives inbound events from the Feishu/Lark platform.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FeishuReceiveMode {
     /// HTTP webhook server (requires public IP / reverse proxy).
     Webhook,
     /// Long-lived WebSocket connection (default, no public IP required).
+    #[default]
     Websocket,
-}
-
-impl Default for FeishuReceiveMode {
-    fn default() -> Self {
-        Self::Websocket
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +202,7 @@ impl FeishuAdapter {
     }
 
     /// Region-aware token URL.
+    #[cfg(test)]
     fn token_url(&self) -> String {
         format!(
             "{}/open-apis/auth/v3/tenant_access_token/internal",
