@@ -205,6 +205,35 @@ function memoryPage() {
         LibreFangToast.error(self.t('memoryPage.addMemoryFailed', 'Failed to add memory: {message}', { message: e.message }));
         self.addingMemory = false;
       });
+    },
+
+    consolidateAgent: function() {
+      var self = this;
+      if (!self.selectedAgentId) {
+        LibreFangToast.warn(self.t('memoryPage.selectAgentFirst', 'Select an agent first'));
+        return;
+      }
+      if (!confirm(self.t('memoryPage.confirmConsolidate', 'Merge duplicate memories for this agent?'))) return;
+      LibreFangAPI.request('POST', '/api/memory/agents/' + self.selectedAgentId + '/consolidate').then(function() {
+        LibreFangToast.success(self.t('memoryPage.consolidated', 'Memories consolidated'));
+        self.loadStats();
+        self.loadMemories();
+      }).catch(function() {
+        LibreFangToast.error(self.t('memoryPage.consolidateFailed', 'Failed to consolidate memories'));
+      });
+    },
+
+    cleanupExpired: function() {
+      var self = this;
+      if (!confirm(self.t('memoryPage.confirmCleanup', 'Remove expired session memories?'))) return;
+      LibreFangAPI.request('POST', '/api/memory/cleanup').then(function(data) {
+        var removed = data.removed || 0;
+        LibreFangToast.success(self.t('memoryPage.cleanedUp', '{count} expired memories removed', { count: removed }));
+        self.loadStats();
+        self.loadMemories();
+      }).catch(function() {
+        LibreFangToast.error(self.t('memoryPage.cleanupFailed', 'Failed to cleanup'));
+      });
     }
   };
 }

@@ -4594,6 +4594,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <button @click="searchMemories()" class="btn btn-primary" data-i18n="memoryPage.search">Search</button>
           <button @click="loadMemories()" class="btn btn-secondary" data-i18n="memoryPage.all">All</button>
           <button @click="toggleAddForm()" class="btn btn-secondary" :class="{ 'btn-primary': showAddForm }" x-text="t('memoryPage.addMemory', 'Add Memory')">Add Memory</button>
+          <button @click="consolidateAgent()" class="btn btn-secondary" x-show="selectedAgentId" x-text="t('memoryPage.consolidate', 'Consolidate')">Consolidate</button>
+          <button @click="cleanupExpired()" class="btn btn-secondary" x-text="t('memoryPage.cleanup', 'Cleanup Expired')">Cleanup Expired</button>
         </div>
 
         <!-- Manual memory creation form -->
