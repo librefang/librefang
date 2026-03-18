@@ -191,6 +191,8 @@ pub struct ProviderInfo {
     pub auth_status: AuthStatus,
     /// Number of models from this provider in the catalog.
     pub model_count: usize,
+    /// URL where users can sign up and get an API key.
+    pub signup_url: Option<String>,
 }
 
 impl Default for ProviderInfo {
@@ -203,6 +205,7 @@ impl Default for ProviderInfo {
             key_required: true,
             auth_status: AuthStatus::default(),
             model_count: 0,
+            signup_url: None,
         }
     }
 }
@@ -225,6 +228,9 @@ pub struct ProviderCatalogToml {
     /// Whether an API key is required (false for local providers).
     #[serde(default = "default_key_required")]
     pub key_required: bool,
+    /// URL where users can sign up and get an API key.
+    #[serde(default)]
+    pub signup_url: Option<String>,
 }
 
 fn default_key_required() -> bool {
@@ -241,6 +247,7 @@ impl From<ProviderCatalogToml> for ProviderInfo {
             key_required: p.key_required,
             auth_status: AuthStatus::default(),
             model_count: 0,
+            signup_url: p.signup_url,
         }
     }
 }
@@ -397,6 +404,7 @@ mod tests {
             key_required: true,
             auth_status: AuthStatus::Configured,
             model_count: 3,
+            signup_url: None,
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: ProviderInfo = serde_json::from_str(&json).unwrap();
@@ -470,6 +478,7 @@ aliases = []
             api_key_env: "ANTHROPIC_API_KEY".to_string(),
             base_url: "https://api.anthropic.com".to_string(),
             key_required: true,
+            signup_url: Some("https://console.anthropic.com/settings/keys".to_string()),
         };
         let info: ProviderInfo = toml_provider.into();
         assert_eq!(info.id, "anthropic");

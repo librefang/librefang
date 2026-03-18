@@ -4,6 +4,7 @@ display_name = "DeepSeek"
 api_key_env = "DEEPSEEK_API_KEY"
 base_url = "https://api.deepseek.com/v1"
 key_required = true
+signup_url = "https://platform.deepseek.com/api_keys"
 
 [[models]]
 id = "deepseek-chat"

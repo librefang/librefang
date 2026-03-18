@@ -3462,8 +3462,11 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               <h4 data-i18n="settingsPage.llmProviders">LLM Providers</h4>
               <p data-i18n="settingsPage.llmProvidersDesc">LibreFang supports 12 LLM providers out of the box. Configure API keys to unlock models from each provider. Set environment variables and restart, or use the form below to save keys directly.</p>
             </div>
+            <template x-for="tierGroup in getProviderTiers()" :key="tierGroup.tier">
+            <div x-show="tierGroup.providers.length > 0" class="mb-4">
+              <h5 class="text-dim mb-2" x-text="tierGroup.label" style="font-size:0.85rem;text-transform:uppercase;letter-spacing:1px"></h5>
             <div class="card-grid">
-              <template x-for="p in providers" :key="p.id">
+              <template x-for="p in tierGroup.providers" :key="p.id">
                 <div class="card provider-card" :class="providerCardClass(p)">
                   <div class="flex justify-between items-center mb-2">
                     <div class="card-header" style="margin:0" x-text="p.display_name"></div>
@@ -3480,6 +3483,15 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   </template>
                   <template x-if="p.auth_status !== 'configured' && p.api_key_env">
                     <div class="text-xs text-dim mt-2" x-text="envRestartText(p.api_key_env)"></div>
+                  </template>
+                  <!-- Signup URL link -->
+                  <template x-if="p.signup_url && p.auth_status !== 'configured'">
+                    <div class="mt-1">
+                      <a :href="p.signup_url" target="_blank" rel="noopener"
+                         class="text-xs" style="color: var(--accent)">
+                        <span data-i18n="provider.getKey">Get API Key</span> &rarr;
+                      </a>
+                    </div>
                   </template>
                   <!-- Copilot OAuth button -->
                   <template x-if="p.id === 'github-copilot' && p.auth_status !== 'configured'">
@@ -3526,6 +3538,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 </div>
               </template>
             </div>
+            </div>
+            </template>
             <!-- Add Custom Provider -->
             <div class="info-card mt-4" style="border:1px solid var(--border)">
               <h4 style="margin-top:0" data-i18n="settingsPage.addCustomProvider">Add Custom Provider</h4>

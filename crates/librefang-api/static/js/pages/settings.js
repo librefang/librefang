@@ -74,6 +74,36 @@ function settingsPage() {
       return translated;
     },
 
+    getProviderTiers() {
+      var freeIds = ['ollama', 'lmstudio', 'groq'];
+      var recommendedIds = ['openai', 'anthropic', 'gemini', 'deepseek'];
+      return [
+        {
+          tier: 'free',
+          label: this.t('provider.tierFree', 'Free / Local'),
+          providers: this.providers.filter(function(p) {
+            return freeIds.indexOf(p.id) !== -1 || !p.key_required;
+          })
+        },
+        {
+          tier: 'recommended',
+          label: this.t('provider.tierRecommended', 'Recommended'),
+          providers: this.providers.filter(function(p) {
+            return recommendedIds.indexOf(p.id) !== -1;
+          })
+        },
+        {
+          tier: 'other',
+          label: this.t('provider.tierOther', 'Other Providers'),
+          providers: this.providers.filter(function(p) {
+            return freeIds.indexOf(p.id) === -1 &&
+                   recommendedIds.indexOf(p.id) === -1 &&
+                   p.key_required;
+          })
+        }
+      ];
+    },
+
     providerModelsText(provider) {
       return this.t('settingsPage.providerModels', '{count} model(s) available', {
         count: provider.model_count || 0
