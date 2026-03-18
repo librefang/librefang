@@ -1,12 +1,11 @@
 # syntax=docker/dockerfile:1
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1-slim-bookworm AS builder
 WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libssl-dev \
     perl \
-    perl-modules \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
