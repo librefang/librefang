@@ -515,6 +515,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::get(routes::catalog_status),
         )
         .route(
+            "/providers/ollama/detect",
+            axum::routing::get(routes::detect_ollama),
+        )
+        .route(
             "/providers/github-copilot/oauth/start",
             axum::routing::post(routes::copilot_oauth_start),
         )

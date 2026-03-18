@@ -1323,6 +1323,38 @@ pub async fn catalog_status() -> impl IntoResponse {
     }))
 }
 
+/// GET /api/providers/ollama/detect — Probe localhost for Ollama availability
+pub async fn detect_ollama() -> impl IntoResponse {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            return Json(serde_json::json!({ "available": false, "models": [] }));
+        }
+    };
+
+    match client.get("http://localhost:11434/api/tags").send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let body: serde_json::Value = resp.json().await.unwrap_or_else(|e| {
+                tracing::warn!("Ollama responded but JSON parse failed: {e}");
+                serde_json::Value::Null
+            });
+            let models: Vec<String> = body["models"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m["name"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Json(serde_json::json!({ "available": true, "models": models }))
+        }
+        _ => Json(serde_json::json!({ "available": false, "models": [] })),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::routes::system::{get_profile, list_profiles};
