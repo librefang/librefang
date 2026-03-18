@@ -3910,7 +3910,11 @@ max_retrieve = 10
         match client.get(format!("{base}/api/skills")).send() {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                    if let Some(arr) = body.get("skills").and_then(|v| v.as_array()).or_else(|| body.as_array()) {
+                    if let Some(arr) = body
+                        .get("skills")
+                        .and_then(|v| v.as_array())
+                        .or_else(|| body.as_array())
+                    {
                         if !json {
                             ui::check_ok(&format!("Skills loaded in daemon: {}", arr.len()));
                         }
@@ -3925,7 +3929,11 @@ max_retrieve = 10
         match client.get(format!("{base}/api/mcp/servers")).send() {
             Ok(resp) if resp.status().is_success() => {
                 if let Ok(body) = resp.json::<serde_json::Value>() {
-                    if let Some(arr) = body.get("configured").and_then(|v| v.as_array()).or_else(|| body.as_array()) {
+                    if let Some(arr) = body
+                        .get("configured")
+                        .and_then(|v| v.as_array())
+                        .or_else(|| body.as_array())
+                    {
                         let connected = arr
                             .iter()
                             .filter(|s| {
@@ -6778,7 +6786,11 @@ fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
             );
             return;
         }
-        if let Some(arr) = body.get("models").and_then(|v| v.as_array()).or_else(|| body.as_array()) {
+        if let Some(arr) = body
+            .get("models")
+            .and_then(|v| v.as_array())
+            .or_else(|| body.as_array())
+        {
             if arr.is_empty() {
                 println!("No models found.");
                 return;
@@ -6896,7 +6908,11 @@ fn cmd_models_providers(json: bool) {
             );
             return;
         }
-        if let Some(arr) = body.get("providers").and_then(|v| v.as_array()).or_else(|| body.as_array()) {
+        if let Some(arr) = body
+            .get("providers")
+            .and_then(|v| v.as_array())
+            .or_else(|| body.as_array())
+        {
             println!(
                 "{:<20} {:<12} {:<10} BASE URL",
                 "PROVIDER", "AUTH", "MODELS"
@@ -7050,7 +7066,11 @@ fn cmd_approvals_list(json: bool) {
         );
         return;
     }
-    if let Some(arr) = body.get("approvals").and_then(|v| v.as_array()).or_else(|| body.as_array()) {
+    if let Some(arr) = body
+        .get("approvals")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+    {
         if arr.is_empty() {
             println!("No pending approvals.");
             return;
@@ -7110,7 +7130,11 @@ fn cmd_cron_list(json: bool) {
         );
         return;
     }
-    if let Some(arr) = body.get("jobs").and_then(|v| v.as_array()).or_else(|| body.as_array()) {
+    if let Some(arr) = body
+        .get("jobs")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+    {
         if arr.is_empty() {
             println!("No scheduled jobs.");
             return;
@@ -7256,7 +7280,11 @@ fn cmd_sessions(agent: Option<&str>, json: bool) {
         );
         return;
     }
-    if let Some(arr) = body.get("sessions").and_then(|v| v.as_array()).or_else(|| body.as_array()) {
+    if let Some(arr) = body
+        .get("sessions")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+    {
         if arr.is_empty() {
             println!("No sessions found.");
             return;
@@ -7266,10 +7294,19 @@ fn cmd_sessions(agent: Option<&str>, json: bool) {
         for s in arr {
             println!(
                 "{:<38} {:<16} {:<8} {}",
-                s["session_id"].as_str().or_else(|| s["id"].as_str()).unwrap_or("?"),
-                s["agent_id"].as_str().map(|id| if id.len() > 16 { &id[..16] } else { id }).unwrap_or(s["agent_name"].as_str().unwrap_or("?")),
+                s["session_id"]
+                    .as_str()
+                    .or_else(|| s["id"].as_str())
+                    .unwrap_or("?"),
+                s["agent_id"]
+                    .as_str()
+                    .map(|id| if id.len() > 16 { &id[..16] } else { id })
+                    .unwrap_or(s["agent_name"].as_str().unwrap_or("?")),
                 s["message_count"].as_u64().unwrap_or(0),
-                s["created_at"].as_str().or_else(|| s["last_active"].as_str()).unwrap_or("?"),
+                s["created_at"]
+                    .as_str()
+                    .or_else(|| s["last_active"].as_str())
+                    .unwrap_or("?"),
             );
         }
     } else {
@@ -7441,7 +7478,11 @@ fn cmd_security_audit(limit: usize, json: bool) {
         );
         return;
     }
-    if let Some(arr) = body.get("entries").and_then(|v| v.as_array()).or_else(|| body.as_array()) {
+    if let Some(arr) = body
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+    {
         if arr.is_empty() {
             println!("No audit entries.");
             return;
@@ -7452,9 +7493,18 @@ fn cmd_security_audit(limit: usize, json: bool) {
             println!(
                 "{:<24} {:<16} {:<12} {}",
                 entry["timestamp"].as_str().unwrap_or("?"),
-                entry["agent_id"].as_str().map(|id| if id.len() > 16 { &id[..16] } else { id }).unwrap_or(entry["agent_name"].as_str().unwrap_or("?")),
-                entry["action"].as_str().or_else(|| entry["event_type"].as_str()).unwrap_or("?"),
-                entry["detail"].as_str().or_else(|| entry["description"].as_str()).unwrap_or(""),
+                entry["agent_id"]
+                    .as_str()
+                    .map(|id| if id.len() > 16 { &id[..16] } else { id })
+                    .unwrap_or(entry["agent_name"].as_str().unwrap_or("?")),
+                entry["action"]
+                    .as_str()
+                    .or_else(|| entry["event_type"].as_str())
+                    .unwrap_or("?"),
+                entry["detail"]
+                    .as_str()
+                    .or_else(|| entry["description"].as_str())
+                    .unwrap_or(""),
             );
         }
     } else {
@@ -7495,7 +7545,11 @@ fn cmd_memory_list(agent: &str, json: bool) {
         );
         return;
     }
-    if let Some(arr) = body.get("kv_pairs").and_then(|v| v.as_array()).or_else(|| body.as_array()) {
+    if let Some(arr) = body
+        .get("kv_pairs")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+    {
         if arr.is_empty() {
             println!("No memory entries for agent '{agent}'.");
             return;
@@ -7679,7 +7733,11 @@ fn cmd_webhooks_list(json: bool) {
         );
         return;
     }
-    if let Some(arr) = body.get("webhooks").and_then(|v| v.as_array()).or_else(|| body.as_array()) {
+    if let Some(arr) = body
+        .get("webhooks")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array())
+    {
         if arr.is_empty() {
             println!("No webhooks configured.");
             return;
