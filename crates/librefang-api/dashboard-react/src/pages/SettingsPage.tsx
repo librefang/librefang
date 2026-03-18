@@ -1,190 +1,104 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { useState } from "react";
-import { listProviders, testProvider, type ProviderItem } from "../api";
+import { useQuery } from "@tanstack/react-query";
+import { loadDashboardSnapshot } from "../api";
+import { useUIStore } from "../lib/store";
 
 const REFRESH_MS = 30000;
 
-type SettingsTab = "providers" | "config" | "tools" | "security" | "network";
-
 export function SettingsPage() {
-  const [tab, setTab] = useState<SettingsTab>("providers");
-  const [testingProviderId, setTestingProviderId] = useState<string | null>(null);
-  const [testResults, setTestResults] = useState<Record<string, "ok" | "error">>({});
-
-  const providersQuery = useQuery({
-    queryKey: ["providers", "list"],
-    queryFn: listProviders,
+  const { theme, toggleTheme } = useUIStore();
+  const snapshotQuery = useQuery({
+    queryKey: ["dashboard", "snapshot", "settings"],
+    queryFn: loadDashboardSnapshot,
     refetchInterval: REFRESH_MS
   });
 
-  const testMutation = useMutation({
-    mutationFn: testProvider
-  });
+  const snapshot = snapshotQuery.data ?? null;
 
-  const providers = providersQuery.data ?? [];
-
-  async function handleTestProvider(providerId: string) {
-    setTestingProviderId(providerId);
-    try {
-      const result = await testMutation.mutateAsync(providerId);
-      setTestResults((prev) => ({
-        ...prev,
-        [providerId]: result.status === "ok" ? "ok" : "error"
-      }));
-    } catch {
-      setTestResults((prev) => ({
-        ...prev,
-        [providerId]: "error"
-      }));
-    } finally {
-      setTestingProviderId(null);
-    }
-  }
+  const sectionClass = "rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5";
+  const labelClass = "text-[10px] font-black uppercase tracking-widest text-text-dim mb-2 block";
+  const infoRowClass = "flex justify-between items-center py-3 border-b border-border-subtle/30 last:border-0";
 
   return (
-    <section className="flex flex-col gap-4">
-      <header>
-        <h1 className="m-0 text-2xl font-semibold">Settings</h1>
-        <p className="text-sm text-slate-400">Configure providers, models, tools, and system options.</p>
+    <div className="flex flex-col gap-6 transition-colors duration-300">
+      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+        <div>
+          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+            System Configuration
+          </div>
+          <h1 className="mt-2 text-3xl font-extrabold tracking-tight md:text-4xl">Settings</h1>
+          <p className="mt-1 text-text-dim font-medium max-w-2xl">Manage your experience, API endpoints, and global kernel parameters.</p>
+        </div>
       </header>
 
-      {/* Tabs */}
-      <div className="flex gap-2 border-b border-slate-800 pb-2">
-        {(["providers", "config", "tools", "security", "network"] as SettingsTab[]).map((t) => (
-          <button
-            key={t}
-            onClick={() => setTab(t)}
-            className={`rounded-lg px-3 py-2 text-sm font-medium transition ${
-              tab === t
-                ? "bg-sky-600 text-white"
-                : "text-slate-400 hover:bg-slate-800 hover:text-white"
-            }`}
-          >
-            {t.charAt(0).toUpperCase() + t.slice(1)}
-          </button>
-        ))}
-      </div>
-
-      {/* Providers Tab */}
-      {tab === "providers" && (
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="m-0 text-base font-semibold">LLM Providers</h2>
-            <button
-              className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm font-medium text-slate-100 transition hover:border-sky-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={() => void providersQuery.refetch()}
-              disabled={providersQuery.isFetching}
-            >
-              Refresh
-            </button>
-          </div>
-
-          {providersQuery.isLoading ? (
-            <p className="text-sm text-slate-400">Loading providers...</p>
-          ) : providers.length === 0 ? (
-            <p className="text-sm text-slate-400">No providers configured.</p>
-          ) : (
-            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-              {providers.map((provider) => (
-                <article
-                  key={provider.id}
-                  className="rounded-lg border border-slate-700 bg-slate-950/70 p-4"
-                >
-                  <div className="flex items-center justify-between">
-                    <h3 className="m-0 text-sm font-semibold">{provider.display_name ?? provider.id}</h3>
-                    <div className="flex items-center gap-2">
-                      {provider.reachable ? (
-                        <span className="rounded-full bg-emerald-700/20 px-2 py-0.5 text-xs text-emerald-400">
-                          Reachable
-                        </span>
-                      ) : provider.key_required ? (
-                        <span className="rounded-full bg-amber-700/20 px-2 py-0.5 text-xs text-amber-400">
-                          Needs Key
-                        </span>
-                      ) : null}
-                    </div>
-                  </div>
-
-                  <div className="mt-3 space-y-1 text-xs text-slate-400">
-                    {provider.model_count !== undefined && (
-                      <p>{provider.model_count} models available</p>
-                    )}
-                    {provider.latency_ms !== undefined && (
-                      <p>Latency: {provider.latency_ms}ms</p>
-                    )}
-                    {provider.api_key_env && (
-                      <p>
-                        Env: <code className="text-sky-400">{provider.api_key_env}</code>
-                      </p>
-                    )}
-                  </div>
-
-                  <div className="mt-3 flex gap-2">
-                    <button
-                      className="rounded-lg border border-sky-500 bg-sky-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
-                      onClick={() => void handleTestProvider(provider.id)}
-                      disabled={testingProviderId === provider.id}
-                    >
-                      {testingProviderId === provider.id ? "Testing..." : "Test"}
-                    </button>
-                  </div>
-
-                  {testResults[provider.id] && (
-                    <p
-                      className={`mt-2 text-xs ${
-                        testResults[provider.id] === "ok" ? "text-emerald-400" : "text-rose-400"
-                      }`}
-                    >
-                      {testResults[provider.id] === "ok" ? "Connection successful" : "Connection failed"}
-                    </p>
-                  )}
-                </article>
-              ))}
+      <div className="grid gap-6 lg:grid-cols-2">
+        <section className={sectionClass}>
+          <h2 className="text-lg font-black tracking-tight mb-6">Appearance</h2>
+          <div>
+            <span className={labelClass}>Interface Theme</span>
+            <div className="flex p-1 rounded-xl bg-main border border-border-subtle w-fit">
+              <button 
+                onClick={() => theme !== 'light' && toggleTheme()}
+                className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${theme === 'light' ? 'bg-surface text-brand shadow-sm border border-border-subtle' : 'text-text-dim hover:text-slate-900 dark:hover:text-white'}`}
+              >
+                Light
+              </button>
+              <button 
+                onClick={() => theme !== 'dark' && toggleTheme()}
+                className={`px-4 py-2 rounded-lg text-xs font-bold transition-all ${theme === 'dark' ? 'bg-surface text-brand shadow-sm border border-border-subtle' : 'text-text-dim hover:text-slate-900 dark:hover:text-white'}`}
+              >
+                Dark
+              </button>
             </div>
-          )}
-        </div>
-      )}
+            <p className="mt-3 text-[10px] text-text-dim italic">System will remember your preference across sessions.</p>
+          </div>
+        </section>
 
-      {/* Config Tab */}
-      {tab === "config" && (
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <h2 className="m-0 mb-4 text-base font-semibold">Configuration</h2>
-          <p className="text-sm text-slate-400">
-            Configuration editing is not yet implemented in the React dashboard. Please use the Alpine.js
-            dashboard or CLI for configuration changes.
-          </p>
-        </div>
-      )}
+        <section className={sectionClass}>
+          <h2 className="text-lg font-black tracking-tight mb-6">Kernel Information</h2>
+          <div className="space-y-1">
+            <div className={infoRowClass}>
+              <span className="text-xs font-bold text-text-dim">Daemon Version</span>
+              <span className="font-mono text-xs font-black text-brand">{snapshot?.status.version || "0.6.0-stable"}</span>
+            </div>
+            <div className={infoRowClass}>
+              <span className="text-xs font-bold text-text-dim">API Endpoint</span>
+              <span className="font-mono text-xs text-slate-700 dark:text-slate-300">http://127.0.0.1:4545/api</span>
+            </div>
+            <div className={infoRowClass}>
+              <span className="text-xs font-bold text-text-dim">Environment</span>
+              <span className="px-2 py-0.5 rounded-lg bg-success/10 border border-success/20 text-[10px] font-black text-success uppercase">Production</span>
+            </div>
+          </div>
+        </section>
 
-      {/* Tools Tab */}
-      {tab === "tools" && (
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <h2 className="m-0 mb-4 text-base font-semibold">Tools</h2>
-          <p className="text-sm text-slate-400">
-            Tools management is not yet implemented in the React dashboard. Please use the Alpine.js dashboard.
-          </p>
-        </div>
-      )}
+        <section className={sectionClass}>
+          <h2 className="text-lg font-black tracking-tight mb-6">Security</h2>
+          <div className="space-y-4">
+            <div>
+              <span className={labelClass}>Default Provider</span>
+              <div className="p-3 rounded-xl bg-main border border-border-subtle text-sm font-bold truncate">
+                {snapshot?.status.default_provider || "No provider configured"}
+              </div>
+            </div>
+            <div className="pt-2">
+              <button className="text-xs font-bold text-error hover:underline transition-all">Clear local cache and tokens</button>
+            </div>
+          </div>
+        </section>
 
-      {/* Security Tab */}
-      {tab === "security" && (
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <h2 className="m-0 mb-4 text-base font-semibold">Security</h2>
-          <p className="text-sm text-slate-400">
-            Security settings are not yet implemented in the React dashboard. Please use the Alpine.js dashboard.
+        <section className="rounded-2xl bg-brand-muted border border-brand/5 p-6 flex flex-col justify-center">
+          <h3 className="text-sm font-black uppercase tracking-widest text-brand mb-2">LibreFang Cloud</h3>
+          <p className="text-xs text-text-dim leading-relaxed mb-4">
+            Sync your agents, skills, and memory across multiple devices with our upcoming secure cloud backend.
           </p>
-        </div>
-      )}
-
-      {/* Network Tab */}
-      {tab === "network" && (
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <h2 className="m-0 mb-4 text-base font-semibold">Network</h2>
-          <p className="text-sm text-slate-400">
-            Network settings are not yet implemented in the React dashboard. Please use the Alpine.js dashboard.
-          </p>
-        </div>
-      )}
-    </section>
+          <button className="w-fit rounded-xl bg-brand px-6 py-2 text-xs font-bold text-white shadow-lg shadow-brand/20 hover:opacity-90 transition-all">
+            Join Waitlist
+          </button>
+        </section>
+      </div>
+    </div>
   );
 }

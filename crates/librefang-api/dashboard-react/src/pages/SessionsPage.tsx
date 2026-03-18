@@ -1,42 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FormEvent, useEffect, useMemo, useState } from "react";
-import {
-  deleteSession,
-  getSessionDetails,
-  listAgents,
-  listSessions,
-  setSessionLabel,
-  type SessionListItem
-} from "../api";
-import { asText, normalizeRole } from "../lib/chat";
+import { useState } from "react";
+import { deleteSession, listAgents, listSessions, switchAgentSession, type AgentItem, type SessionItem } from "../api";
 
 const REFRESH_MS = 30000;
 
-interface ActionFeedback {
-  type: "ok" | "error";
-  text: string;
-}
-
-function dateText(value?: string): string {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
-}
-
-function roleClass(role: string): string {
-  if (role === "assistant") return "border-sky-700 bg-sky-700/15 text-sky-100";
-  if (role === "user") return "border-emerald-700 bg-emerald-700/15 text-emerald-100";
-  return "border-slate-700 bg-slate-800/60 text-slate-100";
-}
-
 export function SessionsPage() {
   const queryClient = useQueryClient();
-  const [searchFilter, setSearchFilter] = useState("");
-  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [labelDraft, setLabelDraft] = useState("");
-  const [feedback, setFeedback] = useState<ActionFeedback | null>(null);
-  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [pendingId, setPendingId] = useState<string | null>(null);
 
   const sessionsQuery = useQuery({
     queryKey: ["sessions", "list"],
@@ -50,272 +20,116 @@ export function SessionsPage() {
     refetchInterval: REFRESH_MS
   });
 
-  const sessionDetailQuery = useQuery({
-    queryKey: ["sessions", "detail", selectedSessionId],
-    queryFn: () => getSessionDetails(selectedSessionId ?? ""),
-    enabled: Boolean(selectedSessionId)
+  const switchMutation = useMutation({
+    mutationFn: ({ agentId, sessionId }: { agentId: string; sessionId: string }) =>
+      switchAgentSession(agentId, sessionId)
   });
 
   const deleteMutation = useMutation({
-    mutationFn: deleteSession
-  });
-
-  const labelMutation = useMutation({
-    mutationFn: ({ sessionId, label }: { sessionId: string; label: string | null }) =>
-      setSessionLabel(sessionId, label)
+    mutationFn: (sessionId: string) => deleteSession(sessionId)
   });
 
   const sessions = sessionsQuery.data ?? [];
   const agents = agentsQuery.data ?? [];
 
-  useEffect(() => {
-    if (!sessions.length) {
-      setSelectedSessionId(null);
-      return;
-    }
-    setSelectedSessionId((current) => {
-      if (current && sessions.some((session) => session.session_id === current)) return current;
-      return sessions[0].session_id;
-    });
-  }, [sessions]);
-
-  useEffect(() => {
-    const label = sessionDetailQuery.data?.label;
-    setLabelDraft(typeof label === "string" ? label : "");
-  }, [sessionDetailQuery.data?.label, selectedSessionId]);
-
-  const filteredSessions = useMemo(() => {
-    const keyword = searchFilter.trim().toLowerCase();
-    if (!keyword) return sessions;
-    return sessions.filter((session) => {
-      const agentId = (session.agent_id ?? "").toLowerCase();
-      const label = (session.label ?? "").toLowerCase();
-      const id = session.session_id.toLowerCase();
-      return agentId.includes(keyword) || label.includes(keyword) || id.includes(keyword);
-    });
-  }, [searchFilter, sessions]);
-
-  const agentNameById = useMemo(() => {
-    const map = new Map<string, string>();
-    for (const agent of agents) {
-      map.set(agent.id, agent.name);
-    }
-    return map;
-  }, [agents]);
-
-  const selectedSession = useMemo(() => {
-    if (!selectedSessionId) return null;
-    return sessions.find((session) => session.session_id === selectedSessionId) ?? null;
-  }, [selectedSessionId, sessions]);
-
-  const sessionsError = sessionsQuery.error instanceof Error ? sessionsQuery.error.message : "";
-  const detailError = sessionDetailQuery.error instanceof Error ? sessionDetailQuery.error.message : "";
-
-  async function refreshAll() {
-    await queryClient.invalidateQueries({ queryKey: ["sessions"] });
-    await sessionsQuery.refetch();
-    if (selectedSessionId) {
-      await sessionDetailQuery.refetch();
-    }
-  }
-
-  async function handleDelete(session: SessionListItem) {
-    if (deleteMutation.isPending) return;
-    if (!window.confirm(`Delete session ${session.session_id}?`)) return;
-
-    setPendingDeleteId(session.session_id);
+  async function handleSwitch(agentId: string, sessionId: string) {
+    setPendingId(sessionId);
     try {
-      const result = await deleteMutation.mutateAsync(session.session_id);
-      setFeedback({
-        type: "ok",
-        text:
-          typeof result.status === "string"
-            ? result.status
-            : `session ${session.session_id.slice(0, 8)} deleted`
-      });
-      if (selectedSessionId === session.session_id) {
-        setSelectedSessionId(null);
-      }
-      await refreshAll();
-    } catch (error) {
-      setFeedback({
-        type: "error",
-        text: error instanceof Error ? error.message : "Failed to delete session."
-      });
+      await switchMutation.mutateAsync({ agentId, sessionId });
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
     } finally {
-      setPendingDeleteId(null);
+      setPendingId(null);
     }
   }
 
-  async function handleSaveLabel(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selectedSessionId || labelMutation.isPending) return;
+  async function handleDelete(sessionId: string) {
+    if (!window.confirm("Close this session? All transient context will be lost.")) return;
+    setPendingId(sessionId);
     try {
-      const trimmed = labelDraft.trim();
-      await labelMutation.mutateAsync({
-        sessionId: selectedSessionId,
-        label: trimmed.length > 0 ? trimmed : null
-      });
-      setFeedback({ type: "ok", text: "Session label updated." });
-      await refreshAll();
-    } catch (error) {
-      setFeedback({
-        type: "error",
-        text: error instanceof Error ? error.message : "Failed to update session label."
-      });
+      await deleteMutation.mutateAsync(sessionId);
+      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
+    } finally {
+      setPendingId(null);
     }
   }
+
+  const getAgentName = (id: string) => agents.find(a => a.id === id)?.name || id;
 
   return (
-    <section className="flex flex-col gap-4">
-      <header className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+    <div className="flex flex-col gap-6 transition-colors duration-300">
+      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
-          <h1 className="m-0 text-2xl font-semibold">Sessions</h1>
-          <p className="text-sm text-slate-400">Conversation session index, detail inspection, and cleanup.</p>
+          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+            </svg>
+            Session Manager
+          </div>
+          <h1 className="mt-2 text-3xl font-extrabold tracking-tight md:text-4xl">Sessions</h1>
+          <p className="mt-1 text-text-dim font-medium max-w-2xl">Active agent conversations and historical execution contexts.</p>
         </div>
         <button
-          className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm font-medium text-slate-100 transition hover:border-sky-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={() => void refreshAll()}
-          disabled={sessionsQuery.isFetching}
+          className="flex h-9 items-center gap-2 rounded-xl border border-border-subtle bg-surface px-4 text-sm font-bold text-text-dim hover:text-brand transition-all shadow-sm"
+          onClick={() => void sessionsQuery.refetch()}
         >
+          <svg className={`h-3.5 w-3.5 ${sessionsQuery.isFetching ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+            <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
           Refresh
         </button>
       </header>
 
-      {feedback ? (
-        <div
-          className={`rounded-xl border p-3 text-sm ${
-            feedback.type === "ok"
-              ? "border-emerald-700 bg-emerald-700/10 text-emerald-200"
-              : "border-rose-700 bg-rose-700/10 text-rose-200"
-          }`}
-        >
-          {feedback.text}
-        </div>
-      ) : null}
-      {sessionsError ? (
-        <div className="rounded-xl border border-rose-700 bg-rose-700/15 p-4 text-rose-200">{sessionsError}</div>
-      ) : null}
-
-      <div className="grid gap-3 xl:grid-cols-[340px_1fr]">
-        <aside className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <input
-            value={searchFilter}
-            onChange={(event) => setSearchFilter(event.target.value)}
-            placeholder="Search by session ID / agent ID / label"
-            className="w-full rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-          />
-          <div className="mt-3 text-xs text-slate-400">
-            {filteredSessions.length}/{sessions.length} sessions
-          </div>
-
-          {sessionsQuery.isLoading ? (
-            <p className="mt-3 text-sm text-slate-400">Loading sessions...</p>
-          ) : filteredSessions.length === 0 ? (
-            <p className="mt-3 text-sm text-slate-400">No sessions found.</p>
-          ) : (
-            <ul className="mt-3 flex max-h-[520px] list-none flex-col gap-2 overflow-y-auto p-0">
-              {filteredSessions.map((session) => {
-                const active = selectedSessionId === session.session_id;
-                const agentName = session.agent_id
-                  ? agentNameById.get(session.agent_id) ?? session.agent_id
-                  : "-";
-                return (
-                  <li key={session.session_id}>
-                    <button
-                      type="button"
-                      className={`w-full rounded-lg border px-3 py-2 text-left transition ${
-                        active
-                          ? "border-sky-500 bg-sky-600/15"
-                          : "border-slate-800 bg-slate-950/70 hover:border-slate-600"
-                      }`}
-                      onClick={() => setSelectedSessionId(session.session_id)}
-                    >
-                      <p className="m-0 truncate text-sm font-medium">{session.label ?? "(no label)"}</p>
-                      <p className="m-0 mt-1 text-xs text-slate-400">
-                        {agentName} · {session.message_count ?? 0} msg
-                      </p>
-                      <p className="m-0 mt-1 font-mono text-[11px] text-slate-500">
-                        {session.session_id.slice(0, 12)}...
-                      </p>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </aside>
-
-        <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          {!selectedSession ? (
-            <p className="text-sm text-slate-400">Select a session to view details.</p>
-          ) : (
-            <>
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h2 className="m-0 text-base font-semibold">{selectedSession.label ?? "(no label)"}</h2>
-                  <p className="m-0 mt-1 font-mono text-xs text-slate-500">{selectedSession.session_id}</p>
+      <div className="grid gap-4">
+        {sessions.map((s: SessionItem) => (
+          <article key={s.session_id} className="group rounded-2xl border border-border-subtle bg-surface p-5 shadow-sm transition-all hover:border-brand/30 ring-1 ring-black/5 dark:ring-white/5">
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-3 mb-1">
+                  <h2 className="text-sm font-black truncate">{s.session_id.slice(0, 12)}...</h2>
+                  <span className={`px-2 py-0.5 rounded-lg border text-[9px] font-black uppercase tracking-widest ${s.active ? 'border-success/20 bg-success/10 text-success' : 'border-border-subtle bg-main text-text-dim'}`}>
+                    {s.active ? 'Active' : 'Idle'}
+                  </span>
                 </div>
+                <div className="flex flex-wrap gap-4 mt-2">
+                  <div className="flex items-center gap-1.5 text-[10px] font-bold text-text-dim uppercase tracking-wider">
+                    <div className="h-4 w-4 rounded bg-brand/10 flex items-center justify-center text-brand">A</div>
+                    Agent: <span className="text-slate-700 dark:text-slate-200">{getAgentName(s.agent_id)}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[10px] font-bold text-text-dim uppercase tracking-wider">
+                    <svg className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path d="M12 8v4l3 2" /></svg>
+                    Last Activity: <span className="text-slate-700 dark:text-slate-200">{new Date(s.updated_at || "").toLocaleTimeString()}</span>
+                  </div>
+                </div>
+              </div>
+              
+              <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                {!s.active && (
+                  <button
+                    onClick={() => void handleSwitch(s.agent_id, s.session_id)}
+                    disabled={pendingId === s.session_id}
+                    className="px-4 py-1.5 rounded-lg border border-brand/20 bg-brand/5 text-brand text-[10px] font-black uppercase hover:bg-brand/10 transition-all disabled:opacity-50"
+                  >
+                    Resume
+                  </button>
+                )}
                 <button
-                  className="rounded-lg border border-rose-700 bg-rose-700/10 px-3 py-2 text-xs font-medium text-rose-200 transition hover:bg-rose-700/20 disabled:cursor-not-allowed disabled:opacity-60"
-                  onClick={() => void handleDelete(selectedSession)}
-                  disabled={pendingDeleteId === selectedSession.session_id}
+                  onClick={() => void handleDelete(s.session_id)}
+                  disabled={pendingId === s.session_id}
+                  className="px-4 py-1.5 rounded-lg border border-error/20 bg-error/5 text-error text-[10px] font-black uppercase hover:bg-error/10 transition-all disabled:opacity-50"
                 >
-                  Delete Session
+                  Close
                 </button>
               </div>
+            </div>
+          </article>
+        ))}
 
-              <dl className="mt-3 grid grid-cols-[120px_1fr] gap-y-2 text-sm">
-                <dt className="text-slate-400">Agent</dt>
-                <dd>{selectedSession.agent_id ? agentNameById.get(selectedSession.agent_id) ?? selectedSession.agent_id : "-"}</dd>
-                <dt className="text-slate-400">Created</dt>
-                <dd>{dateText(selectedSession.created_at)}</dd>
-                <dt className="text-slate-400">Messages</dt>
-                <dd>{selectedSession.message_count ?? 0}</dd>
-              </dl>
-
-              <form className="mt-3 flex gap-2" onSubmit={handleSaveLabel}>
-                <input
-                  value={labelDraft}
-                  onChange={(event) => setLabelDraft(event.target.value)}
-                  placeholder="Session label"
-                  className="min-w-0 flex-1 rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-                />
-                <button
-                  type="submit"
-                  className="rounded-lg border border-sky-500 bg-sky-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={labelMutation.isPending}
-                >
-                  Save Label
-                </button>
-              </form>
-
-              {detailError ? (
-                <div className="mt-3 rounded-lg border border-rose-700 bg-rose-700/10 p-3 text-sm text-rose-200">
-                  {detailError}
-                </div>
-              ) : sessionDetailQuery.isLoading ? (
-                <p className="mt-3 text-sm text-slate-400">Loading session messages...</p>
-              ) : (
-                <ul className="mt-3 flex max-h-[420px] list-none flex-col gap-2 overflow-y-auto p-0">
-                  {(sessionDetailQuery.data?.messages ?? []).map((message, index) => {
-                    const role = normalizeRole(message.role);
-                    return (
-                      <li
-                        key={`${selectedSession.session_id}-message-${index}`}
-                        className={`rounded-lg border p-3 ${roleClass(role)}`}
-                      >
-                        <p className="m-0 text-xs uppercase tracking-wide text-slate-300">{role}</p>
-                        <p className="m-0 mt-1 whitespace-pre-wrap break-words text-sm">{asText(message.content)}</p>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </>
-          )}
-        </article>
+        {sessions.length === 0 && !sessionsQuery.isLoading && (
+          <div className="py-24 text-center border border-dashed border-border-subtle rounded-3xl bg-surface/30">
+            <p className="text-sm text-text-dim font-black tracking-tight">No active sessions found.</p>
+          </div>
+        )}
       </div>
-    </section>
+    </div>
   );
 }

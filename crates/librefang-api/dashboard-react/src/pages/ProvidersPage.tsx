@@ -19,19 +19,19 @@ function statusBadge(provider: ProviderItem): {
 } {
   if (provider.auth_status === "configured") {
     return {
-      label: "Configured",
-      className: "border-emerald-700 bg-emerald-700/20 text-emerald-300"
+      label: "Active",
+      className: "border-success/20 bg-success/10 text-success"
     };
   }
   if (provider.auth_status === "missing") {
     return {
-      label: "Missing Key",
-      className: "border-amber-700 bg-amber-700/20 text-amber-300"
+      label: "Missing API Key",
+      className: "border-warning/20 bg-warning/10 text-warning"
     };
   }
   return {
-    label: provider.auth_status ?? "Unknown",
-    className: "border-slate-700 bg-slate-800/60 text-slate-300"
+    label: provider.auth_status ?? "Offline",
+    className: "border-border-subtle bg-surface text-text-dim"
   };
 }
 
@@ -81,90 +81,118 @@ export function ProvidersPage() {
   }
 
   return (
-    <section className="flex flex-col gap-4">
-      <header className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+    <div className="flex flex-col gap-6 transition-colors duration-300">
+      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
-          <h1 className="m-0 text-2xl font-semibold">Providers</h1>
-          <p className="text-sm text-slate-400">Connection status and model-provider health.</p>
+          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="2" y="2" width="20" height="8" rx="2" /><rect x="2" y="14" width="20" height="8" rx="2" />
+            </svg>
+            Inference Infrastructure
+          </div>
+          <h1 className="mt-2 text-3xl font-extrabold tracking-tight md:text-4xl">Providers</h1>
+          <p className="mt-1 text-text-dim font-medium max-w-2xl">Manage LLM API connections and monitor inference health across all backends.</p>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="rounded-full border border-slate-700 bg-slate-800/60 px-2 py-1 text-xs text-slate-300">
-            {configuredCount}/{providers.length} configured
-          </span>
+        <div className="flex items-center gap-3">
+          <div className="hidden rounded-full border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-text-dim sm:block">
+            {configuredCount} / {providers.length} Configured
+          </div>
           <button
-            className="rounded-lg border border-sky-500 bg-sky-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+            className="flex h-9 items-center gap-2 rounded-xl border border-border-subtle bg-surface px-4 text-sm font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-all shadow-sm disabled:opacity-50"
             type="button"
             onClick={() => void providersQuery.refetch()}
             disabled={providersQuery.isFetching}
           >
+            <svg className={`h-3.5 w-3.5 ${providersQuery.isFetching ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+              <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
             Refresh
           </button>
         </div>
       </header>
 
       {providersError ? (
-        <div className="rounded-xl border border-rose-700 bg-rose-700/15 p-4 text-rose-200">{providersError}</div>
+        <div className="rounded-xl border border-error/20 bg-error/5 p-4 text-sm text-error font-bold">{providersError}</div>
       ) : null}
 
       {providersQuery.isLoading && providers.length === 0 ? (
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-sm text-slate-400">Loading providers...</div>
+        <div className="py-24 text-center">
+          <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-brand border-t-transparent mb-4" />
+          <p className="text-sm text-text-dim font-bold">Discovering inference providers...</p>
+        </div>
       ) : null}
 
       {!providersQuery.isLoading && providers.length === 0 ? (
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-sm text-slate-400">No providers found.</div>
+        <div className="py-24 text-center border border-dashed border-border-subtle rounded-2xl bg-surface/50">
+          <p className="text-sm text-text-dim font-bold">No providers found in configuration.</p>
+        </div>
       ) : null}
 
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {providers.map((provider) => {
           const badge = statusBadge(provider);
           const providerFeedback = feedback[provider.id];
           return (
-            <article key={provider.id} className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-              <div className="mb-3 flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="m-0 text-base font-semibold">{provider.display_name ?? provider.id}</h2>
-                  <p className="text-xs text-slate-500">{provider.id}</p>
+            <article key={provider.id} className="group flex flex-col rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm transition-all hover:border-brand/30 ring-1 ring-black/5 dark:ring-white/5">
+              <div className="mb-5 flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 className="m-0 text-lg font-black tracking-tight truncate group-hover:text-brand transition-colors">{provider.display_name ?? provider.id}</h2>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 mt-0.5">{provider.id}</p>
                 </div>
-                <span className={`rounded-full border px-2 py-1 text-[11px] ${badge.className}`}>{badge.label}</span>
+                <span className={`rounded-lg border px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${badge.className}`}>{badge.label}</span>
               </div>
 
-              <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
-                <dt className="text-slate-400">Models</dt>
-                <dd>{provider.model_count ?? 0}</dd>
-                <dt className="text-slate-400">Base URL</dt>
-                <dd className="truncate">{provider.base_url ?? "-"}</dd>
-                <dt className="text-slate-400">API key env</dt>
-                <dd>{provider.api_key_env ?? "-"}</dd>
-                <dt className="text-slate-400">Latency</dt>
-                <dd>{typeof provider.latency_ms === "number" ? `${provider.latency_ms} ms` : "-"}</dd>
-              </dl>
+              <div className="grid grid-cols-2 gap-4 mb-6">
+                <div className="p-3 rounded-xl bg-main/40 border border-border-subtle/50">
+                  <p className="text-[10px] font-black text-text-dim/60 uppercase tracking-wider mb-1">Models</p>
+                  <p className="text-xl font-black">{provider.model_count ?? 0}</p>
+                </div>
+                <div className="p-3 rounded-xl bg-main/40 border border-border-subtle/50">
+                  <p className="text-[10px] font-black text-text-dim/60 uppercase tracking-wider mb-1">Latency</p>
+                  <p className="text-xl font-black">{typeof provider.latency_ms === "number" ? `${provider.latency_ms}ms` : <span className="text-text-dim/30">—</span>}</p>
+                </div>
+              </div>
 
-              <div className="mt-3 flex items-center justify-between gap-2">
+              <div className="space-y-2 mb-6">
+                <div className="flex justify-between text-xs">
+                  <span className="text-text-dim font-bold">Endpoint</span>
+                  <span className="font-mono text-slate-700 dark:text-slate-300 truncate max-w-[160px]" title={provider.base_url ?? ""}>{provider.base_url || "Built-in"}</span>
+                </div>
+                <div className="flex justify-between text-xs">
+                  <span className="text-text-dim font-bold">Env Key</span>
+                  <span className="font-mono text-slate-700 dark:text-slate-300">{provider.api_key_env || "None"}</span>
+                </div>
+              </div>
+
+              <div className="mt-auto pt-4 border-t border-border-subtle/30 flex items-center justify-between gap-3">
                 <button
-                  className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-xs font-medium text-slate-100 transition hover:border-sky-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="flex-1 rounded-xl border border-border-subtle bg-surface py-2 text-xs font-black text-text-dim hover:text-brand hover:border-brand/30 transition-all shadow-sm disabled:opacity-50"
                   type="button"
                   onClick={() => void handleTest(provider.id)}
                   disabled={pendingProviderId === provider.id}
                 >
-                  {pendingProviderId === provider.id ? "Testing..." : "Test Connection"}
+                  {pendingProviderId === provider.id ? "Analyzing..." : "Test Connection"}
                 </button>
               </div>
 
               {providerFeedback ? (
-                <p
-                  className={`mt-3 rounded-lg border p-2 text-xs ${
+                <div
+                  className={`mt-4 animate-in slide-in-from-top-2 rounded-xl border p-3 text-[11px] font-bold shadow-inner ${
                     providerFeedback.type === "ok"
-                      ? "border-emerald-700 bg-emerald-700/10 text-emerald-200"
-                      : "border-rose-700 bg-rose-700/10 text-rose-200"
+                      ? "border-success/20 bg-success/5 text-success"
+                      : "border-error/20 bg-error/5 text-error"
                   }`}
                 >
-                  {providerFeedback.text}
-                </p>
+                  <div className="flex items-center gap-2">
+                    <div className={`h-1.5 w-1.5 rounded-full ${providerFeedback.type === 'ok' ? 'bg-success' : 'bg-error'}`} />
+                    {providerFeedback.text}
+                  </div>
+                </div>
               ) : null}
             </article>
           );
         })}
       </div>
-    </section>
+    </div>
   );
 }

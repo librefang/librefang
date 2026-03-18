@@ -1,230 +1,175 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import {
-  getSessionDetails,
-  listAgents,
-  listSessions,
-  sendAgentMessage,
-  type AgentItem,
-  type AgentMessageResponse,
-  type SessionListItem
-} from "../api";
-import { asText, formatMeta, normalizeRole } from "../lib/chat";
-
-const REFRESH_MS = 30000;
-
-interface ChatMessage {
-  role: "user" | "assistant" | "system";
-  content: string;
-}
-
-function dateText(value?: string): string {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleTimeString();
-}
+import { useEffect, useRef, useState } from "react";
+import { listAgents, listSessions, type AgentItem, type SessionItem } from "../api";
 
 export function ChatPage() {
   const queryClient = useQueryClient();
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-
   const [selectedAgentId, setSelectedAgentId] = useState<string>("");
-  const [inputText, setInputText] = useState("");
-  const [sending, setSending] = useState(false);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [message, setMessage] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const agentsQuery = useQuery({
-    queryKey: ["agents", "list", "chat-helper"],
-    queryFn: listAgents,
-    refetchInterval: REFRESH_MS
+    queryKey: ["agents", "list", "chat"],
+    queryFn: listAgents
   });
 
   const sessionsQuery = useQuery({
-    queryKey: ["sessions", "list", "chat-helper"],
-    queryFn: listSessions,
-    refetchInterval: REFRESH_MS
-  });
-
-  const currentSessionQuery = useQuery({
-    queryKey: ["sessions", "current", selectedAgentId],
-    queryFn: async () => {
-      if (!selectedAgentId) return null;
-      const sessions = await listSessions();
-      return sessions.find((s) => s.agent_id === selectedAgentId) ?? null;
-    },
-    enabled: Boolean(selectedAgentId)
-  });
-
-  const sessionDetailQuery = useQuery({
-    queryKey: ["sessions", "detail", currentSessionQuery.data?.session_id],
-    queryFn: () => getSessionDetails(currentSessionQuery.data?.session_id ?? ""),
-    enabled: Boolean(currentSessionQuery.data?.session_id)
-  });
-
-  const sendMutation = useMutation({
-    mutationFn: async ({ agentId, message }: { agentId: string; message: string }) =>
-      sendAgentMessage(agentId, message)
+    queryKey: ["sessions", "list", "chat"],
+    queryFn: listSessions
   });
 
   const agents = agentsQuery.data ?? [];
   const sessions = sessionsQuery.data ?? [];
+  
+  // Find the active session for the selected agent
+  const activeSession = selectedAgentId 
+    ? sessions.find(s => s.agent_id === selectedAgentId && s.active) || sessions.find(s => s.agent_id === selectedAgentId)
+    : sessions.find(s => s.active);
 
-  // Auto-select first agent
   useEffect(() => {
-    if (!selectedAgentId && agents.length > 0) {
-      setSelectedAgentId(agents[0].id);
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [agents, selectedAgentId]);
+  }, [selectedAgentId, activeSession]);
 
-  // Load session messages when session changes
-  useEffect(() => {
-    const session = currentSessionQuery.data;
-    if (session?.messages && Array.isArray(session.messages)) {
-      const loaded: ChatMessage[] = session.messages.map((m) => ({
-        role: normalizeRole(m.role),
-        content: asText(m.content)
-      }));
-      setMessages(loaded);
-    } else {
-      setMessages([]);
-    }
-  }, [sessionDetailQuery.data]);
+  const inputClass = "flex-1 rounded-xl border border-border-subtle bg-surface px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/20 transition-all outline-none";
 
-  // Scroll to bottom on new messages
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  const selectedAgent = useMemo(
-    () => agents.find((a) => a.id === selectedAgentId),
-    [agents, selectedAgentId]
-  );
-
-  async function handleSend(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const text = inputText.trim();
-    if (!text || !selectedAgentId || sending) return;
-
-    setSending(true);
-    setInputText("");
-
-    // Add user message immediately
-    setMessages((prev) => [...prev, { role: "user", content: text }]);
-
-    try {
-      const result = await sendMutation.mutateAsync({
-        agentId: selectedAgentId,
-        message: text
-      });
-
-      // Add assistant response
-      if (result.response) {
-        setMessages((prev) => [...prev, { role: "assistant", content: result.response ?? "" }]);
-      }
-
-      // Refresh session data
-      await queryClient.invalidateQueries({ queryKey: ["sessions"] });
-    } catch (error) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `Error: ${error instanceof Error ? error.message : "Unknown error"}` }
-      ]);
-    } finally {
-      setSending(false);
-    }
-  }
+  const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
   return (
-    <section className="flex h-[calc(100vh-140px)] flex-col">
-      <header className="flex flex-col justify-between gap-3 pb-4 sm:flex-row sm:items-start">
-        <div>
-          <h1 className="m-0 text-2xl font-semibold">Chat</h1>
-          <p className="text-sm text-slate-400">Talk to your agents in real-time.</p>
+    <div className="flex h-[calc(100vh-140px)] flex-col transition-colors duration-300">
+      <header className="pb-6">
+        <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
+          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+          </svg>
+          Neural Terminal
         </div>
-        <div className="flex items-center gap-2">
-          <select
-            value={selectedAgentId}
-            onChange={(e) => setSelectedAgentId(e.target.value)}
-            className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-          >
-            <option value="">Select agent</option>
-            {agents.map((agent) => (
-              <option key={agent.id} value={agent.id}>
-                {agent.name}
-              </option>
-            ))}
-          </select>
-          <button
-            className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm font-medium text-slate-100 transition hover:border-sky-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
-            onClick={() => void queryClient.invalidateQueries({ queryKey: ["sessions"] })}
-            disabled={sessionsQuery.isFetching}
-          >
-            Refresh
-          </button>
-        </div>
+        <h1 className="mt-2 text-3xl font-extrabold tracking-tight">Agent Communications</h1>
       </header>
 
-      <div className="flex flex-1 flex-col overflow-hidden rounded-xl border border-slate-800 bg-slate-900/70">
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto p-4">
-          {messages.length === 0 ? (
-            <div className="flex h-full items-center justify-center">
-              <p className="text-sm text-slate-400">
-                {selectedAgentId ? "Send a message to start the conversation." : "Select an agent to start chatting."}
-              </p>
-            </div>
-          ) : (
-            <div className="flex flex-col gap-3">
-              {messages.map((msg, index) => (
-                <div
-                  key={index}
-                  className={`flex ${
-                    msg.role === "user" ? "justify-end" : "justify-start"
+      <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl relative ring-1 ring-black/5 dark:ring-white/5">
+        {/* Left Sidebar: Agent List */}
+        <aside className="w-64 flex-shrink-0 border-r border-border-subtle bg-main/30 backdrop-blur-md flex flex-col">
+          <div className="p-4 border-b border-border-subtle">
+            <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">Active Agents</h3>
+          </div>
+          <div className="flex-1 overflow-y-auto p-2 space-y-1 scrollbar-thin">
+            {agentsQuery.isLoading && (
+              <div className="p-4 text-center">
+                <div className="h-4 w-4 mx-auto animate-spin rounded-full border-2 border-brand border-t-transparent" />
+              </div>
+            )}
+            {agents.map((agent) => {
+              const isActive = selectedAgentId === agent.id;
+              const hasSession = sessions.some(s => s.agent_id === agent.id);
+              
+              return (
+                <button
+                  key={agent.id}
+                  onClick={() => setSelectedAgentId(agent.id)}
+                  className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all text-left group ${
+                    isActive 
+                      ? "bg-brand text-white shadow-lg shadow-brand/20" 
+                      : "hover:bg-surface-hover text-slate-700 dark:text-slate-300"
                   }`}
                 >
-                  <div
-                    className={`max-w-[80%] rounded-lg p-3 ${
-                      msg.role === "user"
-                        ? "border border-emerald-700 bg-emerald-700/15 text-emerald-100"
-                        : msg.role === "system"
-                          ? "border border-amber-700 bg-amber-700/15 text-amber-100"
-                          : "border border-sky-700 bg-sky-700/15 text-sky-100"
-                    }`}
-                  >
-                    <div className="whitespace-pre-wrap text-sm">{msg.content}</div>
-                    {msg.role === "assistant" && index === messages.length - 1 && sending && (
-                      <span className="mt-2 block text-xs text-slate-400">Thinking...</span>
-                    )}
+                  <div className={`h-8 w-8 rounded-lg flex items-center justify-center font-black text-xs shrink-0 ${
+                    isActive ? "bg-white/20" : "bg-brand/10 text-brand group-hover:bg-brand group-hover:text-white"
+                  }`}>
+                    {agent.name.charAt(0)}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className={`text-xs font-black truncate ${isActive ? "text-white" : ""}`}>{agent.name}</p>
+                    <div className="flex items-center gap-1.5 mt-0.5">
+                      <div className={`h-1 w-1 rounded-full ${hasSession ? 'bg-success' : 'bg-text-dim/40'}`} />
+                      <p className={`text-[9px] font-bold uppercase tracking-tight truncate ${isActive ? "text-white/70" : "text-text-dim"}`}>
+                        {agent.model_name || "Neural Core"}
+                      </p>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+            {agents.length === 0 && !agentsQuery.isLoading && (
+              <p className="p-4 text-[10px] text-text-dim font-bold text-center uppercase tracking-widest italic">No agents found</p>
+            )}
+          </div>
+        </aside>
+
+        {/* Right Content Area: Chat Messages */}
+        <main className="flex-1 flex flex-col overflow-hidden bg-main/10 relative">
+          {/* Main Chat Area */}
+          <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
+            {!selectedAgentId ? (
+              <div className="h-full flex flex-col items-center justify-center text-center p-8">
+                <div className="h-16 w-16 rounded-full bg-brand/5 flex items-center justify-center text-brand mb-4">
+                  <svg className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
+                </div>
+                <h3 className="text-lg font-black tracking-tight">Select a Neural Core</h3>
+                <p className="text-sm text-text-dim mt-1 max-w-xs font-medium">Choose an agent from the list to establish a communication bridge.</p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-6">
+                <div className="flex justify-center">
+                  <span className="px-3 py-1 rounded-full bg-surface border border-border-subtle text-[9px] font-black text-text-dim uppercase tracking-[0.2em] shadow-sm">
+                    {activeSession ? `Secure Link: ${activeSession.session_id.slice(0, 8)}` : `Standby: ${selectedAgent?.name}`}
+                  </span>
+                </div>
+
+                {/* Agent Message (Simulated) */}
+                <div className="flex justify-start">
+                  <div className="max-w-[85%] flex gap-3 items-end">
+                    <div className="h-6 w-6 rounded bg-brand/10 flex items-center justify-center text-brand text-[10px] font-black shrink-0">A</div>
+                    <div className="rounded-2xl rounded-bl-sm bg-surface-hover border border-border-subtle p-4 shadow-sm">
+                      <p className="text-[10px] font-black text-brand uppercase tracking-widest mb-1">{selectedAgent?.name}</p>
+                      <p className="text-sm leading-relaxed font-medium">Neural bridge for <span className="font-black underline decoration-brand/30">{selectedAgent?.name}</span> established. All streams are encrypted. How can I assist with your objectives today?</p>
+                    </div>
                   </div>
                 </div>
-              ))}
-              <div ref={messagesEndRef} />
-            </div>
-          )}
-        </div>
 
-        {/* Input */}
-        <form onSubmit={handleSend} className="border-t border-slate-800 p-4">
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
-              placeholder={selectedAgentId ? "Type a message..." : "Select an agent first"}
-              className="flex-1 rounded-lg border border-slate-700 bg-slate-950/80 px-4 py-3 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-              disabled={!selectedAgentId || sending}
-            />
-            <button
-              type="submit"
-              className="rounded-lg border border-sky-500 bg-sky-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={!selectedAgentId || !inputText.trim() || sending}
-            >
-              {sending ? "..." : "Send"}
-            </button>
+                {/* Placeholder for history */}
+                <div className="flex justify-center py-8">
+                  <div className="h-[1px] w-12 bg-border-subtle" />
+                  <p className="mx-4 text-[9px] font-black text-text-dim/30 uppercase tracking-[0.3em]">End of recent history</p>
+                  <div className="h-[1px] w-12 bg-border-subtle" />
+                </div>
+              </div>
+            )}
           </div>
-        </form>
+
+          {/* Input Area */}
+          <div className={`p-4 border-t border-border-subtle bg-surface transition-opacity duration-300 ${!selectedAgentId ? 'opacity-30 pointer-events-none' : ''}`}>
+            <form className="flex gap-3" onSubmit={(e) => e.preventDefault()}>
+              <input
+                type="text"
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                placeholder={selectedAgentId ? `Transmit command to ${selectedAgent?.name}...` : "Establish link first..."}
+                className={inputClass}
+              />
+              <button
+                type="submit"
+                disabled={!message.trim() || !selectedAgentId}
+                className="px-6 rounded-xl bg-brand text-white font-black text-sm shadow-lg shadow-brand/20 hover:opacity-90 transition-all disabled:opacity-50 disabled:shadow-none flex items-center justify-center gap-2"
+              >
+                Send
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5"><path d="M5 12h14M12 5l7 7-7 7" /></svg>
+              </button>
+            </form>
+            <div className="mt-3 flex justify-between items-center px-1">
+              <div className="flex gap-4">
+                <p className="text-[9px] font-black text-text-dim/60 uppercase tracking-widest">Latency: 42ms</p>
+                <p className="text-[9px] font-black text-text-dim/60 uppercase tracking-widest">Tokens: 0</p>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <div className="h-1 w-1 rounded-full bg-success animate-pulse" />
+                <p className="text-[9px] font-black text-text-dim/60 uppercase tracking-widest">Bridge Active</p>
+              </div>
+            </div>
+          </div>
+        </main>
       </div>
-    </section>
+    </div>
   );
 }

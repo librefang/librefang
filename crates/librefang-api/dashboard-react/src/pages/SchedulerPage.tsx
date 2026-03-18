@@ -178,8 +178,6 @@ export function SchedulerPage() {
     if (runScheduleMutation.isPending) return;
     setPendingScheduleRunId(schedule.id);
     try {
-      // Some legacy schedule entries store `agent` but not `agent_id`.
-      // Normalize before run so the backend can resolve target agent.
       if (!schedule.agent_id && schedule.agent) {
         await updateScheduleMutation.mutateAsync({
           scheduleId: schedule.id,
@@ -259,23 +257,34 @@ export function SchedulerPage() {
     }
   }
 
+  const inputClass = "rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand focus:ring-2 focus:ring-brand/20 transition-all outline-none disabled:opacity-50";
+
   return (
-    <section className="flex flex-col gap-4">
-      <header className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+    <div className="flex flex-col gap-6 transition-colors duration-300">
+      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
-          <h1 className="m-0 text-2xl font-semibold">Scheduler</h1>
-          <p className="text-sm text-slate-400">Schedules, triggers, and cron jobs.</p>
+          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 8V12L15 14" /><circle cx="12" cy="12" r="9" />
+            </svg>
+            Automation Engine
+          </div>
+          <h1 className="mt-2 text-3xl font-extrabold tracking-tight">Scheduler</h1>
+          <p className="mt-1 text-text-dim font-medium">Manage cron jobs, event triggers, and periodic tasks.</p>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="rounded-full border border-slate-700 bg-slate-800/60 px-2 py-1 text-xs text-slate-300">
-            {schedules.length} schedules · {triggers.length} triggers
-          </span>
+        <div className="flex items-center gap-3">
+          <div className="hidden rounded-full border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-text-dim sm:block">
+            {schedules.length} schedules • {triggers.length} triggers
+          </div>
           <button
-            className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm font-medium text-slate-100 transition hover:border-sky-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+            className="flex h-9 items-center gap-2 rounded-xl border border-border-subtle bg-surface px-4 text-sm font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-all shadow-sm disabled:opacity-50"
             type="button"
             onClick={() => void refreshAll()}
-            disabled={schedulesQuery.isFetching || triggersQuery.isFetching || cronJobsQuery.isFetching}
+            disabled={schedulesQuery.isFetching || triggersQuery.isFetching || cronJobsQuery.refetch === undefined}
           >
+            <svg className={`h-3.5 w-3.5 ${schedulesQuery.isFetching ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+              <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+            </svg>
             Refresh
           </button>
         </div>
@@ -283,59 +292,81 @@ export function SchedulerPage() {
 
       {feedback ? (
         <div
-          className={`rounded-xl border p-3 text-sm ${
+          className={`animate-in fade-in slide-in-from-top-2 rounded-xl border p-4 text-sm font-bold shadow-sm ${
             feedback.type === "ok"
-              ? "border-emerald-700 bg-emerald-700/10 text-emerald-200"
-              : "border-rose-700 bg-rose-700/10 text-rose-200"
+              ? "border-success/20 bg-success/5 text-success"
+              : "border-error/20 bg-error/5 text-error"
           }`}
         >
-          {feedback.text}
+          <div className="flex items-center gap-3">
+            <div className={`h-2 w-2 rounded-full ${feedback.type === 'ok' ? 'bg-success' : 'bg-error'}`} />
+            {feedback.text}
+          </div>
         </div>
       ) : null}
 
-      <div className="grid gap-3 xl:grid-cols-[340px_1fr]">
-        <aside className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <h2 className="mb-3 mt-0 text-base font-semibold">Create Schedule</h2>
-          <form className="flex flex-col gap-2" onSubmit={handleCreateSchedule}>
-            <input
-              type="text"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="Name"
-              className="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-              disabled={createScheduleMutation.isPending}
-            />
-            <input
-              type="text"
-              value={cron}
-              onChange={(event) => setCron(event.target.value)}
-              placeholder="Cron (e.g. 0 9 * * *)"
-              className="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-              disabled={createScheduleMutation.isPending}
-            />
-            <select
-              value={agentId}
-              onChange={(event) => setAgentId(event.target.value)}
-              className="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-              disabled={createScheduleMutation.isPending}
-            >
-              <option value="">Select agent</option>
-              {agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name}
-                </option>
-              ))}
-            </select>
-            <textarea
-              value={message}
-              onChange={(event) => setMessage(event.target.value)}
-              placeholder="Message to send when schedule fires"
-              rows={4}
-              className="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-              disabled={createScheduleMutation.isPending}
-            />
+      <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
+        {/* Creation Form */}
+        <aside className="h-fit rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5">
+          <h2 className="text-lg font-black tracking-tight">Create Schedule</h2>
+          <p className="mb-6 text-xs text-text-dim font-medium">Define a new automated task sequence.</p>
+          
+          <form className="flex flex-col gap-4" onSubmit={handleCreateSchedule}>
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-black uppercase tracking-widest text-text-dim px-1">Job Name</label>
+              <input
+                type="text"
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                placeholder="e.g. Weekly Health Check"
+                className={inputClass}
+                disabled={createScheduleMutation.isPending}
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-black uppercase tracking-widest text-text-dim px-1">Cron Expression</label>
+              <input
+                type="text"
+                value={cron}
+                onChange={(event) => setCron(event.target.value)}
+                placeholder="0 9 * * *"
+                className={inputClass}
+                disabled={createScheduleMutation.isPending}
+              />
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-black uppercase tracking-widest text-text-dim px-1">Target Agent</label>
+              <select
+                value={agentId}
+                onChange={(event) => setAgentId(event.target.value)}
+                className={inputClass}
+                disabled={createScheduleMutation.isPending}
+              >
+                <option value="">Select agent...</option>
+                {agents.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="text-[10px] font-black uppercase tracking-widest text-text-dim px-1">Prompt Message</label>
+              <textarea
+                value={message}
+                onChange={(event) => setMessage(event.target.value)}
+                placeholder="Message to send to agent..."
+                rows={4}
+                className={`${inputClass} resize-none`}
+                disabled={createScheduleMutation.isPending}
+              />
+            </div>
+
             <button
-              className="rounded-lg border border-sky-500 bg-sky-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+              className="mt-2 rounded-xl bg-brand py-3 text-sm font-bold text-white shadow-lg shadow-brand/20 hover:opacity-90 transition-all disabled:opacity-50 disabled:shadow-none"
               type="submit"
               disabled={
                 createScheduleMutation.isPending ||
@@ -344,62 +375,90 @@ export function SchedulerPage() {
                 agentId.trim().length === 0
               }
             >
-              {createScheduleMutation.isPending ? "Creating..." : "Create"}
+              {createScheduleMutation.isPending ? "Configuring..." : "Create Schedule"}
             </button>
           </form>
         </aside>
 
-        <section className="flex flex-col gap-3">
-          <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-            <h2 className="mb-3 mt-0 text-base font-semibold">Schedules</h2>
-            {schedulesError ? <p className="text-sm text-rose-300">{schedulesError}</p> : null}
+        <div className="flex flex-col gap-6">
+          {/* Schedules Section */}
+          <section className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5">
+            <h2 className="text-lg font-black tracking-tight mb-1">Active Schedules</h2>
+            <p className="mb-6 text-xs text-text-dim font-medium">Currently configured periodic agent interactions.</p>
+            
+            {schedulesError ? <p className="text-sm text-error font-bold mb-4">Error: {schedulesError}</p> : null}
+            
             {schedulesQuery.isLoading && schedules.length === 0 ? (
-              <p className="text-sm text-slate-400">Loading schedules...</p>
+              <div className="py-12 text-center">
+                <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-brand border-t-transparent mb-4" />
+                <p className="text-sm text-text-dim">Fetching schedules...</p>
+              </div>
             ) : null}
+
             {!schedulesQuery.isLoading && schedules.length === 0 ? (
-              <p className="text-sm text-slate-400">No schedules found.</p>
+              <div className="py-12 text-center border border-dashed border-border-subtle rounded-2xl">
+                <p className="text-sm text-text-dim font-medium">No schedules found. Create one to get started.</p>
+              </div>
             ) : null}
-            <div className="grid gap-2">
+
+            <div className="grid gap-3">
               {schedules.map((schedule) => (
-                <article key={schedule.id} className="rounded-lg border border-slate-700 bg-slate-950/70 p-3">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-semibold">{schedule.name ?? schedule.id}</p>
-                      <p className="text-xs text-slate-400">
-                        cron: {schedule.cron ?? schedule.schedule_input ?? "-"} · agent: {scheduleAgent(schedule)}
-                      </p>
-                      <p className="text-xs text-slate-500">
-                        created: {dateText(schedule.created_at)} · last run: {dateText(schedule.last_run)}
+                <article key={schedule.id} className="group rounded-xl border border-border-subtle bg-main/40 p-4 transition-all hover:border-brand/30">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        <p className="text-sm font-black">{schedule.name ?? schedule.id}</p>
+                        <span className={`h-1.5 w-1.5 rounded-full ${schedule.enabled ? 'bg-success animate-pulse' : 'bg-text-dim/30'}`} />
+                      </div>
+                      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+                        <p className="text-[10px] font-bold text-brand uppercase tracking-wider">
+                          CRON: <span className="text-text-dim">{schedule.cron ?? schedule.schedule_input ?? "-"}</span>
+                        </p>
+                        <p className="text-[10px] font-bold text-brand uppercase tracking-wider">
+                          AGENT: <span className="text-text-dim">{scheduleAgent(schedule)}</span>
+                        </p>
+                      </div>
+                      <p className="mt-1 text-[10px] font-medium text-text-dim/60">
+                        Created: {dateText(schedule.created_at)} • Last Run: {dateText(schedule.last_run)}
                       </p>
                     </div>
-                    <span
-                      className={`rounded-full border px-2 py-1 text-[11px] ${
-                        schedule.enabled
-                          ? "border-emerald-700 bg-emerald-700/20 text-emerald-300"
-                          : "border-slate-700 bg-slate-800/60 text-slate-300"
-                      }`}
-                    >
-                      {schedule.enabled ? "Enabled" : "Disabled"}
-                    </span>
+                    
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`rounded-lg border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${
+                          schedule.enabled
+                            ? "border-success/20 bg-success/10 text-success"
+                            : "border-border-subtle bg-surface text-text-dim"
+                        }`}
+                      >
+                        {schedule.enabled ? "Active" : "Paused"}
+                      </span>
+                    </div>
                   </div>
+
                   {schedule.description || schedule.message ? (
-                    <p className="mt-2 text-xs text-slate-300">{schedule.description ?? schedule.message}</p>
+                    <div className="mt-3 rounded-lg bg-surface/50 border border-border-subtle/50 p-2.5">
+                      <p className="text-[11px] font-medium text-text-dim italic leading-relaxed">
+                        "{schedule.description ?? schedule.message}"
+                      </p>
+                    </div>
                   ) : null}
-                  <div className="mt-2 flex flex-wrap justify-end gap-2">
+
+                  <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-border-subtle/30 pt-3">
                     <button
-                      className="rounded-lg border border-slate-600 bg-slate-800 px-2 py-1 text-[11px] text-slate-100 transition hover:border-sky-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+                      className="rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-all shadow-sm"
                       type="button"
                       onClick={() => void handleToggleSchedule(schedule)}
                       disabled={pendingScheduleToggleId === schedule.id}
                     >
                       {pendingScheduleToggleId === schedule.id
-                        ? "Updating..."
+                        ? "..."
                         : schedule.enabled
-                          ? "Disable"
-                          : "Enable"}
+                          ? "Pause"
+                          : "Resume"}
                     </button>
                     <button
-                      className="rounded-lg border border-sky-700 bg-sky-700/20 px-2 py-1 text-[11px] text-sky-200 transition hover:bg-sky-700/30 disabled:cursor-not-allowed disabled:opacity-60"
+                      className="rounded-lg border border-brand/20 bg-brand/10 px-3 py-1.5 text-[10px] font-bold text-brand hover:bg-brand/20 transition-all shadow-sm"
                       type="button"
                       onClick={() => void handleRunSchedule(schedule)}
                       disabled={pendingScheduleRunId === schedule.id}
@@ -407,117 +466,81 @@ export function SchedulerPage() {
                       {pendingScheduleRunId === schedule.id ? "Running..." : "Run Now"}
                     </button>
                     <button
-                      className="rounded-lg border border-rose-700 bg-rose-700/20 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-700/30 disabled:cursor-not-allowed disabled:opacity-60"
+                      className="rounded-lg border border-error/20 bg-error/10 px-3 py-1.5 text-[10px] font-bold text-error hover:bg-error/20 transition-all shadow-sm"
                       type="button"
                       onClick={() => void handleDeleteSchedule(schedule)}
                       disabled={pendingScheduleDeleteId === schedule.id}
                     >
-                      {pendingScheduleDeleteId === schedule.id ? "Deleting..." : "Delete"}
+                      {pendingScheduleDeleteId === schedule.id ? "..." : "Delete"}
                     </button>
                   </div>
                 </article>
               ))}
             </div>
-          </article>
+          </section>
 
-          <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-            <h2 className="mb-3 mt-0 text-base font-semibold">Triggers</h2>
-            {triggersError ? <p className="text-sm text-rose-300">{triggersError}</p> : null}
-            {triggersQuery.isLoading && triggers.length === 0 ? (
-              <p className="text-sm text-slate-400">Loading triggers...</p>
-            ) : null}
-            {!triggersQuery.isLoading && triggers.length === 0 ? (
-              <p className="text-sm text-slate-400">No triggers found.</p>
-            ) : null}
-            <div className="grid gap-2">
-              {triggers.map((trigger) => (
-                <article key={trigger.id} className="rounded-lg border border-slate-700 bg-slate-950/70 p-3">
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-semibold">{trigger.id}</p>
-                      <p className="text-xs text-slate-400">agent: {trigger.agent_id ?? "-"}</p>
-                      <p className="text-xs text-slate-500">
-                        fires: {trigger.fire_count ?? 0}/{trigger.max_fires ?? 0}
-                      </p>
+          {/* Triggers & Cron Section Combined */}
+          <div className="grid gap-6 md:grid-cols-2">
+            <section className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5">
+              <h2 className="text-lg font-black tracking-tight mb-1">Event Triggers</h2>
+              <p className="mb-6 text-[10px] text-text-dim font-bold uppercase tracking-wider">Dynamic Condition Hooks</p>
+              
+              <div className="grid gap-3">
+                {triggers.map((trigger) => (
+                  <article key={trigger.id} className="rounded-xl border border-border-subtle bg-main/40 p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-xs font-black truncate">{trigger.id}</p>
+                        <p className="text-[10px] font-bold text-brand uppercase mt-0.5">
+                          Agent: <span className="text-text-dim">{trigger.agent_id ?? "-"}</span>
+                        </p>
+                      </div>
+                      <span className={`h-1.5 w-1.5 rounded-full ${trigger.enabled ? 'bg-success animate-pulse' : 'bg-text-dim/30'}`} />
                     </div>
-                    <span
-                      className={`rounded-full border px-2 py-1 text-[11px] ${
-                        trigger.enabled
-                          ? "border-emerald-700 bg-emerald-700/20 text-emerald-300"
-                          : "border-slate-700 bg-slate-800/60 text-slate-300"
-                      }`}
-                    >
-                      {trigger.enabled ? "Enabled" : "Disabled"}
-                    </span>
-                  </div>
-                  {trigger.prompt_template ? (
-                    <p className="mt-2 line-clamp-2 text-xs text-slate-300">{trigger.prompt_template}</p>
-                  ) : null}
-                  <div className="mt-2 flex flex-wrap justify-end gap-2">
-                    <button
-                      className="rounded-lg border border-slate-600 bg-slate-800 px-2 py-1 text-[11px] text-slate-100 transition hover:border-sky-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
-                      type="button"
-                      onClick={() => void handleToggleTrigger(trigger)}
-                      disabled={pendingTriggerToggleId === trigger.id}
-                    >
-                      {pendingTriggerToggleId === trigger.id
-                        ? "Updating..."
-                        : trigger.enabled
-                          ? "Disable"
-                          : "Enable"}
-                    </button>
-                    <button
-                      className="rounded-lg border border-rose-700 bg-rose-700/20 px-2 py-1 text-[11px] text-rose-200 transition hover:bg-rose-700/30 disabled:cursor-not-allowed disabled:opacity-60"
-                      type="button"
-                      onClick={() => void handleDeleteTrigger(trigger)}
-                      disabled={pendingTriggerDeleteId === trigger.id}
-                    >
-                      {pendingTriggerDeleteId === trigger.id ? "Deleting..." : "Delete"}
-                    </button>
-                  </div>
-                </article>
-              ))}
-            </div>
-          </article>
+                    <div className="mt-3 flex justify-end gap-2">
+                      <button
+                        className="rounded-lg border border-border-subtle bg-surface px-2 py-1 text-[9px] font-bold text-text-dim hover:text-brand transition-all"
+                        onClick={() => void handleToggleTrigger(trigger)}
+                      >
+                        {trigger.enabled ? "Disable" : "Enable"}
+                      </button>
+                      <button
+                        className="rounded-lg border border-error/20 bg-error/5 px-2 py-1 text-[9px] font-bold text-error hover:bg-error/10 transition-all"
+                        onClick={() => void handleDeleteTrigger(trigger)}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </article>
+                ))}
+                {triggers.length === 0 && <p className="text-xs text-text-dim font-medium py-4 text-center border border-dashed border-border-subtle rounded-xl">No active triggers</p>}
+              </div>
+            </section>
 
-          <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-            <h2 className="mb-3 mt-0 text-base font-semibold">Cron Jobs</h2>
-            {cronJobsError ? <p className="text-sm text-rose-300">{cronJobsError}</p> : null}
-            {cronJobsQuery.isLoading && cronJobs.length === 0 ? (
-              <p className="text-sm text-slate-400">Loading cron jobs...</p>
-            ) : null}
-            {!cronJobsQuery.isLoading && cronJobs.length === 0 ? (
-              <p className="text-sm text-slate-400">No cron jobs found.</p>
-            ) : null}
-            <div className="grid gap-2">
-              {cronJobs.map((job: CronJobItem, index: number) => (
-                <article
-                  key={(typeof job.id === "string" ? job.id : `cron-${index}`) as string}
-                  className="rounded-lg border border-slate-700 bg-slate-950/70 p-3"
-                >
-                  <div className="flex flex-wrap items-start justify-between gap-2">
-                    <div>
-                      <p className="text-sm font-semibold">
-                        {typeof job.name === "string" && job.name.length > 0 ? job.name : job.id ?? `job-${index}`}
-                      </p>
-                      <p className="text-xs text-slate-400">{typeof job.schedule === "string" ? job.schedule : "-"}</p>
+            <section className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5">
+              <h2 className="text-lg font-black tracking-tight mb-1">System Cron</h2>
+              <p className="mb-6 text-[10px] text-text-dim font-bold uppercase tracking-wider">Low-level worker jobs</p>
+              
+              <div className="grid gap-3">
+                {cronJobs.map((job: CronJobItem, index: number) => (
+                  <article key={index} className="rounded-xl border border-border-subtle bg-main/40 p-3">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="text-xs font-black truncate">{job.name || job.id || `job-${index}`}</p>
+                        <p className="text-[10px] font-bold text-accent uppercase mt-0.5">
+                          Schedule: <span className="text-text-dim">{job.schedule || "-"}</span>
+                        </p>
+                      </div>
+                      <div className={`h-1.5 w-1.5 rounded-full ${job.enabled ? 'bg-success shadow-[0_0_5px_var(--success-color)]' : 'bg-text-dim/30'}`} />
                     </div>
-                    <span
-                      className={`rounded-full border px-2 py-1 text-[11px] ${
-                        job.enabled
-                          ? "border-emerald-700 bg-emerald-700/20 text-emerald-300"
-                          : "border-slate-700 bg-slate-800/60 text-slate-300"
-                      }`}
-                    >
-                      {job.enabled ? "Enabled" : "Disabled"}
-                    </span>
-                  </div>
-                </article>
-              ))}
-            </div>
-          </article>
-        </section>
+                  </article>
+                ))}
+                {cronJobs.length === 0 && <p className="text-xs text-text-dim font-medium py-4 text-center border border-dashed border-border-subtle rounded-xl">No worker jobs found</p>}
+              </div>
+            </section>
+          </div>
+        </div>
       </div>
-    </section>
+    </div>
   );
 }

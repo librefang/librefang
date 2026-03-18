@@ -26,10 +26,10 @@ interface GoalDraft {
 
 function statusClass(status?: string): string {
   const value = (status ?? "").toLowerCase();
-  if (value === "completed") return "border-emerald-700 bg-emerald-700/15 text-emerald-100";
-  if (value === "in_progress") return "border-amber-700 bg-amber-700/15 text-amber-100";
-  if (value === "cancelled") return "border-slate-700 bg-slate-800/60 text-slate-200";
-  return "border-sky-700 bg-sky-700/15 text-sky-100";
+  if (value === "completed") return "border-success/20 bg-success/10 text-success";
+  if (value === "in_progress") return "border-warning/20 bg-warning/10 text-warning";
+  if (value === "cancelled") return "border-border-subtle bg-surface text-text-dim";
+  return "border-brand/20 bg-brand/10 text-brand";
 }
 
 function statusLabel(status?: string): string {
@@ -260,265 +260,304 @@ export function GoalsPage() {
     }
   }
 
+  const inputClass = "rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand focus:ring-2 focus:ring-brand/20 transition-all outline-none disabled:opacity-50";
+
   return (
-    <section className="flex flex-col gap-4">
-      <header className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+    <div className="flex flex-col gap-6 transition-colors duration-300">
+      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
-          <h1 className="m-0 text-2xl font-semibold">Goals</h1>
-          <p className="text-sm text-slate-400">Hierarchical goals with status tracking, ownership, and progress.</p>
+          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            </svg>
+            Strategic Planning
+          </div>
+          <h1 className="mt-2 text-3xl font-extrabold tracking-tight md:text-4xl">Goals</h1>
+          <p className="mt-1 text-text-dim font-medium max-w-2xl">Hierarchical mission tracking with multi-agent ownership and progress monitoring.</p>
         </div>
         <button
-          className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm font-medium text-slate-100 transition hover:border-sky-500 hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-60"
+          className="flex h-9 items-center gap-2 rounded-xl border border-border-subtle bg-surface px-4 text-sm font-bold text-text-dim hover:text-brand hover:border-brand/30 transition-all shadow-sm disabled:opacity-50"
           onClick={() => void refreshGoals()}
           disabled={goalsQuery.isFetching}
         >
+          <svg className={`h-3.5 w-3.5 ${goalsQuery.isFetching ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2">
+            <path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
           Refresh
         </button>
       </header>
 
       {feedback ? (
         <div
-          className={`rounded-xl border p-3 text-sm ${
+          className={`animate-in fade-in slide-in-from-top-2 rounded-xl border p-4 text-sm font-bold shadow-sm ${
             feedback.type === "ok"
-              ? "border-emerald-700 bg-emerald-700/10 text-emerald-200"
-              : "border-rose-700 bg-rose-700/10 text-rose-200"
+              ? "border-success/20 bg-success/5 text-success"
+              : "border-error/20 bg-error/5 text-error"
           }`}
         >
-          {feedback.text}
+          <div className="flex items-center gap-3">
+            <div className={`h-2 w-2 rounded-full ${feedback.type === 'ok' ? 'bg-success' : 'bg-error'}`} />
+            {feedback.text}
+          </div>
         </div>
       ) : null}
+      
       {error ? (
-        <div className="rounded-xl border border-rose-700 bg-rose-700/15 p-4 text-rose-200">{error}</div>
+        <div className="rounded-xl border border-error/20 bg-error/5 p-4 text-sm text-error font-bold">{error}</div>
       ) : null}
 
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <span className="text-sm text-slate-400">Total</span>
-          <strong className="mt-1 block text-2xl">{stats.total}</strong>
-        </article>
-        <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <span className="text-sm text-slate-400">Pending</span>
-          <strong className="mt-1 block text-2xl">{stats.pending}</strong>
-        </article>
-        <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <span className="text-sm text-slate-400">In Progress</span>
-          <strong className="mt-1 block text-2xl">{stats.inProgress}</strong>
-        </article>
-        <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <span className="text-sm text-slate-400">Completed</span>
-          <strong className="mt-1 block text-2xl">{stats.completed}</strong>
-        </article>
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        {[
+          { label: "Total Goals", value: stats.total, color: "brand" },
+          { label: "Pending", value: stats.pending, color: "text-dim" },
+          { label: "In Progress", value: stats.inProgress, color: "warning" },
+          { label: "Completed", value: stats.completed, color: "success" },
+        ].map((stat, i) => (
+          <article key={i} className="rounded-2xl border border-border-subtle bg-surface p-5 shadow-sm ring-1 ring-black/5 dark:ring-white/5">
+            <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{stat.label}</span>
+            <div className="mt-1 flex items-baseline gap-2">
+              <strong className={`text-3xl font-black tracking-tight text-${stat.color}`}>{stat.value}</strong>
+              <div className={`h-1 w-1 rounded-full bg-${stat.color}`} />
+            </div>
+          </article>
+        ))}
       </div>
 
-      <div className="grid gap-3 xl:grid-cols-[360px_1fr]">
-        <aside className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <h2 className="m-0 text-base font-semibold">Create Goal</h2>
-          <form className="mt-3 flex flex-col gap-2" onSubmit={handleCreateGoal}>
-            <input
-              value={createDraft.title}
-              onChange={(event) =>
-                setCreateDraft((current) => ({ ...current, title: event.target.value }))
-              }
-              placeholder="Title"
-              className="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-            />
-            <textarea
-              value={createDraft.description}
-              onChange={(event) =>
-                setCreateDraft((current) => ({ ...current, description: event.target.value }))
-              }
-              rows={3}
-              placeholder="Description"
-              className="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-            />
-            <select
-              value={createDraft.status}
-              onChange={(event) =>
-                setCreateDraft((current) => ({ ...current, status: event.target.value }))
-              }
-              className="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-            >
-              <option value="pending">Pending</option>
-              <option value="in_progress">In Progress</option>
-              <option value="completed">Completed</option>
-              <option value="cancelled">Cancelled</option>
-            </select>
-            <input
-              type="number"
-              min={0}
-              max={100}
-              value={createDraft.progress}
-              onChange={(event) =>
-                setCreateDraft((current) => ({
-                  ...current,
-                  progress: clampProgress(Number(event.target.value))
-                }))
-              }
-              placeholder="Progress 0-100"
-              className="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-            />
-            <select
-              value={createDraft.parent_id}
-              onChange={(event) =>
-                setCreateDraft((current) => ({ ...current, parent_id: event.target.value }))
-              }
-              className="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-            >
-              <option value="">No parent</option>
-              {goals.map((goal) => (
-                <option key={goal.id} value={goal.id}>
-                  {goal.title ?? goal.id}
-                </option>
-              ))}
-            </select>
-            <select
-              value={createDraft.agent_id}
-              onChange={(event) =>
-                setCreateDraft((current) => ({ ...current, agent_id: event.target.value }))
-              }
-              className="rounded-lg border border-slate-700 bg-slate-950/80 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-            >
-              <option value="">No agent</option>
-              {agents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name}
-                </option>
-              ))}
-            </select>
-            <button
-              type="submit"
-              className="rounded-lg border border-sky-500 bg-sky-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
-              disabled={createDraft.title.trim().length === 0 || createMutation.isPending}
-            >
-              Create Goal
-            </button>
-          </form>
+      <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
+        <aside className="flex flex-col gap-6">
+          <section className="h-fit rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5">
+            <h2 className="text-lg font-black tracking-tight">Create Goal</h2>
+            <p className="mb-6 text-xs text-text-dim font-medium">Define a new objective for your agents.</p>
+            
+            <form className="flex flex-col gap-4" onSubmit={handleCreateGoal}>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-black uppercase tracking-widest text-text-dim px-1">Goal Title</label>
+                <input
+                  value={createDraft.title}
+                  onChange={(event) => setCreateDraft((current) => ({ ...current, title: event.target.value }))}
+                  placeholder="e.g. Master the Rust language"
+                  className={inputClass}
+                />
+              </div>
+              
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-black uppercase tracking-widest text-text-dim px-1">Description</label>
+                <textarea
+                  value={createDraft.description}
+                  onChange={(event) => setCreateDraft((current) => ({ ...current, description: event.target.value }))}
+                  rows={3}
+                  placeholder="Detailed breakdown..."
+                  className={`${inputClass} resize-none`}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-text-dim px-1">Status</label>
+                  <select
+                    value={createDraft.status}
+                    onChange={(event) => setCreateDraft((current) => ({ ...current, status: event.target.value }))}
+                    className={inputClass}
+                  >
+                    <option value="pending">Pending</option>
+                    <option value="in_progress">In Progress</option>
+                    <option value="completed">Completed</option>
+                    <option value="cancelled">Cancelled</option>
+                  </select>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-text-dim px-1">Progress %</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={100}
+                    value={createDraft.progress}
+                    onChange={(event) => setCreateDraft((current) => ({ ...current, progress: clampProgress(Number(event.target.value)) }))}
+                    className={inputClass}
+                  />
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-black uppercase tracking-widest text-text-dim px-1">Parent Goal</label>
+                <select
+                  value={createDraft.parent_id}
+                  onChange={(event) => setCreateDraft((current) => ({ ...current, parent_id: event.target.value }))}
+                  className={inputClass}
+                >
+                  <option value="">No parent (Top level)</option>
+                  {goals.map((goal) => (
+                    <option key={goal.id} value={goal.id}>
+                      {goal.title ?? goal.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex flex-col gap-1.5">
+                <label className="text-[10px] font-black uppercase tracking-widest text-text-dim px-1">Responsible Agent</label>
+                <select
+                  value={createDraft.agent_id}
+                  onChange={(event) => setCreateDraft((current) => ({ ...current, agent_id: event.target.value }))}
+                  className={inputClass}
+                >
+                  <option value="">No agent assigned</option>
+                  {agents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <button
+                type="submit"
+                className="mt-2 rounded-xl bg-brand py-3 text-sm font-bold text-white shadow-lg shadow-brand/20 hover:opacity-90 transition-all disabled:opacity-50"
+                disabled={createDraft.title.trim().length === 0 || createMutation.isPending}
+              >
+                Create Goal
+              </button>
+            </form>
+          </section>
 
           {editingId ? (
-            <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-              <h3 className="m-0 text-sm font-semibold">Edit Goal</h3>
-              <form className="mt-2 flex flex-col gap-2" onSubmit={handleSaveEdit}>
+            <section className="h-fit rounded-2xl border border-brand/30 bg-brand-muted p-6 shadow-sm animate-in slide-in-from-bottom-4">
+              <h3 className="text-sm font-black uppercase tracking-widest text-brand mb-4">Edit Goal</h3>
+              <form className="flex flex-col gap-3" onSubmit={handleSaveEdit}>
                 <input
                   value={editDraft.title}
-                  onChange={(event) =>
-                    setEditDraft((current) => ({ ...current, title: event.target.value }))
-                  }
-                  className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
+                  onChange={(event) => setEditDraft((current) => ({ ...current, title: event.target.value }))}
+                  className={inputClass}
                 />
                 <textarea
                   value={editDraft.description}
-                  onChange={(event) =>
-                    setEditDraft((current) => ({ ...current, description: event.target.value }))
-                  }
-                  rows={3}
-                  className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
+                  onChange={(event) => setEditDraft((current) => ({ ...current, description: event.target.value }))}
+                  rows={2}
+                  className={`${inputClass} resize-none`}
                 />
-                <select
-                  value={editDraft.status}
-                  onChange={(event) =>
-                    setEditDraft((current) => ({ ...current, status: event.target.value }))
-                  }
-                  className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-                >
-                  <option value="pending">Pending</option>
-                  <option value="in_progress">In Progress</option>
-                  <option value="completed">Completed</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
-                <input
-                  type="number"
-                  min={0}
-                  max={100}
-                  value={editDraft.progress}
-                  onChange={(event) =>
-                    setEditDraft((current) => ({
-                      ...current,
-                      progress: clampProgress(Number(event.target.value))
-                    }))
-                  }
-                  className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
-                />
-                <div className="flex gap-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <select
+                    value={editDraft.status}
+                    onChange={(event) => setEditDraft((current) => ({ ...current, status: event.target.value }))}
+                    className={inputClass}
+                  >
+                    <option value="pending">Pending</option>
+                    <option value="in_progress">In Progress</option>
+                    <option value="completed">Completed</option>
+                    <option value="cancelled">Cancelled</option>
+                  </select>
+                  <input
+                    type="number"
+                    value={editDraft.progress}
+                    onChange={(event) => setEditDraft((current) => ({ ...current, progress: clampProgress(Number(event.target.value)) }))}
+                    className={inputClass}
+                  />
+                </div>
+                <div className="flex gap-2 mt-2">
                   <button
                     type="submit"
-                    className="flex-1 rounded-lg border border-emerald-700 bg-emerald-700/15 px-3 py-2 text-sm font-medium text-emerald-200 transition hover:bg-emerald-700/25 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="flex-1 rounded-xl bg-brand py-2 text-xs font-bold text-white shadow-md shadow-brand/20 hover:opacity-90"
                     disabled={updateMutation.isPending}
                   >
-                    Save
+                    Save Changes
                   </button>
                   <button
                     type="button"
-                    className="flex-1 rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm font-medium text-slate-200 transition hover:border-slate-400 hover:bg-slate-700"
+                    className="flex-1 rounded-xl border border-border-subtle bg-surface py-2 text-xs font-bold text-text-dim hover:text-slate-900 dark:hover:text-white"
                     onClick={() => setEditingId(null)}
                   >
                     Cancel
                   </button>
                 </div>
               </form>
-            </div>
+            </section>
           ) : null}
         </aside>
 
-        <article className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <h2 className="m-0 text-base font-semibold">Goal Tree</h2>
-          {goalsQuery.isLoading ? (
-            <p className="mt-2 text-sm text-slate-400">Loading goals...</p>
+        <article className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5 overflow-hidden">
+          <h2 className="text-lg font-black tracking-tight mb-1">Goal Tree</h2>
+          <p className="mb-6 text-xs text-text-dim font-medium">Visualized hierarchy of objectives and sub-tasks.</p>
+          
+          {goalsQuery.isLoading && goals.length === 0 ? (
+            <div className="py-24 text-center">
+              <div className="mx-auto h-10 w-10 animate-spin rounded-full border-2 border-brand border-t-transparent mb-4" />
+              <p className="text-sm text-text-dim font-bold">Synchronizing goals...</p>
+            </div>
           ) : rows.length === 0 ? (
-            <p className="mt-2 text-sm text-slate-400">No goals yet.</p>
+            <div className="py-24 text-center border border-dashed border-border-subtle rounded-2xl">
+              <p className="text-sm text-text-dim font-bold">No strategic goals defined yet.</p>
+            </div>
           ) : (
-            <ul className="mt-3 flex max-h-[640px] list-none flex-col gap-2 overflow-y-auto p-0">
-              {rows.map((row) => (
-                <li key={row.goal.id} className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-                  <div
-                    className="flex flex-wrap items-center justify-between gap-2"
-                    style={{ paddingLeft: `${row.depth * 16}px` }}
+            <div className="overflow-y-auto max-h-[800px] pr-2 scrollbar-thin">
+              <ul className="flex flex-col gap-2 list-none p-0 m-0">
+                {rows.map((row) => (
+                  <li 
+                    key={row.goal.id} 
+                    className="group rounded-xl border border-border-subtle bg-main/40 p-4 transition-all hover:border-brand/30"
+                    style={{ marginLeft: `${row.depth * 20}px` }}
                   >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        {row.hasChildren ? (
-                          <button
-                            type="button"
-                            className="h-5 w-5 rounded border border-slate-700 bg-slate-900 text-xs text-slate-300"
-                            onClick={() => toggleExpand(row.goal.id)}
-                          >
-                            {expandedById[row.goal.id] ? "-" : "+"}
-                          </button>
-                        ) : (
-                          <span className="inline-block h-5 w-5" />
-                        )}
-                        <strong className="truncate text-sm">{row.goal.title ?? row.goal.id}</strong>
-                        <span className={`rounded-full border px-2 py-1 text-xs ${statusClass(row.goal.status)}`}>
-                          {statusLabel(row.goal.status)}
-                        </span>
+                    <div className="flex flex-wrap items-center justify-between gap-4">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-3">
+                          {row.hasChildren ? (
+                            <button
+                              type="button"
+                              className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-lg border border-border-subtle bg-surface text-xs font-black text-text-dim hover:text-brand hover:border-brand/30 transition-all shadow-sm"
+                              onClick={() => toggleExpand(row.goal.id)}
+                            >
+                              {expandedById[row.goal.id] ? "−" : "+"}
+                            </button>
+                          ) : (
+                            <div className="h-1.5 w-1.5 rounded-full bg-brand/20 ml-2" />
+                          )}
+                          <strong className="truncate text-sm font-black">{row.goal.title ?? row.goal.id}</strong>
+                          <span className={`rounded-lg border px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${statusClass(row.goal.status)}`}>
+                            {statusLabel(row.goal.status)}
+                          </span>
+                        </div>
+                        
+                        <div className="mt-2 flex flex-col gap-1">
+                          <p className="m-0 break-words text-[11px] font-medium text-text-dim/80 line-clamp-2 leading-relaxed italic">
+                            {row.goal.description || "No description provided."}
+                          </p>
+                          <div className="mt-1 flex items-center gap-4">
+                            <div className="flex items-center gap-2">
+                              <div className="h-1.5 w-24 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                                <div className="h-full bg-brand transition-all duration-500" style={{ width: `${clampProgress(row.goal.progress ?? 0)}%` }} />
+                              </div>
+                              <span className="text-[10px] font-black text-brand tracking-tighter">{clampProgress(row.goal.progress ?? 0)}%</span>
+                            </div>
+                            <div className="h-1 w-1 rounded-full bg-border-subtle" />
+                            <p className="text-[10px] font-bold text-text-dim uppercase tracking-wider">
+                              OWNER: <span className="text-slate-700 dark:text-slate-300 font-black">{row.goal.agent_id ? agentNameById.get(row.goal.agent_id) ?? row.goal.agent_id : "UNASSIGNED"}</span>
+                            </p>
+                          </div>
+                        </div>
                       </div>
-                      <p className="m-0 mt-1 break-words text-xs text-slate-400">{row.goal.description ?? "-"}</p>
-                      <p className="m-0 mt-1 text-xs text-slate-500">
-                        progress {clampProgress(row.goal.progress ?? 0)}% ·{" "}
-                        {row.goal.agent_id ? agentNameById.get(row.goal.agent_id) ?? row.goal.agent_id : "no agent"}
-                      </p>
+                      
+                      <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          className="rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-[10px] font-black text-text-dim hover:text-brand hover:border-brand/30 transition-all shadow-sm"
+                          onClick={() => startEdit(row.goal)}
+                        >
+                          Edit
+                        </button>
+                        <button
+                          className="rounded-lg border border-error/20 bg-error/10 px-3 py-1.5 text-[10px] font-black text-error hover:bg-error/20 transition-all shadow-sm"
+                          onClick={() => void handleDelete(row.goal.id)}
+                          disabled={pendingDeleteId === row.goal.id}
+                        >
+                          {pendingDeleteId === row.goal.id ? "..." : "Delete"}
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex gap-2">
-                      <button
-                        className="rounded-lg border border-slate-600 bg-slate-800 px-2 py-1 text-xs text-slate-100 transition hover:border-slate-400 hover:bg-slate-700"
-                        onClick={() => startEdit(row.goal)}
-                      >
-                        Edit
-                      </button>
-                      <button
-                        className="rounded-lg border border-rose-700 bg-rose-700/10 px-2 py-1 text-xs text-rose-200 transition hover:bg-rose-700/20 disabled:cursor-not-allowed disabled:opacity-60"
-                        onClick={() => void handleDelete(row.goal.id)}
-                        disabled={pendingDeleteId === row.goal.id}
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                </li>
-              ))}
-            </ul>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
         </article>
       </div>
-    </section>
+    </div>
   );
 }

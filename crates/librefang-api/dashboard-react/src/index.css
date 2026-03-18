@@ -1,7 +1,59 @@
 @import "tailwindcss";
 
+@theme {
+  /* Dynamic Semantic Palette */
+  --color-brand: var(--brand-color);
+  --color-brand-muted: var(--brand-muted);
+  
+  --color-success: var(--success-color);
+  --color-warning: var(--warning-color);
+  --color-error: var(--error-color);
+  --color-accent: var(--accent-color);
+  
+  /* Layout Colors */
+  --color-main: var(--bg-main);
+  --color-surface: var(--bg-surface);
+  --color-surface-hover: var(--bg-surface-hover);
+  --color-border-subtle: var(--border-color);
+  --color-text-dim: var(--text-muted);
+}
+
 :root {
+  color-scheme: light;
+  
+  /* Light Mode Palette (Subtle & High Contrast) */
+  --brand-color: #0284c7;   /* Sky 600 */
+  --brand-muted: #f0f9ff;   /* Sky 50 */
+  
+  --success-color: #16a34a; /* Emerald 600 */
+  --warning-color: #d97706; /* Amber 600 */
+  --error-color: #dc2626;   /* Rose 600 */
+  --accent-color: #7c3aed;  /* Violet 600 */
+  
+  --bg-main: #f8fafc;
+  --bg-surface: #ffffff;
+  --bg-surface-hover: #f1f5f9;
+  --border-color: #e2e8f0;
+  --text-muted: #64748b;
+}
+
+:root.dark {
   color-scheme: dark;
+  
+  /* Dark Mode Palette (Glowing & Soft Contrast) */
+  --brand-color: #38bdf8;   /* Sky 400 */
+  --brand-muted: rgba(14, 165, 233, 0.15);
+  
+  --success-color: #34d399; /* Emerald 400 */
+  --warning-color: #fbbf24; /* Amber 400 */
+  --error-color: #fb7185;   /* Rose 400 */
+  --accent-color: #a78bfa;  /* Violet 400 */
+  
+  --bg-main: #020617;
+  --bg-surface: rgba(15, 23, 42, 0.6);
+  --bg-surface-hover: rgba(30, 41, 59, 0.4);
+  --border-color: rgba(30, 41, 59, 0.7);
+  --text-muted: #94a3b8;
 }
 
 html,
@@ -9,11 +61,22 @@ body,
 #root {
   margin: 0;
   min-height: 100%;
+  background-color: var(--bg-main);
 }
 
 body {
-  font-family: "Inter", "Segoe UI", sans-serif;
+  font-family: "Inter", system-ui, sans-serif;
+  @apply text-slate-900 dark:text-slate-100 transition-colors duration-300;
+}
+
+.dark body {
   background:
-    radial-gradient(circle at top, rgba(30, 64, 175, 0.35) 0%, rgba(2, 6, 23, 0.95) 50%),
+    radial-gradient(circle at top, rgba(30, 64, 175, 0.15) 0%, rgba(2, 6, 23, 1) 80%),
     #020617;
 }
+
+.glass {
+  @apply border border-border-subtle bg-surface backdrop-blur-xl shadow-sm dark:shadow-none;
+}
+
+@custom-variant dark (&:where(.dark, .dark *));

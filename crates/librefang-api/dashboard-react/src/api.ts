@@ -97,6 +97,7 @@ export interface DashboardSnapshot {
   status: StatusResponse;
   providers: ProviderItem[];
   channels: ChannelItem[];
+  agents: AgentItem[];
   skillCount: number;
 }
 
@@ -527,12 +528,13 @@ async function del<T>(path: string): Promise<T> {
 }
 
 export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
-  const [health, status, providersRaw, channelsRaw, skillsRaw] = await Promise.all([
+  const [health, status, providersRaw, channelsRaw, skillsRaw, agents] = await Promise.all([
     get<HealthResponse>("/api/health"),
     get<StatusResponse>("/api/status"),
     get<ProvidersResponse>("/api/providers"),
     get<ChannelsResponse>("/api/channels"),
-    get<SkillsResponse>("/api/skills")
+    get<SkillsResponse>("/api/skills"),
+    listAgents()
   ]);
 
   return {
@@ -540,6 +542,7 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     status,
     providers: providersRaw.providers ?? [],
     channels: channelsRaw.channels ?? [],
+    agents: agents ?? [],
     skillCount: skillsRaw.skills?.length ?? 0
   };
 }
@@ -715,6 +718,16 @@ export async function approveApproval(id: string): Promise<ApiActionResponse> {
 
 export async function rejectApproval(id: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/approvals/${encodeURIComponent(id)}/reject`, {});
+}
+
+export async function switchAgentSession(
+  agentId: string,
+  sessionId: string
+): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(
+    `/api/agents/${encodeURIComponent(agentId)}/sessions/${encodeURIComponent(sessionId)}/switch`,
+    {}
+  );
 }
 
 export async function listSessions(): Promise<SessionListItem[]> {

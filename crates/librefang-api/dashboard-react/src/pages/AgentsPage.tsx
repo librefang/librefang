@@ -204,20 +204,20 @@ export function AgentsPage() {
   return (
     <section className="flex flex-col gap-4">
       <header>
-        <h1 className="m-0 text-2xl font-semibold">Agents</h1>
-        <p className="text-sm text-slate-400">TanStack Query powered chat workspace.</p>
+        <h1 className="m-0 text-2xl font-bold tracking-tight">Agents</h1>
+        <p className="text-sm text-text-dim font-medium">TanStack Query powered chat workspace.</p>
       </header>
 
       {agentsError ? (
-        <div className="rounded-xl border border-rose-700 bg-rose-700/15 p-4 text-rose-200">{agentsError}</div>
+        <div className="rounded-xl border border-error/20 bg-error/5 p-4 text-error font-bold">{agentsError}</div>
       ) : null}
 
       <div className="grid gap-3 xl:grid-cols-[320px_1fr]">
-        <aside className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+        <aside className="rounded-2xl border border-border-subtle bg-surface p-4 shadow-sm ring-1 ring-black/5 dark:ring-white/5">
           <div className="mb-3 flex items-center justify-between gap-2">
-            <h2 className="m-0 text-base font-semibold">Available Agents</h2>
+            <h2 className="m-0 text-base font-bold tracking-tight">Available Agents</h2>
             <button
-              className="rounded-lg border border-sky-500 bg-sky-600 px-3 py-2 text-xs font-medium text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-lg bg-brand px-3 py-1.5 text-xs font-bold text-white shadow-sm hover:opacity-90 transition-all disabled:opacity-50"
               type="button"
               onClick={() => void agentsQuery.refetch()}
               disabled={agentsQuery.isFetching}
@@ -227,32 +227,32 @@ export function AgentsPage() {
           </div>
 
           {agentsQuery.isLoading && agents.length === 0 ? (
-            <p className="text-sm text-slate-400">Loading agents...</p>
+            <p className="text-sm text-text-dim font-medium">Loading agents...</p>
           ) : null}
           {!agentsQuery.isLoading && agents.length === 0 ? (
-            <p className="text-sm text-slate-400">No agents found. Create one from CLI/API first.</p>
+            <p className="text-sm text-text-dim font-medium">No agents found. Create one from CLI/API first.</p>
           ) : null}
 
           <div className="flex max-h-[65vh] flex-col gap-2 overflow-y-auto pr-1">
             {agents.map((agent) => (
               <button
                 key={agent.id}
-                className={`flex w-full flex-col items-start gap-1 rounded-lg border p-3 text-left transition ${
+                className={`flex w-full flex-col items-start gap-1 rounded-xl border p-3 text-left transition-all ${
                   agent.id === selectedAgentId
-                    ? "border-sky-500 bg-sky-500/15"
-                    : "border-slate-700 bg-slate-900/60 hover:border-slate-500 hover:bg-slate-800/60"
+                    ? "border-brand/30 bg-brand-muted"
+                    : "border-border-subtle bg-surface hover:border-brand/30 hover:bg-surface-hover"
                 }`}
                 type="button"
                 onClick={() => setSelectedAgentId(agent.id)}
                 disabled={sendMutation.isPending}
               >
-                <span className="font-medium">{agent.name}</span>
-                <span className="text-xs text-slate-400">{formatAgentModel(agent)}</span>
+                <span className="font-bold text-sm">{agent.name}</span>
+                <span className="text-[10px] font-bold text-text-dim uppercase tracking-wider">{formatAgentModel(agent)}</span>
                 <span
-                  className={`rounded-full border px-2 py-1 text-[11px] ${
+                  className={`mt-1 rounded-full border px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${
                     agent.ready
-                      ? "border-emerald-700 bg-emerald-700/20 text-emerald-300"
-                      : "border-amber-700 bg-amber-700/20 text-amber-300"
+                      ? "border-success/20 bg-success/10 text-success"
+                      : "border-warning/20 bg-warning/10 text-warning"
                   }`}
                 >
                   {formatAgentState(agent)}
@@ -262,21 +262,21 @@ export function AgentsPage() {
           </div>
         </aside>
 
-        <section className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+        <section className="rounded-2xl border border-border-subtle bg-surface p-4 shadow-sm ring-1 ring-black/5 dark:ring-white/5">
           {selectedAgent ? (
             <div className="flex h-full min-h-[70vh] flex-col gap-3">
-              <div className="flex items-start justify-between gap-3 border-b border-slate-800 pb-3">
+              <div className="flex items-start justify-between gap-3 border-b border-border-subtle pb-3">
                 <div>
-                  <h2 className="m-0 text-lg font-semibold">{selectedAgent.name}</h2>
-                  <p className="text-sm text-slate-400">
-                    {formatAgentModel(selectedAgent)} · mode: {selectedAgent.mode ?? "unknown"}
+                  <h2 className="m-0 text-lg font-black tracking-tight">{selectedAgent.name}</h2>
+                  <p className="text-xs font-bold text-text-dim uppercase tracking-wider">
+                    {formatAgentModel(selectedAgent)} • mode: {selectedAgent.mode ?? "unknown"}
                   </p>
                 </div>
                 <span
-                  className={`rounded-full border px-2 py-1 text-xs ${
+                  className={`rounded-full border px-2 py-1 text-[10px] font-black uppercase tracking-widest ${
                     selectedAgent.ready
-                      ? "border-emerald-700 bg-emerald-700/20 text-emerald-300"
-                      : "border-amber-700 bg-amber-700/20 text-amber-300"
+                      ? "border-success/20 bg-success/10 text-success"
+                      : "border-warning/20 bg-warning/10 text-warning"
                   }`}
                 >
                   {selectedAgent.ready ? "Ready" : "Needs Attention"}
@@ -284,40 +284,40 @@ export function AgentsPage() {
               </div>
 
               {sessionError ? (
-                <div className="rounded-lg border border-rose-700 bg-rose-700/15 p-3 text-sm text-rose-200">
+                <div className="rounded-lg border border-error/20 bg-error/5 p-3 text-sm text-error font-bold">
                   {sessionError}
                 </div>
               ) : null}
 
               <div
                 ref={messagesRef}
-                className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/70 p-3"
+                className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto rounded-xl border border-border-subtle bg-main/40 p-4"
               >
-                {sessionQuery.isLoading ? <div className="text-sm text-slate-400">Loading session...</div> : null}
+                {sessionQuery.isLoading ? <div className="text-sm text-text-dim font-medium">Loading session...</div> : null}
                 {!sessionQuery.isLoading && messages.length === 0 ? (
-                  <div className="text-sm text-slate-400">No messages yet. Start the conversation below.</div>
+                  <div className="text-sm text-text-dim font-medium">No messages yet. Start the conversation below.</div>
                 ) : null}
 
                 {messages.map((message) => (
                   <article
                     key={message.id}
-                    className={`max-w-[90%] rounded-lg border p-3 ${
+                    className={`max-w-[90%] rounded-2xl border p-4 shadow-sm ${
                       message.role === "user"
-                        ? "self-end border-sky-500/70 bg-sky-500/20"
+                        ? "self-end border-brand/30 bg-brand-muted"
                         : message.role === "system"
-                          ? "self-center border-amber-700 bg-amber-700/20"
-                          : "self-start border-slate-700 bg-slate-900"
+                          ? "self-center border-warning/20 bg-warning/10"
+                          : "self-start border-border-subtle bg-surface"
                     }`}
                   >
-                    <div className="mb-1 text-[11px] uppercase tracking-wide text-slate-400">{message.role}</div>
-                    <div className="whitespace-pre-wrap text-sm">{message.content}</div>
+                    <div className="mb-1 text-[10px] font-black uppercase tracking-widest text-text-dim/60">{message.role}</div>
+                    <div className="whitespace-pre-wrap text-sm font-medium">{message.content}</div>
 
                     {message.images.length > 0 ? (
                       <div className="mt-3 grid gap-2 sm:grid-cols-2">
                         {message.images.map((image) => (
                           <img
                             key={`${message.id}-${image.fileId}`}
-                            className="max-h-72 w-full rounded-md border border-slate-700 object-contain"
+                            className="max-h-72 w-full rounded-xl border border-border-subtle object-contain"
                             src={`/api/uploads/${encodeURIComponent(image.fileId)}`}
                             alt={image.filename}
                             loading="lazy"
@@ -329,17 +329,17 @@ export function AgentsPage() {
                     {message.tools.length > 0 ? (
                       <div className="mt-3 flex flex-col gap-2">
                         {message.tools.map((tool, index) => (
-                          <div key={`${message.id}-tool-${index}`} className="rounded-md border border-slate-700 bg-slate-950/70 p-2">
-                            <div className="mb-1 text-xs font-semibold text-slate-300">{tool.name}</div>
+                          <div key={`${message.id}-tool-${index}`} className="rounded-xl border border-border-subtle bg-main/40 p-3">
+                            <div className="mb-1 text-[10px] font-black uppercase tracking-widest text-text-dim">{tool.name}</div>
                             {tool.input ? (
-                              <pre className="max-h-52 overflow-auto whitespace-pre-wrap rounded bg-slate-900 p-2 text-xs text-slate-300">
+                              <pre className="max-h-52 overflow-auto whitespace-pre-wrap rounded-lg bg-main p-2 text-xs text-text-dim font-mono">
                                 <code>{tool.input}</code>
                               </pre>
                             ) : null}
                             {tool.result ? (
                               <pre
-                                className={`mt-2 max-h-52 overflow-auto whitespace-pre-wrap rounded p-2 text-xs ${
-                                  tool.isError ? "bg-rose-900/30 text-rose-200" : "bg-slate-900 text-slate-300"
+                                className={`mt-2 max-h-52 overflow-auto whitespace-pre-wrap rounded-lg p-2 text-xs font-mono ${
+                                  tool.isError ? "bg-error/10 text-error" : "bg-main text-text-dim"
                                 }`}
                               >
                                 <code>{tool.result}</code>
@@ -350,33 +350,35 @@ export function AgentsPage() {
                       </div>
                     ) : null}
 
-                    {message.meta ? <div className="mt-2 text-[11px] text-slate-400">{message.meta}</div> : null}
+                    {message.meta ? <div className="mt-2 text-[10px] font-medium text-text-dim italic">{message.meta}</div> : null}
                   </article>
                 ))}
               </div>
 
-              <form className="flex flex-col gap-2 border-t border-slate-800 pt-3" onSubmit={handleSend}>
+              <form className="flex flex-col gap-3 border-t border-border-subtle pt-3" onSubmit={handleSend}>
                 <textarea
                   value={inputText}
                   onChange={(event) => setInputText(event.target.value)}
                   placeholder="Type a message to the selected agent..."
                   rows={3}
                   disabled={sendMutation.isPending}
-                  className="w-full resize-y rounded-lg border border-slate-700 bg-slate-950/80 p-3 text-sm text-slate-100 outline-none ring-sky-500/70 transition focus:border-sky-500 focus:ring"
+                  className="w-full resize-y rounded-xl border border-border-subtle bg-main p-3 text-sm transition-all focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none disabled:opacity-50"
                 />
                 <div className="flex justify-end">
                   <button
-                    className="rounded-lg border border-sky-500 bg-sky-600 px-4 py-2 text-sm font-medium text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="rounded-xl bg-brand px-6 py-2.5 text-sm font-bold text-white shadow-lg shadow-brand/20 hover:opacity-90 transition-all disabled:opacity-50 disabled:shadow-none"
                     type="submit"
                     disabled={sendMutation.isPending || inputText.trim().length === 0}
                   >
-                    {sendMutation.isPending ? "Sending..." : "Send"}
+                    {sendMutation.isPending ? "Sending..." : "Send Message"}
                   </button>
                 </div>
               </form>
             </div>
           ) : (
-            <div className="text-sm text-slate-400">Select an agent to open chat.</div>
+            <div className="flex h-full items-center justify-center text-sm text-text-dim font-medium italic">
+              Select an agent to open chat.
+            </div>
           )}
         </section>
       </div>
