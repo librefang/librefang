@@ -110,12 +110,17 @@ pub struct ProactiveMemoryStore {
     /// When present, memories are stored with embeddings and search uses cosine similarity.
     /// When absent, falls back to LIKE text matching.
     embedding: Option<Arc<dyn EmbeddingFn>>,
-    /// Counter for auto-consolidation (runs every 10 auto_memorize calls per agent).
-    consolidation_counter: std::sync::atomic::AtomicU32,
+    /// Per-agent counters for auto-consolidation (runs every 10 auto_memorize calls per agent).
+    consolidation_counters: std::sync::Mutex<HashMap<String, u32>>,
 }
 
 impl Clone for ProactiveMemoryStore {
     fn clone(&self) -> Self {
+        let counters = self
+            .consolidation_counters
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
         Self {
             substrate: self.substrate.clone(),
             structured: self.structured.clone(),
@@ -124,10 +129,7 @@ impl Clone for ProactiveMemoryStore {
             config: self.config.clone(),
             extractor: self.extractor.clone(),
             embedding: self.embedding.clone(),
-            consolidation_counter: std::sync::atomic::AtomicU32::new(
-                self.consolidation_counter
-                    .load(std::sync::atomic::Ordering::Relaxed),
-            ),
+            consolidation_counters: std::sync::Mutex::new(counters),
         }
     }
 }
@@ -145,7 +147,7 @@ impl ProactiveMemoryStore {
             config,
             extractor: Arc::new(DefaultMemoryExtractor),
             embedding: None,
-            consolidation_counter: std::sync::atomic::AtomicU32::new(0),
+            consolidation_counters: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -165,7 +167,7 @@ impl ProactiveMemoryStore {
             config,
             extractor,
             embedding: None,
-            consolidation_counter: std::sync::atomic::AtomicU32::new(0),
+            consolidation_counters: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -608,7 +610,18 @@ impl ProactiveMemoryStore {
     /// Reset (soft-delete) ALL memories for a user/agent.
     pub fn reset(&self, user_id: &str) -> LibreFangResult<u64> {
         let agent_id = Self::parse_agent_id(user_id)?;
-        self.semantic.forget_by_agent(agent_id)
+        let count = self.semantic.forget_by_agent(agent_id)?;
+
+        // Also clean up all memory:* KV entries for this agent
+        if let Ok(kv_pairs) = self.structured.list_kv(agent_id) {
+            for (key, _) in kv_pairs {
+                if key.starts_with("memory:") {
+                    let _ = self.structured.delete(agent_id, &key);
+                }
+            }
+        }
+
+        Ok(count)
     }
 
     /// Clear memories at a specific level for a user/agent.
@@ -616,7 +629,26 @@ impl ProactiveMemoryStore {
     /// Useful for clearing session memories while preserving user preferences.
     pub fn clear_level(&self, user_id: &str, level: MemoryLevel) -> LibreFangResult<u64> {
         let agent_id = Self::parse_agent_id(user_id)?;
-        self.semantic.forget_by_scope(agent_id, level.scope_str())
+        let count = self.semantic.forget_by_scope(agent_id, level.scope_str())?;
+
+        // Also clean up matching KV entries for this level
+        if let Ok(kv_pairs) = self.structured.list_kv(agent_id) {
+            for (key, value) in kv_pairs {
+                if !key.starts_with("memory:") {
+                    continue;
+                }
+                // Check if this KV entry's level matches the one being cleared
+                let level_str = value
+                    .get("level")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Session");
+                if MemoryLevel::from(level_str) == level {
+                    let _ = self.structured.delete(agent_id, &key);
+                }
+            }
+        }
+
+        Ok(count)
     }
 
     /// Clean up expired session memories older than the given duration.
@@ -630,8 +662,36 @@ impl ProactiveMemoryStore {
     ) -> LibreFangResult<u64> {
         let agent_id = Self::parse_agent_id(user_id)?;
         let cutoff = chrono::Utc::now() - max_age;
-        self.semantic
-            .forget_older_than(agent_id, scopes::SESSION, cutoff)
+        let count = self
+            .semantic
+            .forget_older_than(agent_id, scopes::SESSION, cutoff)?;
+
+        // Also clean up expired session KV entries
+        if let Ok(kv_pairs) = self.structured.list_kv(agent_id) {
+            for (key, value) in kv_pairs {
+                if !key.starts_with("memory:") {
+                    continue;
+                }
+                // Check if this is a session-level memory that's expired
+                let level_str = value
+                    .get("level")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Session");
+                if MemoryLevel::from(level_str) != MemoryLevel::Session {
+                    continue;
+                }
+                let created_at_str = value.get("created_at").and_then(|v| v.as_str());
+                if let Some(ts) = created_at_str {
+                    if let Ok(created) = chrono::DateTime::parse_from_rfc3339(ts) {
+                        if created.with_timezone(&chrono::Utc) < cutoff {
+                            let _ = self.structured.delete(agent_id, &key);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(count)
     }
 
     /// Get the version history of a memory.
@@ -670,6 +730,7 @@ impl ProactiveMemoryStore {
     ///
     /// Returns the number of memories merged (soft-deleted).
     pub async fn consolidate(&self, user_id: &str) -> LibreFangResult<u64> {
+        let agent_id = Self::parse_agent_id(user_id)?;
         let groups = self.find_duplicates(user_id, None).await?;
         let mut merged_count = 0u64;
 
@@ -687,6 +748,10 @@ impl ProactiveMemoryStore {
                     if let Ok(uuid) = uuid::Uuid::parse_str(&item.id) {
                         let mid = MemoryId(uuid);
                         if self.semantic.forget(mid).is_ok() {
+                            // Also remove the KV entry
+                            let _ = self
+                                .structured
+                                .delete(agent_id, &format!("memory:{}", item.id));
                             merged_count += 1;
                         }
                     }
@@ -748,6 +813,12 @@ impl ProactiveMemoryStore {
                     created_at: frag.created_at,
                 })
                 .collect();
+        }
+
+        // Limit to 100 most recent items to avoid O(n^2) blowup
+        if all_items.len() > 100 {
+            all_items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            all_items.truncate(100);
         }
 
         let mut used = vec![false; all_items.len()];
@@ -986,21 +1057,30 @@ impl ProactiveMemory for ProactiveMemoryStore {
     }
 
     /// Delete a specific memory by ID.
-    async fn delete(&self, memory_id: &str, _user_id: &str) -> LibreFangResult<bool> {
+    async fn delete(&self, memory_id: &str, user_id: &str) -> LibreFangResult<bool> {
         let uuid = uuid::Uuid::parse_str(memory_id)
             .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
         let mid = librefang_types::memory::MemoryId(uuid);
+
+        // Check if the memory exists before deleting
+        if self.semantic.get_by_id(mid, false)?.is_none() {
+            return Ok(false);
+        }
+
         self.semantic.forget(mid)?;
+
+        // Also clean up the KV store entry
+        if let Ok(agent_id) = Self::parse_agent_id(user_id) {
+            let _ = self
+                .structured
+                .delete(agent_id, &format!("memory:{}", memory_id));
+        }
+
         Ok(true)
     }
 
     /// Update a memory's content in-place, preserving version history.
-    async fn update(
-        &self,
-        memory_id: &str,
-        _user_id: &str,
-        content: &str,
-    ) -> LibreFangResult<bool> {
+    async fn update(&self, memory_id: &str, user_id: &str, content: &str) -> LibreFangResult<bool> {
         let uuid = uuid::Uuid::parse_str(memory_id)
             .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
         let mid = MemoryId(uuid);
@@ -1038,6 +1118,21 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
         // Update content in-place (preserves ID, agent, scope, access stats)
         self.semantic.update_content(mid, content, Some(metadata))?;
+
+        // Also update the KV store entry with new content
+        if let Ok(agent_id) = Self::parse_agent_id(user_id) {
+            let kv_key = format!("memory:{}", memory_id);
+            if let Ok(Some(mut kv_val)) = self.structured.get(agent_id, &kv_key) {
+                if let Some(obj) = kv_val.as_object_mut() {
+                    obj.insert("content".to_string(), serde_json::json!(content));
+                    obj.insert(
+                        "updated_at".to_string(),
+                        serde_json::json!(chrono::Utc::now().to_rfc3339()),
+                    );
+                }
+                let _ = self.structured.set(agent_id, &kv_key, kv_val);
+            }
+        }
 
         Ok(true)
     }
@@ -1103,12 +1198,9 @@ fn extract_search_keywords(content: &str) -> String {
     if words.is_empty() {
         content.to_string()
     } else {
-        // Return the longest word for best LIKE matching
-        words
-            .iter()
-            .max_by_key(|w| w.len())
-            .unwrap_or(&content)
-            .to_string()
+        // Join top words with % for broader LIKE matching
+        // e.g. "dark%mode%editor" matches content containing all words in order
+        words.join("%")
     }
 }
 
@@ -1211,10 +1303,16 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
             self.store_relations(&extraction_result.relations);
         }
 
-        // Auto-consolidation: merge duplicates every 10 auto_memorize calls
-        let count = self
-            .consolidation_counter
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Auto-consolidation: merge duplicates every 10 auto_memorize calls per agent
+        let count = {
+            let mut counters = self
+                .consolidation_counters
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let entry = counters.entry(user_id.to_string()).or_insert(0);
+            *entry += 1;
+            *entry
+        };
         if count > 0 && count % 10 == 0 {
             match self.consolidate(user_id).await {
                 Ok(merged) if merged > 0 => {
@@ -1326,9 +1424,33 @@ mod tests {
 
         let agent_id = AgentId::new().to_string();
 
-        // Get should return empty for now (no user-level memories stored)
+        // Get should return empty initially
         let results = store.get(&agent_id).await.unwrap();
         assert!(results.is_empty());
+
+        // Add a user-level memory (via add_with_level)
+        store
+            .add_with_level(
+                &[serde_json::json!({"role": "user", "content": "I prefer dark mode"})],
+                &agent_id,
+                MemoryLevel::User,
+            )
+            .await
+            .unwrap();
+
+        // Also add via the main add() path which stores in KV
+        store
+            .add(
+                &[serde_json::json!({"role": "user", "content": "I prefer Rust programming"})],
+                &agent_id,
+            )
+            .await
+            .unwrap();
+
+        // List all memories (includes KV-stored ones)
+        let all = store.list(&agent_id, None).await.unwrap();
+        // At least the KV-stored memory should be returned
+        assert!(!all.is_empty(), "list() should return memories after add()");
     }
 
     #[tokio::test]
@@ -1423,9 +1545,34 @@ mod tests {
         assert!(!results.is_empty());
         let mem_id = &results[0].id;
 
+        // Verify KV entry exists before delete
+        let agent_id_parsed = ProactiveMemoryStore::parse_agent_id(&agent_id).unwrap();
+        let kv_before = store
+            .structured
+            .get(agent_id_parsed, &format!("memory:{}", mem_id))
+            .unwrap();
+        assert!(kv_before.is_some(), "KV entry should exist after add()");
+
         // Delete it
         let deleted = store.delete(mem_id, &agent_id).await.unwrap();
         assert!(deleted);
+
+        // Verify KV entry is also removed
+        let kv_after = store
+            .structured
+            .get(agent_id_parsed, &format!("memory:{}", mem_id))
+            .unwrap();
+        assert!(
+            kv_after.is_none(),
+            "KV entry should be removed after delete()"
+        );
+
+        // Deleting non-existent memory should return false
+        let deleted_again = store.delete(mem_id, &agent_id).await.unwrap();
+        assert!(
+            !deleted_again,
+            "delete() should return false for non-existent memory"
+        );
     }
 
     #[tokio::test]

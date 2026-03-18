@@ -18,7 +18,8 @@
     "hands": "执行器",
     "system": "系统",
     "runtime": "运行时",
-    "settings": "设置"
+    "settings": "设置",
+    "memory": "记忆"
   },
   "status": {
     "connecting": "连接中...",
@@ -1700,5 +1701,24 @@
     "agentCreateFailed": "创建智能体失败：{message}",
     "pleaseEnterToken": "请输入 {label}",
     "channelConfigFailed": "失败：{message}"
+  },
+  "memoryPage": {
+    "title": "记忆",
+    "subtitle": "主动记忆系统 — 智能体对用户的记忆内容。",
+    "totalMemories": "总记忆数",
+    "userLevel": "用户级别",
+    "sessionLevel": "会话级别",
+    "agentLevel": "智能体级别",
+    "searchPlaceholder": "搜索记忆...",
+    "search": "搜索",
+    "all": "全部",
+    "content": "内容",
+    "level": "级别",
+    "category": "分类",
+    "created": "创建时间",
+    "noMemoriesFound": "未找到记忆",
+    "versionHistory": "版本历史",
+    "replacedAt": "替换于：",
+    "noPreviousVersions": "无历史版本"
   }
 }

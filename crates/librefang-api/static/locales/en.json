@@ -18,7 +18,8 @@
     "hands": "Hands",
     "system": "System",
     "runtime": "Runtime",
-    "settings": "Settings"
+    "settings": "Settings",
+    "memory": "Memory"
   },
   "status": {
     "connecting": "Connecting...",
@@ -1698,5 +1699,24 @@
     "agentCreateFailed": "Failed to create agent: {message}",
     "pleaseEnterToken": "Please enter the {label}",
     "channelConfigFailed": "Failed: {message}"
+  },
+  "memoryPage": {
+    "title": "Memory",
+    "subtitle": "Proactive memory system — what your agents remember about users.",
+    "totalMemories": "Total Memories",
+    "userLevel": "User Level",
+    "sessionLevel": "Session Level",
+    "agentLevel": "Agent Level",
+    "searchPlaceholder": "Search memories...",
+    "search": "Search",
+    "all": "All",
+    "content": "Content",
+    "level": "Level",
+    "category": "Category",
+    "created": "Created",
+    "noMemoriesFound": "No memories found",
+    "versionHistory": "Version History",
+    "replacedAt": "Replaced at:",
+    "noPreviousVersions": "No previous versions"
   }
 }

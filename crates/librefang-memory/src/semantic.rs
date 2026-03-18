@@ -412,13 +412,13 @@ impl SemanticStore {
             let meta_str = serde_json::to_string(&meta)
                 .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
             conn.execute(
-                "UPDATE memories SET content = ?1, metadata = ?2, accessed_at = ?3, embedding = NULL WHERE id = ?4 AND deleted = 0",
+                "UPDATE memories SET content = ?1, metadata = ?2, accessed_at = ?3 WHERE id = ?4 AND deleted = 0",
                 rusqlite::params![new_content, meta_str, now, id.0.to_string()],
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         } else {
             conn.execute(
-                "UPDATE memories SET content = ?1, accessed_at = ?2, embedding = NULL WHERE id = ?3 AND deleted = 0",
+                "UPDATE memories SET content = ?1, accessed_at = ?2 WHERE id = ?3 AND deleted = 0",
                 rusqlite::params![new_content, now, id.0.to_string()],
             )
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;

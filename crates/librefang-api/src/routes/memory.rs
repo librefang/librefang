@@ -71,7 +71,7 @@ fn default_user_id() -> String {
 #[utoipa::path(
     get,
     path = "/api/memory/search",
-    tag = "memory",
+    tag = "proactive-memory",
     params(
         ("q" = String, Query, description = "Search query"),
         ("limit" = usize, Query, description = "Max results (default 10)"),
@@ -88,7 +88,8 @@ pub async fn memory_search(
     };
 
     let user_id = default_user_id();
-    match store.search(&params.q, &user_id, params.limit).await {
+    let limit = params.limit.min(100);
+    match store.search(&params.q, &user_id, limit).await {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
@@ -108,7 +109,7 @@ pub async fn memory_search(
 #[utoipa::path(
     get,
     path = "/api/memory",
-    tag = "memory",
+    tag = "proactive-memory",
     params(
         ("category" = Option<String>, Query, description = "Optional category filter"),
     ),
@@ -144,7 +145,7 @@ pub async fn memory_list(
 #[utoipa::path(
     get,
     path = "/api/memory/user/{user_id}",
-    tag = "memory",
+    tag = "proactive-memory",
     params(("user_id" = String, Path, description = "User ID")),
     responses((status = 200, description = "User memories", body = serde_json::Value))
 )]
@@ -177,7 +178,7 @@ pub async fn memory_get_user(
 #[utoipa::path(
     post,
     path = "/api/memory",
-    tag = "memory",
+    tag = "proactive-memory",
     request_body = serde_json::Value,
     responses((status = 200, description = "Memories added", body = serde_json::Value))
 )]
@@ -217,7 +218,7 @@ pub async fn memory_add(
 #[utoipa::path(
     put,
     path = "/api/memory/items/{memory_id}",
-    tag = "memory",
+    tag = "proactive-memory",
     params(("memory_id" = String, Path, description = "Memory ID")),
     request_body = serde_json::Value,
     responses((status = 200, description = "Memory updated", body = serde_json::Value))
@@ -257,7 +258,7 @@ pub async fn memory_update(
 #[utoipa::path(
     delete,
     path = "/api/memory/items/{memory_id}",
-    tag = "memory",
+    tag = "proactive-memory",
     params(("memory_id" = String, Path, description = "Memory ID")),
     responses((status = 200, description = "Memory deleted", body = serde_json::Value))
 )]
@@ -295,7 +296,7 @@ pub async fn memory_delete(
 #[utoipa::path(
     get,
     path = "/api/memory/stats",
-    tag = "memory",
+    tag = "proactive-memory",
     responses((status = 200, description = "Memory statistics", body = serde_json::Value))
 )]
 pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -321,9 +322,9 @@ pub async fn memory_stats(State(state): State<Arc<AppState>>) -> impl IntoRespon
 /// Delete all proactive memories for a specific agent.
 #[utoipa::path(
     delete,
-    path = "/api/memory/agents/{agent_id}",
-    tag = "memory",
-    params(("agent_id" = String, Path, description = "Agent ID")),
+    path = "/api/memory/agents/{id}",
+    tag = "proactive-memory",
+    params(("id" = String, Path, description = "Agent ID")),
     responses((status = 200, description = "Memories reset", body = serde_json::Value))
 )]
 pub async fn memory_reset_agent(
@@ -354,10 +355,10 @@ pub async fn memory_reset_agent(
 /// Clear memories at a specific level (user/session/agent) for an agent.
 #[utoipa::path(
     delete,
-    path = "/api/memory/agents/{agent_id}/level/{level}",
-    tag = "memory",
+    path = "/api/memory/agents/{id}/level/{level}",
+    tag = "proactive-memory",
     params(
-        ("agent_id" = String, Path, description = "Agent ID"),
+        ("id" = String, Path, description = "Agent ID"),
         ("level" = String, Path, description = "Memory level: user, session, or agent"),
     ),
     responses((status = 200, description = "Memories cleared at level", body = serde_json::Value))
@@ -396,10 +397,10 @@ pub async fn memory_clear_level(
 /// Search memories scoped to a specific agent.
 #[utoipa::path(
     get,
-    path = "/api/memory/agents/{agent_id}/search",
-    tag = "memory",
+    path = "/api/memory/agents/{id}/search",
+    tag = "proactive-memory",
     params(
-        ("agent_id" = String, Path, description = "Agent ID"),
+        ("id" = String, Path, description = "Agent ID"),
         ("q" = String, Query, description = "Search query"),
         ("limit" = usize, Query, description = "Max results (default 10)"),
     ),
@@ -415,7 +416,8 @@ pub async fn memory_search_agent(
         Err(e) => return e,
     };
 
-    match store.search(&params.q, &agent_id, params.limit).await {
+    let limit = params.limit.min(100);
+    match store.search(&params.q, &agent_id, limit).await {
         Ok(items) => (
             StatusCode::OK,
             Json(serde_json::json!({ "memories": items })),
@@ -434,9 +436,9 @@ pub async fn memory_search_agent(
 /// Get memory statistics for a specific agent.
 #[utoipa::path(
     get,
-    path = "/api/memory/agents/{agent_id}/stats",
-    tag = "memory",
-    params(("agent_id" = String, Path, description = "Agent ID")),
+    path = "/api/memory/agents/{id}/stats",
+    tag = "proactive-memory",
+    params(("id" = String, Path, description = "Agent ID")),
     responses((status = 200, description = "Agent memory statistics", body = serde_json::Value))
 )]
 pub async fn memory_stats_agent(
@@ -464,9 +466,9 @@ pub async fn memory_stats_agent(
 /// Find duplicate/near-duplicate memories for an agent.
 #[utoipa::path(
     get,
-    path = "/api/memory/agents/{agent_id}/duplicates",
-    tag = "memory",
-    params(("agent_id" = String, Path, description = "Agent ID")),
+    path = "/api/memory/agents/{id}/duplicates",
+    tag = "proactive-memory",
+    params(("id" = String, Path, description = "Agent ID")),
     responses((status = 200, description = "Duplicate memory groups", body = serde_json::Value))
 )]
 pub async fn memory_duplicates(
@@ -501,7 +503,7 @@ pub async fn memory_duplicates(
 #[utoipa::path(
     get,
     path = "/api/memory/items/{memory_id}/history",
-    tag = "memory",
+    tag = "proactive-memory",
     params(("memory_id" = String, Path, description = "Memory ID")),
     responses((status = 200, description = "Memory version history", body = serde_json::Value))
 )]
@@ -537,9 +539,9 @@ pub async fn memory_history(
 /// Consolidate memories for an agent: merge duplicates, cleanup stale entries.
 #[utoipa::path(
     post,
-    path = "/api/memory/agents/{agent_id}/consolidate",
-    tag = "memory",
-    params(("agent_id" = String, Path, description = "Agent ID")),
+    path = "/api/memory/agents/{id}/consolidate",
+    tag = "proactive-memory",
+    params(("id" = String, Path, description = "Agent ID")),
     responses((status = 200, description = "Consolidation result", body = serde_json::Value))
 )]
 pub async fn memory_consolidate(

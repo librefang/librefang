@@ -111,7 +111,7 @@
             </a>
             <a class="nav-item" :class="{ active: page === 'memory' }" @click="navigate('memory')" :aria-current="page === 'memory' ? 'page' : false">
               <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 0-4 4v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2h-2V6a4 4 0 0 0-4-4z"/><circle cx="12" cy="15" r="2"/></svg></span>
-              <span class="nav-label">Memory</span>
+              <span class="nav-label" data-i18n="nav.memory">Memory</span>
             </a>
           </div>
         </template>
@@ -4409,35 +4409,35 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
     <template x-if="page === 'memory'">
       <div x-data="memoryPage()" x-init="init()">
         <div class="page-header">
-          <h2>Memory</h2>
-          <p class="page-subtitle">Proactive memory system — what your agents remember about users.</p>
+          <h2 data-i18n="memoryPage.title">Memory</h2>
+          <p class="page-subtitle" data-i18n="memoryPage.subtitle">Proactive memory system — what your agents remember about users.</p>
         </div>
 
         <!-- Stats bar -->
         <div class="stats-grid" style="margin-bottom:24px">
           <div class="stat-card">
             <div class="stat-value" x-text="stats.total || 0"></div>
-            <div class="stat-label">Total Memories</div>
+            <div class="stat-label" data-i18n="memoryPage.totalMemories">Total Memories</div>
           </div>
           <div class="stat-card">
             <div class="stat-value" x-text="stats.user_count || 0"></div>
-            <div class="stat-label">User Level</div>
+            <div class="stat-label" data-i18n="memoryPage.userLevel">User Level</div>
           </div>
           <div class="stat-card">
             <div class="stat-value" x-text="stats.session_count || 0"></div>
-            <div class="stat-label">Session Level</div>
+            <div class="stat-label" data-i18n="memoryPage.sessionLevel">Session Level</div>
           </div>
           <div class="stat-card">
             <div class="stat-value" x-text="stats.agent_count || 0"></div>
-            <div class="stat-label">Agent Level</div>
+            <div class="stat-label" data-i18n="memoryPage.agentLevel">Agent Level</div>
           </div>
         </div>
 
         <!-- Search -->
         <div style="display:flex;gap:8px;margin-bottom:16px">
-          <input type="text" x-model="searchQuery" @keyup.enter="searchMemories()" placeholder="Search memories..." style="flex:1" class="form-input">
-          <button @click="searchMemories()" class="btn btn-primary">Search</button>
-          <button @click="loadMemories()" class="btn btn-secondary">All</button>
+          <input type="text" x-model="searchQuery" @keyup.enter="searchMemories()" placeholder="Search memories..." data-i18n-placeholder="memoryPage.searchPlaceholder" style="flex:1" class="form-input">
+          <button @click="searchMemories()" class="btn btn-primary" data-i18n="memoryPage.search">Search</button>
+          <button @click="loadMemories()" class="btn btn-secondary" data-i18n="memoryPage.all">All</button>
         </div>
 
         <!-- Memory list -->
@@ -4445,11 +4445,11 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <table class="data-table">
             <thead>
               <tr>
-                <th>Content</th>
-                <th>Level</th>
-                <th>Category</th>
-                <th>Created</th>
-                <th>Actions</th>
+                <th data-i18n="memoryPage.content">Content</th>
+                <th data-i18n="memoryPage.level">Level</th>
+                <th data-i18n="memoryPage.category">Category</th>
+                <th data-i18n="memoryPage.created">Created</th>
+                <th data-i18n="label.actions">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -4466,7 +4466,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 </tr>
               </template>
               <tr x-show="memories.length === 0">
-                <td colspan="5" style="text-align:center;color:var(--text-secondary);padding:32px">No memories found</td>
+                <td colspan="5" style="text-align:center;color:var(--text-secondary);padding:32px" data-i18n="memoryPage.noMemoriesFound">No memories found</td>
               </tr>
             </tbody>
           </table>
@@ -4477,7 +4477,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <div class="modal-overlay" @click.self="showHistory = false">
             <div class="modal" style="max-width:600px">
               <div class="modal-header">
-                <h3>Version History</h3>
+                <h3 data-i18n="memoryPage.versionHistory">Version History</h3>
                 <button @click="showHistory = false" class="btn btn-sm">&times;</button>
               </div>
               <div class="modal-body">
@@ -4485,12 +4485,12 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <div style="padding:8px 0;border-bottom:1px solid var(--border)">
                     <div x-text="v.content" style="font-family:monospace;font-size:13px"></div>
                     <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">
-                      Replaced at: <span x-text="new Date(v.replaced_at).toLocaleString()"></span>
+                      <span data-i18n="memoryPage.replacedAt">Replaced at:</span> <span x-text="new Date(v.replaced_at).toLocaleString()"></span>
                     </div>
                   </div>
                 </template>
                 <div x-show="historyItems.length === 0" style="color:var(--text-secondary);text-align:center;padding:16px">
-                  No previous versions
+                  <span data-i18n="memoryPage.noPreviousVersions">No previous versions</span>
                 </div>
               </div>
             </div>
