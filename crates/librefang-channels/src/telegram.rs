@@ -1102,7 +1102,7 @@ async fn parse_telegram_update(
         let reply_text = reply["text"].as_str().or_else(|| reply["caption"].as_str());
         if let Some(quoted) = reply_text {
             let reply_sender = reply["from"]["first_name"].as_str().unwrap_or("Someone");
-            // 截断长引用，避免给 LLM 塞过多无关 context
+            // Truncate long quotes to avoid feeding too much irrelevant context to the LLM
             let truncated = if quoted.len() > 200 {
                 format!("{}...", &quoted[..quoted.floor_char_boundary(200)])
             } else {
@@ -1111,7 +1111,7 @@ async fn parse_telegram_update(
             let prefix = format!("[Replying to {reply_sender}: \"{truncated}\"]\n");
             match content {
                 ChannelContent::Text(t) => ChannelContent::Text(format!("{prefix}{t}")),
-                other => other, // 对 Command/Image 等不修改
+                other => other, // Leave Command/Image etc. unchanged
             }
         } else {
             content

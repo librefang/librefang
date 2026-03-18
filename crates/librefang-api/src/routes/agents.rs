@@ -495,14 +495,16 @@ pub async fn bulk_stop_agents(
 fn enrich_agent_json(
     e: &librefang_types::agent::AgentEntry,
     dm: &librefang_types::config::DefaultModelConfig,
-    catalog: &Option<std::sync::RwLockReadGuard<'_, librefang_runtime::model_catalog::ModelCatalog>>,
+    catalog: &Option<
+        std::sync::RwLockReadGuard<'_, librefang_runtime::model_catalog::ModelCatalog>,
+    >,
 ) -> serde_json::Value {
-    let provider =
-        if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default" {
-            dm.provider.as_str()
-        } else {
-            e.manifest.model.provider.as_str()
-        };
+    let provider = if e.manifest.model.provider.is_empty() || e.manifest.model.provider == "default"
+    {
+        dm.provider.as_str()
+    } else {
+        e.manifest.model.provider.as_str()
+    };
     let model = if e.manifest.model.model.is_empty() || e.manifest.model.model == "default" {
         dm.model.as_str()
     } else {
