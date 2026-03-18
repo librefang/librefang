@@ -84,40 +84,102 @@ pub fn needs_compaction(session: &Session, config: &CompactionConfig) -> bool {
     session.messages.len() > config.threshold
 }
 
+/// Classify a character for token estimation purposes.
+///
+/// Returns an estimated token weight for a single character:
+/// - CJK ideographs: ~1.5 tokens each (they are 1-2 tokens in most tokenizers)
+/// - ASCII letters/digits: ~0.25 tokens each (chars/4 heuristic)
+/// - Whitespace and punctuation: ~0.25 tokens each
+fn char_token_weight(c: char) -> f64 {
+    if is_cjk(c) {
+        1.5
+    } else if c.is_ascii_alphanumeric() || c.is_alphabetic() {
+        0.25
+    } else {
+        // Whitespace, punctuation, symbols
+        0.25
+    }
+}
+
+/// Check if a character is a CJK ideograph or common CJK symbol.
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{4E00}'..='\u{9FFF}'   // CJK Unified Ideographs
+        | '\u{3400}'..='\u{4DBF}' // CJK Unified Ideographs Extension A
+        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility Ideographs
+        | '\u{2E80}'..='\u{2EFF}' // CJK Radicals Supplement
+        | '\u{3000}'..='\u{303F}' // CJK Symbols and Punctuation
+        | '\u{3040}'..='\u{309F}' // Hiragana
+        | '\u{30A0}'..='\u{30FF}' // Katakana
+        | '\u{AC00}'..='\u{D7AF}' // Hangul Syllables
+        | '\u{20000}'..='\u{2A6DF}' // CJK Unified Ideographs Extension B
+    )
+}
+
+/// Estimate tokens for a string using CJK-aware heuristic.
+///
+/// CJK characters are weighted at ~1.5 tokens each (they typically map to
+/// 1-2 tokens in BPE tokenizers). ASCII/Latin text uses the standard chars/4
+/// heuristic. This avoids external tokenizer dependencies while being
+/// significantly more accurate for mixed-language content.
+fn estimate_str_tokens(s: &str) -> usize {
+    let total: f64 = s.chars().map(char_token_weight).sum();
+    total.ceil() as usize
+}
+
 /// Estimate token count for a set of messages, optional system prompt, and tool definitions.
 ///
-/// Uses the chars/4 heuristic — not exact, but good enough for budget gating.
+/// Uses a CJK-aware heuristic: CJK chars ~1.5 tokens, ASCII/Latin chars/4.
+/// Not exact, but significantly more accurate than naive chars/4 for multilingual content.
 pub fn estimate_token_count(
     messages: &[Message],
     system_prompt: Option<&str>,
     tools: Option<&[librefang_types::tool::ToolDefinition]>,
 ) -> usize {
-    let mut chars: usize = 0;
+    let mut tokens: usize = 0;
 
     // System prompt
     if let Some(sp) = system_prompt {
-        chars += sp.len();
+        tokens += estimate_str_tokens(sp);
     }
 
     // Messages
     for msg in messages {
-        chars += msg.content.text_length();
+        tokens += estimate_message_tokens(msg);
         // Per-message overhead (role label, framing tokens)
-        chars += 16;
+        tokens += 4;
     }
 
     // Tool definitions (JSON schema is the biggest contributor)
     if let Some(tool_defs) = tools {
         for tool in tool_defs {
-            chars += tool.name.len() + tool.description.len();
+            tokens += estimate_str_tokens(&tool.name);
+            tokens += estimate_str_tokens(&tool.description);
             if let Ok(schema_str) = serde_json::to_string(&tool.input_schema) {
-                chars += schema_str.len();
+                tokens += estimate_str_tokens(&schema_str);
             }
         }
     }
 
-    // chars / 4 heuristic
-    chars / 4
+    tokens
+}
+
+/// Estimate token count for a single message's content.
+fn estimate_message_tokens(msg: &Message) -> usize {
+    match &msg.content {
+        MessageContent::Text(s) => estimate_str_tokens(s),
+        MessageContent::Blocks(blocks) => blocks
+            .iter()
+            .map(|b| match b {
+                ContentBlock::Text { text, .. } => estimate_str_tokens(text),
+                ContentBlock::ToolResult { content, .. } => estimate_str_tokens(content),
+                ContentBlock::Thinking { thinking } => estimate_str_tokens(thinking),
+                ContentBlock::ToolUse { .. }
+                | ContentBlock::Image { .. }
+                | ContentBlock::Unknown => 0,
+            })
+            .sum(),
+    }
 }
 
 /// Check whether estimated tokens exceed the compaction threshold.
@@ -197,26 +259,28 @@ pub fn generate_context_report(
     tools: Option<&[ToolDefinition]>,
     context_window: usize,
 ) -> ContextReport {
-    // Break down token estimates by source
-    let sp_tokens = system_prompt.map_or(0, |s| s.len() / 4);
+    // Break down token estimates by source (CJK-aware)
+    let sp_tokens = system_prompt.map_or(0, estimate_str_tokens);
 
     let msg_tokens = {
-        let mut chars: usize = 0;
+        let mut tokens: usize = 0;
         for msg in messages {
-            chars += msg.content.text_length() + 16;
+            tokens += estimate_message_tokens(msg);
+            tokens += 4; // per-message overhead
         }
-        chars / 4
+        tokens
     };
 
     let tool_tokens = tools.map_or(0, |defs| {
-        let mut chars: usize = 0;
+        let mut tokens: usize = 0;
         for t in defs {
-            chars += t.name.len() + t.description.len();
+            tokens += estimate_str_tokens(&t.name);
+            tokens += estimate_str_tokens(&t.description);
             if let Ok(s) = serde_json::to_string(&t.input_schema) {
-                chars += s.len();
+                tokens += estimate_str_tokens(&s);
             }
         }
-        chars / 4
+        tokens
     });
 
     let total = sp_tokens + msg_tokens + tool_tokens;
@@ -458,6 +522,7 @@ async fn summarize_messages(
                 text: summarize_prompt,
                 provider_metadata: None,
             }]),
+            pinned: false,
         }],
         tools: vec![],
         max_tokens: config.max_summary_tokens,
@@ -577,6 +642,7 @@ async fn summarize_in_chunks(
                 text: merge_prompt,
                 provider_metadata: None,
             }]),
+            pinned: false,
         }],
         tools: vec![],
         max_tokens: config.max_summary_tokens,
@@ -870,6 +936,7 @@ mod tests {
                 input: serde_json::json!({"query": "test"}),
                 provider_metadata: None,
             }]),
+            pinned: false,
         };
         messages[2] = Message {
             role: Role::User,
@@ -879,6 +946,7 @@ mod tests {
                 content: "Search results here".to_string(),
                 is_error: false,
             }]),
+            pinned: false,
         };
 
         let session = Session {
@@ -1211,6 +1279,7 @@ mod tests {
                         provider_metadata: None,
                     },
                 ]),
+                pinned: false,
             },
             Message {
                 role: Role::User,
@@ -1220,6 +1289,7 @@ mod tests {
                     content: "Results found".to_string(),
                     is_error: false,
                 }]),
+                pinned: false,
             },
             Message {
                 role: Role::User,
@@ -1227,6 +1297,7 @@ mod tests {
                     media_type: "image/png".to_string(),
                     data: "base64data".to_string(),
                 }]),
+                pinned: false,
             },
         ];
 
@@ -1259,13 +1330,42 @@ mod tests {
     #[test]
     fn test_estimate_token_count_basic() {
         let messages = vec![
-            Message::user("Hello world"),   // 11 chars + 16 overhead = 27
-            Message::assistant("Hi there"), // 8 chars + 16 overhead = 24
+            Message::user("Hello world"), // 11 ASCII chars -> ~3 tokens + 4 overhead
+            Message::assistant("Hi there"), // 8 ASCII chars -> ~2 tokens + 4 overhead
         ];
         let tokens = estimate_token_count(&messages, None, None);
-        // (11 + 16 + 8 + 16) / 4 = 12 (approx)
         assert!(tokens > 0);
         assert!(tokens < 100);
+    }
+
+    #[test]
+    fn test_estimate_token_count_cjk_higher_than_ascii() {
+        // CJK text should estimate more tokens per character than ASCII
+        let ascii_msg = Message::user("a".repeat(100)); // 100 ASCII chars -> ~25 tokens
+        let cjk_msg = Message::user("\u{4f60}\u{597d}".repeat(50)); // 100 CJK chars -> ~150 tokens
+        let ascii_tokens = estimate_token_count(&[ascii_msg], None, None);
+        let cjk_tokens = estimate_token_count(&[cjk_msg], None, None);
+        // CJK should produce significantly more estimated tokens than same # of ASCII chars
+        assert!(
+            cjk_tokens > ascii_tokens * 3,
+            "CJK tokens ({cjk_tokens}) should be much more than ASCII tokens ({ascii_tokens})"
+        );
+    }
+
+    #[test]
+    fn test_estimate_str_tokens_mixed_content() {
+        // Pure ASCII
+        let ascii_est = estimate_str_tokens("hello world"); // 11 chars -> ~3 tokens
+        assert!(ascii_est >= 2 && ascii_est <= 5);
+        // Pure CJK
+        let cjk_est = estimate_str_tokens("\u{4f60}\u{597d}\u{4e16}\u{754c}"); // 4 CJK chars -> ~6 tokens
+        assert!(cjk_est >= 4 && cjk_est <= 8);
+        // Mixed
+        let mixed_est = estimate_str_tokens("Hello \u{4f60}\u{597d}");
+        assert!(
+            mixed_est > ascii_est,
+            "Mixed content should have more tokens than pure ASCII of same length"
+        );
     }
 
     #[test]
@@ -1361,6 +1461,7 @@ mod tests {
                 content: tool_content,
                 is_error: false,
             }]),
+            pinned: false,
         }];
         let text = build_conversation_text(&messages, &config);
         // The base64 blob should be stripped/replaced by session_repair
@@ -1381,6 +1482,7 @@ mod tests {
                 content: large_result,
                 is_error: false,
             }]),
+            pinned: false,
         }];
         let text = build_conversation_text(&messages, &config);
         // Should be capped at ~2000 chars (plus the "..." suffix)
@@ -1405,6 +1507,7 @@ mod tests {
                 content: short_result.to_string(),
                 is_error: false,
             }]),
+            pinned: false,
         }];
         let text = build_conversation_text(&messages, &config);
         assert!(text.contains(short_result));

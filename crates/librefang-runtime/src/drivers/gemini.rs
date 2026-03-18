@@ -1257,6 +1257,7 @@ mod tests {
             Message {
                 role: Role::System,
                 content: MessageContent::Text("System prompt here.".to_string()),
+                pinned: false,
             },
             Message::user("Hi"),
         ];
@@ -1390,6 +1391,7 @@ mod tests {
                         "thought_signature": "sig_xyz789"
                     })),
                 }]),
+                pinned: false,
             },
             Message {
                 role: Role::User,
@@ -1399,6 +1401,7 @@ mod tests {
                     content: "Results about Rust programming".to_string(),
                     is_error: false,
                 }]),
+                pinned: false,
             },
         ];
 
@@ -1436,6 +1439,7 @@ mod tests {
                         "thought_signature": "text_sig_abc"
                     })),
                 }]),
+                pinned: false,
             },
         ];
 
@@ -1507,6 +1511,7 @@ mod tests {
                     input: serde_json::json!({"path": "/tmp/test"}),
                     provider_metadata: None,
                 }]),
+                pinned: false,
             },
         ];
 
@@ -1744,6 +1749,7 @@ mod tests {
             Message {
                 role: Role::Assistant,
                 content: MessageContent::Blocks(completion.content),
+                pinned: false,
             },
         ];
         let (contents, _) = convert_messages(&messages, &None);
