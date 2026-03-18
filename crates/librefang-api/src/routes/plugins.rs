@@ -1,9 +1,12 @@
 //! Context engine plugin management endpoints.
 
-use axum::extract::Path;
+use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use std::sync::Arc;
+
+use super::AppState;
 
 /// GET /api/plugins — List all installed context engine plugins.
 #[utoipa::path(
@@ -107,7 +110,11 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
                     )
                 }
             };
-            librefang_runtime::plugin_manager::PluginSource::Registry { name }
+            let github_repo = body
+                .get("registry")
+                .and_then(|r| r.as_str())
+                .map(String::from);
+            librefang_runtime::plugin_manager::PluginSource::Registry { name, github_repo }
         }
         Some("local") => {
             let path = match body.get("path").and_then(|p| p.as_str()) {
@@ -279,4 +286,69 @@ pub async fn install_plugin_deps(Path(name): Path<String>) -> impl IntoResponse 
             Json(serde_json::json!({"error": e})),
         ),
     }
+}
+
+/// GET /api/plugins/registries — List configured plugin registries and their available plugins.
+#[utoipa::path(
+    get,
+    path = "/api/plugins/registries",
+    tag = "plugins",
+    responses(
+        (status = 200, description = "Configured registries with available plugins", body = serde_json::Value)
+    )
+)]
+pub async fn list_plugin_registries(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // Ensure the official registry is always present.
+    let mut registries = state.kernel.config.context_engine.plugin_registries.clone();
+    if !registries
+        .iter()
+        .any(|r| r.github_repo == "librefang/plugin-registry")
+    {
+        registries.insert(
+            0,
+            librefang_types::config::PluginRegistrySource {
+                name: "Official".to_string(),
+                github_repo: "librefang/plugin-registry".to_string(),
+            },
+        );
+    }
+
+    let installed = librefang_runtime::plugin_manager::list_plugins();
+    let installed_names: std::collections::HashSet<String> =
+        installed.iter().map(|p| p.manifest.name.clone()).collect();
+
+    let mut results = Vec::new();
+    for reg in &registries {
+        let plugins = match librefang_runtime::plugin_manager::list_registry_plugins(
+            &reg.github_repo,
+        )
+        .await
+        {
+            Ok(entries) => entries
+                .into_iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "name": e.name,
+                        "installed": installed_names.contains(&e.name),
+                    })
+                })
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                results.push(serde_json::json!({
+                    "name": reg.name,
+                    "github_repo": reg.github_repo,
+                    "error": e,
+                    "plugins": [],
+                }));
+                continue;
+            }
+        };
+        results.push(serde_json::json!({
+            "name": reg.name,
+            "github_repo": reg.github_repo,
+            "plugins": plugins,
+        }));
+    }
+
+    Json(serde_json::json!({ "registries": results }))
 }

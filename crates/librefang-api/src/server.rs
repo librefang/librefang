@@ -547,6 +547,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::get(routes::get_extension),
         )
         // Context engine plugins
+        .route(
+            "/plugins/registries",
+            axum::routing::get(routes::list_plugin_registries),
+        )
         .route("/plugins", axum::routing::get(routes::list_plugins))
         .route(
             "/plugins/install",
