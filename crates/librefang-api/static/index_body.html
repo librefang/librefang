@@ -4595,7 +4595,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <button @click="loadMemories()" class="btn btn-secondary" data-i18n="memoryPage.all">All</button>
           <button @click="toggleAddForm()" class="btn btn-secondary" :class="{ 'btn-primary': showAddForm }" x-text="t('memoryPage.addMemory', 'Add Memory')">Add Memory</button>
           <button @click="consolidateAgent()" class="btn btn-secondary" x-show="selectedAgentId" x-text="t('memoryPage.consolidate', 'Consolidate')">Consolidate</button>
+          <button @click="showRelations = !showRelations; if (showRelations && relations.length === 0) loadRelations()" class="btn btn-secondary" x-show="selectedAgentId" :class="{ 'btn-primary': showRelations }" x-text="t('memoryPage.relations', 'Relations')">Relations</button>
           <button @click="cleanupExpired()" class="btn btn-secondary" x-text="t('memoryPage.cleanup', 'Cleanup Expired')">Cleanup Expired</button>
+          <button @click="decayConfidence()" class="btn btn-secondary" x-text="t('memoryPage.decay', 'Decay Confidence')">Decay Confidence</button>
           <button @click="bulkDelete()" class="btn btn-danger" x-show="selectedIds.length > 0" x-text="'Delete ' + selectedIds.length + ' selected'">Delete selected</button>
         </div>
 
@@ -4669,6 +4671,37 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <button class="btn btn-sm btn-ghost" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">&raquo;</button>
           <span style="color:var(--text-secondary);font-size:13px;margin-left:8px" x-text="totalMemories + ' total'"></span>
         </div>
+
+        <!-- Knowledge Graph Relations (per-agent) -->
+        <template x-if="selectedAgentId && showRelations">
+          <div style="margin-top:16px">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+              <h3 style="margin:0" x-text="t('memoryPage.knowledgeGraph', 'Knowledge Graph')">Knowledge Graph</h3>
+              <input type="text" x-model="relationSource" :placeholder="t('memoryPage.sourceEntity', 'Source entity...')" class="input" style="width:140px;font-size:13px">
+              <input type="text" x-model="relationTarget" :placeholder="t('memoryPage.targetEntity', 'Target entity...')" class="input" style="width:140px;font-size:13px">
+              <button @click="loadRelations()" class="btn btn-sm btn-primary" x-text="t('memoryPage.queryRelations', 'Query')">Query</button>
+            </div>
+            <table class="data-table" x-show="relations.length > 0">
+              <thead><tr>
+                <th x-text="t('memoryPage.source', 'Source')">Source</th>
+                <th x-text="t('memoryPage.relation', 'Relation')">Relation</th>
+                <th x-text="t('memoryPage.target', 'Target')">Target</th>
+                <th x-text="t('memoryPage.confidence', 'Confidence')">Confidence</th>
+              </tr></thead>
+              <tbody>
+                <template x-for="r in relations" :key="r.source.id + r.target.id">
+                  <tr>
+                    <td><span class="badge" x-text="r.source.entity_type" style="margin-right:4px"></span><span x-text="r.source.name"></span></td>
+                    <td x-text="r.relation.type"></td>
+                    <td><span class="badge" x-text="r.target.entity_type" style="margin-right:4px"></span><span x-text="r.target.name"></span></td>
+                    <td x-text="(r.relation.confidence * 100).toFixed(0) + '%'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+            <div x-show="relations.length === 0" style="color:var(--text-secondary);text-align:center;padding:16px" x-text="t('memoryPage.noRelations', 'No relations found')"></div>
+          </div>
+        </template>
 
         <!-- History modal -->
         <template x-if="showHistory">

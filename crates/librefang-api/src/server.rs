@@ -223,6 +223,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/memory/cleanup",
             axum::routing::post(routes::memory_cleanup),
         )
+        .route("/memory/decay", axum::routing::post(routes::memory_decay))
         .route(
             "/memory/bulk-delete",
             axum::routing::post(routes::memory_bulk_delete),
@@ -263,6 +264,14 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route(
             "/memory/agents/{id}/consolidate",
             axum::routing::post(routes::memory_consolidate),
+        )
+        .route(
+            "/memory/agents/{id}/count",
+            axum::routing::get(routes::memory_count_agent),
+        )
+        .route(
+            "/memory/agents/{id}/relations",
+            axum::routing::get(routes::memory_query_relations).post(routes::memory_store_relations),
         )
         .route(
             "/memory/agents/{id}/export",

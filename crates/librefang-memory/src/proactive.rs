@@ -1452,6 +1452,16 @@ impl ProactiveMemoryStore {
         self.semantic.count(agent_id, scope)
     }
 
+    /// Query the knowledge graph for relations matching a pattern.
+    ///
+    /// Wraps `KnowledgeStore::query_graph()` for external API access.
+    pub fn query_relations(
+        &self,
+        pattern: GraphPattern,
+    ) -> LibreFangResult<Vec<librefang_types::memory::GraphMatch>> {
+        self.knowledge.query_graph(pattern)
+    }
+
     /// Find duplicate/near-duplicate memories for a user/agent.
     ///
     /// Uses a tiered similarity strategy (mem0-style):

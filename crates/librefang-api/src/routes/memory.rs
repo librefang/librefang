@@ -817,3 +817,209 @@ pub async fn memory_import_agent(
         Err(e) => internal_error(e),
     }
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/memory/decay
+// ---------------------------------------------------------------------------
+
+/// Trigger manual confidence decay across all memories.
+///
+/// Applies time-based exponential decay: memories not accessed recently
+/// lose confidence, while frequently accessed memories get boosted.
+/// Normally runs automatically during maintenance, but this endpoint
+/// allows triggering it on demand.
+#[utoipa::path(
+    post,
+    path = "/api/memory/decay",
+    tag = "proactive-memory",
+    responses((status = 200, description = "Decay result", body = serde_json::Value))
+)]
+pub async fn memory_decay(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let store = match get_pm_store(&state) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    match store.decay_confidence() {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "decayed": true,
+                "decay_rate": store.config().confidence_decay_rate,
+            })),
+        ),
+        Err(e) => internal_error(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/memory/agents/:agent_id/count?level=user
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct MemoryCountQuery {
+    pub level: Option<String>,
+}
+
+/// Count memories for an agent, optionally filtered by level (user/session/agent).
+#[utoipa::path(
+    get,
+    path = "/api/memory/agents/{id}/count",
+    tag = "proactive-memory",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("level" = Option<String>, Query, description = "Memory level filter (user, session, agent)"),
+    ),
+    responses((status = 200, description = "Memory count", body = serde_json::Value))
+)]
+pub async fn memory_count_agent(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+    Query(params): Query<MemoryCountQuery>,
+) -> impl IntoResponse {
+    let store = match get_pm_store(&state) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    let level = params.level.as_deref().and_then(|l| match l {
+        "user" => Some(librefang_types::memory::MemoryLevel::User),
+        "session" => Some(librefang_types::memory::MemoryLevel::Session),
+        "agent" => Some(librefang_types::memory::MemoryLevel::Agent),
+        _ => None,
+    });
+
+    match store.count(&agent_id, level) {
+        Ok(count) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "agent_id": agent_id,
+                "count": count,
+                "level": params.level,
+            })),
+        ),
+        Err(e) => internal_error(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/memory/agents/:agent_id/relations
+// ---------------------------------------------------------------------------
+
+/// Store relation triples into the knowledge graph for an agent.
+///
+/// Accepts an array of `{ subject, subject_type, relation, object, object_type }` triples.
+/// Deduplicates automatically: existing identical relations are skipped.
+#[utoipa::path(
+    post,
+    path = "/api/memory/agents/{id}/relations",
+    tag = "proactive-memory",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body = Vec<librefang_types::memory::RelationTriple>,
+    responses((status = 200, description = "Relations stored", body = serde_json::Value))
+)]
+pub async fn memory_store_relations(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+    Json(triples): Json<Vec<librefang_types::memory::RelationTriple>>,
+) -> impl IntoResponse {
+    let store = match get_pm_store(&state) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    let count = triples.len();
+    store.store_relations(&triples, &agent_id);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "agent_id": agent_id,
+            "triples_processed": count,
+        })),
+    )
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/memory/agents/:agent_id/relations?source=...&relation=...&target=...
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub struct RelationQueryParams {
+    pub source: Option<String>,
+    pub relation: Option<String>,
+    pub target: Option<String>,
+}
+
+/// Query the knowledge graph for relations matching a pattern.
+///
+/// All query parameters are optional — omitting all returns up to 100 relations.
+/// Results include full source entity, relation, and target entity for each match.
+#[utoipa::path(
+    get,
+    path = "/api/memory/agents/{id}/relations",
+    tag = "proactive-memory",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("source" = Option<String>, Query, description = "Source entity name or ID"),
+        ("relation" = Option<String>, Query, description = "Relation type"),
+        ("target" = Option<String>, Query, description = "Target entity name or ID"),
+    ),
+    responses((status = 200, description = "Matching relations", body = serde_json::Value))
+)]
+pub async fn memory_query_relations(
+    State(state): State<Arc<AppState>>,
+    Path(_agent_id): Path<String>,
+    Query(params): Query<RelationQueryParams>,
+) -> impl IntoResponse {
+    let store = match get_pm_store(&state) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    // Parse optional relation type
+    let relation_type = params.relation.as_deref().and_then(|r| {
+        serde_json::from_str::<librefang_types::memory::RelationType>(&format!("\"{}\"", r)).ok()
+    });
+
+    let pattern = librefang_types::memory::GraphPattern {
+        source: params.source,
+        relation: relation_type,
+        target: params.target,
+        max_depth: 1,
+    };
+
+    match store.query_relations(pattern) {
+        Ok(matches) => {
+            let results: Vec<serde_json::Value> = matches
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "source": {
+                            "id": m.source.id,
+                            "name": m.source.name,
+                            "entity_type": m.source.entity_type,
+                        },
+                        "relation": {
+                            "type": m.relation.relation,
+                            "confidence": m.relation.confidence,
+                        },
+                        "target": {
+                            "id": m.target.id,
+                            "name": m.target.name,
+                            "entity_type": m.target.entity_type,
+                        },
+                    })
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "matches": results,
+                    "count": results.len(),
+                })),
+            )
+        }
+        Err(e) => internal_error(e),
+    }
+}

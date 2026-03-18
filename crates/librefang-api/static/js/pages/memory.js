@@ -22,6 +22,12 @@ function memoryPage() {
     // Bulk selection
     selectedIds: [],
 
+    // Knowledge graph relations
+    showRelations: false,
+    relations: [],
+    relationSource: '',
+    relationTarget: '',
+
     // Manual memory creation form
     showAddForm: false,
     addForm: { content: '' },
@@ -93,6 +99,8 @@ function memoryPage() {
 
     onAgentFilterChange: function() {
       this.pageOffset = 0;
+      this.relations = [];
+      this.showRelations = false;
       this.loadStats();
       this.loadMemories();
     },
@@ -290,6 +298,34 @@ function memoryPage() {
         self.loadMemories();
       }).catch(function() {
         LibreFangToast.error(self.t('memoryPage.bulkDeleteFailed', 'Failed to delete selected memories'));
+      });
+    },
+
+    decayConfidence: function() {
+      var self = this;
+      if (!confirm(self.t('memoryPage.confirmDecay', 'Apply confidence decay to old memories?'))) return;
+      LibreFangAPI.request('POST', '/api/memory/decay').then(function(data) {
+        LibreFangToast.success(self.t('memoryPage.decayDone', 'Confidence decay applied (rate: {rate})', { rate: data.decay_rate || 0 }));
+        self.loadStats();
+        self.loadMemories();
+      }).catch(function() {
+        LibreFangToast.error(self.t('memoryPage.decayFailed', 'Failed to apply confidence decay'));
+      });
+    },
+
+    loadRelations: function() {
+      var self = this;
+      if (!self.selectedAgentId) return;
+      var url = '/api/memory/agents/' + encodeURIComponent(self.selectedAgentId) + '/relations';
+      var params = [];
+      if (self.relationSource.trim()) params.push('source=' + encodeURIComponent(self.relationSource.trim()));
+      if (self.relationTarget.trim()) params.push('target=' + encodeURIComponent(self.relationTarget.trim()));
+      if (params.length) url += '?' + params.join('&');
+      LibreFangAPI.request('GET', url).then(function(data) {
+        self.relations = data.matches || [];
+      }).catch(function() {
+        self.relations = [];
+        LibreFangToast.error(self.t('memoryPage.relationsFailed', 'Failed to load relations'));
       });
     }
   };
