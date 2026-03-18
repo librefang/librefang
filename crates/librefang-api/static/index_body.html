@@ -266,6 +266,17 @@
               </template>
             </div>
           </div>
+          <!-- Provider setup banner — non-blocking, dismissible -->
+          <div class="provider-banner"
+               x-show="!loading && !loadError && $store.app.providerMissing && !$store.app.providerBannerDismissed"
+               x-transition>
+            <div class="provider-banner-content">
+              <span class="provider-banner-icon">&#9889;</span>
+              <span data-i18n="provider.bannerText">No AI provider configured — agents are paused.</span>
+              <button class="btn btn-primary btn-sm" @click="location.hash='settings'" data-i18n="provider.bannerAction">Configure Provider</button>
+              <button class="provider-banner-close" @click="$store.app.dismissProviderBanner()" :title="t('btn.close', 'Close')">&times;</button>
+            </div>
+          </div>
           <!-- Onboarding banner -->
           <div class="onboarding-banner" x-show="!loading && !loadError && $store.app.showOnboarding && checklistDismissed">
             <h3 data-i18n="onboarding.welcome">Welcome to LibreFang</h3>
