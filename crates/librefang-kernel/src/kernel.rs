@@ -3843,6 +3843,14 @@ impl LibreFangKernel {
         // Remove from persistent storage
         let _ = self.memory.remove_agent(agent_id);
 
+        // Clean up proactive memories for this agent
+        if let Some(pm) = self.proactive_memory.get() {
+            let aid = agent_id.0.to_string();
+            if let Err(e) = pm.reset(&aid) {
+                warn!("Failed to clean up proactive memories for agent {agent_id}: {e}");
+            }
+        }
+
         // SECURITY: Record agent kill in audit trail
         self.audit_log.record(
             agent_id.to_string(),

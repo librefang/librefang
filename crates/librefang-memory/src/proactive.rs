@@ -724,7 +724,9 @@ impl ProactiveMemoryStore {
                     query_embedding.as_deref(),
                 )?;
                 // Also store in KV using the semantic store's ID for consistency
-                if let Ok(json) = serde_json::to_value(item) {
+                let mut kv_item = item.clone();
+                kv_item.id = mem_id.0.to_string();
+                if let Ok(json) = serde_json::to_value(&kv_item) {
                     if let Err(e) =
                         self.structured
                             .set(agent_id, &format!("memory:{}", mem_id), json)
@@ -1802,6 +1804,22 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
         // Update content in-place (preserves ID, agent, scope, access stats)
         self.semantic.update_content(mid, content, Some(metadata))?;
+
+        // Re-embed the updated content so vector search stays accurate
+        if let Some(ref embed_fn) = self.embedding {
+            match embed_fn.embed_one(content).await {
+                Ok(vec) => {
+                    if let Err(e) = self.semantic.update_embedding(mid, &vec) {
+                        tracing::warn!("Failed to update embedding for memory {memory_id}: {e}");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to compute embedding for updated memory {memory_id}: {e}"
+                    );
+                }
+            }
+        }
 
         // Also update the KV store entry with new content
         if let Ok(agent_id) = Self::parse_agent_id(user_id) {
