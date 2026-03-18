@@ -14,6 +14,7 @@
     "online": "Online", "offline": "Offline", "setup": "Setup", "ok": "OK", "config": "Config", "interact": "Interact",
     "never": "Never", "unknown": "Unknown", "no_data": "No data", "resume": "Resume", "close": "Close",
     "kernel_runtime": "Kernel Runtime", "run_now": "Run Now", "view_all": "View All", "created": "Created",
+    "check": "Check", "label": "Label", "local": "Local", "properties": "Properties", "success": "Success", "type": "Type",
     "symbols": { "separator": ":", "arrow": "→", "none": "-", "slash": "/", "expand": "+", "collapse": "−" },
     "units": { "mb": "MB", "ms": "ms", "days_short": "d", "hours_short": "h", "minutes_short": "m", "seconds_short": "s" }
   },
@@ -49,7 +50,8 @@
   "hands": {
     "title": "Hands", "subtitle": "Autonomous capability packages.",
     "available": "Available Hands", "instances": "Active Instances", "telemetry": "Telemetry", "activate": "Activate",
-    "orchestration": "Capability Orchestration", "ready_hands": "Ready Hands", "ready_description": "Ready to be deployed to an agent."
+    "orchestration": "Capability Orchestration", "ready_hands": "Ready Hands", "ready_description": "Ready to be deployed to an agent.",
+    "activate_failed": "Activation Failed"
   },
   "analytics": {
     "title": "Analytics", "subtitle": "Usage statistics and performance telemetry.",
@@ -66,7 +68,8 @@
     "bus": "Communication Bus", "subtitle": "Real-time message traffic and connectivity.",
     "active_channels": "Active Channels", "active_channels_description": "Connectivity status of adapters.",
     "unconfigured": "Unconfigured", "health_description": "Sub-system checks.", "awaiting_telemetry": "Awaiting telemetry...",
-    "topology": "Network Topology", "topology_description": "High-performance event bus coordination."
+    "topology": "Network Topology", "topology_description": "High-performance event bus coordination.",
+    "no_channels": "No communication channels discovered."
   },
   "workflows": {
     "title": "Workflows", "subtitle": "Automation hub.", "all_workflows": "All Workflows", "run_workflow": "Run Workflow",
@@ -75,7 +78,7 @@
   },
   "scheduler": {
     "title": "Scheduler", "subtitle": "Cron jobs and tasks.", "create_job": "Create Schedule", "create_job_desc": "Define new task sequence.",
-    "job_name": "Job Name", "job_name_placeholder": "e.g. Weekly Health Check", "cron_exp": "Cron Expression",
+    "job_name": "Job Name", "job_name_placeholder": "e.g. Weekly Health Check", "cron_exp": "Cron Expression", "cron_exp_placeholder": "0 0 * * *",
     "target_agent": "Target Agent", "select_agent": "Select agent...", "active_schedules": "Active Schedules", "run_now": "Run Now",
     "event_triggers": "Event Triggers", "system_cron": "System Cron"
   },
@@ -90,5 +93,34 @@
   "settings": {
     "title": "Settings", "subtitle": "System parameters.", "appearance": "Appearance",
     "theme": "Interface Theme", "language": "Language", "theme_light": "Light", "theme_dark": "Dark", "system_config": "System Configuration"
+  },
+  "chat": {
+    "title": "Chat", "neural_terminal": "Neural Terminal", "select_agent": "Select Agent", "select_agent_desc": "Choose an agent from the list to establish a communication link.",
+    "transmit_command": "Transmit neural pulse...", "send": "Send", "secure_link": "Secure Link", "standby": "Standby",
+    "end_history": "End of history", "welcome_system": "Neural bridge established.", "input_placeholder_with_agent": "Transmit command to {{name}}..."
+  },
+  "goals": {
+    "title": "Goals", "subtitle": "Strategic planning and task tracking.", "total": "Total", "pending": "Pending", "in_progress": "In Progress", "completed": "Completed",
+    "create_goal": "Create Goal", "goal_title_placeholder": "Goal Title", "goal_desc_placeholder": "Description", "goal_tree": "Goal Tree"
+  },
+  "sessions": {
+    "title": "Sessions", "subtitle": "Active agent conversations and historical execution contexts.", "active": "Active", "idle": "Idle", "last_activity": "Last Activity", "resume": "Resume", "close": "Close"
+  },
+  "approvals": {
+    "title": "Approvals", "subtitle": "Review and authorize critical agent actions.", "pending_review": "Pending Review", "approve": "Approve", "reject": "Reject",
+    "queue_clear": "Queue Clear", "queue_clear_desc": "No pending actions."
+  },
+  "canvas": {
+    "title": "Designer", "subtitle": "Design visual logic flows for autonomous agent behavior.", "node_library": "Node Library", "triggers": "Triggers",
+    "logic_actions": "Logic & Actions", "save_workflow": "Save Workflow", "clear_confirm": "Are you sure you want to clear the canvas?",
+    "nodes": {
+      "start": "Start", "start_desc": "Workflow start", "end": "End", "end_desc": "Workflow end", "schedule": "Schedule", "schedule_desc": "Run on schedule",
+      "webhook": "Webhook", "webhook_desc": "HTTP Webhook", "channel": "Channel", "channel_desc": "Message trigger", "condition": "Condition", "condition_desc": "Branch logic",
+      "loop": "Loop", "loop_desc": "Loop items", "parallel": "Parallel", "parallel_desc": "Parallel branches", "wait": "Wait", "wait_desc": "Wait duration",
+      "respond": "Respond", "respond_desc": "Send response", "agent": "Agent", "agent_desc": "Run agent"
+    }
+  },
+  "wizard": {
+    "welcome": "Welcome", "step_1": "Step 1", "connect_provider": "Connect Provider"
   }
 }
