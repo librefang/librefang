@@ -236,6 +236,7 @@ function settingsPage() {
 
     // -- Proactive Memory state --
     pmSettings: {
+      enabled: true,
       auto_memorize: true,
       auto_retrieve: true,
       max_retrieve: 10,
@@ -795,6 +796,7 @@ function settingsPage() {
         var data = await LibreFangAPI.get('/api/config');
         var pm = data.proactive_memory || {};
         this.pmSettings = {
+          enabled: pm.enabled !== undefined ? pm.enabled : true,
           auto_memorize: pm.auto_memorize !== undefined ? pm.auto_memorize : true,
           auto_retrieve: pm.auto_retrieve !== undefined ? pm.auto_retrieve : true,
           max_retrieve: pm.max_retrieve || 10,
@@ -839,6 +841,7 @@ function settingsPage() {
         if (!Number.isInteger(st)) { LibreFangToast.error('session_ttl_hours must be an integer'); this.pmSaving = false; return; }
         if (!Number.isInteger(mma)) { LibreFangToast.error('max_memories_per_agent must be an integer'); this.pmSaving = false; return; }
         var fields = [
+          { path: 'proactive_memory.enabled', value: this.pmSettings.enabled },
           { path: 'proactive_memory.auto_memorize', value: this.pmSettings.auto_memorize },
           { path: 'proactive_memory.auto_retrieve', value: this.pmSettings.auto_retrieve },
           { path: 'proactive_memory.max_retrieve', value: mr },

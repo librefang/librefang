@@ -3694,6 +3694,16 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               <div class="card mb-4">
                 <div class="card-header" data-i18n="settingsPage.proactiveMemory">Proactive Memory</div>
                 <div class="detail-grid" style="margin-top:12px">
+                  <!-- Master enabled toggle -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label">Enabled</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <label class="form-checkbox" style="margin:0">
+                        <input type="checkbox" x-model="pmSettings.enabled">
+                      </label>
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px">Master toggle for the entire proactive memory subsystem. When off, no memories are stored or retrieved.</div>
+                  </div>
                   <!-- Auto-memorize toggle -->
                   <div class="detail-row" style="align-items:center">
                     <span class="detail-label" data-i18n="settingsPage.autoMemorize">Auto-memorize</span>

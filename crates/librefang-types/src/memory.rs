@@ -124,6 +124,9 @@ impl MemoryItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProactiveMemoryConfig {
+    /// Master toggle — when false, the entire proactive memory subsystem is disabled.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// Enable auto-memorize after agent execution.
     pub auto_memorize: bool,
     /// Enable auto-retrieve before agent execution.
@@ -154,6 +157,10 @@ pub struct ProactiveMemoryConfig {
     pub max_memories_per_agent: usize,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn default_max_memories_per_agent() -> usize {
     1000
 }
@@ -161,6 +168,7 @@ fn default_max_memories_per_agent() -> usize {
 impl Default for ProactiveMemoryConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             auto_memorize: true,
             auto_retrieve: true,
             max_retrieve: 10,

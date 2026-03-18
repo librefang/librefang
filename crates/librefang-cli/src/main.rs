@@ -2021,9 +2021,10 @@ decay_rate = 0.05
 
 # Proactive memory (mem0-style auto-memorize / auto-retrieve)
 [proactive_memory]
+enabled = true
 auto_memorize = true
 auto_retrieve = true
-max_retrieve = 5
+max_retrieve = 10
 # extraction_model = ""  # defaults to your default_model
 # extraction_threshold = 0.7
 # session_ttl_hours = 24
@@ -3156,9 +3157,10 @@ decay_rate = 0.05
 
 # Proactive memory (mem0-style auto-memorize / auto-retrieve)
 [proactive_memory]
+enabled = true
 auto_memorize = true
 auto_retrieve = true
-max_retrieve = 5
+max_retrieve = 10
 # extraction_model = ""  # defaults to your default_model
 # extraction_threshold = 0.7
 # session_ttl_hours = 24

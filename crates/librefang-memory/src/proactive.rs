@@ -2064,13 +2064,12 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         user_id: &str,
         conversation: &[serde_json::Value],
     ) -> LibreFangResult<ExtractionResult> {
-        if !self
+        let cfg = self
             .config
             .read()
             .unwrap_or_else(|e| e.into_inner())
-            .auto_memorize
-            || conversation.is_empty()
-        {
+            .clone();
+        if !cfg.enabled || !cfg.auto_memorize || conversation.is_empty() {
             return Ok(ExtractionResult {
                 memories: Vec::new(),
                 relations: Vec::new(),
@@ -2167,7 +2166,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
-        if !cfg.auto_retrieve {
+        if !cfg.enabled || !cfg.auto_retrieve {
             return Ok(Vec::new());
         }
 

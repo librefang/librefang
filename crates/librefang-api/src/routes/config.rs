@@ -508,6 +508,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
     // ── Proactive Memory ──
     set!("proactive_memory", {
+        "enabled": config.proactive_memory.enabled,
         "auto_memorize": config.proactive_memory.auto_memorize,
         "auto_retrieve": config.proactive_memory.auto_retrieve,
         "max_retrieve": config.proactive_memory.max_retrieve,
@@ -1209,7 +1210,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "consolidation_interval_hours": "number"
     }});
     sec!("proactive_memory", { "fields": {
-        "auto_memorize": "boolean", "auto_retrieve": "boolean",
+        "enabled": "boolean", "auto_memorize": "boolean", "auto_retrieve": "boolean",
         "max_retrieve": "number", "extraction_threshold": "number",
         "extraction_model": "string", "extract_categories": "array",
         "session_ttl_hours": "number", "confidence_decay_rate": "number",

@@ -1202,7 +1202,7 @@ impl LibreFangKernel {
         // Uses extraction_model if set, otherwise falls back to agent's default model.
         // This allows using a cheap model (e.g., llama/haiku) for extraction while
         // keeping an expensive model (e.g., opus/gpt-4o) for agent responses.
-        {
+        if kernel.config.proactive_memory.enabled {
             let pm_config = kernel.config.proactive_memory.clone();
             let extraction_model = pm_config
                 .extraction_model
