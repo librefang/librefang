@@ -143,6 +143,12 @@ xtask                 Build automation
 
 **Client SDKs** — [JavaScript](sdk/javascript) &bull; [Python](sdk/python) &bull; [Rust](sdk/rust) &bull; [Go](sdk/go) — full REST client with streaming support.
 
+**MCP Support** — Built-in MCP client and server. Connect to IDEs, extend with custom tools, compose agent pipelines. [Details](docs/providers.md)
+
+**A2A Protocol** — Google Agent-to-Agent protocol support. Discover, communicate, and delegate tasks across agent systems. [Details](docs/api-reference.md)
+
+**Desktop App** — Tauri 2.0 native app with system tray, notifications, and global shortcuts.
+
 **OpenClaw Migration** — `librefang migrate --from openclaw` imports agents, history, skills, and config.
 
 ## Development
@@ -160,7 +166,7 @@ See [docs/comparison.md](docs/comparison.md) for benchmarks and feature-by-featu
 
 ## Links
 
-- [Documentation](https://docs.librefang.ai) &bull; [API Reference](docs/api-reference.md) &bull; [Getting Started](docs/getting-started.md)
+- [Documentation](https://docs.librefang.ai) &bull; [API Reference](docs/api-reference.md) &bull; [Getting Started](docs/getting-started.md) &bull; [Troubleshooting](docs/troubleshooting.md)
 - [Contributing](CONTRIBUTING.md) &bull; [Governance](GOVERNANCE.md) &bull; [Security](SECURITY.md)
 - Discussions: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [Use Cases](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [Feature Votes](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [Announcements](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
@@ -169,6 +175,11 @@ See [docs/comparison.md](docs/comparison.md) for benchmarks and feature-by-featu
 <a href="https://github.com/librefang/librefang/graphs/contributors">
   <img src="public/assets/contributors.svg" alt="Contributors" />
 </a>
+
+<p align="center">
+  We welcome contributions of all kinds — code, docs, translations, bug reports.<br/>
+  Check the <a href="CONTRIBUTING.md">Contributing Guide</a> and pick a <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> to get started!
+</p>
 
 <p align="center">
   <a href="https://github.com/librefang/librefang/stargazers">

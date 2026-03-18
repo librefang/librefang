@@ -143,6 +143,12 @@ xtask                 ビルド自動化
 
 **クライアント SDK** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — ストリーミング対応の完全な REST クライアント。
 
+**MCP サポート** — MCP クライアントとサーバーを内蔵。IDE 連携、カスタムツール拡張、エージェントパイプライン構築。[詳細](../docs/providers.md)
+
+**A2A プロトコル** — Google Agent-to-Agent プロトコル対応。エージェントシステム間の発見・通信・タスク委譲。[詳細](../docs/api-reference.md)
+
+**デスクトップアプリ** — Tauri 2.0 ネイティブアプリ。システムトレイ、通知、グローバルショートカット。
+
 **OpenClaw マイグレーション** — `librefang migrate --from openclaw` でエージェント、履歴、スキル、設定をインポート。
 
 ## 開発
@@ -160,7 +166,7 @@ cargo fmt --all -- --check                               # フォーマットチ
 
 ## リンク
 
-- [ドキュメント](https://docs.librefang.ai) &bull; [API リファレンス](../docs/api-reference.md) &bull; [入門ガイド](../docs/getting-started.md)
+- [ドキュメント](https://docs.librefang.ai) &bull; [API リファレンス](../docs/api-reference.md) &bull; [入門ガイド](../docs/getting-started.md) &bull; [トラブルシューティング](../docs/troubleshooting.md)
 - [コントリビュート](../CONTRIBUTING.md) &bull; [ガバナンス](../GOVERNANCE.md) &bull; [セキュリティ](../SECURITY.md)
 - ディスカッション: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [ユースケース](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [機能投票](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [お知らせ](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
@@ -169,6 +175,11 @@ cargo fmt --all -- --check                               # フォーマットチ
 <a href="https://github.com/librefang/librefang/graphs/contributors">
   <img src="../public/assets/contributors.svg" alt="Contributors" />
 </a>
+
+<p align="center">
+  コード、ドキュメント、翻訳、バグ報告など、あらゆる形の貢献を歓迎します。<br/>
+  <a href="../CONTRIBUTING.md">コントリビュートガイド</a>を確認して、<a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> から始めましょう！
+</p>
 
 <p align="center">
   <a href="https://github.com/librefang/librefang/stargazers">

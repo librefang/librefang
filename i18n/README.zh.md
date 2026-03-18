@@ -143,6 +143,12 @@ xtask                 构建自动化
 
 **客户端 SDK** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — 完整 REST 客户端，支持流式传输。
 
+**MCP 支持** — 内置 MCP 客户端和服务器。连接 IDE、扩展自定义工具、组合智能体管道。[详情](../docs/providers.md)
+
+**A2A 协议** — 支持 Google Agent-to-Agent 协议。跨智能体系统发现、通信和任务委派。[详情](../docs/api-reference.md)
+
+**桌面应用** — Tauri 2.0 原生应用，支持系统托盘、通知和全局快捷键。
+
 **OpenClaw 迁移** — `librefang migrate --from openclaw` 导入智能体、历史、技能和配置。
 
 ## 开发
@@ -160,7 +166,7 @@ cargo fmt --all -- --check                               # 格式化检查
 
 ## 链接
 
-- [文档](https://docs.librefang.ai) &bull; [API 参考](../docs/api-reference.md) &bull; [入门指南](../docs/getting-started.md)
+- [文档](https://docs.librefang.ai) &bull; [API 参考](../docs/api-reference.md) &bull; [入门指南](../docs/getting-started.md) &bull; [故障排除](../docs/troubleshooting.md)
 - [贡献](../CONTRIBUTING.md) &bull; [治理](../GOVERNANCE.md) &bull; [安全](../SECURITY.md)
 - 讨论: [问答](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [用例展示](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [功能投票](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [公告](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
@@ -169,6 +175,11 @@ cargo fmt --all -- --check                               # 格式化检查
 <a href="https://github.com/librefang/librefang/graphs/contributors">
   <img src="../public/assets/contributors.svg" alt="Contributors" />
 </a>
+
+<p align="center">
+  我们欢迎各种形式的贡献 — 代码、文档、翻译、Bug 报告。<br/>
+  查看 <a href="../CONTRIBUTING.md">贡献指南</a>，从一个 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> 开始吧！
+</p>
 
 <p align="center">
   <a href="https://github.com/librefang/librefang/stargazers">

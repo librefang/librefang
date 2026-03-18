@@ -143,6 +143,12 @@ xtask                 빌드 자동화
 
 **클라이언트 SDK** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — 스트리밍 지원 완전한 REST 클라이언트.
 
+**MCP 지원** — MCP 클라이언트 및 서버 내장. IDE 연동, 커스텀 도구 확장, 에이전트 파이프라인 구성. [상세](../docs/providers.md)
+
+**A2A 프로토콜** — Google Agent-to-Agent 프로토콜 지원. 에이전트 시스템 간 탐색, 통신, 태스크 위임. [상세](../docs/api-reference.md)
+
+**데스크톱 앱** — Tauri 2.0 네이티브 앱. 시스템 트레이, 알림, 글로벌 단축키.
+
 **OpenClaw 마이그레이션** — `librefang migrate --from openclaw`로 에이전트, 히스토리, 스킬, 설정을 가져옵니다.
 
 ## 개발
@@ -160,7 +166,7 @@ cargo fmt --all -- --check                               # 포맷 체크
 
 ## 링크
 
-- [문서](https://docs.librefang.ai) &bull; [API 레퍼런스](../docs/api-reference.md) &bull; [시작 가이드](../docs/getting-started.md)
+- [문서](https://docs.librefang.ai) &bull; [API 레퍼런스](../docs/api-reference.md) &bull; [시작 가이드](../docs/getting-started.md) &bull; [문제 해결](../docs/troubleshooting.md)
 - [기여](../CONTRIBUTING.md) &bull; [거버넌스](../GOVERNANCE.md) &bull; [보안](../SECURITY.md)
 - 토론: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [유스케이스](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [기능 투표](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [공지](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
@@ -169,6 +175,11 @@ cargo fmt --all -- --check                               # 포맷 체크
 <a href="https://github.com/librefang/librefang/graphs/contributors">
   <img src="../public/assets/contributors.svg" alt="Contributors" />
 </a>
+
+<p align="center">
+  코드, 문서, 번역, 버그 리포트 등 모든 형태의 기여를 환영합니다.<br/>
+  <a href="../CONTRIBUTING.md">기여 가이드</a>를 확인하고 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a>부터 시작해 보세요!
+</p>
 
 <p align="center">
   <a href="https://github.com/librefang/librefang/stargazers">
