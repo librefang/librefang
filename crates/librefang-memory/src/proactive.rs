@@ -37,7 +37,7 @@ use librefang_types::memory::{
     ProactiveMemoryHooks, Relation, RelationTriple, RelationType,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 /// Scope names for multi-level memory.
 pub mod scopes {
@@ -104,7 +104,7 @@ pub struct ProactiveMemoryStore {
     structured: StructuredStore,
     semantic: SemanticStore,
     knowledge: KnowledgeStore,
-    config: ProactiveMemoryConfig,
+    config: Arc<RwLock<ProactiveMemoryConfig>>,
     /// Memory extractor for LLM-powered extraction
     extractor: Arc<dyn MemoryExtractor>,
     /// Optional embedding driver for vector similarity search.
@@ -146,7 +146,7 @@ impl ProactiveMemoryStore {
             semantic: SemanticStore::new(conn),
             knowledge,
             substrate,
-            config,
+            config: Arc::new(RwLock::new(config)),
             extractor: Arc::new(DefaultMemoryExtractor),
             embedding: None,
             consolidation_counters: Arc::new(Mutex::new(HashMap::new())),
@@ -168,7 +168,7 @@ impl ProactiveMemoryStore {
             semantic: SemanticStore::new(conn),
             knowledge,
             substrate,
-            config,
+            config: Arc::new(RwLock::new(config)),
             extractor,
             embedding: None,
             consolidation_counters: Arc::new(Mutex::new(HashMap::new())),
@@ -191,9 +191,18 @@ impl ProactiveMemoryStore {
         Self::new(substrate, ProactiveMemoryConfig::default())
     }
 
-    /// Get a reference to the config.
-    pub fn config(&self) -> &ProactiveMemoryConfig {
-        &self.config
+    /// Get a snapshot of the current config.
+    pub fn config(&self) -> ProactiveMemoryConfig {
+        self.config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Hot-swap the runtime config (called on config reload).
+    pub fn update_config(&self, new_config: ProactiveMemoryConfig) {
+        let mut guard = self.config.write().unwrap_or_else(|e| e.into_inner());
+        *guard = new_config;
     }
 
     /// Decay confidence scores for memories that haven't been accessed recently.
@@ -205,7 +214,11 @@ impl ProactiveMemoryStore {
     ///
     /// This is rate-limited to run at most once per hour.
     pub fn decay_confidence(&self) -> LibreFangResult<()> {
-        let decay_rate = self.config.confidence_decay_rate;
+        let decay_rate = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .confidence_decay_rate;
         if decay_rate <= 0.0 {
             return Ok(());
         }
@@ -326,7 +339,11 @@ impl ProactiveMemoryStore {
     ///
     /// This is the global variant of `cleanup_expired_sessions` (which is per-agent).
     pub fn cleanup_expired(&self) -> LibreFangResult<u64> {
-        let ttl_hours = self.config.session_ttl_hours;
+        let ttl_hours = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .session_ttl_hours;
         if ttl_hours == 0 {
             return Ok(0);
         }
@@ -848,7 +865,11 @@ impl ProactiveMemoryStore {
     ///
     /// Does nothing when the cap is 0 (disabled) or when there is still room.
     fn evict_if_over_cap(&self, agent_id: AgentId, new_count: usize) -> LibreFangResult<()> {
-        let max = self.config.max_memories_per_agent;
+        let max = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .max_memories_per_agent;
         if max == 0 {
             return Ok(()); // cap disabled
         }
@@ -1078,15 +1099,16 @@ impl ProactiveMemoryStore {
         // Use SQL GROUP BY to count categories without loading all items into memory
         let categories = self.semantic.count_by_category(Some(agent_id))?;
 
+        let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
         Ok(MemoryStats {
             total,
             user_count,
             session_count,
             agent_count,
             categories,
-            auto_memorize_enabled: self.config.auto_memorize,
-            auto_retrieve_enabled: self.config.auto_retrieve,
-            llm_extraction: self.config.extraction_model.is_some(),
+            auto_memorize_enabled: cfg.auto_memorize,
+            auto_retrieve_enabled: cfg.auto_retrieve,
+            llm_extraction: cfg.extraction_model.is_some(),
         })
     }
 
@@ -1102,15 +1124,16 @@ impl ProactiveMemoryStore {
         // Use SQL GROUP BY to count categories without loading all items into memory
         let categories = self.semantic.count_by_category(None)?;
 
+        let cfg = self.config.read().unwrap_or_else(|e| e.into_inner());
         Ok(MemoryStats {
             total,
             user_count,
             session_count,
             agent_count,
             categories,
-            auto_memorize_enabled: self.config.auto_memorize,
-            auto_retrieve_enabled: self.config.auto_retrieve,
-            llm_extraction: self.config.extraction_model.is_some(),
+            auto_memorize_enabled: cfg.auto_memorize,
+            auto_retrieve_enabled: cfg.auto_retrieve,
+            llm_extraction: cfg.extraction_model.is_some(),
         })
     }
 
@@ -1465,7 +1488,14 @@ impl ProactiveMemoryStore {
                 // Check semantic similarity (Jaccard word overlap)
                 let similarity = librefang_types::memory::text_similarity(&a_lower, &b_lower);
 
-                if is_substring || similarity > self.config.duplicate_threshold {
+                if is_substring
+                    || similarity
+                        > self
+                            .config
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .duplicate_threshold
+                {
                     group.push(all_items[j].clone());
                     used[j] = true;
                 }
@@ -2034,7 +2064,13 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         user_id: &str,
         conversation: &[serde_json::Value],
     ) -> LibreFangResult<ExtractionResult> {
-        if !self.config.auto_memorize || conversation.is_empty() {
+        if !self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .auto_memorize
+            || conversation.is_empty()
+        {
             return Ok(ExtractionResult {
                 memories: Vec::new(),
                 relations: Vec::new(),
@@ -2126,7 +2162,12 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
     ///
     /// Also performs session TTL cleanup if configured.
     async fn auto_retrieve(&self, user_id: &str, query: &str) -> LibreFangResult<Vec<MemoryItem>> {
-        if !self.config.auto_retrieve {
+        let cfg = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if !cfg.auto_retrieve {
             return Ok(Vec::new());
         }
 
@@ -2141,19 +2182,13 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         // Search across all memory levels — use vector search if available
         let results = if let Some(ref emb) = self.embedding {
             if let Ok(qe) = emb.embed_one(query).await {
-                self.semantic.recall_with_embedding(
-                    query,
-                    self.config.max_retrieve,
-                    filter,
-                    Some(&qe),
-                )?
-            } else {
                 self.semantic
-                    .recall(query, self.config.max_retrieve, filter)?
+                    .recall_with_embedding(query, cfg.max_retrieve, filter, Some(&qe))?
+            } else {
+                self.semantic.recall(query, cfg.max_retrieve, filter)?
             }
         } else {
-            self.semantic
-                .recall(query, self.config.max_retrieve, filter)?
+            self.semantic.recall(query, cfg.max_retrieve, filter)?
         };
 
         Ok(results

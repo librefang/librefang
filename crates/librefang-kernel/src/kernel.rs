@@ -4262,6 +4262,12 @@ impl LibreFangKernel {
                         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
                     *guard = Some(new_config.tool_policy.clone());
                 }
+                HotAction::UpdateProactiveMemory => {
+                    info!("Hot-reload: updating proactive memory config");
+                    if let Some(pm) = self.proactive_memory.get() {
+                        pm.update_config(new_config.proactive_memory.clone());
+                    }
+                }
                 _ => {
                     // Other hot actions (channels, web, browser, extensions, etc.)
                     // are logged but not applied here — they require subsystem-specific
