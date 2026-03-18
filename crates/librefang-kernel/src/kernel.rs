@@ -2459,6 +2459,9 @@ impl LibreFangKernel {
                 } else {
                     info!(hand = %hand_id, "Hand auto-deactivated after repeated failures");
                     self.persist_hand_state();
+                    self.notify_owner_bg(format!(
+                        "⚠️ Hand `{hand_id}` auto-deactivated after {failures} consecutive failures. Re-activate with: librefang hand activate {hand_id}"
+                    ));
                 }
             }
             self.hand_route_cooldowns.remove(hand_id);
@@ -2478,6 +2481,38 @@ impl LibreFangKernel {
                 ),
             );
         }
+    }
+
+    /// Fire-and-forget notification to the owner user via all configured channels.
+    ///
+    /// Best-effort: logs warnings on failure but never blocks the caller.
+    fn notify_owner_bg(&self, message: String) {
+        let weak = match self.self_handle.get() {
+            Some(w) => w.clone(),
+            None => return,
+        };
+        tokio::spawn(async move {
+            let kernel = match weak.upgrade() {
+                Some(k) => k,
+                None => return,
+            };
+            // Find the owner user and their channel bindings
+            let owner = kernel.config.users.iter().find(|u| u.role == "owner");
+            let bindings = match owner {
+                Some(u) => u.channel_bindings.clone(),
+                None => return, // no owner configured — nothing to notify
+            };
+            for (channel, platform_id) in &bindings {
+                if kernel.channel_adapters.contains_key(channel.as_str()) {
+                    if let Err(e) = kernel
+                        .send_channel_message(channel, platform_id, &message, None)
+                        .await
+                    {
+                        warn!(channel = %channel, error = %e, "Failed to send owner notification");
+                    }
+                }
+            }
+        });
     }
 
     /// Check if a hand is in cooldown after a recent dispatch failure.
@@ -4252,6 +4287,70 @@ impl LibreFangKernel {
                 }
             }
             self.persist_hand_state();
+        }
+
+        // ── Startup API key health check ──────────────────────────────────
+        // Verify that configured API keys are present in the environment.
+        // Missing keys are logged as warnings so the operator can fix them
+        // before they cause runtime errors.
+        {
+            let mut missing: Vec<String> = Vec::new();
+
+            // Default LLM provider
+            let llm_env = self
+                .config
+                .resolve_api_key_env(&self.config.default_model.provider);
+            if std::env::var(&llm_env).unwrap_or_default().is_empty() {
+                missing.push(format!(
+                    "LLM ({}): ${}",
+                    self.config.default_model.provider, llm_env
+                ));
+            }
+
+            // Fallback LLM providers
+            for fb in &self.config.fallback_providers {
+                let env_var = self.config.resolve_api_key_env(&fb.provider);
+                if std::env::var(&env_var).unwrap_or_default().is_empty() {
+                    missing.push(format!("LLM fallback ({}): ${}", fb.provider, env_var));
+                }
+            }
+
+            // Search provider
+            let search_env = match self.config.web.search_provider {
+                librefang_types::config::SearchProvider::Brave => {
+                    Some(("Brave", self.config.web.brave.api_key_env.clone()))
+                }
+                librefang_types::config::SearchProvider::Tavily => {
+                    Some(("Tavily", self.config.web.tavily.api_key_env.clone()))
+                }
+                librefang_types::config::SearchProvider::Perplexity => {
+                    Some(("Perplexity", self.config.web.perplexity.api_key_env.clone()))
+                }
+                _ => None,
+            };
+            if let Some((name, env_var)) = search_env {
+                if std::env::var(&env_var).unwrap_or_default().is_empty() {
+                    missing.push(format!("Search ({}): ${}", name, env_var));
+                }
+            }
+
+            if missing.is_empty() {
+                info!("Startup health check: all configured API keys present");
+            } else {
+                warn!(
+                    count = missing.len(),
+                    "Startup health check: missing API keys — affected services may fail"
+                );
+                for m in &missing {
+                    warn!("  ↳ {}", m);
+                }
+                // Notify owner about missing keys
+                self.notify_owner_bg(format!(
+                    "⚠️ Startup: {} API key(s) missing — {}. Set the env vars and restart.",
+                    missing.len(),
+                    missing.join(", ")
+                ));
+            }
         }
 
         let agents = self.registry.list();
