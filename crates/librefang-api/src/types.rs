@@ -42,6 +42,15 @@ pub struct MessageRequest {
     /// Optional file attachments (uploaded via /upload endpoint).
     #[serde(default)]
     pub attachments: Vec<AttachmentRef>,
+    /// Sender phone number or platform ID (from channel gateways).
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    /// Sender display name (from channel gateways).
+    #[serde(default)]
+    pub sender_name: Option<String>,
+    /// Channel type identifier (e.g. "whatsapp", "telegram", "web").
+    #[serde(default)]
+    pub channel_type: Option<String>,
 }
 
 /// Response from sending a message.

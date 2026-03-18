@@ -1781,6 +1781,21 @@ impl LibreFangKernel {
             .await
     }
 
+    /// Send a message with a kernel handle and sender identity context.
+    ///
+    /// Used by the HTTP API when a channel gateway (WhatsApp, Telegram, etc.)
+    /// provides sender metadata alongside the message.
+    pub async fn send_message_with_handle_and_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_context: Option<&SenderContext>,
+    ) -> KernelResult<AgentLoopResult> {
+        self.send_message_full(agent_id, message, kernel_handle, None, sender_context)
+            .await
+    }
+
     /// Internal: send a message with all optional parameters (content blocks + sender context).
     ///
     /// This is the unified entry point for all message dispatch. When `sender_context`
@@ -2097,6 +2112,8 @@ impl LibreFangKernel {
                         .and_then(|(s, _)| s)
                 },
                 user_name,
+                sender_display_name: None,
+                sender_user_id: None,
                 channel_type: None,
                 is_subagent: manifest
                     .metadata
