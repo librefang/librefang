@@ -295,6 +295,14 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "memory": {
             "decay_rate": config.memory.decay_rate,
         },
+        "proactive_memory": {
+            "auto_memorize": config.proactive_memory.auto_memorize,
+            "auto_retrieve": config.proactive_memory.auto_retrieve,
+            "extraction_model": config.proactive_memory.extraction_model,
+            "session_ttl_hours": config.proactive_memory.session_ttl_hours,
+            "confidence_decay_rate": config.proactive_memory.confidence_decay_rate,
+            "duplicate_threshold": config.proactive_memory.duplicate_threshold,
+        },
     }))
 }
 
@@ -673,6 +681,16 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
                     "discord": "object",
                     "slack": "object",
                     "whatsapp": "object"
+                }
+            },
+            "proactive_memory": {
+                "fields": {
+                    "auto_memorize": "boolean",
+                    "auto_retrieve": "boolean",
+                    "extraction_model": "string",
+                    "session_ttl_hours": "number",
+                    "confidence_decay_rate": "number",
+                    "duplicate_threshold": "number"
                 }
             }
         }

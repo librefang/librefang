@@ -3022,6 +3022,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'security' }" @click="tab = 'security'; if (!securityData && !secLoading) loadSecurity()" data-i18n="settingsPage.securityTab">Security</div>
             <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'network' }" @click="tab = 'network'; if (!peers.length && !peersLoading) { loadPeers(); startPeerPolling(); }" data-i18n="settingsPage.networkTab">Network</div>
             <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'budget' }" @click="tab = 'budget'" data-i18n="settingsPage.budgetTab">Budget</div>
+            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'proactive_memory' }" @click="tab = 'proactive_memory'; if (!pmLoaded) loadProactiveMemory()" data-i18n="settingsPage.proactiveMemoryTab">Proactive Memory</div>
             <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'info' }" @click="tab = 'info'" data-i18n="settingsPage.systemTab">System</div>
             <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'migration' }" @click="tab = 'migration'" data-i18n="settingsPage.migrationTab">Migration</div>
           </div>
@@ -3679,6 +3680,81 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 </table>
               </div>
               <div class="text-xs text-dim" x-show="!agentRanking.length" data-i18n="settingsPage.noSpendingToday">No spending recorded today.</div>
+            </div>
+          </div>
+
+          <!-- Proactive Memory tab -->
+          <div x-show="tab === 'proactive_memory'">
+            <div class="info-card">
+              <h4 data-i18n="settingsPage.proactiveMemory">Proactive Memory</h4>
+              <p data-i18n="settingsPage.proactiveMemoryDesc">Configure mem0-style proactive memory that automatically extracts and recalls relevant memories during agent conversations.</p>
+            </div>
+            <div x-show="pmLoading" class="loading-state"><div class="spinner"></div><span data-i18n="settingsPage.loadingProactiveMemory">Loading proactive memory settings...</span></div>
+            <div x-show="!pmLoading">
+              <div class="card mb-4">
+                <div class="card-header" data-i18n="settingsPage.proactiveMemory">Proactive Memory</div>
+                <div class="detail-grid" style="margin-top:12px">
+                  <!-- Auto-memorize toggle -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.autoMemorize">Auto-memorize</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <label class="form-checkbox" style="margin:0">
+                        <input type="checkbox" x-model="pmSettings.auto_memorize">
+                      </label>
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.autoMemorizeDesc">Automatically extract and store memories from agent conversations after each execution.</div>
+                  </div>
+                  <!-- Auto-retrieve toggle -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.autoRetrieve">Auto-retrieve</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <label class="form-checkbox" style="margin:0">
+                        <input type="checkbox" x-model="pmSettings.auto_retrieve">
+                      </label>
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.autoRetrieveDesc">Automatically recall relevant memories before each agent execution to enrich context.</div>
+                  </div>
+                  <!-- Extraction model -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.extractionModel">Extraction Model</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="text" style="flex:1" x-model="pmSettings.extraction_model" data-i18n-placeholder="settingsPage.extractionModelPlaceholder" placeholder="Leave empty to use agent's default model">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.extractionModelDesc">LLM model for memory extraction. If empty, uses rule-based extraction instead.</div>
+                  </div>
+                  <!-- Session TTL hours -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.sessionTtlHours">Session TTL (hours)</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="number" style="width:120px" min="1" step="1" x-model.number="pmSettings.session_ttl_hours">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.sessionTtlHoursDesc">Session memories older than this are automatically cleaned up before each agent execution.</div>
+                  </div>
+                  <!-- Confidence decay rate -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.confidenceDecayRate">Confidence Decay Rate</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="number" style="width:120px" min="0" max="1" step="0.001" x-model.number="pmSettings.confidence_decay_rate">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.confidenceDecayRateDesc">Exponential decay rate per day. Lower values preserve memories longer (0.01 = ~70 days to halve).</div>
+                  </div>
+                  <!-- Duplicate threshold -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.duplicateThreshold">Duplicate Threshold</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="number" style="width:120px" min="0" max="1" step="0.05" x-model.number="pmSettings.duplicate_threshold">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.duplicateThresholdDesc">Jaccard word overlap threshold for duplicate detection. Memories above this similarity are merged.</div>
+                  </div>
+                </div>
+                <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
+                  <button class="btn btn-primary btn-sm" @click="saveProactiveMemory()" :disabled="pmSaving">
+                    <span x-show="!pmSaving" data-i18n="btn.save">Save</span>
+                    <span x-show="pmSaving" class="spinner" style="width:12px;height:12px;border-width:2px"></span>
+                  </button>
+                  <span class="text-xs text-dim" x-show="pmSaveStatus" x-text="pmSaveStatus"></span>
+                </div>
+              </div>
             </div>
           </div>
 
