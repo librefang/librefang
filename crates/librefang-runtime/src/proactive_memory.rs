@@ -244,7 +244,12 @@ impl MemoryExtractor for LlmMemoryExtractor {
             if !content.is_empty() {
                 conversation_text.push_str(&format!("{role}: {content}\n"));
                 if conversation_text.len() > MAX_EXTRACTION_CHARS {
-                    conversation_text.truncate(MAX_EXTRACTION_CHARS);
+                    // Find a safe truncation point on a char boundary
+                    let mut safe = MAX_EXTRACTION_CHARS;
+                    while safe > 0 && !conversation_text.is_char_boundary(safe) {
+                        safe -= 1;
+                    }
+                    conversation_text.truncate(safe);
                     break;
                 }
             }

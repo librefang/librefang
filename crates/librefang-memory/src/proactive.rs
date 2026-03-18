@@ -555,6 +555,13 @@ impl ProactiveMemoryStore {
             imported += 1;
         }
 
+        // Enforce per-agent memory cap after import
+        if imported > 0 {
+            if let Err(e) = self.evict_if_over_cap(aid, 0) {
+                tracing::warn!("import_memories eviction check failed: {}", e);
+            }
+        }
+
         tracing::info!("Imported {} memories for agent {}", imported, agent_id);
         Ok(imported)
     }
@@ -1673,6 +1680,11 @@ impl ProactiveMemory for ProactiveMemoryStore {
                     e
                 );
             }
+        }
+
+        // Enforce per-agent memory cap
+        if let Err(e) = self.evict_if_over_cap(agent_id, 0) {
+            tracing::warn!("add_with_level eviction check failed: {}", e);
         }
 
         Ok(())
