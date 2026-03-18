@@ -19,6 +19,9 @@ pub struct WebSearchEngine {
     config: WebConfig,
     client: reqwest::Client,
     cache: Arc<WebCache>,
+    /// Extra API key env var names from auth_profiles (sorted by priority).
+    /// Used for key rotation when the primary key returns 402/429.
+    brave_key_envs: Vec<String>,
 }
 
 /// Context that bundles both search and fetch engines for passing through the tool runner.
@@ -29,15 +32,36 @@ pub struct WebToolsContext {
 
 impl WebSearchEngine {
     /// Create a new search engine from config with a shared cache.
-    pub fn new(config: WebConfig, cache: Arc<WebCache>) -> Self {
+    ///
+    /// `brave_auth_profiles` supplies additional API key env var names for
+    /// Brave Search key rotation (from `[[auth_profiles.brave]]` in config).
+    pub fn new(
+        config: WebConfig,
+        cache: Arc<WebCache>,
+        brave_auth_profiles: Vec<(String, u32)>,
+    ) -> Self {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
             .unwrap_or_default();
+
+        // Build a deduplicated list of Brave API key env vars sorted by priority.
+        // The primary key from config comes first (priority -1), then auth_profiles.
+        let mut key_entries: Vec<(String, i64)> = Vec::new();
+        key_entries.push((config.brave.api_key_env.clone(), -1));
+        for (env_var, priority) in &brave_auth_profiles {
+            if *env_var != config.brave.api_key_env {
+                key_entries.push((env_var.clone(), *priority as i64));
+            }
+        }
+        key_entries.sort_by_key(|(_, p)| *p);
+        let brave_key_envs: Vec<String> = key_entries.into_iter().map(|(k, _)| k).collect();
+
         Self {
             config,
             client,
             cache,
+            brave_key_envs,
         }
     }
 
@@ -78,8 +102,12 @@ impl WebSearchEngine {
             }
         }
 
-        // Brave second
-        if resolve_api_key(&self.config.brave.api_key_env).is_some() {
+        // Brave second (check any key in the rotation pool)
+        if self
+            .brave_key_envs
+            .iter()
+            .any(|k| resolve_api_key(k).is_some())
+        {
             debug!("Auto: trying Brave");
             match self.search_brave(query, max_results).await {
                 Ok(result) => return Ok(result),
@@ -101,11 +129,51 @@ impl WebSearchEngine {
         self.search_duckduckgo(query, max_results).await
     }
 
-    /// Search via Brave Search API.
+    /// Search via Brave Search API with auth_profile key rotation.
+    ///
+    /// Tries each configured API key in priority order. If a key returns
+    /// 402 (Payment Required) or 429 (Too Many Requests), the next key is
+    /// tried automatically.
     async fn search_brave(&self, query: &str, max_results: usize) -> Result<String, String> {
-        let api_key =
-            resolve_api_key(&self.config.brave.api_key_env).ok_or("Brave API key not set")?;
+        let mut last_err = String::from("Brave API key not set");
 
+        for env_var in &self.brave_key_envs {
+            let Some(api_key) = resolve_api_key(env_var) else {
+                continue;
+            };
+
+            match self
+                .search_brave_with_key(query, max_results, &api_key)
+                .await
+            {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    let is_rotatable =
+                        e.contains("402") || e.contains("429") || e.contains("Payment");
+                    if is_rotatable && self.brave_key_envs.len() > 1 {
+                        warn!(
+                            env_var,
+                            error = %e,
+                            "Brave key exhausted, rotating to next"
+                        );
+                        last_err = e;
+                        continue;
+                    }
+                    return Err(e);
+                }
+            }
+        }
+
+        Err(last_err)
+    }
+
+    /// Execute a single Brave search request with a specific API key.
+    async fn search_brave_with_key(
+        &self,
+        query: &str,
+        max_results: usize,
+        api_key: &Zeroizing<String>,
+    ) -> Result<String, String> {
         let mut params = vec![("q", query.to_string()), ("count", max_results.to_string())];
         if !self.config.brave.country.is_empty() {
             params.push(("country", self.config.brave.country.clone()));

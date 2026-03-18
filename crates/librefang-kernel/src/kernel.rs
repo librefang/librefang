@@ -929,10 +929,21 @@ impl LibreFangKernel {
         // Initialize web tools (multi-provider search + SSRF-protected fetch + caching)
         let cache_ttl = std::time::Duration::from_secs(config.web.cache_ttl_minutes * 60);
         let web_cache = Arc::new(librefang_runtime::web_cache::WebCache::new(cache_ttl));
+        let brave_auth_profiles: Vec<(String, u32)> = config
+            .auth_profiles
+            .get("brave")
+            .map(|profiles| {
+                profiles
+                    .iter()
+                    .map(|p| (p.api_key_env.clone(), p.priority))
+                    .collect()
+            })
+            .unwrap_or_default();
         let web_ctx = librefang_runtime::web_search::WebToolsContext {
             search: librefang_runtime::web_search::WebSearchEngine::new(
                 config.web.clone(),
                 web_cache.clone(),
+                brave_auth_profiles,
             ),
             fetch: librefang_runtime::web_fetch::WebFetchEngine::new(
                 config.web.fetch.clone(),
