@@ -39,6 +39,10 @@ Herkömmliche Agenten-Frameworks warten auf Ihre Eingabe. LibreFang führt **Age
 
 > LibreFang ist ein Community-Fork von [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) mit offener Governance und Merge-First PR-Policy. Siehe [GOVERNANCE.md](../GOVERNANCE.md) für Details.
 
+<p align="center">
+  <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang Dashboard" />
+</p>
+
 ## Schnellstart
 
 ```bash

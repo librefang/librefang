@@ -39,6 +39,10 @@ LibreFang 是一个 **Agent 操作系统** — 用 Rust 从头构建的完整自
 
 > LibreFang 是 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) 的社区分支，采用开放治理和合并优先的 PR 政策。详见 [GOVERNANCE.md](../GOVERNANCE.md)。
 
+<p align="center">
+  <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang 控制台" />
+</p>
+
 ## 快速开始
 
 ```bash

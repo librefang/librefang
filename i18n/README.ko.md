@@ -39,6 +39,10 @@ LibreFang은 **에이전트 운영체제**입니다 — Rust로 처음부터 구
 
 > LibreFang은 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang)의 커뮤니티 포크로, 오픈 거버넌스와 머지 우선 PR 정책을 채택합니다. 자세한 내용은 [GOVERNANCE.md](../GOVERNANCE.md)를 참조하세요.
 
+<p align="center">
+  <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang 대시보드" />
+</p>
+
 ## 빠른 시작
 
 ```bash

@@ -39,6 +39,10 @@ Los frameworks de agentes tradicionales esperan tu entrada. LibreFang ejecuta **
 
 > LibreFang es un fork comunitario de [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) con gobernanza abierta y política de merge-first para PRs. Ver [GOVERNANCE.md](../GOVERNANCE.md) para detalles.
 
+<p align="center">
+  <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang Dashboard" />
+</p>
+
 ## Inicio Rápido
 
 ```bash

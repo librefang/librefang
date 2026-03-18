@@ -39,6 +39,10 @@ LibreFang は **エージェントオペレーティングシステム** — Rus
 
 > LibreFang は [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) のコミュニティフォークで、オープンガバナンスとマージファーストの PR ポリシーを採用しています。詳細は [GOVERNANCE.md](../GOVERNANCE.md) を参照。
 
+<p align="center">
+  <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang ダッシュボード" />
+</p>
+
 ## クイックスタート
 
 ```bash
