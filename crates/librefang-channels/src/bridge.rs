@@ -8,7 +8,7 @@ use crate::rate_limiter::ChannelRateLimiter;
 use crate::router::AgentRouter;
 use crate::types::{
     default_phase_emoji, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelUser,
-    LifecycleReaction,
+    LifecycleReaction, SenderContext,
 };
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -46,6 +46,33 @@ pub trait ChannelBridgeHandle: Send + Sync {
             .collect::<Vec<_>>()
             .join("\n");
         self.send_message(agent_id, &text).await
+    }
+
+    /// Send a message to an agent with sender identity context.
+    ///
+    /// The sender context is propagated to the agent's system prompt so it knows
+    /// who is talking and from which channel. Default falls back to `send_message()`.
+    async fn send_message_with_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> Result<String, String> {
+        let _ = sender;
+        self.send_message(agent_id, message).await
+    }
+
+    /// Send a multimodal message with sender identity context.
+    ///
+    /// Default falls back to `send_message_with_blocks()`.
+    async fn send_message_with_blocks_and_sender(
+        &self,
+        agent_id: AgentId,
+        blocks: Vec<ContentBlock>,
+        sender: &SenderContext,
+    ) -> Result<String, String> {
+        let _ = sender;
+        self.send_message_with_blocks(agent_id, blocks).await
     }
 
     /// Find an agent by name, returning its ID.
@@ -375,6 +402,17 @@ fn channel_type_str(channel: &crate::types::ChannelType) -> &str {
 
 /// Metadata key for the actual sender user ID (distinct from platform_id in DMs).
 pub const SENDER_USER_ID_KEY: &str = "sender_user_id";
+
+/// Build a `SenderContext` from an incoming `ChannelMessage`.
+fn build_sender_context(message: &ChannelMessage) -> SenderContext {
+    SenderContext {
+        channel: channel_type_str(&message.channel).to_string(),
+        user_id: sender_user_id(message).to_string(),
+        display_name: message.sender.display_name.clone(),
+        is_group: message.is_group,
+        thread_id: message.thread_id.clone(),
+    }
+}
 
 /// Extract the sender identity used for RBAC and per-user rate limiting.
 fn sender_user_id(message: &ChannelMessage) -> &str {
@@ -953,6 +991,9 @@ async fn dispatch_message(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
+    // Build sender context to propagate identity to the agent
+    let sender_ctx = build_sender_context(message);
+
     // Streaming path: if the adapter supports progressive output, pipe text
     // deltas directly to it instead of waiting for the full response.
     if adapter.supports_streaming() {
@@ -1066,8 +1107,11 @@ async fn dispatch_message(
         }
     }
 
-    // Non-streaming path: send to agent and relay the complete response.
-    match handle.send_message(agent_id, &text).await {
+    // Non-streaming path: send to agent and relay response (with sender identity).
+    match handle
+        .send_message_with_sender(agent_id, &text, &sender_ctx)
+        .await
+    {
         Ok(response) => {
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
             // Empty response means the agent intentionally chose to stay silent
@@ -1087,6 +1131,7 @@ async fn dispatch_message(
                 .await;
         }
         Err(e) => {
+            let sender_ctx_retry = sender_ctx.clone();
             handle_send_error(
                 &e,
                 agent_id,
@@ -1102,7 +1147,10 @@ async fn dispatch_message(
                 |new_id| {
                     let h = handle.clone();
                     let t = text.clone();
-                    async move { h.send_message(new_id, &t).await }
+                    async move {
+                        h.send_message_with_sender(new_id, &t, &sender_ctx_retry)
+                            .await
+                    }
                 },
             )
             .await;
@@ -1325,8 +1373,11 @@ async fn dispatch_with_blocks(
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Queued).await;
     send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Thinking).await;
 
+    // Build sender context to propagate identity to the agent
+    let sender_ctx = build_sender_context(message);
+
     match handle
-        .send_message_with_blocks(agent_id, blocks.clone())
+        .send_message_with_blocks_and_sender(agent_id, blocks.clone(), &sender_ctx)
         .await
     {
         Ok(response) => {
@@ -1346,6 +1397,7 @@ async fn dispatch_with_blocks(
                 .await;
         }
         Err(e) => {
+            let sender_ctx_retry = sender_ctx.clone();
             handle_send_error(
                 &e,
                 agent_id,
@@ -1360,7 +1412,10 @@ async fn dispatch_with_blocks(
                 output_format,
                 |new_id| {
                     let h = handle.clone();
-                    async move { h.send_message_with_blocks(new_id, blocks).await }
+                    async move {
+                        h.send_message_with_blocks_and_sender(new_id, blocks, &sender_ctx_retry)
+                            .await
+                    }
                 },
             )
             .await;
