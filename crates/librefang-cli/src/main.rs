@@ -7766,10 +7766,7 @@ fn resolve_agent_id(base: &str, name_or_id: &str) -> String {
         .and_then(|v| v.as_array())
         .or_else(|| body.as_array());
     if let Some(arr) = agents {
-        if let Some(agent) = arr
-            .iter()
-            .find(|a| a["name"].as_str() == Some(name_or_id))
-        {
+        if let Some(agent) = arr.iter().find(|a| a["name"].as_str() == Some(name_or_id)) {
             if let Some(id) = agent["id"].as_str() {
                 return id.to_string();
             }
