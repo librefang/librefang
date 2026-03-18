@@ -268,6 +268,8 @@ pub struct LibreFangKernel {
     pub context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
+    /// Whether we've already logged the "no provider" audit entry (prevents spam).
+    pub provider_unconfigured_logged: std::sync::atomic::AtomicBool,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -1232,6 +1234,7 @@ impl LibreFangKernel {
             hand_desc_embeddings: tokio::sync::RwLock::new(None),
             context_engine,
             self_handle: OnceLock::new(),
+            provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -1857,6 +1860,21 @@ impl LibreFangKernel {
                 if !result.decision_traces.is_empty() {
                     self.decision_traces
                         .insert(agent_id, result.decision_traces.clone());
+                }
+
+                if result.provider_not_configured {
+                    if !self
+                        .provider_unconfigured_logged
+                        .swap(true, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        self.audit_log.record(
+                            agent_id.to_string(),
+                            librefang_runtime::audit::AuditAction::AgentMessage,
+                            "agent loop skipped",
+                            "No LLM provider configured — configure via dashboard settings",
+                        );
+                    }
+                    return Ok(result);
                 }
 
                 // SECURITY: Record successful message in audit trail
