@@ -220,6 +220,8 @@ pub struct LibreFangKernel {
     /// Hot-reloadable default model override (set via config hot-reload, read at agent spawn).
     pub default_model_override:
         std::sync::RwLock<Option<librefang_types::config::DefaultModelConfig>>,
+    /// Hot-reloadable tool policy override (set via config hot-reload, read in available_tools).
+    pub tool_policy_override: std::sync::RwLock<Option<librefang_types::tool_policy::ToolPolicy>>,
     /// Per-agent message locks — serializes LLM calls for the same agent to prevent
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
@@ -783,7 +785,7 @@ impl LibreFangKernel {
                         "Fallback provider configured"
                     );
                     driver_chain.push(d.clone());
-                    model_chain.push((d, fb.model.clone()));
+                    model_chain.push((d, strip_provider_prefix(&fb.model, &fb.provider)));
                 }
                 Err(e) => {
                     warn!(
@@ -1147,6 +1149,7 @@ impl LibreFangKernel {
             whatsapp_gateway_pid: Arc::new(std::sync::Mutex::new(None)),
             channel_adapters: dashmap::DashMap::new(),
             default_model_override: std::sync::RwLock::new(None),
+            tool_policy_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
             command_queue,
@@ -2105,6 +2108,29 @@ impl LibreFangKernel {
                     kernel_clone
                         .scheduler
                         .record_usage(agent_id, &result.total_usage);
+
+                    // Persist usage to SQLite (mirrors non-streaming path)
+                    let model = &manifest.model.model;
+                    let cost = MeteringEngine::estimate_cost_with_catalog(
+                        &kernel_clone
+                            .model_catalog
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner()),
+                        model,
+                        result.total_usage.input_tokens,
+                        result.total_usage.output_tokens,
+                    );
+                    let _ = kernel_clone
+                        .metering
+                        .record(&librefang_memory::usage::UsageRecord {
+                            agent_id,
+                            model: model.clone(),
+                            input_tokens: result.total_usage.input_tokens,
+                            output_tokens: result.total_usage.output_tokens,
+                            cost_usd: cost,
+                            tool_calls: result.iterations.saturating_sub(1),
+                        });
+
                     let _ = kernel_clone
                         .registry
                         .set_state(agent_id, AgentState::Running);
@@ -5325,7 +5351,23 @@ impl LibreFangKernel {
             all_tools.retain(|t| !tool_blocklist.iter().any(|b| b == &t.name));
         }
 
-        // Step 5: Remove shell_exec if exec_policy denies it.
+        // Step 5: Apply global tool_policy rules (deny/allow with glob patterns).
+        // This filters tools based on the kernel-wide tool policy from config.toml.
+        if !self.config.tool_policy.is_empty() {
+            all_tools.retain(|t| {
+                let result = librefang_runtime::tool_policy::resolve_tool_access(
+                    &t.name,
+                    &self.config.tool_policy,
+                    0, // depth 0 for top-level available_tools; subagent depth handled elsewhere
+                );
+                matches!(
+                    result,
+                    librefang_runtime::tool_policy::ToolAccessResult::Allowed
+                )
+            });
+        }
+
+        // Step 6: Remove shell_exec if exec_policy denies it.
         let exec_blocks_shell = entry.as_ref().is_some_and(|e| {
             e.manifest
                 .exec_policy
@@ -5768,6 +5810,12 @@ async fn cron_deliver_response(
             let _ = kernel
                 .memory
                 .structured_set(agent_id, "delivery.last_channel", kv_val);
+            if let Err(e) = kernel
+                .send_channel_message(channel, to, response, None)
+                .await
+            {
+                tracing::warn!(channel = %channel, to = %to, error = %e, "Cron channel delivery failed");
+            }
         }
         CronDelivery::LastChannel => {
             match kernel
@@ -5783,6 +5831,12 @@ async fn cron_deliver_response(
                             recipient = %recipient,
                             "Cron: delivering to last channel"
                         );
+                        if let Err(e) = kernel
+                            .send_channel_message(channel, recipient, response, None)
+                            .await
+                        {
+                            tracing::warn!(channel = %channel, recipient = %recipient, error = %e, "Cron last_channel delivery failed");
+                        }
                     }
                 }
                 _ => {

@@ -1,7 +1,7 @@
 //! Config hot-reload — diffs two `KernelConfig` instances and produces a `ReloadPlan`.
 //!
 //! **Hot-reload safe**: channels, skills, usage footer, web config, browser,
-//! approval policy, cron settings, webhook triggers, extensions.
+//! approval policy, cron settings, webhook triggers, extensions, tool policy.
 //!
 //! **No-op** (informational only): log_level, language, mode.
 //!
@@ -45,6 +45,8 @@ pub enum HotAction {
     ReloadProviderUrls,
     /// Default model changed — update in-place without restart.
     UpdateDefaultModel,
+    /// Tool policy changed — update tool filtering rules.
+    UpdateToolPolicy,
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +250,10 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
 
     if field_changed(&old.provider_urls, &new.provider_urls) {
         plan.hot_actions.push(HotAction::ReloadProviderUrls);
+    }
+
+    if field_changed(&old.tool_policy, &new.tool_policy) {
+        plan.hot_actions.push(HotAction::UpdateToolPolicy);
     }
 
     if field_changed(&old.provider_api_keys, &new.provider_api_keys) {

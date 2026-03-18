@@ -124,7 +124,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .send_message(agent_id, message)
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(result.response)
+        // When the agent intentionally chose not to reply (NO_REPLY / [[silent]]),
+        // return an empty string so the bridge skips sending a response to the channel.
+        if result.silent {
+            Ok(String::new())
+        } else {
+            Ok(result.response)
+        }
     }
 
     async fn send_message_with_blocks(
@@ -151,7 +157,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .send_message_with_blocks(agent_id, &text, blocks)
             .await
             .map_err(|e| format!("{e}"))?;
-        Ok(result.response)
+        if result.silent {
+            Ok(String::new())
+        } else {
+            Ok(result.response)
+        }
     }
 
     async fn send_message_streaming(

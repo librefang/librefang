@@ -39,6 +39,17 @@ impl OpenAIDriver {
         self.base_url.contains("moonshot") || model.to_lowercase().contains("kimi")
     }
 
+    /// True if this model is DeepSeek-reasoner (R1).
+    ///
+    /// DeepSeek-reasoner returns `reasoning_content` in assistant responses, but
+    /// for multi-turn conversations the API **rejects** requests that include
+    /// `reasoning_content` on previous assistant messages.  We must strip it from
+    /// all historical assistant messages when building the request payload.
+    fn is_deepseek_reasoner(&self, model: &str) -> bool {
+        let m = model.to_lowercase();
+        m.contains("deepseek-reasoner") || m.contains("deepseek-r1")
+    }
+
     /// Create a driver with additional HTTP headers (e.g. for Copilot IDE auth).
     pub fn with_extra_headers(mut self, headers: Vec<(String, String)>) -> Self {
         self.extra_headers = headers;
@@ -349,7 +360,16 @@ impl LlmDriver for OpenAIDriver {
                             Some(tool_calls)
                         },
                         tool_call_id: None,
-                        reasoning_content: if has_tool_calls
+                        // DeepSeek-reasoner: MUST omit reasoning_content on
+                        // all previous assistant messages — the API rejects it.
+                        // Kimi: requires an empty-string reasoning_content when
+                        // tool_calls are present (thinking is disabled for
+                        // multi-turn compatibility).
+                        reasoning_content: if self.is_deepseek_reasoner(&request.model) {
+                            // Always None — DeepSeek rejects reasoning_content
+                            // on historical assistant turns.
+                            None
+                        } else if has_tool_calls
                             && self.kimi_needs_reasoning_content(&request.model)
                         {
                             Some(String::new())
@@ -838,7 +858,13 @@ impl LlmDriver for OpenAIDriver {
                             Some(tool_calls_out)
                         },
                         tool_call_id: None,
-                        reasoning_content: if has_tool_calls
+                        // DeepSeek-reasoner: MUST omit reasoning_content on
+                        // all previous assistant messages — the API rejects it.
+                        // Kimi: requires an empty-string reasoning_content when
+                        // tool_calls are present.
+                        reasoning_content: if self.is_deepseek_reasoner(&request.model) {
+                            None
+                        } else if has_tool_calls
                             && self.kimi_needs_reasoning_content(&request.model)
                         {
                             Some(String::new())
@@ -1812,5 +1838,43 @@ mod tests {
         let msg: OaiResponseMessage = serde_json::from_str(json).unwrap();
         assert!(msg.content.is_none());
         assert!(msg.reasoning_content.is_none());
+    }
+
+    // ----- is_deepseek_reasoner tests -----
+
+    #[test]
+    fn test_is_deepseek_reasoner() {
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        assert!(driver.is_deepseek_reasoner("deepseek-reasoner"));
+        assert!(driver.is_deepseek_reasoner("deepseek-r1"));
+        assert!(driver.is_deepseek_reasoner("DeepSeek-Reasoner"));
+        assert!(driver.is_deepseek_reasoner("deepseek-r1-0528"));
+        assert!(!driver.is_deepseek_reasoner("deepseek-chat"));
+        assert!(!driver.is_deepseek_reasoner("deepseek-coder"));
+        assert!(!driver.is_deepseek_reasoner("gpt-4o"));
+    }
+
+    /// Verify that reasoning_content is omitted (None) when building
+    /// assistant messages for deepseek-reasoner, even if the blocks
+    /// contain Thinking content.
+    #[test]
+    fn test_deepseek_reasoner_strips_reasoning_content_from_assistant_msg() {
+        let driver = OpenAIDriver::new(String::new(), "https://api.deepseek.com/v1".to_string());
+        let model = "deepseek-reasoner";
+
+        // Simulate building an assistant OaiMessage with tool_calls —
+        // for deepseek-reasoner, reasoning_content must always be None.
+        let has_tool_calls = true;
+        let reasoning_content = if driver.is_deepseek_reasoner(model) {
+            None
+        } else if has_tool_calls && driver.kimi_needs_reasoning_content(model) {
+            Some(String::new())
+        } else {
+            None
+        };
+        assert!(
+            reasoning_content.is_none(),
+            "deepseek-reasoner must never send reasoning_content on assistant messages"
+        );
     }
 }
