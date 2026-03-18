@@ -1380,13 +1380,17 @@ pub async fn webhook_agent(
                 },
             })),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": {
-                let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-                t.t_args("api-error-webhook-agent-exec-failed", &[("error", &e.to_string())])
-            }})),
-        ),
+        Err(e) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            let msg = t.t_args(
+                "api-error-webhook-agent-exec-failed",
+                &[("error", &e.to_string())],
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": msg})),
+            )
+        }
     }
 }
 
@@ -2418,13 +2422,22 @@ pub async fn create_event_webhook(
     lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
-    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    // Pre-translate error messages before .await to avoid holding !Send ErrorTranslator across await
+    let (err_missing_url, err_invalid_url, err_missing_events) = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        (
+            t.t("api-error-webhook-missing-url"),
+            t.t("api-error-webhook-invalid-url"),
+            t.t("api-error-webhook-missing-events"),
+        )
+    };
+
     let url = match req["url"].as_str() {
         Some(u) if !u.is_empty() => u.to_string(),
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-webhook-missing-url")})),
+                Json(serde_json::json!({"error": err_missing_url})),
             );
         }
     };
@@ -2432,7 +2445,7 @@ pub async fn create_event_webhook(
     if url::Url::parse(&url).is_err() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": t.t("api-error-webhook-invalid-url")})),
+            Json(serde_json::json!({"error": err_invalid_url})),
         );
     }
 
@@ -2444,7 +2457,7 @@ pub async fn create_event_webhook(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": t.t("api-error-webhook-missing-events")})),
+                Json(serde_json::json!({"error": err_missing_events})),
             );
         }
     };
@@ -2776,17 +2789,21 @@ pub async fn test_webhook(
                 })),
             )
         }
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(serde_json::json!({
-                "status": "error",
-                "error": {
-                    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-                    t.t_args("api-error-webhook-reach-failed", &[("error", &e.to_string())])
-                },
-                "webhook_id": id,
-            })),
-        ),
+        Err(e) => {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            let msg = t.t_args(
+                "api-error-webhook-reach-failed",
+                &[("error", &e.to_string())],
+            );
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "error": msg,
+                    "webhook_id": id,
+                })),
+            )
+        }
     }
 }
 

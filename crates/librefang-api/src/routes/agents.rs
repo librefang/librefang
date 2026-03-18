@@ -11,7 +11,7 @@ use dashmap::DashMap;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
-use librefang_types::i18n::{self, ErrorTranslator};
+use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
@@ -179,6 +179,7 @@ pub async fn spawn_agent(
         ),
         Err(e) => {
             tracing::warn!("Spawn failed: {e}");
+            let t = ErrorTranslator::new(l);
             let status = match &e {
                 librefang_kernel::error::KernelError::LibreFang(
                     librefang_types::error::LibreFangError::AgentAlreadyExists(_),
@@ -188,7 +189,7 @@ pub async fn spawn_agent(
             (
                 status,
                 Json(
-                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                    serde_json::json!({"error": t.t_args("api-error-agent-error", &[("error", &e.to_string())])}),
                 ),
             )
         }
@@ -271,13 +272,14 @@ pub async fn bulk_create_agents(
                         });
                     }
                     Err(e) => {
+                        let t = ErrorTranslator::new(l);
                         results.push(BulkCreateResult {
                             index,
                             success: false,
                             agent_id: None,
                             name: None,
                             error: Some(t.t_args(
-                                "api-error-agent-clone-failed",
+                                "api-error-agent-clone-spawn-failed",
                                 &[("error", &e.to_string())],
                             )),
                         });
@@ -631,13 +633,18 @@ pub async fn list_agents(
     const VALID_SORT_FIELDS: &[&str] = &["name", "created_at", "last_active", "state"];
     let sort_field = params.sort.as_deref().unwrap_or("name");
     if !VALID_SORT_FIELDS.contains(&sort_field) {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        let msg = t.t_args(
+            "api-error-agent-invalid-sort",
+            &[
+                ("field", sort_field),
+                ("valid", &format!("{:?}", VALID_SORT_FIELDS)),
+            ],
+        );
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
-                "error": {
-                let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-                t.t_args("api-error-agent-invalid-sort", &[("field", sort_field), ("valid", &format!("{:?}", VALID_SORT_FIELDS))])
-            }
+                "error": msg
             })),
         )
             .into_response();
@@ -1385,10 +1392,10 @@ pub async fn send_message_stream(
     let (err_too_large, err_invalid_id, err_not_found, err_streaming_failed) = {
         let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
         (
-            err_too_large,
-            err_invalid_id,
-            err_not_found,
-            err_streaming_failed,
+            t.t("api-error-message-too-large"),
+            t.t("api-error-agent-invalid-id"),
+            t.t("api-error-agent-not-found"),
+            t.t("api-error-message-streaming-failed"),
         )
     };
 
@@ -3441,12 +3448,12 @@ pub async fn upload_file(
     ) = {
         let t = ErrorTranslator::new(l);
         (
-            err_invalid_id,
-            err_unsupported_type,
-            err_too_large_upload,
-            err_empty_body,
-            err_upload_dir_failed,
-            err_upload_save_failed,
+            t.t("api-error-agent-invalid-id"),
+            t.t("api-error-file-unsupported-type"),
+            t.t_args("api-error-file-too-large", &[("max", "10MB")]),
+            t.t("api-error-file-empty-body"),
+            t.t("api-error-file-upload-dir-failed"),
+            t.t("api-error-file-save-failed"),
         )
     };
     // Validate agent ID format
@@ -4049,7 +4056,8 @@ mod monitoring_tests {
         let agent_id = spawn_monitoring_test_agent(&state, "metrics-shape");
 
         let (status, body) =
-            json_response(agent_metrics(State(state), Path(agent_id.to_string())).await).await;
+            json_response(agent_metrics(State(state), Path(agent_id.to_string()), None).await)
+                .await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["agent_id"], agent_id.to_string());
@@ -4062,9 +4070,10 @@ mod monitoring_tests {
     async fn test_agent_metrics_returns_not_found_for_unknown_agent() {
         let (state, _tmp) = monitoring_test_app_state();
 
-        let (status, body) =
-            json_response(agent_metrics(State(state), Path(AgentId::new().to_string())).await)
-                .await;
+        let (status, body) = json_response(
+            agent_metrics(State(state), Path(AgentId::new().to_string()), None).await,
+        )
+        .await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"], "Agent not found");
@@ -4093,7 +4102,8 @@ mod monitoring_tests {
         params.insert("level".to_string(), "custom_error".to_string());
 
         let (status, body) =
-            json_response(agent_logs(State(state), Path(agent_id_str), Query(params)).await).await;
+            json_response(agent_logs(State(state), Path(agent_id_str), None, Query(params)).await)
+                .await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["count"], 1);
