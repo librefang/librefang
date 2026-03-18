@@ -248,7 +248,7 @@ pub enum LoopPhase {
 pub type PhaseCallback = Arc<dyn Fn(LoopPhase) + Send + Sync>;
 
 /// Result of an agent loop execution.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AgentLoopResult {
     /// The final text response from the agent.
     pub response: String,
@@ -274,6 +274,10 @@ pub struct AgentLoopResult {
     /// Detected memory conflicts where new info contradicts existing memories.
     /// Empty when no conflicts were detected.
     pub memory_conflicts: Vec<librefang_types::memory::MemoryConflict>,
+    /// True when the agent loop was skipped because no LLM provider is configured.
+    /// Distinct from `silent` (agent chose not to reply) — this means the system
+    /// couldn't run the agent at all.
+    pub provider_not_configured: bool,
 }
 
 /// Check if stable_prefix_mode is enabled via manifest metadata.
@@ -728,6 +732,7 @@ pub async fn run_agent_loop(
                         memories_saved: Vec::new(),
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
+                        provider_not_configured: false,
                     });
                 }
 
@@ -924,6 +929,7 @@ pub async fn run_agent_loop(
                     memories_saved,
                     memories_used,
                     memory_conflicts,
+                    provider_not_configured: false,
                 });
             }
             StopReason::ToolUse => {
@@ -1241,6 +1247,7 @@ pub async fn run_agent_loop(
                         memories_saved,
                         memories_used,
                         memory_conflicts,
+                        provider_not_configured: false,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -1910,6 +1917,7 @@ pub async fn run_agent_loop_streaming(
                         memories_saved: Vec::new(),
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
+                        provider_not_configured: false,
                     });
                 }
 
@@ -2105,6 +2113,7 @@ pub async fn run_agent_loop_streaming(
                     memories_saved,
                     memories_used,
                     memory_conflicts,
+                    provider_not_configured: false,
                 });
             }
             StopReason::ToolUse => {
@@ -2428,6 +2437,7 @@ pub async fn run_agent_loop_streaming(
                         memories_saved,
                         memories_used,
                         memory_conflicts,
+                        provider_not_configured: false,
                     });
                 }
                 let text = response.text();
