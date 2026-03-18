@@ -47,7 +47,7 @@ pub enum DeviceFlowStatus {
 /// POST https://github.com/login/device/code
 /// Returns a device code and user code for the user to enter at the verification URI.
 pub async fn start_device_flow() -> Result<DeviceCodeResponse, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;
@@ -76,7 +76,7 @@ pub async fn start_device_flow() -> Result<DeviceCodeResponse, String> {
 /// POST https://github.com/login/oauth/access_token
 /// Returns the current status of the authorization flow.
 pub async fn poll_device_flow(device_code: &str) -> DeviceFlowStatus {
-    let client = match reqwest::Client::builder()
+    let client = match crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
     {

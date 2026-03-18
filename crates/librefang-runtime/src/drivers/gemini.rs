@@ -37,10 +37,10 @@ impl GeminiDriver {
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
-            client: reqwest::Client::builder()
+            client: crate::http_client::client_builder()
                 .user_agent(crate::USER_AGENT)
                 .build()
-                .unwrap_or_default(),
+                .expect("HTTP client build"),
         }
     }
 }

@@ -57,7 +57,7 @@ impl ThreemaAdapter {
             threema_id,
             secret: Zeroizing::new(secret),
             webhook_port,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,

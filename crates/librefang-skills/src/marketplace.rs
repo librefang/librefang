@@ -86,7 +86,7 @@ impl MarketplaceClient {
     pub fn new(config: MarketplaceConfig) -> Self {
         Self {
             config,
-            http: reqwest::Client::builder()
+            http: crate::http_client::client_builder()
                 .user_agent("librefang-skills/0.1")
                 .build()
                 .expect("Failed to build HTTP client"),

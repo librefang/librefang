@@ -3722,6 +3722,7 @@ dependencies = [
  "rsa",
  "rustls",
  "rustls-connector",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha1",
@@ -3734,6 +3735,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "webpki-roots",
  "zeroize",
 ]
 
@@ -3809,6 +3811,8 @@ dependencies = [
  "librefang-types",
  "rand 0.8.5",
  "reqwest",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha2",
@@ -3820,6 +3824,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "webpki-roots",
  "zeroize",
 ]
 
@@ -3936,6 +3941,8 @@ dependencies = [
  "regex-lite",
  "reqwest",
  "rusqlite",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha2",
@@ -3950,6 +3957,7 @@ dependencies = [
  "tracing",
  "uuid",
  "wasmtime",
+ "webpki-roots",
  "zeroize",
 ]
 
@@ -3961,6 +3969,8 @@ dependencies = [
  "hex",
  "librefang-types",
  "reqwest",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3973,6 +3983,7 @@ dependencies = [
  "tracing",
  "uuid",
  "walkdir",
+ "webpki-roots",
  "zip 8.2.0",
 ]
 

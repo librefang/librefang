@@ -667,10 +667,10 @@ pub async fn resolve_url_attachments(
 ) -> Vec<librefang_types::message::ContentBlock> {
     use base64::Engine;
 
-    let client = reqwest::Client::builder()
+    let client = librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .unwrap_or_default();
+        .expect("HTTP client build");
     let mut blocks = Vec::new();
 
     for att in attachments {

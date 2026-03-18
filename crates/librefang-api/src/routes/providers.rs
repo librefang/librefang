@@ -767,10 +767,10 @@ pub async fn test_provider(
 
     let start = std::time::Instant::now();
     let api_key_val = api_key.unwrap_or_default();
-    let client = reqwest::Client::builder()
+    let client = librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .unwrap_or_default();
+        .expect("HTTP client build");
 
     // ── Bedrock: AWS Signature auth — can't test with simple HTTP ──
     if name == "bedrock" || name == "aws-bedrock" {

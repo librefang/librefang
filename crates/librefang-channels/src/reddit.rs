@@ -86,11 +86,11 @@ impl RedditAdapter {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         // Build HTTP client with required User-Agent
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::client_builder()
             .user_agent(USER_AGENT)
             .timeout(Duration::from_secs(30))
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .unwrap_or_else(|_| crate::http_client::new_client());
 
         Self {
             client_id,

@@ -61,7 +61,7 @@ impl MastodonAdapter {
         Self {
             instance_url,
             access_token: Zeroizing::new(access_token),
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,

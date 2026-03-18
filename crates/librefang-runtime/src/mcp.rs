@@ -580,7 +580,7 @@ impl McpConnection {
             return Err("SSRF: MCP SSE URL targets metadata endpoint".to_string());
         }
 
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::client_builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
@@ -597,7 +597,7 @@ impl McpConnection {
             return Err("SSRF: HTTP compatibility backend targets metadata endpoint".to_string());
         }
 
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::client_builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
@@ -1184,7 +1184,7 @@ mod tests {
             tools: Vec::new(),
             original_names: HashMap::new(),
             transport: McpTransportHandle::HttpCompat {
-                client: reqwest::Client::new(),
+                client: crate::http_client::new_client(),
             },
             next_id: 1,
         };

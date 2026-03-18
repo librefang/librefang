@@ -59,7 +59,7 @@ impl WhatsAppAdapter {
             access_token: Zeroizing::new(access_token),
             verify_token: Zeroizing::new(verify_token),
             webhook_port,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             allowed_users,
             gateway_url: None,
             account_id: None,

@@ -51,7 +51,7 @@ impl GitterAdapter {
         Self {
             token: Zeroizing::new(token),
             room_id,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -184,10 +184,10 @@ impl ChannelAdapter for GitterAdapter {
         let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
-            let stream_client = reqwest::Client::builder()
+            let stream_client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(0)) // No timeout for streaming
                 .build()
-                .unwrap_or_default();
+                .expect("HTTP client build");
 
             let mut backoff = Duration::from_secs(1);
 
