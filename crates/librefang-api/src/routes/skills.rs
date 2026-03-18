@@ -1605,6 +1605,43 @@ fn http_compat_tool_summary(
     })
 }
 
+fn serialize_mcp_transport(
+    transport: &librefang_types::config::McpTransportEntry,
+) -> serde_json::Value {
+    match transport {
+        librefang_types::config::McpTransportEntry::Stdio { command, args } => {
+            serde_json::json!({
+                "type": "stdio",
+                "command": command,
+                "args": args,
+            })
+        }
+        librefang_types::config::McpTransportEntry::Sse { url } => {
+            serde_json::json!({
+                "type": "sse",
+                "url": url,
+            })
+        }
+        librefang_types::config::McpTransportEntry::HttpCompat {
+            base_url,
+            headers,
+            tools,
+        } => {
+            let tool_summaries: Vec<serde_json::Value> =
+                tools.iter().map(http_compat_tool_summary).collect();
+            let header_summaries: Vec<serde_json::Value> =
+                headers.iter().map(http_compat_header_summary).collect();
+            serde_json::json!({
+                "type": "http_compat",
+                "base_url": base_url,
+                "headers": header_summaries,
+                "tools_count": tool_summaries.len(),
+                "tools": tool_summaries,
+            })
+        }
+    }
+}
+
 /// GET /api/mcp/servers — List configured MCP servers and their tools.
 #[utoipa::path(
     get,
@@ -1622,38 +1659,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         .mcp_servers
         .iter()
         .map(|s| {
-            let transport = match &s.transport {
-                librefang_types::config::McpTransportEntry::Stdio { command, args } => {
-                    serde_json::json!({
-                        "type": "stdio",
-                        "command": command,
-                        "args": args,
-                    })
-                }
-                librefang_types::config::McpTransportEntry::Sse { url } => {
-                    serde_json::json!({
-                        "type": "sse",
-                        "url": url,
-                    })
-                }
-                librefang_types::config::McpTransportEntry::HttpCompat {
-                    base_url,
-                    headers,
-                    tools,
-                } => {
-                    let tool_summaries: Vec<serde_json::Value> =
-                        tools.iter().map(http_compat_tool_summary).collect();
-                    let header_summaries: Vec<serde_json::Value> =
-                        headers.iter().map(http_compat_header_summary).collect();
-                    serde_json::json!({
-                        "type": "http_compat",
-                        "base_url": base_url,
-                        "headers": header_summaries,
-                        "tools_count": tool_summaries.len(),
-                        "tools": tool_summaries,
-                    })
-                }
-            };
+            let transport = serialize_mcp_transport(&s.transport);
             serde_json::json!({
                 "name": s.name,
                 "transport": transport,
@@ -1693,6 +1699,77 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         "total_configured": config_servers.len(),
         "total_connected": connected.len(),
     }))
+}
+
+/// GET /api/mcp/servers/{name} — Retrieve a single MCP server by name.
+///
+/// Returns the configured server entry plus live connection status and tools
+/// if the server is currently connected.
+#[utoipa::path(
+    get,
+    path = "/api/mcp/servers/{name}",
+    tag = "mcp",
+    params(
+        ("name" = String, Path, description = "Server name"),
+    ),
+    responses(
+        (status = 200, description = "MCP server details", body = serde_json::Value),
+        (status = 404, description = "MCP server not found")
+    )
+)]
+pub async fn get_mcp_server(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    // Find the configured entry by name
+    let entry = state
+        .kernel
+        .config
+        .mcp_servers
+        .iter()
+        .find(|s| s.name == name);
+
+    let entry = match entry {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("MCP server '{}' not found", name)})),
+            );
+        }
+    };
+
+    let transport = serialize_mcp_transport(&entry.transport);
+
+    let mut result = serde_json::json!({
+        "name": entry.name,
+        "transport": transport,
+        "timeout_secs": entry.timeout_secs,
+        "env": entry.env,
+        "connected": false,
+    });
+
+    // Check live connection status
+    let connections = state.kernel.mcp_connections.lock().await;
+    if let Some(conn) = connections.iter().find(|c| c.name() == name) {
+        let tools: Vec<serde_json::Value> = conn
+            .tools()
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                })
+            })
+            .collect();
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("connected".to_string(), serde_json::json!(true));
+            obj.insert("tools_count".to_string(), serde_json::json!(tools.len()));
+            obj.insert("tools".to_string(), serde_json::json!(tools));
+        }
+    }
+
+    (StatusCode::OK, Json(result))
 }
 
 /// POST /api/mcp/servers — Add a new MCP server configuration.
@@ -2338,6 +2415,22 @@ pub(crate) fn remove_channel_config(
 // Integration management endpoints
 // ---------------------------------------------------------------------------
 
+/// Derive a human-readable status string for an integration.
+fn integration_status_str(
+    installed: Option<&librefang_extensions::InstalledIntegration>,
+    health: Option<&librefang_extensions::health::IntegrationHealth>,
+) -> &'static str {
+    match installed {
+        Some(inst) if !inst.enabled => "disabled",
+        Some(_) => match health.map(|h| &h.status) {
+            Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
+            Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
+            _ => "installed",
+        },
+        None => "available",
+    }
+}
+
 /// GET /api/integrations — List installed integrations with status.
 #[utoipa::path(
     get,
@@ -2358,15 +2451,10 @@ pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoR
     let mut entries = Vec::new();
     for info in registry.list_all_info() {
         let h = health.get_health(&info.template.id);
-        let status = match &info.installed {
-            Some(inst) if !inst.enabled => "disabled",
-            Some(_) => match h.as_ref().map(|h| &h.status) {
-                Some(librefang_extensions::IntegrationStatus::Ready) => "ready",
-                Some(librefang_extensions::IntegrationStatus::Error(_)) => "error",
-                _ => "installed",
-            },
-            None => continue, // Only show installed
-        };
+        let status = integration_status_str(info.installed.as_ref(), h.as_ref());
+        if status == "available" {
+            continue; // Only show installed
+        }
         entries.push(serde_json::json!({
             "id": info.template.id,
             "name": info.template.name,
@@ -2382,6 +2470,81 @@ pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoR
         "installed": entries,
         "count": entries.len(),
     }))
+}
+
+/// GET /api/integrations/:id — Get a single integration by ID.
+#[utoipa::path(
+    get,
+    path = "/api/integrations/{id}",
+    tag = "integrations",
+    params(
+        ("id" = String, Path, description = "Integration ID"),
+    ),
+    responses(
+        (status = 200, description = "Integration detail", body = serde_json::Value),
+        (status = 404, description = "Integration not found", body = serde_json::Value),
+    )
+)]
+pub async fn get_integration(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let registry = state
+        .kernel
+        .extension_registry
+        .read()
+        .unwrap_or_else(|e| e.into_inner());
+    let health = &state.kernel.extension_health;
+
+    // Look up the template first
+    let template = match registry.get_template(&id) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Integration '{}' not found", id)})),
+            )
+                .into_response();
+        }
+    };
+
+    let installed = registry.get_installed(&id);
+    let h = health.get_health(&id);
+
+    let status = integration_status_str(installed, h.as_ref());
+
+    let error_message = h.as_ref().and_then(|h| match &h.status {
+        librefang_extensions::IntegrationStatus::Error(msg) => Some(msg.clone()),
+        _ => None,
+    });
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "id": template.id,
+            "name": template.name,
+            "description": template.description,
+            "icon": template.icon,
+            "category": template.category.to_string(),
+            "status": status,
+            "tags": template.tags,
+            "tool_count": h.as_ref().map(|h| h.tool_count).unwrap_or(0),
+            "installed": installed.is_some(),
+            "enabled": installed.map(|i| i.enabled).unwrap_or(false),
+            "installed_at": installed.map(|i| i.installed_at.to_rfc3339()),
+            "has_oauth": template.oauth.is_some(),
+            "setup_instructions": template.setup_instructions,
+            "required_env": template.required_env.iter().map(|e| serde_json::json!({
+                "name": e.name,
+                "label": e.label,
+                "help": e.help,
+                "is_secret": e.is_secret,
+                "get_url": e.get_url,
+            })).collect::<Vec<_>>(),
+            "error": error_message,
+        })),
+    )
+        .into_response()
 }
 
 /// GET /api/integrations/available — List all available templates.

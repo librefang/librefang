@@ -1198,7 +1198,7 @@ async fn exchange_code(
     client_secret: &str,
     redirect_uri: &str,
 ) -> Result<TokenResponse, String> {
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
     let resp = client
         .post(token_endpoint)
         .form(&[
@@ -1335,7 +1335,7 @@ async fn fetch_userinfo(
     userinfo_url: &str,
     access_token: &str,
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
+    let client = librefang_runtime::http_client::new_client();
     let resp = client
         .get(userinfo_url)
         .bearer_auth(access_token)

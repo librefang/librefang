@@ -17,6 +17,9 @@ walkdir = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 reqwest = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+rustls-native-certs = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 serde_yaml = { workspace = true }

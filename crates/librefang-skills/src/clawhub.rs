@@ -256,10 +256,10 @@ impl ClawHubClient {
     pub fn with_url(base_url: &str, cache_dir: PathBuf) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            client: reqwest::Client::builder()
+            client: crate::http_client::client_builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
-                .unwrap_or_default(),
+                .expect("HTTP client build"),
             _cache_dir: cache_dir,
         }
     }

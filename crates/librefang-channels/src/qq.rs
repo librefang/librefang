@@ -64,7 +64,7 @@ impl QqAdapter {
         Self {
             app_id,
             app_secret: Zeroizing::new(app_secret),
-            client: reqwest::Client::builder()
+            client: crate::http_client::client_builder()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("failed to build HTTP client"),
@@ -239,8 +239,10 @@ impl ChannelAdapter for QqAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         info!("Starting QQ adapter for app_id={}", self.app_id);
 
         // Ensure rustls CryptoProvider is installed for WSS connections.
@@ -468,7 +470,7 @@ impl ChannelAdapter for QqAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(ref t) => strip_markdown(t),
             _ => return Ok(()), // QQ adapter only handles text for now
@@ -491,7 +493,7 @@ impl ChannelAdapter for QqAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         info!("Stopping QQ adapter");
         let _ = self.shutdown_tx.send(true);
         self.connected.store(false, Ordering::Relaxed);

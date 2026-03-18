@@ -102,7 +102,7 @@ impl TokenManager {
         let jwt = format!("{signing_input}.{sig_b64}");
 
         // Exchange JWT for access token.
-        let client = reqwest::Client::new();
+        let client = crate::http_client::new_client();
         let resp = client
             .post(token_uri)
             .form(&[
@@ -556,7 +556,7 @@ impl VertexAiDriver {
             project_id,
             region,
             token_manager: Arc::new(RwLock::new(TokenManager::new(credential_source))),
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
         })
     }
 
@@ -918,7 +918,7 @@ mod tests {
             project_id: "my-project".to_string(),
             region: "us-central1".to_string(),
             token_manager: Arc::new(RwLock::new(TokenManager::new(CredentialSource::GcloudCli))),
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
         };
 
         let url = driver.endpoint_url("vertex-ai/gemini-2.5-pro", false);

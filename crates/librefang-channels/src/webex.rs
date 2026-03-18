@@ -60,7 +60,7 @@ impl WebexAdapter {
         Self {
             bot_token: Zeroizing::new(bot_token),
             allowed_rooms,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -74,7 +74,7 @@ impl WebexAdapter {
     }
 
     /// Validate credentials and retrieve bot identity.
-    async fn validate(&self) -> Result<(String, String), Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<(String, String), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/people/me", WEBEX_API_BASE);
         let resp = self
             .client
@@ -104,7 +104,7 @@ impl WebexAdapter {
     async fn get_message(
         &self,
         message_id: &str,
-    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/messages/{}", WEBEX_API_BASE, message_id);
         let resp = self
             .client
@@ -127,7 +127,7 @@ impl WebexAdapter {
     async fn register_webhook(
         &self,
         target_url: &str,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/webhooks", WEBEX_API_BASE);
         let body = serde_json::json!({
             "name": "LibreFang Bot Webhook",
@@ -160,7 +160,7 @@ impl WebexAdapter {
         &self,
         room_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/messages", WEBEX_API_BASE);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -194,7 +194,7 @@ impl WebexAdapter {
         &self,
         person_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/messages", WEBEX_API_BASE);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -248,8 +248,10 @@ impl ChannelAdapter for WebexAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials and get bot identity
         let (bot_id, bot_name) = self.validate().await?;
         info!("Webex adapter authenticated as {bot_name} ({bot_id})");
@@ -466,7 +468,7 @@ impl ChannelAdapter for WebexAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -479,12 +481,15 @@ impl ChannelAdapter for WebexAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Webex does not expose a public typing indicator API for bots
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

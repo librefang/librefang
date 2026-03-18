@@ -69,8 +69,10 @@ impl ChannelAdapter for MockAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let rx = self
             .rx
             .lock()
@@ -85,7 +87,7 @@ impl ChannelAdapter for MockAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let ChannelContent::Text(text) = content {
             self.sent
                 .lock()
@@ -95,7 +97,7 @@ impl ChannelAdapter for MockAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
@@ -542,4 +544,321 @@ async fn test_bridge_multiple_adapters() {
     assert_eq!(dc_sent[0].1, "Echo: from discord");
 
     manager.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Mock Streaming Adapter — supports_streaming() returns true, captures
+// streamed text via send_streaming().
+// ---------------------------------------------------------------------------
+
+struct MockStreamingAdapter {
+    name: String,
+    channel_type: ChannelType,
+    rx: Mutex<Option<mpsc::Receiver<ChannelMessage>>>,
+    /// Captures text assembled from streaming deltas.
+    streamed: Arc<Mutex<Vec<(String, String)>>>,
+    /// Captures text sent via the non-streaming send() path.
+    sent: Arc<Mutex<Vec<(String, String)>>>,
+    shutdown_tx: watch::Sender<bool>,
+}
+
+impl MockStreamingAdapter {
+    fn new(name: &str, channel_type: ChannelType) -> (Arc<Self>, mpsc::Sender<ChannelMessage>) {
+        let (tx, rx) = mpsc::channel(256);
+        let (shutdown_tx, _shutdown_rx) = watch::channel(false);
+        let adapter = Arc::new(Self {
+            name: name.to_string(),
+            channel_type,
+            rx: Mutex::new(Some(rx)),
+            streamed: Arc::new(Mutex::new(Vec::new())),
+            sent: Arc::new(Mutex::new(Vec::new())),
+            shutdown_tx,
+        });
+        (adapter, tx)
+    }
+
+    fn get_streamed(&self) -> Vec<(String, String)> {
+        self.streamed.lock().unwrap().clone()
+    }
+
+    fn get_sent(&self) -> Vec<(String, String)> {
+        self.sent.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl ChannelAdapter for MockStreamingAdapter {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn channel_type(&self) -> ChannelType {
+        self.channel_type.clone()
+    }
+
+    async fn start(
+        &self,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        let rx = self
+            .rx
+            .lock()
+            .unwrap()
+            .take()
+            .expect("start() called more than once");
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Box::pin(stream))
+    }
+
+    async fn send(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if let ChannelContent::Text(text) = content {
+            self.sent
+                .lock()
+                .unwrap()
+                .push((user.platform_id.clone(), text));
+        }
+        Ok(())
+    }
+
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _ = self.shutdown_tx.send(true);
+        Ok(())
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    async fn send_streaming(
+        &self,
+        user: &ChannelUser,
+        mut delta_rx: mpsc::Receiver<String>,
+        _thread_id: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut full_text = String::new();
+        while let Some(delta) = delta_rx.recv().await {
+            full_text.push_str(&delta);
+        }
+        if !full_text.is_empty() {
+            self.streamed
+                .lock()
+                .unwrap()
+                .push((user.platform_id.clone(), full_text));
+        }
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mock Handle with streaming support — emits deltas one token at a time.
+// ---------------------------------------------------------------------------
+
+struct MockStreamingHandle {
+    agents: Mutex<Vec<(AgentId, String)>>,
+    received: Arc<Mutex<Vec<(AgentId, String)>>>,
+}
+
+impl MockStreamingHandle {
+    fn new(agents: Vec<(AgentId, String)>) -> Self {
+        Self {
+            agents: Mutex::new(agents),
+            received: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+}
+
+#[async_trait]
+impl ChannelBridgeHandle for MockStreamingHandle {
+    async fn send_message(&self, agent_id: AgentId, message: &str) -> Result<String, String> {
+        self.received
+            .lock()
+            .unwrap()
+            .push((agent_id, message.to_string()));
+        Ok(format!("Echo: {message}"))
+    }
+
+    async fn send_message_streaming(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> Result<mpsc::Receiver<String>, String> {
+        self.received
+            .lock()
+            .unwrap()
+            .push((agent_id, message.to_string()));
+        let (tx, rx) = mpsc::channel(16);
+        // Emit the response as individual word deltas.
+        let words: Vec<String> = format!("Echo: {message}")
+            .split(' ')
+            .map(|w| format!("{w} "))
+            .collect();
+        tokio::spawn(async move {
+            for word in words {
+                if tx.send(word).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(rx)
+    }
+
+    async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
+        let agents = self.agents.lock().unwrap();
+        Ok(agents.iter().find(|(_, n)| n == name).map(|(id, _)| *id))
+    }
+
+    async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
+        Ok(self.agents.lock().unwrap().clone())
+    }
+
+    async fn spawn_agent_by_name(&self, _manifest_name: &str) -> Result<AgentId, String> {
+        Err("mock: spawn not implemented".to_string())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Streaming Tests
+// ---------------------------------------------------------------------------
+
+/// Test that a streaming-capable adapter's `send_streaming` is called
+/// instead of `send` when the handle provides streaming support.
+#[tokio::test]
+async fn test_bridge_streaming_adapter_uses_send_streaming() {
+    let agent_id = AgentId::new();
+    let handle = Arc::new(MockStreamingHandle::new(vec![(
+        agent_id,
+        "streamer".to_string(),
+    )]));
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("user1".to_string(), agent_id);
+
+    let (adapter, tx) = MockStreamingAdapter::new("stream-adapter", ChannelType::Telegram);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_text_msg(
+        ChannelType::Telegram,
+        "user1",
+        "hello stream",
+    ))
+    .await
+    .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // send_streaming should have been called (not send)
+    let streamed = adapter_ref.get_streamed();
+    assert_eq!(
+        streamed.len(),
+        1,
+        "Expected 1 streamed response, got {}",
+        streamed.len()
+    );
+    assert_eq!(streamed[0].0, "user1");
+    assert!(
+        streamed[0].1.contains("hello stream"),
+        "Streamed text should contain the echo, got: {}",
+        streamed[0].1
+    );
+
+    // Non-streaming send() should NOT have been called for the response
+    let sent = adapter_ref.get_sent();
+    assert_eq!(
+        sent.len(),
+        0,
+        "send() should not be called when streaming succeeds, got {} calls",
+        sent.len()
+    );
+
+    manager.stop().await;
+}
+
+/// Test that a non-streaming adapter falls back to `send()` even when the
+/// kernel handle supports streaming.
+#[tokio::test]
+async fn test_bridge_non_streaming_adapter_falls_back_to_send() {
+    let agent_id = AgentId::new();
+    let handle = Arc::new(MockStreamingHandle::new(vec![(
+        agent_id,
+        "basic".to_string(),
+    )]));
+    let router = Arc::new(AgentRouter::new());
+    router.set_user_default("user1".to_string(), agent_id);
+
+    // Use the plain MockAdapter which does NOT support streaming
+    let (adapter, tx) = MockAdapter::new("basic-adapter", ChannelType::Discord);
+    let adapter_ref = adapter.clone();
+
+    let mut manager = BridgeManager::new(handle.clone(), router);
+    manager.start_adapter(adapter.clone()).await.unwrap();
+
+    tx.send(make_text_msg(
+        ChannelType::Discord,
+        "user1",
+        "no streaming here",
+    ))
+    .await
+    .unwrap();
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Regular send() should have been called since the adapter doesn't support streaming
+    let sent = adapter_ref.get_sent();
+    assert_eq!(
+        sent.len(),
+        1,
+        "Expected 1 sent response, got {}",
+        sent.len()
+    );
+    assert_eq!(sent[0].0, "user1");
+    assert!(
+        sent[0].1.contains("no streaming here"),
+        "Response should contain echo, got: {}",
+        sent[0].1
+    );
+
+    manager.stop().await;
+}
+
+/// Test that the default `send_streaming` implementation on `ChannelAdapter`
+/// collects all deltas and sends the assembled text via `send()`.
+#[tokio::test]
+async fn test_default_send_streaming_collects_and_sends() {
+    // The default `send_streaming` on ChannelAdapter collects all deltas
+    // then calls `self.send()`. We test this using the plain MockAdapter
+    // (which does NOT override send_streaming) by calling it directly.
+
+    let (adapter, _tx) = MockAdapter::new("default-stream", ChannelType::Slack);
+    let user = ChannelUser {
+        platform_id: "u1".to_string(),
+        display_name: "Tester".to_string(),
+        librefang_user: None,
+    };
+
+    let (delta_tx, delta_rx) = mpsc::channel::<String>(16);
+
+    // Send deltas in a background task
+    tokio::spawn(async move {
+        for word in &["Hello", " ", "world", "!"] {
+            delta_tx.send(word.to_string()).await.unwrap();
+        }
+        // drop delta_tx to close the channel
+    });
+
+    // Call the default send_streaming implementation
+    adapter.send_streaming(&user, delta_rx, None).await.unwrap();
+
+    // The default impl should have called send() with the full assembled text
+    let sent = adapter.get_sent();
+    assert_eq!(sent.len(), 1, "Expected 1 sent message, got {}", sent.len());
+    assert_eq!(sent[0].0, "u1");
+    assert_eq!(sent[0].1, "Hello world!");
 }

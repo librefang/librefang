@@ -17,6 +17,9 @@ chrono = { workspace = true }
 dashmap = { workspace = true }
 tokio = { workspace = true }
 reqwest = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+rustls-native-certs = { workspace = true }
 axum = { workspace = true }
 zeroize = { workspace = true }
 rand = { workspace = true }

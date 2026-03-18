@@ -876,7 +876,7 @@ If `a2a` is `None` (not present in config), all A2A features are disabled. The A
 
 ### MCP Security
 
-**Subprocess Sandboxing**: Stdio MCP servers run with `env_clear()` -- the subprocess environment is completely cleared. Only explicitly whitelisted environment variables (listed in the `env` field) plus `PATH` are passed through. This prevents leaking secrets to untrusted MCP server processes.
+**Subprocess Environment**: Stdio MCP servers inherit the parent process environment so that credentials loaded from `.env` or vault are available automatically. The `env` config field can supply additional `KEY=VALUE` overrides that are layered on top.
 
 **Path Traversal Prevention**: The command path for stdio MCP servers is validated to reject `..` sequences.
 

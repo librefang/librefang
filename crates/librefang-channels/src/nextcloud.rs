@@ -62,7 +62,7 @@ impl NextcloudAdapter {
             server_url,
             token: Zeroizing::new(token),
             allowed_rooms,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -84,7 +84,7 @@ impl NextcloudAdapter {
     }
 
     /// Validate credentials by fetching the user's own status.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/ocs/v2.php/cloud/user?format=json", self.server_url);
         let resp = self.ocs_headers(self.client.get(&url)).send().await?;
 
@@ -102,7 +102,7 @@ impl NextcloudAdapter {
 
     /// Fetch the list of joined rooms from the Nextcloud Talk API.
     #[allow(dead_code)]
-    async fn fetch_rooms(&self) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    async fn fetch_rooms(&self) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/ocs/v2.php/apps/spreed/api/v4/room?format=json",
             self.server_url
@@ -131,7 +131,7 @@ impl NextcloudAdapter {
         &self,
         room_token: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "{}/ocs/v2.php/apps/spreed/api/v1/chat/{}",
             self.server_url, room_token
@@ -178,8 +178,10 @@ impl ChannelAdapter for NextcloudAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let username = self.validate().await?;
         info!("Nextcloud Talk adapter authenticated as {username}");
@@ -424,7 +426,7 @@ impl ChannelAdapter for NextcloudAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -437,12 +439,15 @@ impl ChannelAdapter for NextcloudAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Nextcloud Talk does not have a public typing indicator REST endpoint
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

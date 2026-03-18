@@ -222,7 +222,7 @@ pub async fn run_pkce_flow(oauth: &OAuthTemplate, client_id: &str) -> ExtensionR
     debug!("Received authorization code, exchanging for tokens...");
 
     // Exchange code for tokens
-    let client = reqwest::Client::new();
+    let client = crate::http_client::new_client();
     let mut params = HashMap::new();
     params.insert("grant_type", "authorization_code");
     params.insert("code", &code);

@@ -43,7 +43,7 @@ impl SlackAdapter {
         Self {
             app_token: Zeroizing::new(app_token),
             bot_token: Zeroizing::new(bot_token),
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             allowed_channels,
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
@@ -59,7 +59,7 @@ impl SlackAdapter {
     }
 
     /// Validate the bot token by calling auth.test.
-    async fn validate_bot_token(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate_bot_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let resp: serde_json::Value = self
             .client
             .post(format!("{SLACK_API_BASE}/auth.test"))
@@ -86,7 +86,7 @@ impl SlackAdapter {
         &self,
         channel_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chunks = split_message(text, SLACK_MSG_LIMIT);
 
         for chunk in chunks {
@@ -129,8 +129,10 @@ impl ChannelAdapter for SlackAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate bot token first
         let bot_user_id_val = self.validate_bot_token().await?;
         *self.bot_user_id.write().await = Some(bot_user_id_val.clone());
@@ -301,7 +303,7 @@ impl ChannelAdapter for SlackAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let channel_id = &user.platform_id;
         match content {
             ChannelContent::Text(text) => {
@@ -315,7 +317,7 @@ impl ChannelAdapter for SlackAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
@@ -325,7 +327,7 @@ impl ChannelAdapter for SlackAdapter {
 async fn get_socket_mode_url(
     client: &reqwest::Client,
     app_token: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let resp: serde_json::Value = client
         .post(format!("{SLACK_API_BASE}/apps.connections.open"))
         .header("Authorization", format!("Bearer {app_token}"))

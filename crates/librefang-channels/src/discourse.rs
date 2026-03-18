@@ -66,7 +66,7 @@ impl DiscourseAdapter {
             api_key: Zeroizing::new(api_key),
             api_username,
             categories,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -87,7 +87,7 @@ impl DiscourseAdapter {
     }
 
     /// Validate credentials by calling `/session/current.json`.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/session/current.json", self.base_url);
         let resp = self.auth_headers(self.client.get(&url)).send().await?;
 
@@ -110,7 +110,7 @@ impl DiscourseAdapter {
         api_key: &str,
         api_username: &str,
         before_id: u64,
-    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
         let url = if before_id > 0 {
             format!("{}/posts.json?before={}", base_url, before_id)
         } else {
@@ -138,7 +138,7 @@ impl DiscourseAdapter {
         &self,
         topic_id: u64,
         raw: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/posts.json", self.base_url);
         let chunks = split_message(raw, MAX_MESSAGE_LEN);
 
@@ -183,8 +183,10 @@ impl ChannelAdapter for DiscourseAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let own_username = self.validate().await?;
         info!("Discourse adapter authenticated as {own_username}");
 
@@ -363,7 +365,7 @@ impl ChannelAdapter for DiscourseAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(t) => t,
             _ => "(Unsupported content type)".to_string(),
@@ -385,7 +387,7 @@ impl ChannelAdapter for DiscourseAdapter {
         _user: &ChannelUser,
         content: ChannelContent,
         thread_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(t) => t,
             _ => "(Unsupported content type)".to_string(),
@@ -401,12 +403,15 @@ impl ChannelAdapter for DiscourseAdapter {
         self.create_post(topic_id, &text).await
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Discourse does not have typing indicators.
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

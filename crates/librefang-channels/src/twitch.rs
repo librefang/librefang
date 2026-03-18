@@ -122,8 +122,10 @@ impl ChannelAdapter for TwitchAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         info!("Twitch adapter connecting to {TWITCH_IRC_HOST}:{TWITCH_IRC_PORT}");
 
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
@@ -295,7 +297,7 @@ impl ChannelAdapter for TwitchAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let channel = &user.platform_id;
         let text = match content {
             ChannelContent::Text(text) => text,
@@ -325,7 +327,7 @@ impl ChannelAdapter for TwitchAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

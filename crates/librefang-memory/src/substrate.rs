@@ -144,6 +144,14 @@ impl MemorySubstrate {
         self.sessions.get_session(session_id)
     }
 
+    /// Get a session by ID along with its `created_at` timestamp.
+    pub fn get_session_with_created_at(
+        &self,
+        session_id: SessionId,
+    ) -> LibreFangResult<Option<(Session, String)>> {
+        self.sessions.get_session_with_created_at(session_id)
+    }
+
     /// Save a session.
     pub fn save_session(&self, session: &Session) -> LibreFangResult<()> {
         self.sessions.save_session(session)
