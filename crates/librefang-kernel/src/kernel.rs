@@ -79,6 +79,10 @@ impl LlmDriver for StubDriver {
                 .to_string(),
         ))
     }
+
+    fn is_configured(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -2440,6 +2444,7 @@ impl LibreFangKernel {
             memories_saved: Vec::new(),
             memories_used: Vec::new(),
             memory_conflicts: Vec::new(),
+            provider_not_configured: false,
         })
     }
 
@@ -2505,6 +2510,7 @@ impl LibreFangKernel {
             memories_saved: Vec::new(),
             memories_used: Vec::new(),
             memory_conflicts: Vec::new(),
+            provider_not_configured: false,
         })
     }
 
@@ -2972,6 +2978,7 @@ impl LibreFangKernel {
             memories_saved: result.memories_saved,
             memories_used: result.memories_used,
             memory_conflicts: result.memory_conflicts,
+            provider_not_configured: result.provider_not_configured,
         }
     }
 
