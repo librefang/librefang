@@ -4023,6 +4023,22 @@ impl LibreFangKernel {
     /// Must be called after the kernel is wrapped in `Arc` (e.g., from the daemon).
     /// Iterates the agent registry and starts background tasks for agents with
     /// `Continuous`, `Periodic`, or `Proactive` schedules.
+    /// Hands activated on first boot when no `hand_state.json` exists yet.
+    /// These provide a useful out-of-the-box experience without requiring
+    /// extra API keys or manual setup.
+    const DEFAULT_HANDS: &'static [&'static str] = &[
+        "researcher",
+        "browser",
+        "collector",
+        "analytics",
+        "strategist",
+        "lead",
+        "predictor",
+        "trader",
+        "devops",
+        "apitester",
+    ];
+
     pub fn start_background_agents(self: &Arc<Self>) {
         // Restore previously active hands from persisted state
         let state_path = self.config.home_dir.join("hand_state.json");
@@ -4077,6 +4093,21 @@ impl LibreFangKernel {
                     Err(e) => warn!(hand = %hand_id, error = %e, "Failed to restore hand"),
                 }
             }
+        } else if !state_path.exists() {
+            // First boot: activate default hands for out-of-the-box experience
+            info!(
+                "First boot detected — activating {} default hand(s)",
+                Self::DEFAULT_HANDS.len()
+            );
+            for hand_id in Self::DEFAULT_HANDS {
+                match self.activate_hand(hand_id, std::collections::HashMap::new()) {
+                    Ok(inst) => {
+                        info!(hand = %hand_id, instance = %inst.instance_id, "Default hand activated");
+                    }
+                    Err(e) => warn!(hand = %hand_id, error = %e, "Failed to activate default hand"),
+                }
+            }
+            self.persist_hand_state();
         }
 
         let agents = self.registry.list();
