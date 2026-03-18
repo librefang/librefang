@@ -571,6 +571,21 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route("/migrate/scan", axum::routing::post(routes::migrate_scan))
         .route("/migrate", axum::routing::post(routes::run_migrate))
+        // Goals endpoints
+        .route(
+            "/goals",
+            axum::routing::get(routes::list_goals).post(routes::create_goal),
+        )
+        .route(
+            "/goals/{id}",
+            axum::routing::get(routes::get_goal)
+                .put(routes::update_goal_by_id)
+                .delete(routes::delete_goal),
+        )
+        .route(
+            "/goals/{id}/children",
+            axum::routing::get(routes::get_goal_children),
+        )
         .route(
             "/cron/jobs",
             axum::routing::get(routes::list_cron_jobs).post(routes::create_cron_job),

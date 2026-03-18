@@ -332,9 +332,7 @@ impl CronJob {
                         return Err("workflow timeout_secs must be > 0".into());
                     }
                     if *t > 3600 {
-                        return Err(format!(
-                            "workflow timeout_secs too large ({t}, max 3600)"
-                        ));
+                        return Err(format!("workflow timeout_secs too large ({t}, max 3600)"));
                     }
                 }
             }
