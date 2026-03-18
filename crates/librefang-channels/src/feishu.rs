@@ -485,7 +485,7 @@ impl FeishuAdapter {
                                 if schema == "2.0" {
                                     // V2 event format — try message first, then card action
                                     let parsed = parse_feishu_event(&body.0, region)
-                                        .or_else(|| parse_card_action(&body.0));
+                                        .or_else(|| parse_card_action(&body.0, region));
                                     if let Some(mut msg) = parsed {
                                         // Inject account_id for multi-bot routing
                                         if let Some(ref aid) = *account_id {
@@ -648,7 +648,7 @@ impl FeishuAdapter {
                                     // in an envelope: { "header": {...}, "event": {...} }
                                     // which matches the v2 schema.
                                     let parsed = parse_feishu_event(&payload, region)
-                                        .or_else(|| parse_card_action(&payload));
+                                        .or_else(|| parse_card_action(&payload, region));
                                     if let Some(mut channel_msg) = parsed {
                                         if let Some(ref aid) = *account_id {
                                             channel_msg.metadata.insert(
@@ -862,7 +862,7 @@ pub fn build_approval_card(
 /// Handles `card.action.trigger` events from interactive card button clicks.
 /// Extracts the `action` and `request_id` from the button value payload and
 /// converts them into a `ChannelMessage` with a `Command` content type.
-fn parse_card_action(event: &serde_json::Value) -> Option<ChannelMessage> {
+fn parse_card_action(event: &serde_json::Value, region: FeishuRegion) -> Option<ChannelMessage> {
     // Defensive: only handle card.action.trigger events
     let header = event.get("header")?;
     if header["event_type"].as_str() != Some("card.action.trigger") {
@@ -919,8 +919,9 @@ fn parse_card_action(event: &serde_json::Value) -> Option<ChannelMessage> {
         serde_json::Value::String(open_id.clone()),
     );
 
+    let channel_label = region.label().to_lowercase();
     Some(ChannelMessage {
-        channel: ChannelType::Custom("feishu".to_string()),
+        channel: ChannelType::Custom(channel_label),
         platform_message_id: open_message_id,
         sender: ChannelUser {
             // Use operator open_id as platform_id so downstream approval
@@ -1728,7 +1729,7 @@ mod tests {
             }
         });
 
-        let msg = parse_card_action(&event).unwrap();
+        let msg = parse_card_action(&event, FeishuRegion::Cn).unwrap();
         assert_eq!(msg.channel, ChannelType::Custom("feishu".to_string()));
         match &msg.content {
             ChannelContent::Command { name, args } => {
@@ -1743,6 +1744,29 @@ mod tests {
             msg.metadata.get("card_action"),
             Some(&serde_json::Value::Bool(true))
         );
+    }
+
+    #[test]
+    fn test_parse_card_action_lark_region() {
+        let event = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-card-intl",
+                "event_type": "card.action.trigger"
+            },
+            "event": {
+                "operator": { "open_id": "ou_user1" },
+                "open_chat_id": "oc_chat1",
+                "open_message_id": "om_card_intl",
+                "action": {
+                    "value": { "action": "approve", "request_id": "intl-1" },
+                    "tag": "button"
+                }
+            }
+        });
+
+        let msg = parse_card_action(&event, FeishuRegion::Intl).unwrap();
+        assert_eq!(msg.channel, ChannelType::Custom("lark".to_string()));
     }
 
     #[test]
@@ -1769,7 +1793,7 @@ mod tests {
             }
         });
 
-        let msg = parse_card_action(&event).unwrap();
+        let msg = parse_card_action(&event, FeishuRegion::Cn).unwrap();
         match &msg.content {
             ChannelContent::Command { name, args } => {
                 assert_eq!(name, "reject");
@@ -1803,7 +1827,7 @@ mod tests {
             }
         });
 
-        assert!(parse_card_action(&event).is_none());
+        assert!(parse_card_action(&event, FeishuRegion::Cn).is_none());
     }
 
     #[test]
@@ -1824,7 +1848,7 @@ mod tests {
             }
         });
 
-        assert!(parse_card_action(&event).is_none());
+        assert!(parse_card_action(&event, FeishuRegion::Cn).is_none());
     }
 
     #[test]
@@ -1851,7 +1875,7 @@ mod tests {
             }
         });
 
-        assert!(parse_card_action(&event).is_none());
+        assert!(parse_card_action(&event, FeishuRegion::Cn).is_none());
     }
 
     #[test]
@@ -1874,7 +1898,7 @@ mod tests {
             }
         });
 
-        assert!(parse_card_action(&event).is_none());
+        assert!(parse_card_action(&event, FeishuRegion::Cn).is_none());
     }
 
     #[test]
@@ -1896,6 +1920,6 @@ mod tests {
             }
         });
 
-        assert!(parse_card_action(&event).is_none());
+        assert!(parse_card_action(&event, FeishuRegion::Cn).is_none());
     }
 }
