@@ -1318,6 +1318,193 @@ weak_aliases = ["changelog"]
         }
     }
 
+    // ── Hand routing: all hands coverage ──────────────────────────────
+
+    #[test]
+    fn test_auto_select_hand_routes_collector() {
+        let sel = auto_select_hand("帮我监控这个网站的变更，持续观察");
+        assert_eq!(sel.hand_id, Some("collector"));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_researcher() {
+        let sel = auto_select_hand("请做一个深度调研，全面对比三个框架");
+        assert_eq!(sel.hand_id, Some("researcher"));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_clip() {
+        let sel = auto_select_hand("下载视频并做字幕提取");
+        assert_eq!(sel.hand_id, Some("clip"));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_predictor() {
+        let sel = auto_select_hand("预测一下明天的胜率和概率判断");
+        assert_eq!(sel.hand_id, Some("predictor"));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_trader() {
+        let sel = auto_select_hand("帮我做盘前分析，看看 NVDA 仓位");
+        assert_eq!(sel.hand_id, Some("trader"));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_lead() {
+        let sel = auto_select_hand("帮我做线索挖掘，找潜在客户名单");
+        assert_eq!(sel.hand_id, Some("lead"));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_analytics() {
+        let sel = auto_select_hand("请做数据分析并生成 dashboard 报表");
+        assert_eq!(sel.hand_id, Some("analytics"));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_apitester() {
+        let sel = auto_select_hand("对这个 endpoint 做 api test 和接口验证");
+        assert_eq!(sel.hand_id, Some("apitester"));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_devops() {
+        let sel = auto_select_hand("配置 ci/cd pipeline 和基础设施监控");
+        assert_eq!(sel.hand_id, Some("devops"));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_strategist() {
+        let sel = auto_select_hand("做一个战略分析和竞品分析报告");
+        assert_eq!(sel.hand_id, Some("strategist"));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_linkedin() {
+        let sel = auto_select_hand("优化我的 linkedin profile optimization");
+        assert_eq!(sel.hand_id, Some("linkedin"));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_reddit() {
+        let sel = auto_select_hand("去 reddit 的 r/rust 发帖并监控回复");
+        assert_eq!(sel.hand_id, Some("reddit"));
+    }
+
+    #[test]
+    fn test_auto_select_hand_routes_twitter() {
+        let sel = auto_select_hand("帮我在 twitter 发推文并安排 scheduled tweet");
+        assert_eq!(sel.hand_id, Some("twitter"));
+    }
+
+    // ── MIN_HAND_SCORE threshold ────────────────────────────────────
+
+    #[test]
+    fn test_weak_only_single_match_rejected() {
+        // "部署" is a weak keyword for devops (score=1), below MIN_HAND_SCORE=2
+        let sel = auto_select_hand("帮我部署");
+        assert_eq!(sel.hand_id, None, "single weak match should be rejected");
+        assert_eq!(sel.score, 0);
+    }
+
+    #[test]
+    fn test_strong_match_always_passes_threshold() {
+        // A single strong match = score 3 >= MIN_HAND_SCORE(2)
+        let sel = auto_select_hand("请打开网站");
+        assert_eq!(sel.hand_id, Some("browser"));
+        assert!(sel.score >= 2);
+    }
+
+    // ── Chinese message routing ─────────────────────────────────────
+
+    #[test]
+    fn test_chinese_collector_monitoring() {
+        let sel = auto_select_hand("帮我跟踪更新这个 GitHub 仓库，收集公开信息");
+        assert_eq!(sel.hand_id, Some("collector"));
+    }
+
+    #[test]
+    fn test_chinese_trader_stock() {
+        let sel = auto_select_hand("帮我做交易 BTC，看看仓位");
+        assert_eq!(sel.hand_id, Some("trader"));
+    }
+
+    #[test]
+    fn test_chinese_analytics_visualization() {
+        let sel = auto_select_hand("请做数据可视化，生成图表和仪表盘");
+        assert_eq!(sel.hand_id, Some("analytics"));
+    }
+
+    #[test]
+    fn test_chinese_devops_cicd() {
+        // Strong match via "部署自动化" or "ci/cd" keywords
+        let sel = auto_select_hand("配置 github actions 部署自动化流水线");
+        assert_eq!(sel.hand_id, Some("devops"));
+    }
+
+    #[test]
+    fn test_chinese_predictor_forecast() {
+        let sel = auto_select_hand("做一下趋势预测和情景推演");
+        assert_eq!(sel.hand_id, Some("predictor"));
+    }
+
+    // ── Negative / boundary tests ───────────────────────────────────
+
+    #[test]
+    fn test_generic_greeting_no_hand_match() {
+        let sel = auto_select_hand("你好，今天天气怎么样？");
+        assert_eq!(sel.hand_id, None);
+    }
+
+    #[test]
+    fn test_generic_english_no_hand_match() {
+        let sel = auto_select_hand("Hello, how are you today?");
+        assert_eq!(sel.hand_id, None);
+    }
+
+    #[test]
+    fn test_coding_request_no_hand_match() {
+        // Coding should go to template, not hand
+        let sel = auto_select_hand("请帮我写一个 Rust 函数");
+        assert_eq!(sel.hand_id, None);
+    }
+
+    #[test]
+    fn test_ambiguous_short_message_no_hand_match() {
+        let sel = auto_select_hand("帮我看看这个");
+        assert_eq!(sel.hand_id, None);
+    }
+
+    // ── Scoring: strong beats weak ──────────────────────────────────
+
+    #[test]
+    fn test_strong_match_scores_higher_than_weak() {
+        // "深度调研" is strong for researcher (score 3+)
+        let strong = auto_select_hand("请做深度调研");
+        // "调研" alone is weak for researcher (score 1, rejected)
+        let weak = auto_select_hand("帮我调研");
+        assert!(strong.score > weak.score);
+    }
+
+    #[test]
+    fn test_multiple_strong_matches_boost_score() {
+        let single = auto_select_hand("帮我做数据分析");
+        let double = auto_select_hand("帮我做数据分析并生成 dashboard 报表");
+        assert!(double.score >= single.score);
+    }
+
+    // ── Regex cache: implicit correctness ───────────────────────────
+
+    #[test]
+    fn test_regex_cache_returns_consistent_results() {
+        // Call the same pattern twice — results must be identical
+        let r1 = auto_select_hand("打开网站并填写表单");
+        let r2 = auto_select_hand("打开网站并填写表单");
+        assert_eq!(r1.hand_id, r2.hand_id);
+        assert_eq!(r1.score, r2.score);
+    }
+
     #[test]
     fn test_load_template_manifest_falls_back_to_bundled_template() {
         let tmp = tempdir().unwrap();
