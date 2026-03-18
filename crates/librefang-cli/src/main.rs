@@ -2632,7 +2632,10 @@ fn cmd_agent_list(config: Option<PathBuf>, json: bool) {
             return;
         }
 
-        let agents = body.as_array();
+        let agents = body
+            .get("items")
+            .and_then(|v| v.as_array())
+            .or_else(|| body.as_array());
 
         match agents {
             Some(agents) if agents.is_empty() => println!("{}", i18n::t("agent-no-agents")),
@@ -2703,14 +2706,15 @@ fn cmd_agent_chat(config: Option<PathBuf>, agent_id_str: &str) {
 
 fn cmd_agent_kill(config: Option<PathBuf>, agent_id_str: &str) {
     if let Some(base) = find_daemon() {
+        let agent_id = resolve_agent_id(&base, agent_id_str);
         let client = daemon_client();
         let body = daemon_json(
             client
-                .delete(format!("{base}/api/agents/{agent_id_str}"))
+                .delete(format!("{base}/api/agents/{agent_id}"))
                 .send(),
         );
         if body.get("status").is_some() {
-            println!("{}", i18n::t_args("agent-killed", &[("id", agent_id_str)]));
+            println!("{}", i18n::t_args("agent-killed", &[("id", &agent_id)]));
         } else {
             eprintln!(
                 "{}",
@@ -2750,15 +2754,16 @@ fn cmd_agent_set(agent_id_str: &str, field: &str, value: &str) {
     match field {
         "model" => {
             if let Some(base) = find_daemon() {
+                let agent_id = resolve_agent_id(&base, agent_id_str);
                 let client = daemon_client();
                 let body = daemon_json(
                     client
-                        .put(format!("{base}/api/agents/{agent_id_str}/model"))
+                        .put(format!("{base}/api/agents/{agent_id}/model"))
                         .json(&serde_json::json!({"model": value}))
                         .send(),
                 );
                 if body.get("status").is_some() {
-                    println!("Agent {agent_id_str} model set to {value}.");
+                    println!("Agent {agent_id} model set to {value}.");
                 } else {
                     eprintln!(
                         "Failed to set model: {}",
@@ -6866,7 +6871,18 @@ fn cmd_models_aliases(json: bool) {
             );
             return;
         }
-        if let Some(obj) = body.as_object() {
+        if let Some(arr) = body.get("aliases").and_then(|v| v.as_array()) {
+            println!("{:<30} RESOLVES TO", "ALIAS");
+            println!("{}", "-".repeat(60));
+            for entry in arr {
+                println!(
+                    "{:<30} {}",
+                    entry["alias"].as_str().unwrap_or("?"),
+                    entry["model_id"].as_str().unwrap_or("?"),
+                );
+            }
+        } else if let Some(obj) = body.as_object() {
+            // Fallback for plain {alias: model_id} format
             println!("{:<30} RESOLVES TO", "ALIAS");
             println!("{}", "-".repeat(60));
             for (alias, target) in obj {
@@ -7532,6 +7548,7 @@ fn cmd_security_verify() {
 
 fn cmd_memory_list(agent: &str, json: bool) {
     let base = require_daemon("memory list");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
@@ -7578,6 +7595,7 @@ fn cmd_memory_list(agent: &str, json: bool) {
 
 fn cmd_memory_get(agent: &str, key: &str, json: bool) {
     let base = require_daemon("memory get");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
@@ -7603,6 +7621,7 @@ fn cmd_memory_get(agent: &str, key: &str, json: bool) {
 
 fn cmd_memory_set(agent: &str, key: &str, value: &str) {
     let base = require_daemon("memory set");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
@@ -7618,13 +7637,14 @@ fn cmd_memory_set(agent: &str, key: &str, value: &str) {
     } else {
         ui::success(&i18n::t_args(
             "memory-set",
-            &[("key", key), ("agent", agent)],
+            &[("key", key), ("agent", &agent)],
         ));
     }
 }
 
 fn cmd_memory_delete(agent: &str, key: &str) {
     let base = require_daemon("memory delete");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
@@ -7639,7 +7659,7 @@ fn cmd_memory_delete(agent: &str, key: &str) {
     } else {
         ui::success(&i18n::t_args(
             "memory-deleted",
-            &[("key", key), ("agent", agent)],
+            &[("key", key), ("agent", &agent)],
         ));
     }
 }
@@ -7811,12 +7831,34 @@ fn cmd_webhooks_test(id: &str) {
     }
 }
 
+/// Resolve an agent name-or-id to a UUID by querying the daemon.
+fn resolve_agent_id(base: &str, name_or_id: &str) -> String {
+    if uuid::Uuid::try_parse(name_or_id).is_ok() {
+        return name_or_id.to_string();
+    }
+    let client = daemon_client();
+    let body = daemon_json(client.get(format!("{base}/api/agents")).send());
+    let agents = body
+        .get("items")
+        .and_then(|v| v.as_array())
+        .or_else(|| body.as_array());
+    if let Some(arr) = agents {
+        if let Some(agent) = arr.iter().find(|a| a["name"].as_str() == Some(name_or_id)) {
+            if let Some(id) = agent["id"].as_str() {
+                return id.to_string();
+            }
+        }
+    }
+    name_or_id.to_string()
+}
+
 fn cmd_message(agent: &str, text: &str, json: bool) {
     let base = require_daemon("message");
+    let agent_id = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
-            .post(format!("{base}/api/agents/{agent}/message"))
+            .post(format!("{base}/api/agents/{agent_id}/message"))
             .json(&serde_json::json!({"message": text}))
             .send(),
     );
