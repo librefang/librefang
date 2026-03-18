@@ -1387,7 +1387,7 @@ impl App {
                     let tx = self.event_tx.clone();
                     std::thread::spawn(move || {
                         if let event::BackendRef::Daemon(base_url) = backend {
-                            let client = reqwest::blocking::Client::builder()
+                            let client = crate::http_client::client_builder()
                                 .timeout(std::time::Duration::from_secs(10))
                                 .build()
                                 .ok();

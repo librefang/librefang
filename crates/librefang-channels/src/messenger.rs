@@ -61,7 +61,7 @@ impl MessengerAdapter {
             page_token: Zeroizing::new(page_token),
             verify_token: Zeroizing::new(verify_token),
             webhook_port,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,

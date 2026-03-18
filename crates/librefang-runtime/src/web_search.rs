@@ -40,10 +40,10 @@ impl WebSearchEngine {
         cache: Arc<WebCache>,
         brave_auth_profiles: Vec<(String, u32)>,
     ) -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::client_builder()
             .timeout(std::time::Duration::from_secs(15))
             .build()
-            .unwrap_or_default();
+            .expect("HTTP client build");
 
         // Build a deduplicated list of Brave API key env vars sorted by priority.
         // The primary key from config comes first (priority -1), then auth_profiles.
@@ -56,7 +56,6 @@ impl WebSearchEngine {
         }
         key_entries.sort_by_key(|(_, p)| *p);
         let brave_key_envs: Vec<String> = key_entries.into_iter().map(|(k, _)| k).collect();
-
         Self {
             config,
             client,

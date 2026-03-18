@@ -146,7 +146,9 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/agents/{id}/files/{filename}",
-            axum::routing::get(routes::get_agent_file).put(routes::set_agent_file),
+            axum::routing::get(routes::get_agent_file)
+                .put(routes::set_agent_file)
+                .delete(routes::delete_agent_file),
         )
         .route(
             "/agents/{id}/metrics",
@@ -292,6 +294,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/workflows",
             axum::routing::get(routes::list_workflows).post(routes::create_workflow),
         )
+        .route("/workflows/{id}", axum::routing::get(routes::get_workflow))
         .route(
             "/workflows/{id}/run",
             axum::routing::post(routes::run_workflow),
@@ -382,7 +385,9 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/mcp/servers/{name}",
-            axum::routing::put(routes::update_mcp_server).delete(routes::delete_mcp_server),
+            axum::routing::get(routes::get_mcp_server)
+                .put(routes::update_mcp_server)
+                .delete(routes::delete_mcp_server),
         )
         .route("/audit/recent", axum::routing::get(routes::audit_recent))
         .route("/audit/verify", axum::routing::get(routes::audit_verify))
@@ -509,6 +514,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route(
             "/providers/{name}/url",
             axum::routing::put(routes::set_provider_url),
+        )
+        .route(
+            "/providers/{name}",
+            axum::routing::get(routes::get_provider),
         )
         .route("/skills/create", axum::routing::post(routes::create_skill))
         .route("/extensions", axum::routing::get(routes::list_extensions))

@@ -77,6 +77,7 @@ use crate::types;
         routes::list_agent_files,
         routes::get_agent_file,
         routes::set_agent_file,
+        routes::delete_agent_file,
         routes::upload_file,
         routes::serve_upload,
         routes::get_agent_deliveries,
@@ -119,6 +120,7 @@ use crate::types;
 
         // ── MCP Servers ──
         routes::list_mcp_servers,
+        routes::get_mcp_server,
         routes::add_mcp_server,
         routes::update_mcp_server,
         routes::delete_mcp_server,
@@ -148,6 +150,7 @@ use crate::types;
         routes::add_custom_model,
         routes::remove_custom_model,
         routes::list_providers,
+        routes::get_provider,
         routes::set_provider_key,
         routes::delete_provider_key,
         routes::test_provider,

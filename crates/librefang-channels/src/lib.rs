@@ -9,6 +9,7 @@
 // Core infrastructure — always compiled
 pub mod bridge;
 pub mod formatter;
+pub(crate) mod http_client;
 pub mod rate_limiter;
 pub mod router;
 pub mod sidecar;
@@ -53,6 +54,8 @@ pub mod matrix;
 pub mod mattermost;
 #[cfg(feature = "channel-messenger")]
 pub mod messenger;
+#[cfg(feature = "channel-mqtt")]
+pub mod mqtt;
 #[cfg(feature = "channel-mumble")]
 pub mod mumble;
 #[cfg(feature = "channel-nextcloud")]

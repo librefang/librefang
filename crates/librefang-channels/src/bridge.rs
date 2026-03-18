@@ -711,6 +711,17 @@ async fn dispatch_message(
         } => {
             format!("[User sent a voice message ({duration_seconds}s): {url}]")
         }
+        ChannelContent::Video {
+            ref url,
+            ref caption,
+            duration_seconds,
+            ..
+        } => match caption {
+            Some(c) => {
+                format!("[User sent a video ({duration_seconds}s): {url}]\nCaption: {c}")
+            }
+            None => format!("[User sent a video ({duration_seconds}s): {url}]"),
+        },
         ChannelContent::Location { lat, lon } => {
             format!("[User shared location: {lat}, {lon}]")
         }
@@ -1146,7 +1157,7 @@ async fn download_image_to_blocks(url: &str, caption: Option<&str>) -> Vec<Conte
     // 5 MB limit to prevent memory abuse from oversized images
     const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-    let client = reqwest::Client::new();
+    let client = crate::http_client::new_client();
     let resp = match client.get(url).send().await {
         Ok(r) => r,
         Err(e) => {

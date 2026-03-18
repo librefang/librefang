@@ -55,7 +55,7 @@ impl GotifyAdapter {
             server_url,
             app_token: Zeroizing::new(app_token),
             client_token: Zeroizing::new(client_token),
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
