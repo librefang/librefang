@@ -1342,6 +1342,7 @@ pub async fn get_agent(
                 "tools": entry.manifest.capabilities.tools,
                 "network": entry.manifest.capabilities.network,
             },
+            "system_prompt": entry.manifest.model.system_prompt,
             "description": entry.manifest.description,
             "tags": entry.manifest.tags,
             "identity": {
