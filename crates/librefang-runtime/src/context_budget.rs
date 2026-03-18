@@ -172,7 +172,7 @@ pub fn apply_context_guard(
 
     // First pass: cap any single result that exceeds 50% of context
     let mut compacted = 0;
-    for loc in &locations {
+    for loc in &mut locations {
         if loc.char_len > single_max {
             // Bounds check: indices may be stale if messages were modified concurrently
             if loc.msg_idx >= messages.len() {
@@ -187,6 +187,7 @@ pub fn apply_context_guard(
                     *content = truncate_to(content, single_max);
                     let new_char_len = content.chars().count();
                     total_chars = total_chars.saturating_sub(old_char_len) + new_char_len;
+                    loc.char_len = new_char_len; // update so second pass uses correct value
                     compacted += 1;
                 }
             }
@@ -266,27 +267,42 @@ fn find_safe_break_after(content: &str, pos: usize) -> usize {
 /// Keeps the first 60% and last 40% of the budget to preserve both
 /// the beginning (context) and end (errors, final output) of content.
 fn truncate_to(content: &str, max_chars: usize) -> String {
-    if content.len() <= max_chars {
+    let char_count = content.chars().count();
+    if char_count <= max_chars {
         return content.to_string();
     }
 
-    let marker = TRUNCATION_MARKER;
-    let suffix_reserve = 80; // for "[COMPACTED: ...]" line
-    let usable = max_chars.saturating_sub(marker.len() + suffix_reserve);
-    let head_budget = (usable as f64 * 0.6) as usize;
-    let tail_budget = usable.saturating_sub(head_budget);
+    // Compute average bytes-per-char ratio so we can convert char budgets
+    // to byte positions for slicing (same approach as truncate_tool_result_dynamic).
+    let bytes_per_char = if char_count > 0 {
+        content.len() as f64 / char_count as f64
+    } else {
+        1.0
+    };
 
-    let head_end = find_safe_break_before(content, head_budget);
-    let tail_start = find_safe_break_after(content, content.len().saturating_sub(tail_budget));
+    let marker = TRUNCATION_MARKER;
+    let marker_chars = marker.chars().count();
+    let suffix_reserve = 80; // for "[COMPACTED: ...]" line
+    let usable = max_chars.saturating_sub(marker_chars + suffix_reserve);
+    let head_chars = (usable as f64 * 0.6) as usize;
+    let tail_chars = usable.saturating_sub(head_chars);
+
+    // Convert char budgets to byte positions for slicing
+    let head_byte_budget = (head_chars as f64 * bytes_per_char) as usize;
+    let tail_byte_budget = (tail_chars as f64 * bytes_per_char) as usize;
+
+    let head_end = find_safe_break_before(content, head_byte_budget);
+    let tail_start = find_safe_break_after(content, content.len().saturating_sub(tail_byte_budget));
 
     // Only use head+tail if there's a meaningful gap to skip
     if tail_start <= head_end {
-        let break_point = find_safe_break_before(content, max_chars.saturating_sub(suffix_reserve));
+        let cap_bytes = (max_chars.saturating_sub(suffix_reserve) as f64 * bytes_per_char) as usize;
+        let break_point = find_safe_break_before(content, cap_bytes);
         return format!(
             "{}\n\n[COMPACTED: {} -> {} chars by context guard]",
             &content[..break_point],
-            content.len(),
-            break_point
+            char_count,
+            content[..break_point].chars().count()
         );
     }
 
@@ -295,8 +311,8 @@ fn truncate_to(content: &str, max_chars: usize) -> String {
         &content[..head_end],
         marker,
         &content[tail_start..],
-        content.len(),
-        head_end + (content.len() - tail_start)
+        char_count,
+        content[..head_end].chars().count() + content[tail_start..].chars().count()
     )
 }
 

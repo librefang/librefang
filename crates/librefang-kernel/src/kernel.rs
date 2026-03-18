@@ -1157,6 +1157,11 @@ impl LibreFangKernel {
                 memory.clone(),
                 emb_arc,
             );
+            // TODO: Call engine.bootstrap(&ce_config).await here once Kernel::new
+            // is made async. Currently Kernel::new is synchronous so we cannot
+            // invoke the async bootstrap(). ScriptableContextEngine validates
+            // hook script paths in bootstrap — without this call, validation is
+            // deferred until the first hook invocation.
             Some(engine)
         };
 
@@ -3707,11 +3712,28 @@ impl LibreFangKernel {
         let driver = self.resolve_driver(&entry.manifest)?;
         let model = entry.manifest.model.model.clone();
 
+        // Resolve the agent's actual context window from the model catalog
+        let agent_ctx_window = self
+            .model_catalog
+            .read()
+            .ok()
+            .and_then(|cat| {
+                cat.find_model(&entry.manifest.model.model)
+                    .map(|m| m.context_window as usize)
+            })
+            .unwrap_or(200_000);
+
         // Delegate to the context engine when available, otherwise fall back
         // to the built-in compactor directly.
         let result = if let Some(engine) = self.context_engine.as_deref() {
             engine
-                .compact(agent_id, &session.messages, Arc::clone(&driver), &model)
+                .compact(
+                    agent_id,
+                    &session.messages,
+                    Arc::clone(&driver),
+                    &model,
+                    agent_ctx_window,
+                )
                 .await
                 .map_err(KernelError::LibreFang)?
         } else {

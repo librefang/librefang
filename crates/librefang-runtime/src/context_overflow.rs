@@ -135,17 +135,27 @@ pub fn recover_from_overflow(
         if let MessageContent::Blocks(blocks) = &mut msg.content {
             for block in blocks.iter_mut() {
                 if let ContentBlock::ToolResult { content, .. } = block {
-                    if content.len() > tool_truncation_limit {
-                        let mut safe_keep = tool_truncation_limit.saturating_sub(80);
+                    let char_count = content.chars().count();
+                    if char_count > tool_truncation_limit {
+                        // Compute bytes-per-char ratio to convert char budget to byte position
+                        let bytes_per_char = if char_count > 0 {
+                            content.len() as f64 / char_count as f64
+                        } else {
+                            1.0
+                        };
+                        let keep_chars = tool_truncation_limit.saturating_sub(80);
+                        let mut safe_keep = (keep_chars as f64 * bytes_per_char) as usize;
+                        safe_keep = safe_keep.min(content.len());
                         // Walk back to a valid char boundary
                         while safe_keep > 0 && !content.is_char_boundary(safe_keep) {
                             safe_keep -= 1;
                         }
+                        let kept_chars = content[..safe_keep].chars().count();
                         *content = format!(
                             "{}\n\n[OVERFLOW RECOVERY: truncated from {} to {} chars]",
                             &content[..safe_keep],
-                            content.len(),
-                            safe_keep
+                            char_count,
+                            kept_chars
                         );
                         truncated += 1;
                     }

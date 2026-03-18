@@ -127,15 +127,18 @@ pub trait ContextEngine: Send + Sync {
     /// Called when the context window is under pressure.
     ///
     /// Summarize older history to free space. `model` is the agent's
-    /// configured LLM model name. The default implementation uses
-    /// LLM-based compaction with 3 strategies (single-pass, chunked,
-    /// fallback).
+    /// configured LLM model name. `context_window_tokens` is the
+    /// **current agent's** model context size so compaction uses the
+    /// correct window, not the boot-time default.
+    /// The default implementation uses LLM-based compaction with 3
+    /// strategies (single-pass, chunked, fallback).
     async fn compact(
         &self,
         agent_id: AgentId,
         messages: &[Message],
         driver: Arc<dyn LlmDriver>,
         model: &str,
+        context_window_tokens: usize,
     ) -> LibreFangResult<CompactionResult>;
 
     /// Called after a complete turn (LLM response + tool execution).
@@ -322,17 +325,22 @@ impl ContextEngine for DefaultContextEngine {
         messages: &[Message],
         driver: Arc<dyn LlmDriver>,
         model: &str,
+        context_window_tokens: usize,
     ) -> LibreFangResult<CompactionResult> {
-        // Build a temporary session for the compactor
+        // Build a temporary session for the compactor, using the per-agent
+        // context window rather than the boot-time default.
         let session = librefang_memory::session::Session {
             id: librefang_types::agent::SessionId::new(),
             agent_id,
             messages: messages.to_vec(),
-            context_window_tokens: self.config.context_window_tokens as u64,
+            context_window_tokens: context_window_tokens as u64,
             label: None,
         };
 
-        compactor::compact_session(driver, model, &session, &self.compaction_config)
+        let mut compaction_config = self.compaction_config.clone();
+        compaction_config.context_window_tokens = context_window_tokens;
+
+        compactor::compact_session(driver, model, &session, &compaction_config)
             .await
             .map_err(LibreFangError::Internal)
     }
@@ -409,14 +417,22 @@ impl ScriptableContextEngine {
     /// Resolve a script path, expanding `~` to the user's home directory.
     fn resolve_script_path(path: &str) -> String {
         if let Some(rest) = path.strip_prefix("~/") {
-            if let Ok(home) = std::env::var("HOME") {
-                return format!("{home}/{rest}");
+            if let Some(home) = dirs::home_dir() {
+                return format!("{}/{rest}", home.display());
             }
         }
         path.to_string()
     }
 
     /// Run a Python hook script with JSON input, return parsed JSON output.
+    ///
+    /// **Note on envelope format:** The input JSON is passed as the `message`
+    /// parameter to `run_python_agent`, which wraps it in its own envelope:
+    /// `{"type": "message", "message": <input_json>, ...}`. Hook scripts
+    /// therefore receive a double-nested structure and should extract their
+    /// payload from the inner `message` field.
+    // TODO: Consider writing JSON directly to process stdin to avoid the
+    // double-nesting, but this requires changes to the Python runtime protocol.
     async fn run_hook(
         script_path: &str,
         input: serde_json::Value,
@@ -554,9 +570,12 @@ impl ContextEngine for ScriptableContextEngine {
         messages: &[Message],
         driver: Arc<dyn LlmDriver>,
         model: &str,
+        context_window_tokens: usize,
     ) -> LibreFangResult<CompactionResult> {
         // Always delegate to Rust — requires LLM driver access
-        self.inner.compact(agent_id, messages, driver, model).await
+        self.inner
+            .compact(agent_id, messages, driver, model, context_window_tokens)
+            .await
     }
 
     async fn after_turn(&self, agent_id: AgentId, messages: &[Message]) -> LibreFangResult<()> {
@@ -668,17 +687,41 @@ pub fn load_plugin(
         })?;
 
     // Resolve relative hook paths to absolute paths within the plugin dir
+    // and verify they don't escape the plugin directory (path traversal guard).
+    let canon_plugin_dir = std::fs::canonicalize(&plugin_dir).unwrap_or_else(|_| plugin_dir.clone());
+
+    let resolve_and_sandbox = |rel_path: &str| -> LibreFangResult<String> {
+        let abs_path = plugin_dir.join(rel_path);
+        // Canonicalize to resolve any ".." components
+        let canon = std::fs::canonicalize(&abs_path).map_err(|e| {
+            LibreFangError::Internal(format!(
+                "Cannot resolve hook path '{}': {e}",
+                abs_path.display()
+            ))
+        })?;
+        if !canon.starts_with(&canon_plugin_dir) {
+            return Err(LibreFangError::Internal(format!(
+                "Hook script '{}' escapes plugin directory '{}'",
+                canon.display(),
+                canon_plugin_dir.display()
+            )));
+        }
+        Ok(canon.to_string_lossy().into_owned())
+    };
+
     let resolved_hooks = librefang_types::config::ContextEngineHooks {
         ingest: manifest
             .hooks
             .ingest
             .as_ref()
-            .map(|p| plugin_dir.join(p).to_string_lossy().into_owned()),
+            .map(|p| resolve_and_sandbox(p))
+            .transpose()?,
         after_turn: manifest
             .hooks
             .after_turn
             .as_ref()
-            .map(|p| plugin_dir.join(p).to_string_lossy().into_owned()),
+            .map(|p| resolve_and_sandbox(p))
+            .transpose()?,
     };
 
     debug!(
