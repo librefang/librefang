@@ -1006,11 +1006,23 @@ async fn test_agent_list_paginated_response_format() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["items"].is_array(), "Response should have 'items' array");
-    assert!(body["total"].is_number(), "Response should have 'total' number");
-    assert!(body["offset"].is_number(), "Response should have 'offset' number");
+    assert!(
+        body["items"].is_array(),
+        "Response should have 'items' array"
+    );
+    assert!(
+        body["total"].is_number(),
+        "Response should have 'total' number"
+    );
+    assert!(
+        body["offset"].is_number(),
+        "Response should have 'offset' number"
+    );
     // limit should be null when not specified
-    assert!(body["limit"].is_null(), "limit should be null when not specified");
+    assert!(
+        body["limit"].is_null(),
+        "limit should be null when not specified"
+    );
 }
 
 #[tokio::test]
@@ -1046,12 +1058,7 @@ async fn test_agent_list_valid_sort_fields() {
             .send()
             .await
             .unwrap();
-        assert_eq!(
-            resp.status(),
-            200,
-            "Sort by '{}' should return 200",
-            field
-        );
+        assert_eq!(resp.status(), 200, "Sort by '{}' should return 200", field);
     }
 }
 
@@ -1107,7 +1114,10 @@ system_prompt = "Agent {i}."
     let body: serde_json::Value = resp.json().await.unwrap();
     let items = body["items"].as_array().unwrap();
     assert_eq!(items.len(), 1, "Should return exactly 1 item");
-    assert!(body["total"].as_u64().unwrap() >= 3, "Total should include all agents");
+    assert!(
+        body["total"].as_u64().unwrap() >= 3,
+        "Total should include all agents"
+    );
 
     // Get second page
     let resp = client
@@ -1144,7 +1154,10 @@ system_prompt = "Test."
 
     // Search by name
     let resp = client
-        .get(format!("{}/api/agents?q=unique-searchable", server.base_url))
+        .get(format!(
+            "{}/api/agents?q=unique-searchable",
+            server.base_url
+        ))
         .send()
         .await
         .unwrap();
@@ -1164,7 +1177,10 @@ system_prompt = "Test."
         .unwrap();
     let body: serde_json::Value = resp.json().await.unwrap();
     let items = body["items"].as_array().unwrap();
-    assert!(items.is_empty(), "No agents should match non-existent query");
+    assert!(
+        items.is_empty(),
+        "No agents should match non-existent query"
+    );
 }
 
 // ---------------------------------------------------------------------------
