@@ -38,6 +38,7 @@ pub mod mcp;
 pub mod mcp_server;
 pub mod media_understanding;
 pub mod model_catalog;
+pub mod plugin_manager;
 pub mod process_manager;
 pub mod prompt_builder;
 pub mod provider_health;
