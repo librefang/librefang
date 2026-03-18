@@ -1605,6 +1605,43 @@ fn http_compat_tool_summary(
     })
 }
 
+fn serialize_mcp_transport(
+    transport: &librefang_types::config::McpTransportEntry,
+) -> serde_json::Value {
+    match transport {
+        librefang_types::config::McpTransportEntry::Stdio { command, args } => {
+            serde_json::json!({
+                "type": "stdio",
+                "command": command,
+                "args": args,
+            })
+        }
+        librefang_types::config::McpTransportEntry::Sse { url } => {
+            serde_json::json!({
+                "type": "sse",
+                "url": url,
+            })
+        }
+        librefang_types::config::McpTransportEntry::HttpCompat {
+            base_url,
+            headers,
+            tools,
+        } => {
+            let tool_summaries: Vec<serde_json::Value> =
+                tools.iter().map(http_compat_tool_summary).collect();
+            let header_summaries: Vec<serde_json::Value> =
+                headers.iter().map(http_compat_header_summary).collect();
+            serde_json::json!({
+                "type": "http_compat",
+                "base_url": base_url,
+                "headers": header_summaries,
+                "tools_count": tool_summaries.len(),
+                "tools": tool_summaries,
+            })
+        }
+    }
+}
+
 /// GET /api/mcp/servers — List configured MCP servers and their tools.
 #[utoipa::path(
     get,
@@ -1622,38 +1659,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         .mcp_servers
         .iter()
         .map(|s| {
-            let transport = match &s.transport {
-                librefang_types::config::McpTransportEntry::Stdio { command, args } => {
-                    serde_json::json!({
-                        "type": "stdio",
-                        "command": command,
-                        "args": args,
-                    })
-                }
-                librefang_types::config::McpTransportEntry::Sse { url } => {
-                    serde_json::json!({
-                        "type": "sse",
-                        "url": url,
-                    })
-                }
-                librefang_types::config::McpTransportEntry::HttpCompat {
-                    base_url,
-                    headers,
-                    tools,
-                } => {
-                    let tool_summaries: Vec<serde_json::Value> =
-                        tools.iter().map(http_compat_tool_summary).collect();
-                    let header_summaries: Vec<serde_json::Value> =
-                        headers.iter().map(http_compat_header_summary).collect();
-                    serde_json::json!({
-                        "type": "http_compat",
-                        "base_url": base_url,
-                        "headers": header_summaries,
-                        "tools_count": tool_summaries.len(),
-                        "tools": tool_summaries,
-                    })
-                }
-            };
+            let transport = serialize_mcp_transport(&s.transport);
             serde_json::json!({
                 "name": s.name,
                 "transport": transport,
@@ -1733,38 +1739,7 @@ pub async fn get_mcp_server(
         }
     };
 
-    let transport = match &entry.transport {
-        librefang_types::config::McpTransportEntry::Stdio { command, args } => {
-            serde_json::json!({
-                "type": "stdio",
-                "command": command,
-                "args": args,
-            })
-        }
-        librefang_types::config::McpTransportEntry::Sse { url } => {
-            serde_json::json!({
-                "type": "sse",
-                "url": url,
-            })
-        }
-        librefang_types::config::McpTransportEntry::HttpCompat {
-            base_url,
-            headers,
-            tools,
-        } => {
-            let tool_summaries: Vec<serde_json::Value> =
-                tools.iter().map(http_compat_tool_summary).collect();
-            let header_summaries: Vec<serde_json::Value> =
-                headers.iter().map(http_compat_header_summary).collect();
-            serde_json::json!({
-                "type": "http_compat",
-                "base_url": base_url,
-                "headers": header_summaries,
-                "tools_count": tool_summaries.len(),
-                "tools": tool_summaries,
-            })
-        }
-    };
+    let transport = serialize_mcp_transport(&entry.transport);
 
     let mut result = serde_json::json!({
         "name": entry.name,
