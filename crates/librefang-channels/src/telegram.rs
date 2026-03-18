@@ -273,7 +273,7 @@ impl TelegramAdapter {
         video_url: &str,
         caption: Option<&str>,
         thread_id: Option<i64>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/bot{}/sendVideo", self.api_base_url, self.token.as_str());
         let mut body = serde_json::json!({
             "chat_id": chat_id,
