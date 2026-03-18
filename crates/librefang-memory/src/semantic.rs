@@ -28,6 +28,11 @@ impl SemanticStore {
         Self { conn }
     }
 
+    /// Get a reference to the underlying connection for advanced operations.
+    pub fn conn(&self) -> &Arc<Mutex<Connection>> {
+        &self.conn
+    }
+
     /// Store a new memory fragment (without embedding).
     pub fn remember(
         &self,
@@ -164,7 +169,7 @@ impl SemanticStore {
             let _ = param_idx;
         }
 
-        sql.push_str(" ORDER BY accessed_at DESC, access_count DESC");
+        sql.push_str(" ORDER BY confidence DESC, accessed_at DESC, access_count DESC");
         sql.push_str(&format!(" LIMIT {fetch_limit}"));
 
         let mut stmt = conn

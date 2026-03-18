@@ -27,16 +27,17 @@ use crate::structured::StructuredStore;
 use crate::MemorySubstrate;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use librefang_types::agent::AgentId;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
-    DefaultMemoryExtractor, Entity, EntityType, ExtractionResult, GraphPattern, MemoryAction,
-    MemoryAddResult, MemoryExtractor, MemoryFilter, MemoryId, MemoryItem, MemoryLevel,
-    MemorySource, ProactiveMemory, ProactiveMemoryConfig, ProactiveMemoryHooks, Relation,
-    RelationTriple, RelationType,
+    text_similarity, DefaultMemoryExtractor, Entity, EntityType, ExtractionResult, GraphPattern,
+    MemoryAction, MemoryAddResult, MemoryConflict, MemoryExtractor, MemoryFilter, MemoryId,
+    MemoryItem, MemoryLevel, MemorySource, ProactiveMemory, ProactiveMemoryConfig,
+    ProactiveMemoryHooks, Relation, RelationTriple, RelationType,
 };
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Scope names for multi-level memory.
 pub mod scopes {
@@ -111,7 +112,9 @@ pub struct ProactiveMemoryStore {
     /// When absent, falls back to LIKE text matching.
     embedding: Option<Arc<dyn EmbeddingFn>>,
     /// Per-agent counters for auto-consolidation (runs every 10 auto_memorize calls per agent).
-    consolidation_counters: std::sync::Mutex<HashMap<String, u32>>,
+    consolidation_counters: Mutex<HashMap<String, u32>>,
+    /// Timestamp of the last confidence decay run (at most once per hour).
+    last_decay_run: Mutex<Option<chrono::DateTime<Utc>>>,
 }
 
 impl Clone for ProactiveMemoryStore {
@@ -121,6 +124,7 @@ impl Clone for ProactiveMemoryStore {
             .lock()
             .map(|g| g.clone())
             .unwrap_or_default();
+        let last_decay = self.last_decay_run.lock().map(|g| *g).unwrap_or(None);
         Self {
             substrate: self.substrate.clone(),
             structured: self.structured.clone(),
@@ -129,7 +133,8 @@ impl Clone for ProactiveMemoryStore {
             config: self.config.clone(),
             extractor: self.extractor.clone(),
             embedding: self.embedding.clone(),
-            consolidation_counters: std::sync::Mutex::new(counters),
+            consolidation_counters: Mutex::new(counters),
+            last_decay_run: Mutex::new(last_decay),
         }
     }
 }
@@ -147,7 +152,8 @@ impl ProactiveMemoryStore {
             config,
             extractor: Arc::new(DefaultMemoryExtractor),
             embedding: None,
-            consolidation_counters: std::sync::Mutex::new(HashMap::new()),
+            consolidation_counters: Mutex::new(HashMap::new()),
+            last_decay_run: Mutex::new(None),
         }
     }
 
@@ -167,7 +173,8 @@ impl ProactiveMemoryStore {
             config,
             extractor,
             embedding: None,
-            consolidation_counters: std::sync::Mutex::new(HashMap::new()),
+            consolidation_counters: Mutex::new(HashMap::new()),
+            last_decay_run: Mutex::new(None),
         }
     }
 
@@ -188,6 +195,213 @@ impl ProactiveMemoryStore {
     /// Get a reference to the config.
     pub fn config(&self) -> &ProactiveMemoryConfig {
         &self.config
+    }
+
+    /// Decay confidence scores for memories that haven't been accessed recently.
+    ///
+    /// For each memory not accessed in the last day, applies:
+    ///   `new_confidence = original_confidence * e^(-decay_rate * days_since_access)`
+    /// Then boosts frequently accessed memories:
+    ///   `new_confidence *= min(1.0 + log2(access_count), 2.0)`
+    ///
+    /// This is rate-limited to run at most once per hour.
+    pub fn decay_confidence(&self) -> LibreFangResult<()> {
+        let decay_rate = self.config.confidence_decay_rate;
+        if decay_rate <= 0.0 {
+            return Ok(());
+        }
+
+        let now = Utc::now();
+        let one_day_ago = now - chrono::Duration::days(1);
+
+        // Fetch all non-deleted memories that haven't been accessed in > 1 day
+        let conn = self
+            .semantic
+            .conn()
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, confidence, accessed_at, access_count
+                 FROM memories
+                 WHERE deleted = 0 AND accessed_at < ?1",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let rows: Vec<(String, f64, String, i64)> = stmt
+            .query_map(rusqlite::params![one_day_ago.to_rfc3339()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        for (id, current_confidence, accessed_str, access_count) in &rows {
+            let accessed_at = chrono::DateTime::parse_from_rfc3339(accessed_str)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or(now);
+
+            let days_since_access = (now - accessed_at).num_seconds() as f64 / 86400.0;
+            if days_since_access <= 0.0 {
+                continue;
+            }
+
+            // Exponential decay
+            let decayed = current_confidence * (-decay_rate * days_since_access).exp();
+
+            // Boost for frequently accessed memories: min(1.0 + log2(access_count), 2.0)
+            let count = (*access_count).max(1) as f64;
+            let boost = (1.0 + count.log2()).min(2.0);
+            let new_confidence = (decayed * boost).clamp(0.0, 1.0);
+
+            conn.execute(
+                "UPDATE memories SET confidence = ?1 WHERE id = ?2",
+                rusqlite::params![new_confidence, id],
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        }
+
+        if !rows.is_empty() {
+            tracing::debug!(
+                "Confidence decay applied to {} memories (rate={})",
+                rows.len(),
+                decay_rate
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Run confidence decay if at least one hour has elapsed since the last run.
+    fn maybe_decay_confidence(&self) {
+        let now = Utc::now();
+        let should_run = {
+            let guard = self
+                .last_decay_run
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            match *guard {
+                Some(last) => (now - last) >= chrono::Duration::hours(1),
+                None => true,
+            }
+        };
+
+        if should_run {
+            if let Err(e) = self.decay_confidence() {
+                tracing::debug!("Confidence decay failed (non-fatal): {}", e);
+            }
+            let mut guard = self
+                .last_decay_run
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            *guard = Some(now);
+        }
+    }
+
+    /// Export all memories for an agent as a flat JSON-serializable list.
+    pub fn export_all(&self, agent_id: &str) -> LibreFangResult<Vec<MemoryExportItem>> {
+        let aid = Self::parse_agent_id(agent_id)?;
+        let filter = Some(MemoryFilter::agent(aid));
+
+        // Fetch all non-deleted memories for this agent (up to 10k)
+        let frags = self.semantic.recall("", 10_000, filter)?;
+
+        let items = frags
+            .into_iter()
+            .map(|frag| {
+                let level = MemoryLevel::from(frag.scope.as_str());
+                let category = frag
+                    .metadata
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let updated_at = frag
+                    .metadata
+                    .get("updated_at")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+
+                MemoryExportItem {
+                    content: frag.content,
+                    level: format!("{:?}", level),
+                    category,
+                    confidence: frag.confidence as f64,
+                    created_at: frag.created_at.to_rfc3339(),
+                    updated_at,
+                    metadata: serde_json::to_value(&frag.metadata).unwrap_or_default(),
+                }
+            })
+            .collect();
+
+        Ok(items)
+    }
+
+    /// Import memories from a flat JSON list. Returns count of successfully imported items.
+    pub async fn import_memories(
+        &self,
+        agent_id: &str,
+        items: Vec<MemoryExportItem>,
+    ) -> LibreFangResult<usize> {
+        let aid = Self::parse_agent_id(agent_id)?;
+        let mut imported = 0usize;
+
+        for item in items {
+            let level = MemoryLevel::from(item.level.as_str());
+            let scope = level.scope_str();
+
+            let mut metadata: HashMap<String, serde_json::Value> = if item.metadata.is_object() {
+                serde_json::from_value(item.metadata).unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
+
+            if !item.category.is_empty() {
+                metadata.insert("category".to_string(), serde_json::json!(item.category));
+            }
+            metadata.insert("imported".to_string(), serde_json::json!(true));
+            if let Some(ref updated_at) = item.updated_at {
+                metadata.insert(
+                    "original_updated_at".to_string(),
+                    serde_json::json!(updated_at),
+                );
+            }
+
+            // Generate embedding if driver available
+            let embedding = if let Some(ref emb) = self.embedding {
+                emb.embed_one(&item.content).await.ok()
+            } else {
+                None
+            };
+
+            let mem_id = self.semantic.remember_with_embedding(
+                aid,
+                &item.content,
+                MemorySource::System,
+                scope,
+                metadata,
+                embedding.as_deref(),
+            )?;
+
+            // Also store in KV for consistency
+            let mem_item = MemoryItem::new(item.content, level);
+            if let Ok(json) = serde_json::to_value(&mem_item) {
+                let _ = self
+                    .structured
+                    .set(aid, &format!("memory:{}", mem_id), json);
+            }
+
+            imported += 1;
+        }
+
+        tracing::info!("Imported {} memories for agent {}", imported, agent_id);
+        Ok(imported)
     }
 
     /// Parse user_id string into AgentId.
@@ -337,6 +551,7 @@ impl ProactiveMemoryStore {
                     item: item.clone(),
                     action: MemoryAction::Add,
                     replaced_id: None,
+                    conflict: None,
                 }))
             }
             MemoryAction::Update { ref existing_id } => {
@@ -353,6 +568,10 @@ impl ProactiveMemoryStore {
                     .map(|f| f.content.clone())
                     .unwrap_or_default();
 
+                // Conflict detection: check if the update looks contradictory
+                // rather than a simple refinement.
+                let conflict = detect_memory_conflict(&old_content, &item.content, existing_id);
+
                 let mut metadata = item.metadata.clone();
                 metadata.insert("category".to_string(), serde_json::json!(&item.category));
                 metadata.insert("updated_from".to_string(), serde_json::json!(existing_id));
@@ -364,6 +583,9 @@ impl ProactiveMemoryStore {
                     "updated_at".to_string(),
                     serde_json::json!(chrono::Utc::now().to_rfc3339()),
                 );
+                if conflict.is_some() {
+                    metadata.insert("conflict_detected".to_string(), serde_json::json!(true));
+                }
 
                 // Build version history chain
                 if let Some(ref old_frag) = old_frag {
@@ -399,15 +621,25 @@ impl ProactiveMemoryStore {
                         .set(agent_id, &format!("memory:{}", existing_id), json);
                 }
 
-                tracing::debug!(
-                    "Memory decision: UPDATE {} -> {}",
-                    existing_id,
-                    truncate_for_log(&item.content, 80)
-                );
+                if conflict.is_some() {
+                    tracing::info!(
+                        "Memory conflict detected: UPDATE {} (old: '{}' -> new: '{}')",
+                        existing_id,
+                        truncate_for_log(&old_content, 60),
+                        truncate_for_log(&item.content, 60)
+                    );
+                } else {
+                    tracing::debug!(
+                        "Memory decision: UPDATE {} -> {}",
+                        existing_id,
+                        truncate_for_log(&item.content, 80)
+                    );
+                }
                 Ok(Some(MemoryAddResult {
                     item: item.clone(),
                     action: action.clone(),
                     replaced_id: Some(existing_id.clone()),
+                    conflict,
                 }))
             }
         }
@@ -978,6 +1210,18 @@ impl ProactiveMemoryStore {
     }
 }
 
+/// A flat, JSON-serializable representation of a memory for import/export.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MemoryExportItem {
+    pub content: String,
+    pub level: String,
+    pub category: String,
+    pub confidence: f64,
+    pub created_at: String,
+    pub updated_at: Option<String>,
+    pub metadata: serde_json::Value,
+}
+
 /// Memory usage statistics.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoryStats {
@@ -1371,6 +1615,67 @@ fn parse_relation_type(s: &str) -> RelationType {
     }
 }
 
+/// Negation/contradiction words that suggest content is contradictory, not a refinement.
+const NEGATION_WORDS: &[&str] = &[
+    "not",
+    "don't",
+    "dont",
+    "doesn't",
+    "doesnt",
+    "never",
+    "no longer",
+    "changed",
+    "switched",
+    "stopped",
+    "quit",
+    "instead",
+    "rather than",
+    "replaced",
+    "moved from",
+    "moved to",
+    "no more",
+];
+
+/// Detect whether a memory update looks like a contradiction rather than a refinement.
+///
+/// Returns `Some(MemoryConflict)` when:
+/// 1. The old and new content have low Jaccard word-overlap similarity (< 0.3), AND
+/// 2. The new content contains negation/change words suggesting contradiction.
+///
+/// This heuristic avoids flagging simple expansions ("likes Python" -> "likes Python and Rust")
+/// while catching real contradictions ("likes Python" -> "switched to Rust, no longer uses Python").
+fn detect_memory_conflict(
+    old_content: &str,
+    new_content: &str,
+    memory_id: &str,
+) -> Option<MemoryConflict> {
+    if old_content.is_empty() || new_content.is_empty() {
+        return None;
+    }
+
+    let old_lower = old_content.to_lowercase();
+    let new_lower = new_content.to_lowercase();
+
+    // Check Jaccard similarity — low overlap suggests contradiction
+    let similarity = text_similarity(&old_lower, &new_lower);
+    if similarity >= 0.3 {
+        return None; // Enough overlap: likely a refinement, not a contradiction
+    }
+
+    // Check for negation/contradiction words in the new content
+    let has_negation = NEGATION_WORDS.iter().any(|word| new_lower.contains(word));
+
+    if has_negation {
+        Some(MemoryConflict {
+            old_content: old_content.to_string(),
+            new_content: new_content.to_string(),
+            memory_id: memory_id.to_string(),
+        })
+    } else {
+        None
+    }
+}
+
 /// Truncate a string for log messages.
 fn truncate_for_log(s: &str, max: usize) -> String {
     if s.len() <= max {
@@ -1402,6 +1707,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
                 relations: Vec::new(),
                 has_content: false,
                 trigger: "auto_memorize_disabled".to_string(),
+                conflicts: Vec::new(),
             });
         }
 
@@ -1412,6 +1718,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
 
         // Apply decision flow for each extracted memory
         let mut stored_memories = Vec::new();
+        let mut conflicts = Vec::new();
         for item in &extraction_result.memories {
             // Tag with auto_memorize metadata
             let mut enriched = item.clone();
@@ -1420,7 +1727,12 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
                 .insert("auto_memorize".to_string(), serde_json::json!(true));
 
             match self.add_with_decision(agent_id, &enriched).await {
-                Ok(Some(result)) => stored_memories.push(result.item),
+                Ok(Some(result)) => {
+                    if let Some(conflict) = result.conflict {
+                        conflicts.push(conflict);
+                    }
+                    stored_memories.push(result.item);
+                }
                 Ok(None) => {} // NOOP
                 Err(e) => {
                     tracing::warn!("auto_memorize decision failed for memory: {}", e);
@@ -1460,6 +1772,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
             memories: stored_memories,
             relations: extraction_result.relations,
             trigger: extraction_result.trigger,
+            conflicts,
         })
     }
 
@@ -1470,6 +1783,9 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         if !self.config.auto_retrieve {
             return Ok(Vec::new());
         }
+
+        // Run confidence decay at most once per hour
+        self.maybe_decay_confidence();
 
         let agent_id = Self::parse_agent_id(user_id)?;
 

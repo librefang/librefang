@@ -255,6 +255,14 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::post(routes::memory_consolidate),
         )
         .route(
+            "/memory/agents/{id}/export",
+            axum::routing::get(routes::memory_export_agent),
+        )
+        .route(
+            "/memory/agents/{id}/import",
+            axum::routing::post(routes::memory_import_agent),
+        )
+        .route(
             "/triggers",
             axum::routing::get(routes::list_triggers).post(routes::create_trigger),
         )

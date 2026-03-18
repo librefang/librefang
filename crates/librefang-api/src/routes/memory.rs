@@ -619,3 +619,78 @@ pub async fn memory_consolidate(
         ),
     }
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/memory/agents/:agent_id/export
+// ---------------------------------------------------------------------------
+
+/// Export all proactive memories for an agent as JSON.
+#[utoipa::path(
+    get,
+    path = "/api/memory/agents/{id}/export",
+    tag = "proactive-memory",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses((status = 200, description = "Exported memories", body = serde_json::Value))
+)]
+pub async fn memory_export_agent(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    let store = match get_pm_store(&state) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    match store.export_all(&agent_id) {
+        Ok(items) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "agent_id": agent_id,
+                "count": items.len(),
+                "memories": items,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/memory/agents/:agent_id/import
+// ---------------------------------------------------------------------------
+
+/// Import proactive memories for an agent from JSON.
+#[utoipa::path(
+    post,
+    path = "/api/memory/agents/{id}/import",
+    tag = "proactive-memory",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Import result", body = serde_json::Value))
+)]
+pub async fn memory_import_agent(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+    Json(body): Json<Vec<librefang_memory::MemoryExportItem>>,
+) -> impl IntoResponse {
+    let store = match get_pm_store(&state) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    match store.import_memories(&agent_id, body).await {
+        Ok(count) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "imported": count,
+                "agent_id": agent_id,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}

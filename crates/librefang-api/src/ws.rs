@@ -682,6 +682,10 @@ async fn handle_text_message(
                                 resp_json["memories_used"] =
                                     serde_json::json!(result.memories_used);
                             }
+                            if !result.memory_conflicts.is_empty() {
+                                resp_json["memory_conflicts"] =
+                                    serde_json::json!(result.memory_conflicts);
+                            }
                             let _ = send_json(sender, &resp_json).await;
                         }
                         Ok(Err(e)) => {

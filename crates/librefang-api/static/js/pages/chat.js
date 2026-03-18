@@ -962,7 +962,7 @@ function chatPage() {
           if (!finalText.trim() && streamedTools.length) {
             finalText = '';
           }
-          this.messages.push({ id: ++msgId, role: 'agent', text: finalText, meta: meta, tools: streamedTools, ts: Date.now() });
+          this.messages.push({ id: ++msgId, role: 'agent', text: finalText, meta: meta, tools: streamedTools, ts: Date.now(), memory_conflicts: data.memory_conflicts || [] });
           this.sending = false;
           this.tokenCount = 0;
           this.scrollToBottom();
@@ -1161,7 +1161,7 @@ function chatPage() {
         var httpMeta = (res.input_tokens || 0) + ' in / ' + (res.output_tokens || 0) + ' out';
         if (res.cost_usd != null) httpMeta += ' | $' + res.cost_usd.toFixed(4);
         if (res.iterations) httpMeta += ' | ' + res.iterations + ' iter';
-        this.messages.push({ id: ++msgId, role: 'agent', text: res.response, meta: httpMeta, tools: [], ts: Date.now() });
+        this.messages.push({ id: ++msgId, role: 'agent', text: res.response, meta: httpMeta, tools: [], ts: Date.now(), memory_conflicts: res.memory_conflicts || [] });
       } catch(e) {
         this.messages = this.messages.filter(function(m) { return !m.thinking; });
         this.messages.push({

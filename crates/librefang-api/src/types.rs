@@ -66,6 +66,11 @@ pub struct MessageResponse {
     /// Empty when no relevant memories were found.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memories_used: Vec<String>,
+    /// Detected memory conflicts where new info contradicts existing memories.
+    /// Empty when no conflicts were detected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(value_type = Vec<serde_json::Value>)]
+    pub memory_conflicts: Vec<librefang_types::memory::MemoryConflict>,
 }
 
 /// Request to install a skill from the marketplace.

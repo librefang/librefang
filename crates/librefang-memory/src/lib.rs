@@ -34,4 +34,4 @@ pub use librefang_types::memory::{
 };
 
 // Re-export proactive memory store
-pub use proactive::{MemoryStats, ProactiveMemoryStore};
+pub use proactive::{MemoryExportItem, MemoryStats, ProactiveMemoryStore};

@@ -143,6 +143,10 @@ pub struct ProactiveMemoryConfig {
     /// Memories with Jaccard word overlap above this are considered duplicates.
     /// Default: 0.5.
     pub duplicate_threshold: f32,
+    /// Confidence decay rate per day. Memories lose confidence over time when
+    /// not accessed, following exponential decay: `conf * e^(-rate * days)`.
+    /// Default: 0.01 (very slow — takes ~70 days to halve).
+    pub confidence_decay_rate: f64,
 }
 
 impl Default for ProactiveMemoryConfig {
@@ -161,6 +165,7 @@ impl Default for ProactiveMemoryConfig {
             ],
             session_ttl_hours: 24,
             duplicate_threshold: 0.5,
+            confidence_decay_rate: 0.01,
         }
     }
 }
@@ -193,6 +198,24 @@ pub struct ExtractionResult {
     pub has_content: bool,
     /// Original query that triggered extraction.
     pub trigger: String,
+    /// Detected conflicts where new info contradicts existing memories.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<MemoryConflict>,
+}
+
+/// A detected conflict between old and new memory content.
+///
+/// This is surfaced when an Update action replaces old content with new content
+/// that appears contradictory (low similarity + negation patterns), rather than
+/// being a simple refinement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryConflict {
+    /// The previous memory content that was replaced.
+    pub old_content: String,
+    /// The new memory content that replaced it.
+    pub new_content: String,
+    /// The ID of the memory that was updated.
+    pub memory_id: String,
 }
 
 /// Result from a single memory add operation, including the decision taken.
@@ -204,6 +227,9 @@ pub struct MemoryAddResult {
     pub action: MemoryAction,
     /// If updated, the ID of the old memory that was replaced.
     pub replaced_id: Option<String>,
+    /// Detected conflict when an update appears contradictory rather than a refinement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<MemoryConflict>,
 }
 
 /// Action to take when a new memory conflicts with an existing one.
@@ -547,6 +573,7 @@ impl MemoryExtractor for DefaultMemoryExtractor {
             memories,
             relations,
             trigger: "default_extractor".to_string(),
+            conflicts: Vec::new(),
         })
     }
 

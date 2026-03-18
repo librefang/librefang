@@ -252,6 +252,9 @@ pub struct AgentLoopResult {
     /// Summaries of memories that were recalled and injected as context (from auto_retrieve).
     /// Empty when no relevant memories were found.
     pub memories_used: Vec<String>,
+    /// Detected memory conflicts where new info contradicts existing memories.
+    /// Empty when no conflicts were detected.
+    pub memory_conflicts: Vec<librefang_types::memory::MemoryConflict>,
 }
 
 /// Check if stable_prefix_mode is enabled via manifest metadata.
@@ -472,6 +475,8 @@ pub async fn run_agent_loop(
 
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
     let mut memories_saved: Vec<String> = Vec::new();
+    // Mutable collector for memory conflicts detected during this turn.
+    let mut memory_conflicts: Vec<librefang_types::memory::MemoryConflict> = Vec::new();
 
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
@@ -669,6 +674,7 @@ pub async fn run_agent_loop(
                         decision_traces,
                         memories_saved: Vec::new(),
                         memories_used: memories_used.clone(),
+                        memory_conflicts: Vec::new(),
                     });
                 }
 
@@ -800,6 +806,7 @@ pub async fn run_agent_loop(
                             );
                             memories_saved
                                 .extend(result.memories.iter().map(|m| m.content.clone()));
+                            memory_conflicts.extend(result.conflicts);
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -832,6 +839,7 @@ pub async fn run_agent_loop(
                     decision_traces,
                     memories_saved,
                     memories_used,
+                    memory_conflicts,
                 });
             }
             StopReason::ToolUse => {
@@ -1140,6 +1148,7 @@ pub async fn run_agent_loop(
                         decision_traces,
                         memories_saved,
                         memories_used,
+                        memory_conflicts,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -1568,6 +1577,8 @@ pub async fn run_agent_loop_streaming(
 
     // Mutable collector for memories saved during this turn (populated by auto_memorize).
     let mut memories_saved: Vec<String> = Vec::new();
+    // Mutable collector for memory conflicts detected during this turn.
+    let mut memory_conflicts: Vec<librefang_types::memory::MemoryConflict> = Vec::new();
 
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
@@ -1781,6 +1792,7 @@ pub async fn run_agent_loop_streaming(
                         decision_traces,
                         memories_saved: Vec::new(),
                         memories_used: memories_used.clone(),
+                        memory_conflicts: Vec::new(),
                     });
                 }
 
@@ -1911,6 +1923,7 @@ pub async fn run_agent_loop_streaming(
                             );
                             memories_saved
                                 .extend(result.memories.iter().map(|m| m.content.clone()));
+                            memory_conflicts.extend(result.conflicts);
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -1943,6 +1956,7 @@ pub async fn run_agent_loop_streaming(
                     decision_traces,
                     memories_saved,
                     memories_used,
+                    memory_conflicts,
                 });
             }
             StopReason::ToolUse => {
@@ -2257,6 +2271,7 @@ pub async fn run_agent_loop_streaming(
                         decision_traces,
                         memories_saved,
                         memories_used,
+                        memory_conflicts,
                     });
                 }
                 let text = response.text();

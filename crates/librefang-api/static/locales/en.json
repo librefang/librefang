@@ -380,6 +380,7 @@
     "newSessionFailed": "Failed to create session",
     "switchSessionFailed": "Failed to switch session",
     "errorPrefix": "Error: {message}",
+    "memoryConflict": "Memory updated: Previously '{old}', now '{new}'",
     "runCancelled": "Run cancelled",
     "stopFailed": "Stop failed: {message}",
     "stopAgentTitle": "Stop Agent",

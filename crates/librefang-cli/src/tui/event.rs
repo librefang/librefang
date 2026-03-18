@@ -444,6 +444,7 @@ pub fn spawn_daemon_stream(
             decision_traces: Vec::new(),
             memories_saved: Vec::new(),
             memories_used: Vec::new(),
+            memory_conflicts: Vec::new(),
         })));
     });
 }
@@ -484,6 +485,7 @@ fn daemon_fallback(
             decision_traces: Vec::new(),
             memories_saved: Vec::new(),
             memories_used: Vec::new(),
+            memory_conflicts: Vec::new(),
         })
     } else {
         Err(body["error"]

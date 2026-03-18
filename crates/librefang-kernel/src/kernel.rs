@@ -2263,6 +2263,7 @@ impl LibreFangKernel {
             decision_traces: Vec::new(),
             memories_saved: Vec::new(),
             memories_used: Vec::new(),
+            memory_conflicts: Vec::new(),
         })
     }
 
@@ -2327,6 +2328,7 @@ impl LibreFangKernel {
             decision_traces: Vec::new(),
             memories_saved: Vec::new(),
             memories_used: Vec::new(),
+            memory_conflicts: Vec::new(),
         })
     }
 
@@ -2524,6 +2526,7 @@ impl LibreFangKernel {
             decision_traces: result.decision_traces,
             memories_saved: result.memories_saved,
             memories_used: result.memories_used,
+            memory_conflicts: result.memory_conflicts,
         }
     }
 

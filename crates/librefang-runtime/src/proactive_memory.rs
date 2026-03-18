@@ -246,6 +246,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
                 memories: Vec::new(),
                 relations: Vec::new(),
                 trigger: "llm_extractor".to_string(),
+                conflicts: Vec::new(),
             });
         }
 
@@ -493,6 +494,7 @@ fn parse_llm_extraction_response(
         memories,
         relations,
         trigger: "llm_extractor".to_string(),
+        conflicts: Vec::new(),
     })
 }
 

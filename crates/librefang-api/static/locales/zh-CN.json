@@ -380,6 +380,7 @@
     "newSessionFailed": "创建会话失败",
     "switchSessionFailed": "切换会话失败",
     "errorPrefix": "错误：{message}",
+    "memoryConflict": "记忆已更新：之前是「{old}」，现在是「{new}」",
     "runCancelled": "运行已取消",
     "stopFailed": "停止失败：{message}",
     "stopAgentTitle": "停止智能体",
