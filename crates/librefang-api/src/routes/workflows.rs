@@ -1071,10 +1071,13 @@ pub async fn create_cron_job(
 ) -> impl IntoResponse {
     let agent_id = body["agent_id"].as_str().unwrap_or("");
     match state.kernel.cron_create(agent_id, body.clone()).await {
-        Ok(result) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({"result": result})),
-        ),
+        Ok(result) => {
+            // cron_create returns a JSON string — parse it so the response
+            // is a proper JSON object instead of a stringified blob.
+            let parsed: serde_json::Value =
+                serde_json::from_str(&result).unwrap_or(serde_json::json!({"id": result}));
+            (StatusCode::CREATED, Json(parsed))
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": e})),
