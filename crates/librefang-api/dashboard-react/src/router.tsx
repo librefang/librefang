@@ -95,7 +95,7 @@ const wizardRoute = createRoute({
 const workflowsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/workflows",
-  component: WorkflowsPage
+  component: CanvasPage
 });
 
 const schedulerRoute = createRoute({

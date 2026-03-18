@@ -52,8 +52,8 @@ export function App() {
           <Link to="/hands" className={navBase} activeProps={{ className: `${navBase} ${navActive}` }}>
             Hands
           </Link>
-          <Link to="/workflows" className={navBase} activeProps={{ className: `${navBase} ${navActive}` }}>
-            Workflows
+          <Link to="/canvas" className={navBase} activeProps={{ className: `${navBase} ${navActive}` }}>
+            Canvas
           </Link>
           <Link to="/scheduler" className={navBase} activeProps={{ className: `${navBase} ${navActive}` }}>
             Scheduler
