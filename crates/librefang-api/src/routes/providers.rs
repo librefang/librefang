@@ -744,6 +744,15 @@ pub async fn set_provider_key(
         false
     };
 
+    // Reset log-once flag so future provider removal gets logged again
+    state
+        .kernel
+        .provider_unconfigured_logged
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    // Trigger all active hands so they resume immediately
+    state.kernel.trigger_all_hands();
+
     let mut resp = serde_json::json!({"status": "saved", "provider": name});
     if switched {
         resp["switched_default"] = serde_json::json!(true);
