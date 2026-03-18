@@ -25,7 +25,7 @@ impl KnowledgeStore {
     }
 
     /// Add an entity to the knowledge graph.
-    pub fn add_entity(&self, entity: Entity) -> LibreFangResult<String> {
+    pub fn add_entity(&self, entity: Entity, agent_id: &str) -> LibreFangResult<String> {
         let conn = self
             .conn
             .lock()
@@ -41,17 +41,17 @@ impl KnowledgeStore {
             .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO entities (id, entity_type, name, properties, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            "INSERT INTO entities (id, entity_type, name, properties, created_at, updated_at, agent_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)
              ON CONFLICT(id) DO UPDATE SET name = ?3, properties = ?4, updated_at = ?5",
-            rusqlite::params![id, entity_type_str, entity.name, props_str, now],
+            rusqlite::params![id, entity_type_str, entity.name, props_str, now, agent_id],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(id)
     }
 
     /// Add a relation between two entities.
-    pub fn add_relation(&self, relation: Relation) -> LibreFangResult<String> {
+    pub fn add_relation(&self, relation: Relation, agent_id: &str) -> LibreFangResult<String> {
         let conn = self
             .conn
             .lock()
@@ -63,8 +63,8 @@ impl KnowledgeStore {
             .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let now = Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT INTO relations (id, source_entity, relation_type, target_entity, properties, confidence, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO relations (id, source_entity, relation_type, target_entity, properties, confidence, created_at, agent_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             rusqlite::params![
                 id,
                 relation.source,
@@ -73,10 +73,55 @@ impl KnowledgeStore {
                 props_str,
                 relation.confidence as f64,
                 now,
+                agent_id,
             ],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(id)
+    }
+
+    /// Delete all entities and relations belonging to a specific agent.
+    pub fn delete_by_agent(&self, agent_id: &str) -> LibreFangResult<u64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let rel_count = conn
+            .execute(
+                "DELETE FROM relations WHERE agent_id = ?1",
+                rusqlite::params![agent_id],
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))? as u64;
+        let ent_count = conn
+            .execute(
+                "DELETE FROM entities WHERE agent_id = ?1",
+                rusqlite::params![agent_id],
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))? as u64;
+        Ok(rel_count + ent_count)
+    }
+
+    /// Check if a relation already exists between two entities with a given type.
+    pub fn has_relation(
+        &self,
+        source_id: &str,
+        relation_type: &RelationType,
+        target_id: &str,
+    ) -> LibreFangResult<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let rel_str = serde_json::to_string(relation_type)
+            .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM relations WHERE source_entity = ?1 AND relation_type = ?2 AND target_entity = ?3",
+                rusqlite::params![source_id, rel_str, target_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(count > 0)
     }
 
     /// Query the knowledge graph with a pattern.
@@ -283,14 +328,17 @@ mod tests {
     fn test_add_and_query_entity() {
         let store = setup();
         let id = store
-            .add_entity(Entity {
-                id: String::new(),
-                entity_type: EntityType::Person,
-                name: "Alice".to_string(),
-                properties: HashMap::new(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .add_entity(
+                Entity {
+                    id: String::new(),
+                    entity_type: EntityType::Person,
+                    name: "Alice".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "test-agent",
+            )
             .unwrap();
         assert!(!id.is_empty());
     }
@@ -299,34 +347,43 @@ mod tests {
     fn test_add_relation_and_query() {
         let store = setup();
         let alice_id = store
-            .add_entity(Entity {
-                id: "alice".to_string(),
-                entity_type: EntityType::Person,
-                name: "Alice".to_string(),
-                properties: HashMap::new(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .add_entity(
+                Entity {
+                    id: "alice".to_string(),
+                    entity_type: EntityType::Person,
+                    name: "Alice".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "test-agent",
+            )
             .unwrap();
         let company_id = store
-            .add_entity(Entity {
-                id: "acme".to_string(),
-                entity_type: EntityType::Organization,
-                name: "Acme Corp".to_string(),
-                properties: HashMap::new(),
-                created_at: Utc::now(),
-                updated_at: Utc::now(),
-            })
+            .add_entity(
+                Entity {
+                    id: "acme".to_string(),
+                    entity_type: EntityType::Organization,
+                    name: "Acme Corp".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "test-agent",
+            )
             .unwrap();
         store
-            .add_relation(Relation {
-                source: alice_id.clone(),
-                relation: RelationType::WorksAt,
-                target: company_id,
-                properties: HashMap::new(),
-                confidence: 0.95,
-                created_at: Utc::now(),
-            })
+            .add_relation(
+                Relation {
+                    source: alice_id.clone(),
+                    relation: RelationType::WorksAt,
+                    target: company_id,
+                    properties: HashMap::new(),
+                    confidence: 0.95,
+                    created_at: Utc::now(),
+                },
+                "test-agent",
+            )
             .unwrap();
 
         let matches = store

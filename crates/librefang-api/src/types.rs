@@ -58,6 +58,19 @@ pub struct MessageResponse {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[schema(value_type = Vec<serde_json::Value>)]
     pub decision_traces: Vec<librefang_types::tool::DecisionTrace>,
+    /// Summaries of memories that were saved during this turn.
+    /// Empty when no new memories were extracted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memories_saved: Vec<String>,
+    /// Summaries of memories that were recalled and used as context.
+    /// Empty when no relevant memories were found.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memories_used: Vec<String>,
+    /// Detected memory conflicts where new info contradicts existing memories.
+    /// Empty when no conflicts were detected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schema(value_type = Vec<serde_json::Value>)]
+    pub memory_conflicts: Vec<librefang_types::memory::MemoryConflict>,
 }
 
 /// Request to install a skill from the marketplace.

@@ -78,6 +78,11 @@ impl MemorySubstrate {
         &self.usage
     }
 
+    /// Get a reference to the knowledge graph store.
+    pub fn knowledge(&self) -> &KnowledgeStore {
+        &self.knowledge
+    }
+
     /// Get the shared database connection (for constructing stores from outside).
     pub fn usage_conn(&self) -> Arc<Mutex<Connection>> {
         Arc::clone(&self.conn)
@@ -709,14 +714,14 @@ impl Memory for MemorySubstrate {
 
     async fn add_entity(&self, entity: Entity) -> LibreFangResult<String> {
         let store = self.knowledge.clone();
-        tokio::task::spawn_blocking(move || store.add_entity(entity))
+        tokio::task::spawn_blocking(move || store.add_entity(entity, ""))
             .await
             .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }
 
     async fn add_relation(&self, relation: Relation) -> LibreFangResult<String> {
         let store = self.knowledge.clone();
-        tokio::task::spawn_blocking(move || store.add_relation(relation))
+        tokio::task::spawn_blocking(move || store.add_relation(relation, ""))
             .await
             .map_err(|e| LibreFangError::Internal(e.to_string()))?
     }

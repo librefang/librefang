@@ -281,14 +281,44 @@ pub fn build_memory_section(memories: &[(String, String)]) -> String {
          - Store important preferences, decisions, and context with memory_store for future use.",
     );
     if !memories.is_empty() {
-        out.push_str("\n\nRecalled memories:\n");
-        for (key, content) in memories.iter().take(5) {
-            let capped = cap_str(content, 500);
-            if key.is_empty() {
-                out.push_str(&format!("- {capped}\n"));
-            } else {
-                out.push_str(&format!("- [{key}] {capped}\n"));
-            }
+        out.push_str("\n\n");
+        out.push_str(&format_memory_items_as_personal_context(memories));
+    }
+    out
+}
+
+/// Format recalled memories as a natural personal-context block.
+///
+/// Used by both the system prompt (appended to the Memory section) and
+/// by the agent loop for injecting a standalone context message in
+/// stable_prefix_mode.  The framing instructs the LLM to use the
+/// knowledge the way a person who actually knows you would — naturally,
+/// without announcing that it "remembers" things.
+pub fn format_memory_items_as_personal_context(memories: &[(String, String)]) -> String {
+    if memories.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "You have the following understanding of this person from previous conversations. \
+         This is knowledge you have — not a list to recite. Let it naturally shape how you \
+         respond:\n\
+         \n\
+         - Reference relevant context when it helps (\"since you're working in Rust...\", \
+         \"keeping it concise like you prefer...\") but only when it genuinely adds value.\n\
+         - Let remembered preferences silently guide your style, format, and depth — you \
+         don't need to announce that you're doing so.\n\
+         - NEVER say \"based on my memory\", \"according to my records\", \"I recall that you...\", \
+         or mechanically list what you know. A friend doesn't preface every remark with \
+         \"I remember you told me...\".\n\
+         - If a memory is clearly outdated or the user contradicts it, trust the current \
+         conversation over stored context.\n\n",
+    );
+    for (key, content) in memories.iter().take(10) {
+        let capped = cap_str(content, 500);
+        if key.is_empty() {
+            out.push_str(&format!("- {capped}\n"));
+        } else {
+            out.push_str(&format!("- [{key}] {capped}\n"));
         }
     }
     out
@@ -739,7 +769,7 @@ mod tests {
         let section = build_memory_section(&[]);
         assert!(section.contains("## Memory"));
         assert!(section.contains("memory_recall"));
-        assert!(!section.contains("Recalled memories"));
+        assert!(!section.contains("understanding of this person"));
     }
 
     #[test]
@@ -749,20 +779,42 @@ mod tests {
             ("ctx".to_string(), "Working on Rust project".to_string()),
         ];
         let section = build_memory_section(&memories);
-        assert!(section.contains("Recalled memories"));
+        assert!(section.contains("understanding of this person"));
+        assert!(section.contains("not a list to recite"));
         assert!(section.contains("[pref] User likes dark mode"));
         assert!(section.contains("[ctx] Working on Rust project"));
     }
 
     #[test]
-    fn test_memory_cap_at_5() {
-        let memories: Vec<(String, String)> = (0..10)
+    fn test_format_memory_items_as_personal_context() {
+        let memories = vec![
+            (String::new(), "Prefers concise answers".to_string()),
+            ("pref".to_string(), "Uses dark mode".to_string()),
+        ];
+        let ctx = format_memory_items_as_personal_context(&memories);
+        assert!(ctx.contains("understanding of this person"));
+        assert!(ctx.contains("- Prefers concise answers"));
+        assert!(ctx.contains("- [pref] Uses dark mode"));
+        // Must NOT contain tool instructions (those belong in build_memory_section)
+        assert!(!ctx.contains("memory_recall"));
+        assert!(!ctx.contains("## Memory"));
+    }
+
+    #[test]
+    fn test_format_memory_items_empty() {
+        let ctx = format_memory_items_as_personal_context(&[]);
+        assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn test_memory_cap_at_10() {
+        let memories: Vec<(String, String)> = (0..15)
             .map(|i| (format!("k{i}"), format!("value {i}")))
             .collect();
         let section = build_memory_section(&memories);
         assert!(section.contains("[k0]"));
-        assert!(section.contains("[k4]"));
-        assert!(!section.contains("[k5]"));
+        assert!(section.contains("[k9]"));
+        assert!(!section.contains("[k10]"));
     }
 
     #[test]
@@ -770,9 +822,10 @@ mod tests {
         let long_content = "x".repeat(1000);
         let memories = vec![("k".to_string(), long_content)];
         let section = build_memory_section(&memories);
-        // Should be capped at 500 + "..."
+        // Content should be capped at 500 chars + "..."
         assert!(section.contains("..."));
-        assert!(section.len() < 1200);
+        // The section includes the natural-use preamble + capped content
+        assert!(section.len() < 2000);
     }
 
     #[test]

@@ -1378,6 +1378,9 @@ pub struct KernelConfig {
     /// Tool policy configuration (global deny/allow rules, groups, depth limits).
     #[serde(default)]
     pub tool_policy: crate::tool_policy::ToolPolicy,
+    /// Proactive memory (mem0-style) configuration.
+    #[serde(default)]
+    pub proactive_memory: crate::memory::ProactiveMemoryConfig,
     /// Pluggable context engine configuration.
     #[serde(default)]
     pub context_engine: ContextEngineTomlConfig,
@@ -1882,6 +1885,7 @@ impl Default for KernelConfig {
             queue: QueueConfig::default(),
             external_auth: ExternalAuthConfig::default(),
             tool_policy: crate::tool_policy::ToolPolicy::default(),
+            proactive_memory: crate::memory::ProactiveMemoryConfig::default(),
             context_engine: ContextEngineTomlConfig::default(),
         }
     }

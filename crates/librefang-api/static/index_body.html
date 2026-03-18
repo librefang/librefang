@@ -109,6 +109,10 @@
               <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg></span>
               <span class="nav-label" data-i18n="nav.comms">Comms</span>
             </a>
+            <a class="nav-item" :class="{ active: page === 'memory' }" @click="navigate('memory')" :aria-current="page === 'memory' ? 'page' : false">
+              <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a4 4 0 0 0-4 4v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2h-2V6a4 4 0 0 0-4-4z"/><circle cx="12" cy="15" r="2"/></svg></span>
+              <span class="nav-label" data-i18n="nav.memory">Memory</span>
+            </a>
           </div>
         </template>
       </div>
@@ -676,6 +680,37 @@
                                 <pre class="tool-pre" :class="{ 'tool-pre-error': tool.is_error, 'tool-pre-short': !tool.is_error && tool.result && tool.result.length < 100, 'tool-pre-medium': !tool.is_error && tool.result && tool.result.length >= 100 && tool.result.length < 500 }" x-text="formatToolJson(tool.result)"></pre>
                               </div>
                             </div>
+                          </div>
+                        </template>
+                        <!-- Memory hit indicator -->
+                        <template x-if="msg.role === 'agent' && !msg.thinking && !msg.streaming && hasMemoryActivity(msg)">
+                          <div class="memory-indicator" @click="msg._memExpanded = !msg._memExpanded" style="position:relative;display:inline-flex;align-items:center;gap:4px;padding:3px 8px;margin:4px 0;border-radius:12px;background:var(--surface);border:1px solid var(--border);cursor:pointer;font-size:12px;color:var(--text-secondary);transition:background 0.15s" @mouseenter="$el.style.background='var(--hover)'" @mouseleave="$el.style.background='var(--surface)'">
+                            <span style="font-size:14px">&#x1F9E0;</span>
+                            <span x-text="memoryIndicatorForMsg(msg)"></span>
+                            <span class="tool-expand-chevron" :style="msg._memExpanded ? 'transform:rotate(90deg)' : ''" style="transition:transform 0.15s;font-size:10px">&#9654;</span>
+                            <template x-if="msg._memExpanded">
+                              <div @click.stop style="position:absolute;z-index:10;top:100%;left:0;min-width:260px;max-width:400px;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);padding:8px 12px;margin-top:4px;font-size:12px">
+                                <template x-for="(item, idx) in memoryDetailItems(msg)" :key="idx">
+                                  <div style="padding:4px 0;border-bottom:1px solid var(--border)">
+                                    <div style="display:flex;align-items:center;gap:4px">
+                                      <span class="badge" :class="item.type === 'recalled' ? 'badge-user' : 'badge-agent'" x-text="item.type === 'recalled' ? t('memoryPage.recalled', 'recalled') : t('memoryPage.saved', 'saved')"></span>
+                                      <span class="text-dim" x-text="item.content ? item.content.substring(0, 80) : ''"></span>
+                                    </div>
+                                  </div>
+                                </template>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
+                        <!-- Memory conflict banner -->
+                        <template x-if="msg.memory_conflicts && msg.memory_conflicts.length">
+                          <div style="margin:6px 0">
+                            <template x-for="(mc, mci) in msg.memory_conflicts" :key="mci">
+                              <div style="display:flex;align-items:flex-start;gap:8px;padding:8px 12px;margin:4px 0;border-radius:8px;background:var(--warning-subtle);border:1px solid var(--warning);font-size:13px;color:var(--warning-dim)">
+                                <span style="font-size:16px;flex-shrink:0;color:var(--warning)">&#x26A0;</span>
+                                <span x-text="t('agentChat.memoryConflict', 'Memory updated: Previously \'{old}\', now \'{new}\'', { old: mc.old_content, new: mc.new_content })"></span>
+                              </div>
+                            </template>
                           </div>
                         </template>
                         <!-- Timestamp + meta row -->
@@ -2987,6 +3022,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'security' }" @click="tab = 'security'; if (!securityData && !secLoading) loadSecurity()" data-i18n="settingsPage.securityTab">Security</div>
             <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'network' }" @click="tab = 'network'; if (!peers.length && !peersLoading) { loadPeers(); startPeerPolling(); }" data-i18n="settingsPage.networkTab">Network</div>
             <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'budget' }" @click="tab = 'budget'" data-i18n="settingsPage.budgetTab">Budget</div>
+            <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'proactive_memory' }" @click="tab = 'proactive_memory'; if (!pmLoaded) loadProactiveMemory()" data-i18n="settingsPage.proactiveMemoryTab">Proactive Memory</div>
             <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'info' }" @click="tab = 'info'" data-i18n="settingsPage.systemTab">System</div>
             <div class="tab tab-secondary" role="tab" :class="{ active: tab === 'migration' }" @click="tab = 'migration'" data-i18n="settingsPage.migrationTab">Migration</div>
           </div>
@@ -3644,6 +3680,123 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 </table>
               </div>
               <div class="text-xs text-dim" x-show="!agentRanking.length" data-i18n="settingsPage.noSpendingToday">No spending recorded today.</div>
+            </div>
+          </div>
+
+          <!-- Proactive Memory tab -->
+          <div x-show="tab === 'proactive_memory'">
+            <div class="info-card">
+              <h4 data-i18n="settingsPage.proactiveMemory">Proactive Memory</h4>
+              <p data-i18n="settingsPage.proactiveMemoryDesc">Configure mem0-style proactive memory that automatically extracts and recalls relevant memories during agent conversations.</p>
+            </div>
+            <div x-show="pmLoading" class="loading-state"><div class="spinner"></div><span data-i18n="settingsPage.loadingProactiveMemory">Loading proactive memory settings...</span></div>
+            <div x-show="!pmLoading">
+              <div class="card mb-4">
+                <div class="card-header" data-i18n="settingsPage.proactiveMemory">Proactive Memory</div>
+                <div class="detail-grid" style="margin-top:12px">
+                  <!-- Master enabled toggle -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label">Enabled</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <label class="form-checkbox" style="margin:0">
+                        <input type="checkbox" x-model="pmSettings.enabled">
+                      </label>
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px">Master toggle for the entire proactive memory subsystem. When off, no memories are stored or retrieved.</div>
+                  </div>
+                  <!-- Auto-memorize toggle -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.autoMemorize">Auto-memorize</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <label class="form-checkbox" style="margin:0">
+                        <input type="checkbox" x-model="pmSettings.auto_memorize">
+                      </label>
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.autoMemorizeDesc">Automatically extract and store memories from agent conversations after each execution.</div>
+                  </div>
+                  <!-- Auto-retrieve toggle -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.autoRetrieve">Auto-retrieve</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <label class="form-checkbox" style="margin:0">
+                        <input type="checkbox" x-model="pmSettings.auto_retrieve">
+                      </label>
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.autoRetrieveDesc">Automatically recall relevant memories before each agent execution to enrich context.</div>
+                  </div>
+                  <!-- Max retrieve -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.maxRetrieve">Max Retrieve</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="number" style="width:120px" min="1" max="100" step="1" x-model.number="pmSettings.max_retrieve">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.maxRetrieveDesc">Maximum number of memories to retrieve per query.</div>
+                  </div>
+                  <!-- Extraction threshold -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.extractionThreshold">Extraction Threshold</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="number" style="width:120px" min="0" max="1" step="0.05" x-model.number="pmSettings.extraction_threshold">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.extractionThresholdDesc">Confidence threshold for near-duplicate detection during extraction (0.0 - 1.0).</div>
+                  </div>
+                  <!-- Extraction model -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.extractionModel">Extraction Model</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="text" style="flex:1" x-model="pmSettings.extraction_model" data-i18n-placeholder="settingsPage.extractionModelPlaceholder" placeholder="Leave empty to use agent's default model">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.extractionModelDesc">LLM model for memory extraction. If empty, uses the agent's default model.</div>
+                  </div>
+                  <!-- Extract categories -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.extractCategories">Extract Categories</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="text" style="flex:1" x-model="pmCategoriesText" @change="pmSettings.extract_categories = $el.value.split(',').map(s => s.trim()).filter(s => s)" data-i18n-placeholder="settingsPage.extractCategoriesPlaceholder" placeholder="preference, frustration, workflow, fact, ...">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.extractCategoriesDesc">Comma-separated list of memory categories to extract. Leave empty for defaults.</div>
+                  </div>
+                  <!-- Session TTL hours -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.sessionTtlHours">Session TTL (hours)</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="number" style="width:120px" min="1" step="1" x-model.number="pmSettings.session_ttl_hours">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.sessionTtlHoursDesc">Session memories older than this are automatically cleaned up before each agent execution.</div>
+                  </div>
+                  <!-- Confidence decay rate -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.confidenceDecayRate">Confidence Decay Rate</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="number" style="width:120px" min="0" max="1" step="0.001" x-model.number="pmSettings.confidence_decay_rate">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.confidenceDecayRateDesc">Exponential decay rate per day. Lower values preserve memories longer (0.01 = ~70 days to halve).</div>
+                  </div>
+                  <!-- Duplicate threshold -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.duplicateThreshold">Duplicate Threshold</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="number" style="width:120px" min="0" max="1" step="0.05" x-model.number="pmSettings.duplicate_threshold">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.duplicateThresholdDesc">Jaccard word overlap threshold for duplicate detection. Memories above this similarity are merged.</div>
+                  </div>
+                  <!-- Max memories per agent -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.maxMemoriesPerAgent">Max Memories Per Agent</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="number" style="width:120px" min="0" step="1" x-model.number="pmSettings.max_memories_per_agent">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.maxMemoriesPerAgentDesc">Maximum number of memories per agent. Lowest-confidence memories are evicted when exceeded. Set to 0 to disable.</div>
+                  </div>
+                </div>
+                <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
+                  <button class="btn btn-primary btn-sm" @click="saveProactiveMemory()" :disabled="pmSaving">
+                    <span x-show="!pmSaving" data-i18n="btn.save">Save</span>
+                    <span x-show="pmSaving" class="spinner" style="width:12px;height:12px;border-width:2px"></span>
+                  </button>
+                  <span class="text-xs text-dim" x-show="pmSaveStatus" x-text="pmSaveStatus"></span>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -4398,6 +4551,182 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             </div>
           </div>
         </div>
+      </div>
+    </template>
+
+    <!-- Page: Memory (Proactive Memory / mem0-style) -->
+    <template x-if="page === 'memory'">
+      <div x-data="memoryPage()" x-init="init()">
+        <div class="page-header">
+          <h2 data-i18n="memoryPage.title">Memory</h2>
+          <p class="page-subtitle" data-i18n="memoryPage.subtitle">Proactive memory system — what your agents remember about users.</p>
+        </div>
+
+        <!-- Stats bar -->
+        <div class="stats-grid" style="margin-bottom:24px">
+          <div class="stat-card">
+            <div class="stat-value" x-text="stats.total || 0"></div>
+            <div class="stat-label" data-i18n="memoryPage.totalMemories">Total Memories</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" x-text="stats.user_count || 0"></div>
+            <div class="stat-label" data-i18n="memoryPage.userLevel">User Level</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" x-text="stats.session_count || 0"></div>
+            <div class="stat-label" data-i18n="memoryPage.sessionLevel">Session Level</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" x-text="stats.agent_count || 0"></div>
+            <div class="stat-label" data-i18n="memoryPage.agentLevel">Agent Level</div>
+          </div>
+        </div>
+
+        <!-- Agent filter + Search + Add -->
+        <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
+          <select x-model="selectedAgentId" @change="onAgentFilterChange()" class="form-input" style="max-width:220px">
+            <option value="" x-text="t('memoryPage.allAgents', 'All Agents')">All Agents</option>
+            <template x-for="agent in agents" :key="agent.id">
+              <option :value="agent.id" x-text="agent.name || agent.id"></option>
+            </template>
+          </select>
+          <input type="text" x-model="searchQuery" @keyup.enter="searchMemories()" placeholder="Search memories..." data-i18n-placeholder="memoryPage.searchPlaceholder" style="flex:1;min-width:180px" class="form-input">
+          <button @click="searchMemories()" class="btn btn-primary" data-i18n="memoryPage.search">Search</button>
+          <button @click="loadMemories()" class="btn btn-secondary" data-i18n="memoryPage.all">All</button>
+          <button @click="toggleAddForm()" class="btn btn-secondary" :class="{ 'btn-primary': showAddForm }" x-text="t('memoryPage.addMemory', 'Add Memory')">Add Memory</button>
+          <button @click="consolidateAgent()" class="btn btn-secondary" x-show="selectedAgentId" x-text="t('memoryPage.consolidate', 'Consolidate')">Consolidate</button>
+          <button @click="showRelations = !showRelations; if (showRelations && relations.length === 0) loadRelations()" class="btn btn-secondary" x-show="selectedAgentId" :class="{ 'btn-primary': showRelations }" x-text="t('memoryPage.relations', 'Relations')">Relations</button>
+          <button @click="cleanupExpired()" class="btn btn-secondary" x-text="t('memoryPage.cleanup', 'Cleanup Expired')">Cleanup Expired</button>
+          <button @click="decayConfidence()" class="btn btn-secondary" x-text="t('memoryPage.decay', 'Decay Confidence')">Decay Confidence</button>
+          <button @click="bulkDelete()" class="btn btn-danger" x-show="selectedIds.length > 0" x-text="'Delete ' + selectedIds.length + ' selected'">Delete selected</button>
+        </div>
+
+        <!-- Manual memory creation form -->
+        <template x-if="showAddForm">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px">
+            <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+              <div style="flex:1;min-width:240px">
+                <label style="display:block;font-size:13px;font-weight:500;margin-bottom:4px;color:var(--text-secondary)" x-text="t('memoryPage.contentLabel', 'Content')">Content</label>
+                <input type="text" x-model="addForm.content" class="form-input" :placeholder="t('memoryPage.contentPlaceholder', 'Enter memory content...')" style="width:100%" @keyup.enter="addMemory()">
+              </div>
+              <!-- Level is auto-determined by the extraction pipeline -->
+              <button @click="addMemory()" class="btn btn-primary" :disabled="addingMemory" x-text="addingMemory ? t('memoryPage.saving', 'Saving...') : t('memoryPage.save', 'Save')">Save</button>
+              <button @click="toggleAddForm()" class="btn btn-secondary" x-text="t('btn.cancel', 'Cancel')">Cancel</button>
+            </div>
+          </div>
+        </template>
+
+        <!-- Memory list -->
+        <div class="table-container">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th style="width:32px"><input type="checkbox" @change="selectAll()" :checked="selectedIds.length === memories.length && memories.length > 0"></th>
+                <th data-i18n="memoryPage.content">Content</th>
+                <th data-i18n="memoryPage.level">Level</th>
+                <th data-i18n="memoryPage.category">Category</th>
+                <th data-i18n="memoryPage.created">Created</th>
+                <th data-i18n="label.actions">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="mem in memories" :key="mem.id">
+                <tr>
+                  <td><input type="checkbox" :checked="selectedIds.indexOf(mem.id) !== -1" @change="toggleSelect(mem.id)"></td>
+                  <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                    <template x-if="!mem._editing">
+                      <span x-text="mem.content" @dblclick="startEdit(mem)" title="Double-click to edit" style="cursor:text"></span>
+                    </template>
+                    <template x-if="mem._editing">
+                      <div style="display:flex;gap:4px;align-items:center">
+                        <input type="text" x-model="mem._editContent" class="form-input" style="flex:1;font-size:13px;padding:2px 6px" @keyup.enter="saveEdit(mem)" @keyup.escape="cancelEdit(mem)">
+                        <button @click="saveEdit(mem)" class="btn btn-sm btn-primary" title="Save">&#x2713;</button>
+                        <button @click="cancelEdit(mem)" class="btn btn-sm" title="Cancel">&#x2715;</button>
+                      </div>
+                    </template>
+                  </td>
+                  <td><span class="badge" :class="'badge-' + mem.level" x-text="mem.level"></span></td>
+                  <td x-text="mem.category || '—'" style="color:var(--text-secondary)"></td>
+                  <td x-text="new Date(mem.created_at).toLocaleDateString()" style="white-space:nowrap"></td>
+                  <td>
+                    <button @click="startEdit(mem)" class="btn btn-sm" title="Edit" x-show="!mem._editing">&#x270E;</button>
+                    <button @click="viewHistory(mem.id)" class="btn btn-sm" title="History">&#x1f4dc;</button>
+                    <button @click="deleteMemory(mem.id)" class="btn btn-sm btn-danger" title="Delete">&#x2715;</button>
+                  </td>
+                </tr>
+              </template>
+              <tr x-show="memories.length === 0">
+                <td colspan="6" style="text-align:center;color:var(--text-secondary);padding:32px" data-i18n="memoryPage.noMemoriesFound">No memories found</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Pagination controls -->
+        <div x-show="totalPages > 1" style="display:flex;justify-content:center;align-items:center;gap:8px;margin:16px 0">
+          <button class="btn btn-sm btn-ghost" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">&laquo;</button>
+          <template x-for="p in totalPages" :key="p">
+            <button class="btn btn-sm" :class="p === currentPage ? 'btn-primary' : 'btn-ghost'" @click="goToPage(p)" x-text="p" x-show="Math.abs(p - currentPage) <= 2 || p === 1 || p === totalPages"></button>
+          </template>
+          <button class="btn btn-sm btn-ghost" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">&raquo;</button>
+          <span style="color:var(--text-secondary);font-size:13px;margin-left:8px" x-text="totalMemories + ' total'"></span>
+        </div>
+
+        <!-- Knowledge Graph Relations (per-agent) -->
+        <template x-if="selectedAgentId && showRelations">
+          <div style="margin-top:16px">
+            <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">
+              <h3 style="margin:0" x-text="t('memoryPage.knowledgeGraph', 'Knowledge Graph')">Knowledge Graph</h3>
+              <input type="text" x-model="relationSource" :placeholder="t('memoryPage.sourceEntity', 'Source entity...')" class="input" style="width:140px;font-size:13px">
+              <input type="text" x-model="relationTarget" :placeholder="t('memoryPage.targetEntity', 'Target entity...')" class="input" style="width:140px;font-size:13px">
+              <button @click="loadRelations()" class="btn btn-sm btn-primary" x-text="t('memoryPage.queryRelations', 'Query')">Query</button>
+            </div>
+            <table class="data-table" x-show="relations.length > 0">
+              <thead><tr>
+                <th x-text="t('memoryPage.source', 'Source')">Source</th>
+                <th x-text="t('memoryPage.relation', 'Relation')">Relation</th>
+                <th x-text="t('memoryPage.target', 'Target')">Target</th>
+                <th x-text="t('memoryPage.confidence', 'Confidence')">Confidence</th>
+              </tr></thead>
+              <tbody>
+                <template x-for="r in relations" :key="r.source.id + r.target.id">
+                  <tr>
+                    <td><span class="badge" x-text="r.source.entity_type" style="margin-right:4px"></span><span x-text="r.source.name"></span></td>
+                    <td x-text="r.relation.type"></td>
+                    <td><span class="badge" x-text="r.target.entity_type" style="margin-right:4px"></span><span x-text="r.target.name"></span></td>
+                    <td x-text="(r.relation.confidence * 100).toFixed(0) + '%'"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+            <div x-show="relations.length === 0" style="color:var(--text-secondary);text-align:center;padding:16px" x-text="t('memoryPage.noRelations', 'No relations found')"></div>
+          </div>
+        </template>
+
+        <!-- History modal -->
+        <template x-if="showHistory">
+          <div class="modal-overlay" @click.self="showHistory = false">
+            <div class="modal" style="max-width:600px">
+              <div class="modal-header">
+                <h3 data-i18n="memoryPage.versionHistory">Version History</h3>
+                <button @click="showHistory = false" class="btn btn-sm">&times;</button>
+              </div>
+              <div class="modal-body">
+                <template x-for="(v, i) in historyItems" :key="i">
+                  <div style="padding:8px 0;border-bottom:1px solid var(--border)">
+                    <div x-text="v.content" style="font-family:monospace;font-size:13px"></div>
+                    <div style="color:var(--text-secondary);font-size:12px;margin-top:4px">
+                      <span data-i18n="memoryPage.replacedAt">Replaced at:</span> <span x-text="new Date(v.replaced_at).toLocaleString()"></span>
+                    </div>
+                  </div>
+                </template>
+                <div x-show="historyItems.length === 0" style="color:var(--text-secondary);text-align:center;padding:16px">
+                  <span data-i18n="memoryPage.noPreviousVersions">No previous versions</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
       </div>
     </template>
 

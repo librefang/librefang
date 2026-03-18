@@ -47,6 +47,8 @@ pub enum HotAction {
     UpdateDefaultModel,
     /// Tool policy changed — update tool filtering rules.
     UpdateToolPolicy,
+    /// Proactive memory config changed — update thresholds/toggles in-place.
+    UpdateProactiveMemory,
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +264,10 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
 
     if field_changed(&old.tool_policy, &new.tool_policy) {
         plan.hot_actions.push(HotAction::UpdateToolPolicy);
+    }
+
+    if field_changed(&old.proactive_memory, &new.proactive_memory) {
+        plan.hot_actions.push(HotAction::UpdateProactiveMemory);
     }
 
     if field_changed(&old.provider_api_keys, &new.provider_api_keys) {

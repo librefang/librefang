@@ -155,6 +155,8 @@ pub struct LibreFangKernel {
     pub scheduler: AgentScheduler,
     /// Memory substrate.
     pub memory: Arc<MemorySubstrate>,
+    /// Proactive memory store (mem0-style auto_retrieve/auto_memorize).
+    pub proactive_memory: OnceLock<Arc<librefang_memory::ProactiveMemoryStore>>,
     /// Process supervisor.
     pub supervisor: Supervisor,
     /// Workflow engine.
@@ -1170,6 +1172,7 @@ impl LibreFangKernel {
             event_bus: EventBus::new(),
             scheduler: AgentScheduler::new(),
             memory: memory.clone(),
+            proactive_memory: OnceLock::new(),
             supervisor,
             workflows: WorkflowEngine::new(),
             triggers: TriggerEngine::new(),
@@ -1219,6 +1222,38 @@ impl LibreFangKernel {
             context_engine,
             self_handle: OnceLock::new(),
         };
+
+        // Initialize proactive memory system (mem0-style) from config.
+        // Uses extraction_model if set, otherwise falls back to agent's default model.
+        // This allows using a cheap model (e.g., llama/haiku) for extraction while
+        // keeping an expensive model (e.g., opus/gpt-4o) for agent responses.
+        if kernel.config.proactive_memory.enabled {
+            let pm_config = kernel.config.proactive_memory.clone();
+            let extraction_model = pm_config
+                .extraction_model
+                .clone()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| kernel.config.default_model.model.clone());
+            let llm = Some((Arc::clone(&kernel.default_driver) as _, extraction_model));
+            let store = if let Some(ref emb) = kernel.embedding_driver {
+                librefang_runtime::proactive_memory::init_proactive_memory_with_embedding(
+                    Arc::clone(&kernel.memory),
+                    pm_config,
+                    llm,
+                    Arc::clone(emb),
+                )
+            } else {
+                librefang_runtime::proactive_memory::init_proactive_memory_full(
+                    Arc::clone(&kernel.memory),
+                    pm_config,
+                    llm,
+                    None,
+                )
+            };
+            if let Some(s) = store {
+                let _ = kernel.proactive_memory.set(s);
+            }
+        }
 
         // Restore persisted agents from SQLite
         match kernel.memory.load_all_agents() {
@@ -2145,6 +2180,7 @@ impl LibreFangKernel {
                 ctx_window,
                 Some(&kernel_clone.process_manager),
                 None, // content_blocks (streaming path uses text only for now)
+                kernel_clone.proactive_memory.get().cloned(),
                 kernel_clone.context_engine.as_deref(),
             )
             .await;
@@ -2320,6 +2356,9 @@ impl LibreFangKernel {
             silent: false,
             directives: Default::default(),
             decision_traces: Vec::new(),
+            memories_saved: Vec::new(),
+            memories_used: Vec::new(),
+            memory_conflicts: Vec::new(),
         })
     }
 
@@ -2382,6 +2421,9 @@ impl LibreFangKernel {
             silent: false,
             directives: Default::default(),
             decision_traces: Vec::new(),
+            memories_saved: Vec::new(),
+            memories_used: Vec::new(),
+            memory_conflicts: Vec::new(),
         })
     }
 
@@ -2846,6 +2888,9 @@ impl LibreFangKernel {
             silent: result.silent,
             directives: result.directives,
             decision_traces: result.decision_traces,
+            memories_saved: result.memories_saved,
+            memories_used: result.memories_used,
+            memory_conflicts: result.memory_conflicts,
         }
     }
 
@@ -3117,6 +3162,8 @@ impl LibreFangKernel {
             message.to_string()
         };
 
+        let proactive_memory = self.proactive_memory.get().cloned();
+
         let result = run_agent_loop(
             &manifest,
             &message_with_links,
@@ -3147,6 +3194,7 @@ impl LibreFangKernel {
             ctx_window,
             Some(&self.process_manager),
             content_blocks,
+            proactive_memory,
             self.context_engine.as_deref(),
         )
         .await
@@ -3822,6 +3870,14 @@ impl LibreFangKernel {
         // Remove from persistent storage
         let _ = self.memory.remove_agent(agent_id);
 
+        // Clean up proactive memories for this agent
+        if let Some(pm) = self.proactive_memory.get() {
+            let aid = agent_id.0.to_string();
+            if let Err(e) = pm.reset(&aid) {
+                warn!("Failed to clean up proactive memories for agent {agent_id}: {e}");
+            }
+        }
+
         // SECURITY: Record agent kill in audit trail
         self.audit_log.record(
             agent_id.to_string(),
@@ -4232,6 +4288,12 @@ impl LibreFangKernel {
                         .write()
                         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
                     *guard = Some(new_config.tool_policy.clone());
+                }
+                HotAction::UpdateProactiveMemory => {
+                    info!("Hot-reload: updating proactive memory config");
+                    if let Some(pm) = self.proactive_memory.get() {
+                        pm.update_config(new_config.proactive_memory.clone());
+                    }
                 }
                 _ => {
                     // Other hot actions (channels, web, browser, extensions, etc.)

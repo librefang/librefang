@@ -16,11 +16,12 @@ use crate::mcp::McpConnection;
 use crate::tool_runner;
 use crate::web_search::WebToolsContext;
 use librefang_memory::session::Session;
-use librefang_memory::MemorySubstrate;
+use librefang_memory::{MemorySubstrate, ProactiveMemoryHooks};
 use librefang_skills::registry::SkillRegistry;
 use librefang_types::agent::AgentManifest;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{Memory, MemoryFilter, MemorySource};
+use librefang_types::memory::{MemoryFragment, MemoryId};
 use librefang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
 };
@@ -264,6 +265,15 @@ pub struct AgentLoopResult {
     /// Structured decision traces for each tool call made during the loop.
     /// Captures reasoning, inputs, timing, and outcomes for debugging and auditing.
     pub decision_traces: Vec<DecisionTrace>,
+    /// Summaries of memories that were saved during this turn (from auto_memorize).
+    /// Empty when no new memories were extracted.
+    pub memories_saved: Vec<String>,
+    /// Summaries of memories that were recalled and injected as context (from auto_retrieve).
+    /// Empty when no relevant memories were found.
+    pub memories_used: Vec<String>,
+    /// Detected memory conflicts where new info contradicts existing memories.
+    /// Empty when no conflicts were detected.
+    pub memory_conflicts: Vec<librefang_types::memory::MemoryConflict>,
 }
 
 /// Check if stable_prefix_mode is enabled via manifest metadata.
@@ -294,6 +304,47 @@ fn sanitize_tool_result_content(
     }
 }
 
+/// Convert a proactive `MemoryItem` into the `MemoryFragment` format used by the agent loop.
+fn proactive_item_to_fragment(
+    item: librefang_types::memory::MemoryItem,
+    agent_id: librefang_types::agent::AgentId,
+) -> MemoryFragment {
+    MemoryFragment {
+        id: MemoryId(uuid::Uuid::parse_str(&item.id).unwrap_or_else(|_| uuid::Uuid::new_v4())),
+        agent_id,
+        content: item.content,
+        embedding: None,
+        metadata: item.metadata,
+        source: librefang_types::memory::MemorySource::Conversation,
+        confidence: 1.0,
+        created_at: item.created_at,
+        accessed_at: chrono::Utc::now(),
+        access_count: 0,
+        scope: item.level.scope_str().to_string(),
+    }
+}
+
+/// Serialize session messages into a JSON array for auto_memorize.
+fn serialize_session_messages(
+    messages: &[librefang_types::message::Message],
+) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|m| {
+            let content_str = m.content.text_content();
+            let role = match m.role {
+                librefang_types::message::Role::System => "system",
+                librefang_types::message::Role::User => "user",
+                librefang_types::message::Role::Assistant => "assistant",
+            };
+            serde_json::json!({
+                "role": role,
+                "content": content_str
+            })
+        })
+        .collect()
+}
+
 /// Run the agent execution loop for a single user message.
 ///
 /// This is the core of LibreFang: it loads session context, recalls memories,
@@ -321,6 +372,7 @@ pub async fn run_agent_loop(
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
     user_content_blocks: Option<Vec<ContentBlock>>,
+    proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
@@ -335,7 +387,8 @@ pub async fn run_agent_loop(
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
     // Recall relevant memories — use context engine if available, else fallback to inline logic.
-    let memories = if let Some(engine) = context_engine {
+    // In stable_prefix_mode, skip memory recall to keep the system prompt prefix stable for caching.
+    let mut memories = if let Some(engine) = context_engine {
         engine
             .ingest(session.agent_id, user_message)
             .await
@@ -389,6 +442,32 @@ pub async fn run_agent_loop(
             .unwrap_or_default()
     };
 
+    // Proactive memory: auto-retrieve (cleanup runs inside auto_retrieve)
+    // In stable_prefix_mode, skip proactive recall too to keep the prompt prefix stable for caching.
+    if !stable_prefix_mode {
+        if let Some(ref pm_store_arc) = proactive_memory {
+            let user_id = session.agent_id.0.to_string();
+
+            match pm_store_arc.auto_retrieve(&user_id, user_message).await {
+                Ok(pm_memories) if !pm_memories.is_empty() => {
+                    debug!("Proactive memory retrieved {} items", pm_memories.len());
+                    let pm_fragments: Vec<_> = pm_memories
+                        .into_iter()
+                        .map(|item| proactive_item_to_fragment(item, session.agent_id))
+                        .filter(|frag| !memories.iter().any(|m| m.content == frag.content))
+                        .collect();
+                    memories.extend(pm_fragments);
+                }
+                Ok(_) => {
+                    debug!("No proactive memories retrieved");
+                }
+                Err(e) => {
+                    warn!("Proactive memory auto_retrieve failed: {e}");
+                }
+            }
+        }
+    }
+
     // Fire BeforePromptBuild hook
     let agent_id_str = session.agent_id.0.to_string();
     if let Some(hook_reg) = hooks {
@@ -404,18 +483,43 @@ pub async fn run_agent_loop(
         let _ = hook_reg.fire(&ctx);
     }
 
+    // Capture summaries of recalled memories for user-visible feedback.
+    let memories_used: Vec<String> = memories.iter().map(|m| m.content.clone()).collect();
+
     // Build the system prompt — base prompt comes from kernel (prompt_builder),
     // we append recalled memories here since they are resolved at loop time.
-    // In stable_prefix_mode, skip appending to keep the prefix stable for caching.
+    // In stable_prefix_mode, memories are injected as a context message instead
+    // (see below) to keep the system prompt prefix stable for caching.
     let mut system_prompt = manifest.model.system_prompt.clone();
-    if !stable_prefix_mode && !memories.is_empty() {
+    let memory_context_msg = if !memories.is_empty() {
         let mem_pairs: Vec<(String, String)> = memories
             .iter()
             .map(|m| (String::new(), m.content.clone()))
             .collect();
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(&crate::prompt_builder::build_memory_section(&mem_pairs));
-    }
+        if stable_prefix_mode {
+            // In stable_prefix_mode, inject personal context only (no tool
+            // instructions) as a standalone context message to keep the system
+            // prompt prefix stable for caching.
+            let personal_ctx =
+                crate::prompt_builder::format_memory_items_as_personal_context(&mem_pairs);
+            Some(personal_ctx)
+        } else {
+            let section = crate::prompt_builder::build_memory_section(&mem_pairs);
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&section);
+            None
+        }
+    } else {
+        None
+    };
+
+    // Track message count before this turn so auto_memorize only processes new messages.
+    let messages_before = session.messages.len();
+
+    // Mutable collector for memories saved during this turn (populated by auto_memorize).
+    let mut memories_saved: Vec<String> = Vec::new();
+    // Mutable collector for memory conflicts detected during this turn.
+    let mut memory_conflicts: Vec<librefang_types::memory::MemoryConflict> = Vec::new();
 
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
@@ -448,6 +552,19 @@ pub async fn run_agent_loop(
         if !cc_msg.is_empty() {
             messages.insert(0, Message::user(cc_msg));
         }
+    }
+
+    // In stable_prefix_mode, inject recalled memories as a context message
+    // (after canonical context, before conversation) to avoid polluting the
+    // system prompt prefix that benefits from provider prompt caching.
+    // Framed as system context so the LLM treats it as background knowledge.
+    if let Some(mem_msg) = memory_context_msg {
+        messages.insert(
+            0,
+            Message::user(format!(
+                "[System context — what you know about this person]\n{mem_msg}"
+            )),
+        );
     }
 
     let mut total_usage = TokenUsage::default();
@@ -608,6 +725,9 @@ pub async fn run_agent_loop(
                             silent: true,
                         },
                         decision_traces,
+                        memories_saved: Vec::new(),
+                        memories_used: memories_used.clone(),
+                        memory_conflicts: Vec::new(),
                     });
                 }
 
@@ -754,6 +874,31 @@ pub async fn run_agent_loop(
                     "Agent loop completed"
                 );
 
+                // Run auto_memorize directly (not via hook) for proper result handling.
+                // Relations are stored inside auto_memorize via store_relations().
+                // Only send new messages from this turn, not the full session history.
+                if let Some(ref pm_store) = proactive_memory {
+                    let user_id = session.agent_id.0.to_string();
+                    let new_messages = &session.messages[messages_before..];
+                    let messages_json = serialize_session_messages(new_messages);
+                    match pm_store.auto_memorize(&user_id, &messages_json).await {
+                        Ok(result) if result.has_content => {
+                            debug!(
+                                "Proactive memory: stored {} memories, {} relations",
+                                result.memories.len(),
+                                result.relations.len(),
+                            );
+                            memories_saved
+                                .extend(result.memories.iter().map(|m| m.content.clone()));
+                            memory_conflicts.extend(result.conflicts);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!("Proactive memory auto_memorize failed: {e}");
+                        }
+                    }
+                }
+
                 // Fire AgentLoopEnd hook
                 if let Some(hook_reg) = hooks {
                     let ctx = crate::hooks::HookContext {
@@ -776,6 +921,9 @@ pub async fn run_agent_loop(
                     silent: false,
                     directives: Default::default(),
                     decision_traces,
+                    memories_saved,
+                    memories_used,
+                    memory_conflicts,
                 });
             }
             StopReason::ToolUse => {
@@ -1090,6 +1238,9 @@ pub async fn run_agent_loop(
                         silent: false,
                         directives: Default::default(),
                         decision_traces,
+                        memories_saved,
+                        memories_used,
+                        memory_conflicts,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -1380,6 +1531,7 @@ pub async fn run_agent_loop_streaming(
     context_window_tokens: Option<usize>,
     process_manager: Option<&crate::process_manager::ProcessManager>,
     user_content_blocks: Option<Vec<ContentBlock>>,
+    proactive_memory: Option<Arc<librefang_memory::ProactiveMemoryStore>>,
     context_engine: Option<&dyn ContextEngine>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
@@ -1394,7 +1546,8 @@ pub async fn run_agent_loop_streaming(
     let stable_prefix_mode = stable_prefix_mode_enabled(manifest);
 
     // Recall relevant memories — use context engine if available, else fallback to inline logic.
-    let memories = if let Some(engine) = context_engine {
+    // In stable_prefix_mode, skip memory recall to keep the system prompt prefix stable for caching.
+    let mut memories = if let Some(engine) = context_engine {
         engine
             .ingest(session.agent_id, user_message)
             .await
@@ -1448,6 +1601,35 @@ pub async fn run_agent_loop_streaming(
             .unwrap_or_default()
     };
 
+    // Proactive memory: auto-retrieve (cleanup runs inside auto_retrieve)
+    // In stable_prefix_mode, skip proactive recall too to keep the prompt prefix stable for caching.
+    if !stable_prefix_mode {
+        if let Some(ref pm_store_arc) = proactive_memory {
+            let user_id = session.agent_id.0.to_string();
+
+            match pm_store_arc.auto_retrieve(&user_id, user_message).await {
+                Ok(pm_memories) if !pm_memories.is_empty() => {
+                    debug!(
+                        "Proactive memory (streaming) retrieved {} items",
+                        pm_memories.len()
+                    );
+                    let pm_fragments: Vec<_> = pm_memories
+                        .into_iter()
+                        .map(|item| proactive_item_to_fragment(item, session.agent_id))
+                        .filter(|frag| !memories.iter().any(|m| m.content == frag.content))
+                        .collect();
+                    memories.extend(pm_fragments);
+                }
+                Ok(_) => {
+                    debug!("No proactive memories retrieved (streaming)");
+                }
+                Err(e) => {
+                    warn!("Proactive memory auto_retrieve failed (streaming): {e}");
+                }
+            }
+        }
+    }
+
     // Fire BeforePromptBuild hook
     let agent_id_str = session.agent_id.0.to_string();
     if let Some(hook_reg) = hooks {
@@ -1463,18 +1645,43 @@ pub async fn run_agent_loop_streaming(
         let _ = hook_reg.fire(&ctx);
     }
 
+    // Capture summaries of recalled memories for user-visible feedback (streaming).
+    let memories_used: Vec<String> = memories.iter().map(|m| m.content.clone()).collect();
+
     // Build the system prompt — base prompt comes from kernel (prompt_builder),
     // we append recalled memories here since they are resolved at loop time.
-    // In stable_prefix_mode, skip appending to keep the prefix stable for caching.
+    // In stable_prefix_mode, memories are injected as a context message instead
+    // (see below) to keep the system prompt prefix stable for caching.
     let mut system_prompt = manifest.model.system_prompt.clone();
-    if !stable_prefix_mode && !memories.is_empty() {
+    let memory_context_msg = if !memories.is_empty() {
         let mem_pairs: Vec<(String, String)> = memories
             .iter()
             .map(|m| (String::new(), m.content.clone()))
             .collect();
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(&crate::prompt_builder::build_memory_section(&mem_pairs));
-    }
+        if stable_prefix_mode {
+            // In stable_prefix_mode, inject personal context only (no tool
+            // instructions) as a standalone context message to keep the system
+            // prompt prefix stable for caching.
+            let personal_ctx =
+                crate::prompt_builder::format_memory_items_as_personal_context(&mem_pairs);
+            Some(personal_ctx)
+        } else {
+            let section = crate::prompt_builder::build_memory_section(&mem_pairs);
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&section);
+            None
+        }
+    } else {
+        None
+    };
+
+    // Track message count before this turn so auto_memorize only processes new messages.
+    let messages_before = session.messages.len();
+
+    // Mutable collector for memories saved during this turn (populated by auto_memorize).
+    let mut memories_saved: Vec<String> = Vec::new();
+    // Mutable collector for memory conflicts detected during this turn.
+    let mut memory_conflicts: Vec<librefang_types::memory::MemoryConflict> = Vec::new();
 
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
@@ -1505,6 +1712,19 @@ pub async fn run_agent_loop_streaming(
         if !cc_msg.is_empty() {
             messages.insert(0, Message::user(cc_msg));
         }
+    }
+
+    // In stable_prefix_mode, inject recalled memories as a context message
+    // (after canonical context, before conversation) to avoid polluting the
+    // system prompt prefix that benefits from provider prompt caching.
+    // Framed as system context so the LLM treats it as background knowledge.
+    if let Some(mem_msg) = memory_context_msg {
+        messages.insert(
+            0,
+            Message::user(format!(
+                "[System context — what you know about this person]\n{mem_msg}"
+            )),
+        );
     }
 
     let mut total_usage = TokenUsage::default();
@@ -1687,6 +1907,9 @@ pub async fn run_agent_loop_streaming(
                             silent: true,
                         },
                         decision_traces,
+                        memories_saved: Vec::new(),
+                        memories_used: memories_used.clone(),
+                        memory_conflicts: Vec::new(),
                     });
                 }
 
@@ -1832,6 +2055,31 @@ pub async fn run_agent_loop_streaming(
                     "Streaming agent loop completed"
                 );
 
+                // Run auto_memorize directly for streaming path.
+                // Relations are stored inside auto_memorize via store_relations().
+                // Only send new messages from this turn, not the full session history.
+                if let Some(ref pm_store) = proactive_memory {
+                    let user_id = session.agent_id.0.to_string();
+                    let new_messages = &session.messages[messages_before..];
+                    let messages_json = serialize_session_messages(new_messages);
+                    match pm_store.auto_memorize(&user_id, &messages_json).await {
+                        Ok(result) if result.has_content => {
+                            debug!(
+                                "Proactive memory (streaming): stored {} memories, {} relations",
+                                result.memories.len(),
+                                result.relations.len(),
+                            );
+                            memories_saved
+                                .extend(result.memories.iter().map(|m| m.content.clone()));
+                            memory_conflicts.extend(result.conflicts);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!("Proactive memory auto_memorize failed (streaming): {e}");
+                        }
+                    }
+                }
+
                 // Fire AgentLoopEnd hook
                 if let Some(hook_reg) = hooks {
                     let ctx = crate::hooks::HookContext {
@@ -1854,6 +2102,9 @@ pub async fn run_agent_loop_streaming(
                     silent: false,
                     directives: Default::default(),
                     decision_traces,
+                    memories_saved,
+                    memories_used,
+                    memory_conflicts,
                 });
             }
             StopReason::ToolUse => {
@@ -2174,6 +2425,9 @@ pub async fn run_agent_loop_streaming(
                         silent: false,
                         directives: Default::default(),
                         decision_traces,
+                        memories_saved,
+                        memories_used,
+                        memory_conflicts,
                     });
                 }
                 let text = response.text();
@@ -3151,6 +3405,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
             None, // context_engine
         )
         .await
@@ -3205,6 +3460,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
             None, // context_engine
         )
         .await
@@ -3259,6 +3515,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
             None, // context_engine
         )
         .await
@@ -3306,6 +3563,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
             None, // context_engine
         )
         .await
@@ -3434,6 +3692,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
             None, // context_engine
         )
         .await
@@ -3482,6 +3741,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
             None, // context_engine
         )
         .await
@@ -3538,6 +3798,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
             None, // context_engine
         )
         .await
@@ -4316,6 +4577,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
             None, // context_engine
         )
         .await
@@ -4384,6 +4646,7 @@ mod tests {
             None,
             None,
             None, // user_content_blocks
+            None, // proactive_memory
             None, // context_engine
         )
         .await
@@ -4448,6 +4711,7 @@ mod tests {
             None, // context_window_tokens
             None, // process_manager
             None, // user_content_blocks
+            None, // proactive_memory
             None, // context_engine
         )
         .await

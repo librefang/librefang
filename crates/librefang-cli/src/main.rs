@@ -2018,6 +2018,19 @@ api_key_env = "{api_key_env}"
 
 [memory]
 decay_rate = 0.05
+
+# Proactive memory (mem0-style auto-memorize / auto-retrieve)
+[proactive_memory]
+enabled = true
+auto_memorize = true
+auto_retrieve = true
+max_retrieve = 10
+# extraction_model = ""  # defaults to your default_model
+# extraction_threshold = 0.7
+# session_ttl_hours = 24
+# duplicate_threshold = 0.5
+# confidence_decay_rate = 0.01
+# max_memories_per_agent = 1000
 "#
         );
         std::fs::write(&config_path, &default_config).unwrap_or_else(|e| {
@@ -3141,6 +3154,19 @@ api_key_env = "{api_key_env}"
 
 [memory]
 decay_rate = 0.05
+
+# Proactive memory (mem0-style auto-memorize / auto-retrieve)
+[proactive_memory]
+enabled = true
+auto_memorize = true
+auto_retrieve = true
+max_retrieve = 10
+# extraction_model = ""  # defaults to your default_model
+# extraction_threshold = 0.7
+# session_ttl_hours = 24
+# duplicate_threshold = 0.5
+# confidence_decay_rate = 0.01
+# max_memories_per_agent = 1000
 "#
                 );
                 let _ = std::fs::create_dir_all(&librefang_dir);

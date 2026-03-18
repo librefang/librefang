@@ -6,10 +6,18 @@
 //! - **Knowledge graph** (SQLite): Entities and relations
 //!
 //! Agents interact with a single `Memory` trait that abstracts over all three stores.
+//!
+//! ## Proactive Memory (mem0-style API)
+//!
+//! This module also provides proactive memory capabilities:
+//! - `ProactiveMemory`: Unified API (search, add, get, list)
+//! - `ProactiveMemoryHooks`: Auto-memorize and auto-retrieve hooks
+//! - `ProactiveMemoryStore`: Implementation on top of MemorySubstrate
 
 pub mod consolidation;
 pub mod knowledge;
 pub mod migration;
+pub mod proactive;
 pub mod semantic;
 pub mod session;
 pub mod structured;
@@ -17,3 +25,16 @@ pub mod usage;
 
 mod substrate;
 pub use substrate::MemorySubstrate;
+
+// Re-export types for convenience
+pub use librefang_types::memory::{
+    ExtractionResult, MemoryAction, MemoryAddResult, MemoryFilter, MemoryFragment, MemoryId,
+    MemoryItem, MemoryLevel, MemorySource, ProactiveMemory, ProactiveMemoryConfig,
+    ProactiveMemoryHooks, RelationTriple, VectorSearchResult, VectorStore,
+};
+
+// Re-export proactive memory store
+pub use proactive::{MemoryExportItem, MemoryStats, ProactiveMemoryStore};
+
+// Re-export vector store implementations
+pub use semantic::SqliteVectorStore;
