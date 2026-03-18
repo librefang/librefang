@@ -2,6 +2,7 @@
 //! bindings, pairing, webhooks, and miscellaneous system handlers.
 
 use super::AppState;
+use crate::middleware::RequestLanguage;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -10,6 +11,7 @@ use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::AgentId;
 use librefang_types::agent::AgentManifest;
+use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -53,8 +55,13 @@ pub async fn list_profiles() -> impl IntoResponse {
 
 /// GET /api/profiles/:name — Get a single profile by name.
 #[utoipa::path(get, path = "/api/profiles/{name}", tag = "system", params(("name" = String, Path, description = "Profile name")), responses((status = 200, description = "Profile details", body = serde_json::Value)))]
-pub async fn get_profile(Path(name): Path<String>) -> impl IntoResponse {
+pub async fn get_profile(
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
     use librefang_types::agent::ToolProfile;
+
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
 
     let profiles: &[(&str, ToolProfile)] = &[
         ("minimal", ToolProfile::Minimal),
@@ -75,7 +82,9 @@ pub async fn get_profile(Path(name): Path<String>) -> impl IntoResponse {
         ),
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("Profile '{}' not found", name)})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-profile-not-found", &[("name", &name)])}),
+            ),
         ),
     }
 }
@@ -125,14 +134,18 @@ pub async fn list_templates() -> impl IntoResponse {
 
 /// GET /api/templates/:name — Get template details.
 #[utoipa::path(get, path = "/api/templates/{name}", tag = "system", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template details", body = serde_json::Value)))]
-pub async fn get_template(Path(name): Path<String>) -> impl IntoResponse {
+pub async fn get_template(
+    Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agents_dir = librefang_kernel::config::librefang_home().join("agents");
     let manifest_path = agents_dir.join(&name).join("agent.toml");
 
     if !manifest_path.exists() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Template not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-template-not-found")})),
         );
     }
 
@@ -163,7 +176,7 @@ pub async fn get_template(Path(name): Path<String>) -> impl IntoResponse {
                 tracing::warn!("Invalid template manifest for '{name}': {e}");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": "Invalid template manifest"})),
+                    Json(serde_json::json!({"error": t.t("api-error-template-invalid-manifest")})),
                 )
             }
         },
@@ -171,7 +184,7 @@ pub async fn get_template(Path(name): Path<String>) -> impl IntoResponse {
             tracing::warn!("Failed to read template '{name}': {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Failed to read template"})),
+                Json(serde_json::json!({"error": t.t("api-error-template-read-failed")})),
             )
         }
     }
@@ -186,13 +199,15 @@ pub async fn get_template(Path(name): Path<String>) -> impl IntoResponse {
 pub async fn get_agent_kv(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -208,7 +223,7 @@ pub async fn get_agent_kv(
             tracing::warn!("Memory list_kv failed: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Memory operation failed"})),
+                Json(serde_json::json!({"error": t.t("api-error-memory-operation-failed")})),
             )
         }
     }
@@ -219,13 +234,15 @@ pub async fn get_agent_kv(
 pub async fn get_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -236,13 +253,13 @@ pub async fn get_agent_kv_key(
         ),
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Key not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-kv-key-not-found")})),
         ),
         Err(e) => {
             tracing::warn!("Memory get failed for key '{key}': {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Memory operation failed"})),
+                Json(serde_json::json!({"error": t.t("api-error-memory-operation-failed")})),
             )
         }
     }
@@ -253,14 +270,16 @@ pub async fn get_agent_kv_key(
 pub async fn set_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -275,7 +294,7 @@ pub async fn set_agent_kv_key(
             tracing::warn!("Memory set failed for key '{key}': {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Memory operation failed"})),
+                Json(serde_json::json!({"error": t.t("api-error-memory-operation-failed")})),
             )
         }
     }
@@ -286,13 +305,15 @@ pub async fn set_agent_kv_key(
 pub async fn delete_agent_kv_key(
     State(state): State<Arc<AppState>>,
     Path((id, key)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -305,7 +326,7 @@ pub async fn delete_agent_kv_key(
             tracing::warn!("Memory delete failed for key '{key}': {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Memory operation failed"})),
+                Json(serde_json::json!({"error": t.t("api-error-memory-operation-failed")})),
             )
         }
     }
@@ -316,13 +337,15 @@ pub async fn delete_agent_kv_key(
 pub async fn export_agent_memory(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -331,7 +354,7 @@ pub async fn export_agent_memory(
     if state.kernel.registry.get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
 
@@ -351,7 +374,7 @@ pub async fn export_agent_memory(
             tracing::warn!("Memory export failed for agent {agent_id}: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Memory export failed"})),
+                Json(serde_json::json!({"error": t.t("api-error-kv-export-failed")})),
             )
         }
     }
@@ -365,14 +388,16 @@ pub async fn export_agent_memory(
 pub async fn import_agent_memory(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(aid) => aid,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -381,7 +406,7 @@ pub async fn import_agent_memory(
     if state.kernel.registry.get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
 
@@ -390,9 +415,7 @@ pub async fn import_agent_memory(
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(
-                    serde_json::json!({"error": "Missing or invalid 'kv' object in request body"}),
-                ),
+                Json(serde_json::json!({"error": t.t("api-error-kv-missing-kv-object")})),
             );
         }
     };
@@ -416,7 +439,7 @@ pub async fn import_agent_memory(
                 tracing::warn!("Failed to list existing KV during import clear: {e}");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": "Memory import failed during clear"})),
+                    Json(serde_json::json!({"error": t.t("api-error-kv-import-clear-failed")})),
                 );
             }
         }
@@ -685,7 +708,9 @@ pub async fn list_tools(State(state): State<Arc<AppState>>) -> impl IntoResponse
 pub async fn get_tool(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let tr = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Search built-in tools first
     for t in builtin_tool_definitions() {
         if t.name == name {
@@ -719,7 +744,9 @@ pub async fn get_tool(
 
     (
         StatusCode::NOT_FOUND,
-        Json(serde_json::json!({"error": format!("Tool '{}' not found", name)})),
+        Json(
+            serde_json::json!({"error": tr.t_args("api-error-tool-not-found", &[("name", &name)])}),
+        ),
     )
 }
 
@@ -748,13 +775,15 @@ pub async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoRespo
 pub async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid session ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-session-invalid-id")})),
             );
         }
     };
@@ -774,11 +803,13 @@ pub async fn get_session(
         ),
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Session not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-session-not-found")})),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -788,13 +819,15 @@ pub async fn get_session(
 pub async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid session ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-session-invalid-id")})),
             );
         }
     };
@@ -806,7 +839,9 @@ pub async fn delete_session(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -816,14 +851,16 @@ pub async fn delete_session(
 pub async fn set_session_label(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let session_id = match id.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::SessionId(u),
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid session ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-session-invalid-id")})),
             );
         }
     };
@@ -835,7 +872,9 @@ pub async fn set_session_label(
         if let Err(e) = librefang_types::agent::SessionLabel::new(lbl) {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": e.to_string()})),
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                ),
             );
         }
     }
@@ -851,7 +890,9 @@ pub async fn set_session_label(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -861,7 +902,9 @@ pub async fn set_session_label(
 pub async fn find_session_by_label(
     State(state): State<Arc<AppState>>,
     Path((agent_id_str, label)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id = match agent_id_str.parse::<uuid::Uuid>() {
         Ok(u) => librefang_types::agent::AgentId(u),
         Err(_) => {
@@ -871,7 +914,7 @@ pub async fn find_session_by_label(
                 None => {
                     return (
                         StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({"error": "Agent not found"})),
+                        Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
                     );
                 }
             }
@@ -890,11 +933,13 @@ pub async fn find_session_by_label(
         ),
         Ok(None) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "No session found with that label"})),
+            Json(serde_json::json!({"error": t.t("api-error-session-no-label")})),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e.to_string()})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -908,7 +953,11 @@ pub async fn find_session_by_label(
 /// Runs both expired-session and excess-session cleanup using the configured
 /// `[session]` policy. Returns `{"sessions_deleted": N}`.
 #[utoipa::path(post, path = "/api/sessions/cleanup", tag = "sessions", responses((status = 200, description = "Cleanup result", body = serde_json::Value)))]
-pub async fn session_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn session_cleanup(
+    State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let cfg = &state.kernel.config.session;
     let mut total: u64 = 0;
 
@@ -922,7 +971,9 @@ pub async fn session_cleanup(State(state): State<Arc<AppState>>) -> impl IntoRes
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("expired cleanup failed: {e}")})),
+                    Json(
+                        serde_json::json!({"error": t.t_args("api-error-session-cleanup-expired-failed", &[("error", &e.to_string())])}),
+                    ),
                 );
             }
         }
@@ -938,7 +989,9 @@ pub async fn session_cleanup(State(state): State<Arc<AppState>>) -> impl IntoRes
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": format!("excess cleanup failed: {e}")})),
+                    Json(
+                        serde_json::json!({"error": t.t_args("api-error-session-cleanup-excess-failed", &[("error", &e.to_string())])}),
+                    ),
                 );
             }
         }
@@ -1005,13 +1058,15 @@ pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResp
 pub async fn get_approval(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid approval ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-approval-invalid-id")})),
             );
         }
     };
@@ -1023,7 +1078,9 @@ pub async fn get_approval(
         }
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("No pending approval request with id {id}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-approval-not-found", &[("id", &id)])}),
+            ),
         ),
     }
 }
@@ -1088,13 +1145,15 @@ pub async fn create_approval(
 pub async fn approve_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid approval ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-approval-invalid-id")})),
             );
         }
     };
@@ -1119,13 +1178,15 @@ pub async fn approve_request(
 pub async fn reject_request(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let uuid = match uuid::Uuid::parse_str(&id) {
         Ok(u) => u,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid approval ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-approval-invalid-id")})),
             );
         }
     };
@@ -1157,15 +1218,23 @@ pub async fn reject_request(
 pub async fn webhook_wake(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<librefang_types::webhook::WakePayload>,
 ) -> impl IntoResponse {
+    let (err_webhook_not_enabled, err_invalid_token) = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        (
+            t.t("api-error-webhook-triggers-not-enabled"),
+            t.t("api-error-webhook-invalid-token"),
+        )
+    };
     // Check if webhook triggers are enabled
     let wh_config = match &state.kernel.config.webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Webhook triggers not enabled"})),
+                Json(serde_json::json!({"error": err_webhook_not_enabled})),
             );
         }
     };
@@ -1174,7 +1243,7 @@ pub async fn webhook_wake(
     if !validate_webhook_token(&headers, &wh_config.token_env) {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Invalid or missing token"})),
+            Json(serde_json::json!({"error": err_invalid_token})),
         );
     }
 
@@ -1197,9 +1266,16 @@ pub async fn webhook_wake(
         KernelHandle::publish_event(state.kernel.as_ref(), "webhook.wake", event_payload).await
     {
         tracing::warn!("Webhook wake event publish failed: {e}");
+        let err_msg = {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            t.t_args(
+                "api-error-webhook-publish-failed",
+                &[("error", &e.to_string())],
+            )
+        };
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Event publish failed: {e}")})),
+            Json(serde_json::json!({"error": err_msg})),
         );
     }
 
@@ -1217,15 +1293,24 @@ pub async fn webhook_wake(
 pub async fn webhook_agent(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<librefang_types::webhook::AgentHookPayload>,
 ) -> impl IntoResponse {
+    let (err_webhook_not_enabled, err_invalid_token, err_no_agents) = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        (
+            t.t("api-error-webhook-triggers-not-enabled"),
+            t.t("api-error-webhook-invalid-token"),
+            t.t("api-error-webhook-no-agents"),
+        )
+    };
     // Check if webhook triggers are enabled
     let wh_config = match &state.kernel.config.webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Webhook triggers not enabled"})),
+                Json(serde_json::json!({"error": err_webhook_not_enabled})),
             );
         }
     };
@@ -1234,7 +1319,7 @@ pub async fn webhook_agent(
     if !validate_webhook_token(&headers, &wh_config.token_env) {
         return (
             StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Invalid or missing token"})),
+            Json(serde_json::json!({"error": err_invalid_token})),
         );
     }
 
@@ -1255,11 +1340,13 @@ pub async fn webhook_agent(
                 match state.kernel.registry.find_by_name(agent_ref) {
                     Some(entry) => entry.id,
                     None => {
+                        let err_msg = {
+                            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+                            t.t_args("api-error-webhook-agent-not-found", &[("id", agent_ref)])
+                        };
                         return (
                             StatusCode::NOT_FOUND,
-                            Json(
-                                serde_json::json!({"error": format!("Agent not found: {}", agent_ref)}),
-                            ),
+                            Json(serde_json::json!({"error": err_msg})),
                         );
                     }
                 }
@@ -1272,7 +1359,7 @@ pub async fn webhook_agent(
                 None => {
                     return (
                         StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({"error": "No agents available"})),
+                        Json(serde_json::json!({"error": err_no_agents})),
                     );
                 }
             }
@@ -1295,7 +1382,10 @@ pub async fn webhook_agent(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Agent execution failed: {e}")})),
+            Json(serde_json::json!({"error": {
+                let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+                t.t_args("api-error-webhook-agent-exec-failed", &[("error", &e.to_string())])
+            }})),
         ),
     }
 }
@@ -1338,7 +1428,9 @@ pub async fn add_binding(
 pub async fn remove_binding(
     State(state): State<Arc<AppState>>,
     Path(index): Path<usize>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match state.kernel.remove_binding(index) {
         Some(_) => (
             StatusCode::OK,
@@ -1346,7 +1438,7 @@ pub async fn remove_binding(
         ),
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "Binding index out of range" })),
+            Json(serde_json::json!({ "error": t.t("api-error-binding-index-out-of-range") })),
         ),
     }
 }
@@ -1355,11 +1447,15 @@ pub async fn remove_binding(
 
 /// POST /api/pairing/request — Create a new pairing request (returns token + QR URI).
 #[utoipa::path(post, path = "/api/pairing/request", tag = "pairing", responses((status = 200, description = "Pairing request created", body = serde_json::Value)))]
-pub async fn pairing_request(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn pairing_request(
+    State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config.pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Pairing not enabled"})),
+            Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
         )
             .into_response();
     }
@@ -1385,12 +1481,14 @@ pub async fn pairing_request(State(state): State<Arc<AppState>>) -> impl IntoRes
 #[utoipa::path(post, path = "/api/pairing/complete", tag = "pairing", request_body = serde_json::Value, responses((status = 200, description = "Pairing completed", body = serde_json::Value)))]
 pub async fn pairing_complete(
     State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config.pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Pairing not enabled"})),
+            Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
         )
             .into_response();
     }
@@ -1433,11 +1531,15 @@ pub async fn pairing_complete(
 
 /// GET /api/pairing/devices — List paired devices.
 #[utoipa::path(get, path = "/api/pairing/devices", tag = "pairing", responses((status = 200, description = "List paired devices", body = Vec<serde_json::Value>)))]
-pub async fn pairing_devices(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn pairing_devices(
+    State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config.pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Pairing not enabled"})),
+            Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
         )
             .into_response();
     }
@@ -1464,11 +1566,13 @@ pub async fn pairing_devices(State(state): State<Arc<AppState>>) -> impl IntoRes
 pub async fn pairing_remove_device(
     State(state): State<Arc<AppState>>,
     Path(device_id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     if !state.kernel.config.pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Pairing not enabled"})),
+            Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
         )
             .into_response();
     }
@@ -1482,12 +1586,20 @@ pub async fn pairing_remove_device(
 #[utoipa::path(post, path = "/api/pairing/notify", tag = "pairing", request_body = serde_json::Value, responses((status = 200, description = "Notification sent", body = serde_json::Value)))]
 pub async fn pairing_notify(
     State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let (err_pairing_not_enabled, err_message_required) = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        (
+            t.t("api-error-pairing-not-enabled"),
+            t.t("api-error-pairing-message-required"),
+        )
+    };
     if !state.kernel.config.pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Pairing not enabled"})),
+            Json(serde_json::json!({"error": err_pairing_not_enabled})),
         )
             .into_response();
     }
@@ -1499,7 +1611,7 @@ pub async fn pairing_notify(
     if message.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "message is required"})),
+            Json(serde_json::json!({"error": err_message_required})),
         )
             .into_response();
     }
@@ -1547,7 +1659,9 @@ pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoRespo
 pub async fn get_command(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Normalise: ensure lookup key has a leading slash
     let lookup = if name.starts_with('/') {
         name.clone()
@@ -1607,7 +1721,9 @@ pub async fn get_command(
 
     (
         StatusCode::NOT_FOUND,
-        Json(serde_json::json!({"error": format!("Command '{}' not found", lookup)})),
+        Json(
+            serde_json::json!({"error": t.t_args("api-error-command-not-found", &[("name", &lookup)])}),
+        ),
     )
 }
 
@@ -1630,13 +1746,19 @@ struct BackupManifest {
 /// Returns the backup metadata including the filename. The archive is stored
 /// in `<home_dir>/backups/` with a timestamped filename.
 #[utoipa::path(post, path = "/api/backup", tag = "system", responses((status = 200, description = "Backup created", body = serde_json::Value)))]
-pub async fn create_backup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn create_backup(
+    State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let home_dir = &state.kernel.config.home_dir;
     let backups_dir = home_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to create backups directory: {e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-backup-create-dir-failed", &[("error", &e.to_string())])}),
+            ),
         );
     }
 
@@ -1652,7 +1774,9 @@ pub async fn create_backup(State(state): State<Arc<AppState>>) -> impl IntoRespo
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to create backup file: {e}")})),
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-backup-create-file-failed", &[("error", &e.to_string())])}),
+                ),
             );
         }
     };
@@ -1806,7 +1930,9 @@ pub async fn create_backup(State(state): State<Arc<AppState>>) -> impl IntoRespo
     if let Err(e) = zip.finish() {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to finalize backup: {e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-backup-finalize-failed", &[("error", &e.to_string())])}),
+            ),
         );
     }
 
@@ -1898,18 +2024,20 @@ pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoRespon
 pub async fn delete_backup(
     State(state): State<Arc<AppState>>,
     Path(filename): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Sanitize filename to prevent path traversal
     if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid backup filename"})),
+            Json(serde_json::json!({"error": t.t("api-error-backup-invalid-filename")})),
         );
     }
     if !filename.ends_with(".zip") {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid backup filename — must be a .zip file"})),
+            Json(serde_json::json!({"error": t.t("api-error-backup-must-be-zip")})),
         );
     }
 
@@ -1917,14 +2045,16 @@ pub async fn delete_backup(
     if !backup_path.exists() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Backup not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
         );
     }
 
     if let Err(e) = std::fs::remove_file(&backup_path) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to delete backup: {e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-backup-delete-failed", &[("error", &e.to_string())])}),
+            ),
         );
     }
 
@@ -1945,14 +2075,16 @@ pub async fn delete_backup(
 #[utoipa::path(post, path = "/api/restore", tag = "system", request_body = serde_json::Value, responses((status = 200, description = "Backup restored", body = serde_json::Value)))]
 pub async fn restore_backup(
     State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let filename = match req.get("filename").and_then(|v| v.as_str()) {
         Some(f) => f.to_string(),
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'filename' field"})),
+                Json(serde_json::json!({"error": t.t("api-error-backup-missing-filename")})),
             );
         }
     };
@@ -1961,7 +2093,7 @@ pub async fn restore_backup(
     if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid backup filename"})),
+            Json(serde_json::json!({"error": t.t("api-error-backup-invalid-filename")})),
         );
     }
 
@@ -1970,7 +2102,7 @@ pub async fn restore_backup(
     if !backup_path.exists() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Backup file not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
         );
     }
 
@@ -1980,7 +2112,9 @@ pub async fn restore_backup(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Failed to open backup: {e}")})),
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())])}),
+                ),
             );
         }
     };
@@ -1989,7 +2123,9 @@ pub async fn restore_backup(
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("Invalid backup archive: {e}")})),
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-backup-invalid-archive", &[("error", &e.to_string())])}),
+                ),
             );
         }
     };
@@ -2012,9 +2148,7 @@ pub async fn restore_backup(
     if manifest.is_none() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": "Backup archive is missing manifest.json — not a valid LibreFang backup"}),
-            ),
+            Json(serde_json::json!({"error": t.t("api-error-backup-missing-manifest")})),
         );
     }
 
@@ -2226,7 +2360,9 @@ static EVENT_WEBHOOKS: std::sync::LazyLock<
 /// Validate an events JSON array against VALID_EVENT_TYPES.
 fn validate_event_types(
     arr: &[serde_json::Value],
+    lang: Option<&axum::Extension<RequestLanguage>>,
 ) -> Result<Vec<String>, (StatusCode, Json<serde_json::Value>)> {
+    let t = ErrorTranslator::new(super::resolve_lang(lang));
     let mut event_list = Vec::new();
     for ev in arr {
         match ev.as_str() {
@@ -2234,17 +2370,18 @@ fn validate_event_types(
                 event_list.push(s.to_string());
             }
             Some(s) => {
+                let valid_str = format!("{VALID_EVENT_TYPES:?}");
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
-                        "error": format!("Unknown event type: '{s}'. Valid types: {VALID_EVENT_TYPES:?}")
+                        "error": t.t_args("api-error-webhook-unknown-event", &[("event", s), ("valid", &valid_str)])
                     })),
                 ));
             }
             None => {
                 return Err((
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": "Event types must be strings"})),
+                    Json(serde_json::json!({"error": t.t("api-error-webhook-event-not-string")})),
                 ));
             }
         }
@@ -2252,7 +2389,7 @@ fn validate_event_types(
     if event_list.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "At least one event type is required"})),
+            Json(serde_json::json!({"error": t.t("api-error-webhook-events-empty")})),
         ));
     }
     Ok(event_list)
@@ -2277,13 +2414,17 @@ pub async fn list_event_webhooks() -> impl IntoResponse {
 }
 
 /// POST /api/webhooks/events — Create a new event webhook subscription.
-pub async fn create_event_webhook(Json(req): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn create_event_webhook(
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let url = match req["url"].as_str() {
         Some(u) if !u.is_empty() => u.to_string(),
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing or empty 'url'"})),
+                Json(serde_json::json!({"error": t.t("api-error-webhook-missing-url")})),
             );
         }
     };
@@ -2291,19 +2432,19 @@ pub async fn create_event_webhook(Json(req): Json<serde_json::Value>) -> impl In
     if url::Url::parse(&url).is_err() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid URL format"})),
+            Json(serde_json::json!({"error": t.t("api-error-webhook-invalid-url")})),
         );
     }
 
     let events = match req.get("events").and_then(|v| v.as_array()) {
-        Some(arr) => match validate_event_types(arr) {
+        Some(arr) => match validate_event_types(arr, lang.as_ref()) {
             Ok(ev) => ev,
             Err(e) => return e,
         },
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'events' array"})),
+                Json(serde_json::json!({"error": t.t("api-error-webhook-missing-events")})),
             );
         }
     };
@@ -2332,15 +2473,23 @@ pub async fn create_event_webhook(Json(req): Json<serde_json::Value>) -> impl In
 /// PUT /api/webhooks/events/{id} — Update an event webhook subscription.
 pub async fn update_event_webhook(
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let (err_webhook_not_found, err_invalid_url) = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        (
+            t.t("api-error-webhook-not-found"),
+            t.t("api-error-webhook-invalid-url"),
+        )
+    };
     let mut store = EVENT_WEBHOOKS.write().await;
     let existing = match store.get(&id) {
         Some(w) => w.clone(),
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Webhook not found"})),
+                Json(serde_json::json!({"error": err_webhook_not_found})),
             );
         }
     };
@@ -2351,14 +2500,14 @@ pub async fn update_event_webhook(
         if url::Url::parse(url_val).is_err() {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid URL format"})),
+                Json(serde_json::json!({"error": err_invalid_url})),
             );
         }
         updated["url"] = serde_json::json!(url_val);
     }
 
     if let Some(arr) = req.get("events").and_then(|v| v.as_array()) {
-        match validate_event_types(arr) {
+        match validate_event_types(arr, lang.as_ref()) {
             Ok(ev) => updated["events"] = serde_json::json!(ev),
             Err(e) => return e,
         }
@@ -2378,7 +2527,14 @@ pub async fn update_event_webhook(
 }
 
 /// DELETE /api/webhooks/events/{id} — Remove an event webhook subscription.
-pub async fn delete_event_webhook(Path(id): Path<String>) -> impl IntoResponse {
+pub async fn delete_event_webhook(
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let err_webhook_not_found = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        t.t("api-error-webhook-not-found")
+    };
     let mut store = EVENT_WEBHOOKS.write().await;
     if store.remove(&id).is_some() {
         (
@@ -2388,7 +2544,7 @@ pub async fn delete_event_webhook(Path(id): Path<String>) -> impl IntoResponse {
     } else {
         (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Webhook not found"})),
+            Json(serde_json::json!({"error": err_webhook_not_found})),
         )
     }
 }
@@ -2416,13 +2572,15 @@ pub async fn list_webhooks(State(state): State<Arc<AppState>>) -> impl IntoRespo
 pub async fn get_webhook(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let wh_id = match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => crate::webhook_store::WebhookId(uuid),
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid webhook ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-webhook-invalid-id")})),
             );
         }
     };
@@ -2433,13 +2591,13 @@ pub async fn get_webhook(
                 Ok(v) => (StatusCode::OK, Json(v)),
                 Err(_) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": "serialization error"})),
+                    Json(serde_json::json!({"error": t.t("api-error-webhook-serialize-error")})),
                 ),
             }
         }
         None => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Webhook not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-webhook-not-found")})),
         ),
     }
 }
@@ -2447,8 +2605,10 @@ pub async fn get_webhook(
 /// POST /api/webhooks — Create a new webhook subscription.
 pub async fn create_webhook(
     State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<crate::webhook_store::CreateWebhookRequest>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match state.webhook_store.create(req) {
         Ok(webhook) => {
             let redacted = crate::webhook_store::redact_webhook_secret(&webhook);
@@ -2456,7 +2616,7 @@ pub async fn create_webhook(
                 Ok(v) => (StatusCode::CREATED, Json(v)),
                 Err(_) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": "serialization error"})),
+                    Json(serde_json::json!({"error": t.t("api-error-webhook-serialize-error")})),
                 ),
             }
         }
@@ -2471,8 +2631,10 @@ pub async fn create_webhook(
 pub async fn update_webhook(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<crate::webhook_store::UpdateWebhookRequest>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let wh_id = crate::webhook_store::WebhookId(uuid);
@@ -2483,7 +2645,9 @@ pub async fn update_webhook(
                         Ok(v) => (StatusCode::OK, Json(v)),
                         Err(_) => (
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({"error": "serialization error"})),
+                            Json(
+                                serde_json::json!({"error": t.t("api-error-webhook-serialize-error")}),
+                            ),
                         ),
                     }
                 }
@@ -2492,7 +2656,7 @@ pub async fn update_webhook(
         }
         Err(_) => (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid webhook ID"})),
+            Json(serde_json::json!({"error": t.t("api-error-webhook-invalid-id")})),
         ),
     }
 }
@@ -2501,7 +2665,9 @@ pub async fn update_webhook(
 pub async fn delete_webhook(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let wh_id = crate::webhook_store::WebhookId(uuid);
@@ -2513,13 +2679,13 @@ pub async fn delete_webhook(
             } else {
                 (
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": "Webhook not found"})),
+                    Json(serde_json::json!({"error": t.t("api-error-webhook-not-found")})),
                 )
             }
         }
         Err(_) => (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Invalid webhook ID"})),
+            Json(serde_json::json!({"error": t.t("api-error-webhook-invalid-id")})),
         ),
     }
 }
@@ -2531,13 +2697,21 @@ pub async fn delete_webhook(
 pub async fn test_webhook(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let (err_invalid_id, err_not_found) = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        (
+            t.t("api-error-webhook-invalid-id"),
+            t.t("api-error-webhook-not-found"),
+        )
+    };
     let wh_id = match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => crate::webhook_store::WebhookId(uuid),
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid webhook ID"})),
+                Json(serde_json::json!({"error": err_invalid_id})),
             );
         }
     };
@@ -2547,16 +2721,20 @@ pub async fn test_webhook(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Webhook not found"})),
+                Json(serde_json::json!({"error": err_not_found})),
             );
         }
     };
 
     // Re-validate the URL against SSRF rules before sending
     if let Err(e) = crate::webhook_store::validate_webhook_url(&webhook.url) {
+        let err_msg = {
+            let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+            t.t_args("api-error-webhook-url-unsafe", &[("error", &e.to_string())])
+        };
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("Webhook URL is not safe: {e}")})),
+            Json(serde_json::json!({"error": err_msg})),
         );
     }
 
@@ -2602,7 +2780,10 @@ pub async fn test_webhook(
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({
                 "status": "error",
-                "error": format!("Failed to reach webhook URL: {e}"),
+                "error": {
+                    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+                    t.t_args("api-error-webhook-reach-failed", &[("error", &e.to_string())])
+                },
                 "webhook_id": id,
             })),
         ),
@@ -2614,7 +2795,10 @@ pub async fn test_webhook(
 // ---------------------------------------------------------------------------
 
 /// GET /api/tasks/status — Summary counts of tasks by status.
-pub async fn task_queue_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn task_queue_status(
+    State(state): State<Arc<AppState>>,
+    _lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
     match state.kernel.task_list(None).await {
         Ok(tasks) => {
             let mut pending = 0u64;
@@ -2651,6 +2835,7 @@ pub async fn task_queue_status(State(state): State<Arc<AppState>>) -> impl IntoR
 /// GET /api/tasks/list — List tasks, optionally filtered by ?status=pending|in_progress|completed|failed.
 pub async fn task_queue_list(
     State(state): State<Arc<AppState>>,
+    _lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     let status_filter = params.get("status").map(|s| s.as_str());
@@ -2673,7 +2858,12 @@ pub async fn task_queue_list(
 pub async fn task_queue_delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let err_task_not_found = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        t.t("api-error-task-not-found")
+    };
     match state.kernel.task_delete(&id).await {
         Ok(true) => (
             StatusCode::OK,
@@ -2681,7 +2871,7 @@ pub async fn task_queue_delete(
         ),
         Ok(false) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Task not found"})),
+            Json(serde_json::json!({"error": err_task_not_found})),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2696,7 +2886,12 @@ pub async fn task_queue_delete(
 pub async fn task_queue_retry(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let err_task_not_retryable = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        t.t("api-error-task-not-retryable")
+    };
     match state.kernel.task_retry(&id).await {
         Ok(true) => (
             StatusCode::OK,
@@ -2705,7 +2900,7 @@ pub async fn task_queue_retry(
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
-                "error": "Task not found or not in a retryable state (must be completed or failed)"
+                "error": err_task_not_retryable
             })),
         ),
         Err(e) => (

@@ -1890,8 +1890,10 @@ pub async fn add_mcp_server(
 pub async fn update_mcp_server(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(mut body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Ensure the entry exists
     if !state
         .kernel
@@ -1902,7 +1904,9 @@ pub async fn update_mcp_server(
     {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("MCP server '{}' not found", name)})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-mcp-not-found", &[("name", &name)])}),
+            ),
         );
     }
 
@@ -1914,7 +1918,7 @@ pub async fn update_mcp_server(
     if body.get("transport").is_none() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Missing 'transport' field"})),
+            Json(serde_json::json!({"error": t.t("api-error-mcp-missing-transport")})),
         );
     }
 
@@ -1924,7 +1928,9 @@ pub async fn update_mcp_server(
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("Invalid MCP server config: {e}")})),
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-mcp-invalid-config", &[("error", &e.to_string())])}),
+                ),
             );
         }
     };
@@ -1934,7 +1940,9 @@ pub async fn update_mcp_server(
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to write config: {e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-config-write-failed", &[("error", &e.to_string())])}),
+            ),
         );
     }
 
@@ -1981,7 +1989,9 @@ pub async fn update_mcp_server(
 pub async fn delete_mcp_server(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Ensure the entry exists
     if !state
         .kernel
@@ -1992,7 +2002,9 @@ pub async fn delete_mcp_server(
     {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": format!("MCP server '{}' not found", name)})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-mcp-not-found", &[("name", &name)])}),
+            ),
         );
     }
 
@@ -2000,7 +2012,9 @@ pub async fn delete_mcp_server(
     if let Err(e) = remove_mcp_server_config(&config_path, &name) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to write config: {e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-config-write-failed", &[("error", &e.to_string())])}),
+            ),
         );
     }
 

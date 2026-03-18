@@ -547,7 +547,8 @@ pub async fn list_triggers(
             })
         })
         .collect();
-    Json(serde_json::json!({"triggers": list, "total": list.len()}))
+    let total = list.len();
+    Json(serde_json::json!({"triggers": list, "total": total}))
 }
 
 /// DELETE /api/triggers/:id — Remove a trigger.
