@@ -556,19 +556,44 @@ async fn download_github_entry(
                 .as_ref()
                 .ok_or_else(|| format!("No download URL for {}", entry.name))?;
 
-            let content = client
+            let resp = client
                 .get(download_url)
                 .send()
                 .await
-                .map_err(|e| format!("Failed to download {}: {e}", entry.name))?
+                .map_err(|e| format!("Failed to download {}: {e}", entry.name))?;
+
+            // Check Content-Length before downloading to reject oversized files early
+            const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10 MiB per file
+            if let Some(len) = resp.content_length() {
+                if len > MAX_FILE_SIZE {
+                    return Err(format!(
+                        "File '{}' too large ({len} bytes, max {MAX_FILE_SIZE})",
+                        entry.name
+                    ));
+                }
+            }
+
+            let content = resp
                 .bytes()
                 .await
                 .map_err(|e| format!("Failed to read {}: {e}", entry.name))?;
 
+            if content.len() as u64 > MAX_FILE_SIZE {
+                return Err(format!(
+                    "File '{}' too large ({} bytes, max {MAX_FILE_SIZE})",
+                    entry.name,
+                    content.len()
+                ));
+            }
+
             std::fs::write(&target_path, &content)
                 .map_err(|e| format!("Failed to write {}: {e}", target_path.display()))?;
 
-            debug!(file = entry.name, "Downloaded plugin file");
+            debug!(
+                file = entry.name,
+                bytes = content.len(),
+                "Downloaded plugin file"
+            );
         }
         "dir" => {
             std::fs::create_dir_all(&target_path)
@@ -618,16 +643,27 @@ async fn download_github_entry(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Check that all declared hook scripts exist on disk.
+/// Check that all declared hook scripts exist on disk and are within the plugin directory.
 fn check_hooks_exist(plugin_dir: &Path, manifest: &PluginManifest) -> bool {
+    let check = |rel_path: &str| -> bool {
+        let joined = plugin_dir.join(rel_path);
+        // Canonicalize to resolve any `..` and verify the resolved path
+        // stays inside the plugin directory. If canonicalize fails (file
+        // doesn't exist), the hook is missing.
+        match joined.canonicalize() {
+            Ok(abs) => abs.starts_with(plugin_dir),
+            Err(_) => false,
+        }
+    };
+
     let mut valid = true;
     if let Some(ref p) = manifest.hooks.ingest {
-        if !plugin_dir.join(p).exists() {
+        if !check(p) {
             valid = false;
         }
     }
     if let Some(ref p) = manifest.hooks.after_turn {
-        if !plugin_dir.join(p).exists() {
+        if !check(p) {
             valid = false;
         }
     }
@@ -761,8 +797,11 @@ after_turn = "hooks/after_turn.py"
     #[test]
     fn test_check_hooks_exist() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("hooks")).unwrap();
-        std::fs::write(tmp.path().join("hooks/ingest.py"), "").unwrap();
+        // Canonicalize because check_hooks_exist uses canonicalize internally
+        // (on macOS /tmp → /private/tmp)
+        let plugin_dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+        std::fs::write(plugin_dir.join("hooks/ingest.py"), "").unwrap();
 
         let manifest = PluginManifest {
             name: "test".to_string(),
@@ -776,10 +815,24 @@ after_turn = "hooks/after_turn.py"
             requirements: None,
         };
 
-        assert!(!check_hooks_exist(tmp.path(), &manifest));
+        assert!(!check_hooks_exist(&plugin_dir, &manifest));
 
         // Now create the missing file
-        std::fs::write(tmp.path().join("hooks/after_turn.py"), "").unwrap();
-        assert!(check_hooks_exist(tmp.path(), &manifest));
+        std::fs::write(plugin_dir.join("hooks/after_turn.py"), "").unwrap();
+        assert!(check_hooks_exist(&plugin_dir, &manifest));
+
+        // Path traversal: hook pointing outside plugin dir should fail
+        let manifest_escape = PluginManifest {
+            name: "test".to_string(),
+            version: "0.1.0".to_string(),
+            description: None,
+            author: None,
+            hooks: librefang_types::config::ContextEngineHooks {
+                ingest: Some("../../etc/passwd".to_string()),
+                after_turn: None,
+            },
+            requirements: None,
+        };
+        assert!(!check_hooks_exist(&plugin_dir, &manifest_escape));
     }
 }
