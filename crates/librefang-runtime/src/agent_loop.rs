@@ -381,6 +381,17 @@ pub async fn run_agent_loop(
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
 
+    // Skip agent loop if no LLM provider is configured (StubDriver).
+    // Return Ok (not Err) — this is a valid state, not a runtime error.
+    if !driver.is_configured() {
+        info!(agent = %manifest.name, "Skipping agent loop — no LLM provider configured");
+        return Ok(AgentLoopResult {
+            silent: true,
+            provider_not_configured: true,
+            ..Default::default()
+        });
+    }
+
     // Extract hand-allowed env vars from manifest metadata (set by kernel for hand settings)
     let hand_allowed_env: Vec<String> = manifest
         .metadata
@@ -1542,6 +1553,16 @@ pub async fn run_agent_loop_streaming(
     context_engine: Option<&dyn ContextEngine>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
+
+    // Skip streaming agent loop if no LLM provider is configured.
+    if !driver.is_configured() {
+        info!(agent = %manifest.name, "Skipping streaming agent loop — no LLM provider configured");
+        return Ok(AgentLoopResult {
+            silent: true,
+            provider_not_configured: true,
+            ..Default::default()
+        });
+    }
 
     // Extract hand-allowed env vars from manifest metadata (set by kernel for hand settings)
     let hand_allowed_env: Vec<String> = manifest
