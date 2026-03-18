@@ -328,7 +328,7 @@ pub async fn list_registry_plugins(github_repo: &str) -> Result<Vec<RegistryPlug
 
     Ok(entries
         .into_iter()
-        .filter(|e| e.entry_type == "dir")
+        .filter(|e| e.content_type == "dir")
         .map(|e| RegistryPluginEntry {
             name: e.name,
             registry: github_repo.to_string(),

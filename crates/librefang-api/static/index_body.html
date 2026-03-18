@@ -161,6 +161,10 @@
               <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M18 11V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2"/><path d="M14 10V4a2 2 0 0 0-2-2 2 2 0 0 0-2 2v6"/><path d="M10 10.5V6a2 2 0 0 0-2-2 2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.9-5.7-2.4L3.4 16a2 2 0 0 1 3.2-2.4L8 15"/></svg></span>
               <span class="nav-label" data-i18n="nav.hands">Hands</span>
             </a>
+            <a class="nav-item" :class="{ active: page === 'plugins' }" @click="navigate('plugins')" :aria-current="page === 'plugins' ? 'page' : false">
+              <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M12 2v6m0 8v6M2 12h6m8 0h6"/><circle cx="12" cy="12" r="3"/></svg></span>
+              <span class="nav-label">Plugins</span>
+            </a>
           </div>
         </template>
       </div>
@@ -3195,6 +3199,222 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               <span x-text="activateResult"></span>
             </div>
           </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- Page: Plugins -->
+    <template x-if="page === 'plugins'">
+      <div x-data="{
+        tab: 'installed',
+        plugins: [],
+        registries: [],
+        loading: false,
+        regLoading: false,
+        installSource: 'registry',
+        installName: '',
+        installPath: '',
+        installUrl: '',
+        installBranch: '',
+        installRegistry: '',
+        scaffoldName: '',
+        scaffoldDesc: '',
+        showInstall: false,
+        showScaffold: false,
+        async loadPlugins() {
+          this.loading = true;
+          try {
+            const r = await fetch('/api/plugins');
+            const d = await r.json();
+            this.plugins = d.plugins || [];
+          } catch(e) { console.error(e); }
+          this.loading = false;
+        },
+        async loadRegistries() {
+          this.regLoading = true;
+          try {
+            const r = await fetch('/api/plugins/registries');
+            const d = await r.json();
+            this.registries = d.registries || [];
+          } catch(e) { console.error(e); }
+          this.regLoading = false;
+        },
+        async installPlugin() {
+          let body = { source: this.installSource };
+          if (this.installSource === 'registry') {
+            body.name = this.installName;
+            if (this.installRegistry) body.registry = this.installRegistry;
+          } else if (this.installSource === 'local') {
+            body.path = this.installPath;
+          } else {
+            body.url = this.installUrl;
+            if (this.installBranch) body.branch = this.installBranch;
+          }
+          const r = await fetch('/api/plugins/install', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+          const d = await r.json();
+          if (d.error) { alert(d.error); return; }
+          this.showInstall = false;
+          this.loadPlugins();
+          this.loadRegistries();
+        },
+        async removePlugin(name) {
+          const r = await fetch('/api/plugins/uninstall', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name}) });
+          const d = await r.json();
+          if (d.error) { alert(d.error); return; }
+          this.loadPlugins();
+          this.loadRegistries();
+        },
+        async installDeps(name) {
+          const r = await fetch('/api/plugins/'+name+'/install-deps', { method:'POST' });
+          const d = await r.json();
+          if (d.error) alert(d.error); else alert('Dependencies installed');
+        },
+        async scaffoldPlugin() {
+          const r = await fetch('/api/plugins/scaffold', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name:this.scaffoldName, description:this.scaffoldDesc}) });
+          const d = await r.json();
+          if (d.error) { alert(d.error); return; }
+          this.showScaffold = false;
+          this.loadPlugins();
+        },
+        registryInstall(name, repo) {
+          this.installSource = 'registry';
+          this.installName = name;
+          this.installRegistry = repo;
+          this.installPlugin();
+        },
+        init() { this.loadPlugins(); this.loadRegistries(); }
+      }">
+        <div class="page-header">
+          <h2>Plugins</h2>
+          <div style="display:flex;gap:8px">
+            <button class="btn btn-sm" @click="showScaffold=true">New Plugin</button>
+            <button class="btn btn-sm btn-primary" @click="showInstall=true">Install</button>
+          </div>
+        </div>
+        <div class="page-body">
+          <!-- Tabs -->
+          <div style="display:flex;gap:16px;margin-bottom:16px;border-bottom:1px solid var(--border)">
+            <button :class="tab==='installed'?'tab-active':''" @click="tab='installed'" style="padding:8px 16px;background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;color:var(--text-secondary)" :style="tab==='installed'?'border-color:var(--primary);color:var(--text-primary)':''">Installed</button>
+            <button :class="tab==='registry'?'tab-active':''" @click="tab='registry'" style="padding:8px 16px;background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;color:var(--text-secondary)" :style="tab==='registry'?'border-color:var(--primary);color:var(--text-primary)':''">Registry</button>
+          </div>
+
+          <!-- Installed Tab -->
+          <template x-if="tab==='installed'">
+            <div>
+              <template x-if="loading"><div class="text-dim">Loading...</div></template>
+              <template x-if="!loading && plugins.length===0"><div class="empty-state"><h3>No plugins installed</h3><p>Install plugins from the Registry tab or use the Install button.</p></div></template>
+              <template x-if="!loading && plugins.length>0">
+                <div class="table-wrap"><table>
+                  <thead><tr><th>Name</th><th>Version</th><th>Description</th><th>Hooks</th><th>Size</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    <template x-for="p in plugins" :key="p.name">
+                      <tr>
+                        <td x-text="p.name" style="font-weight:600"></td>
+                        <td><span class="badge" x-text="p.version"></span></td>
+                        <td x-text="p.description||'—'" class="text-dim"></td>
+                        <td>
+                          <span x-show="p.hooks?.ingest" class="badge badge-success" style="margin-right:4px">ingest</span>
+                          <span x-show="p.hooks?.after_turn" class="badge badge-success">after_turn</span>
+                          <span x-show="!p.hooks_valid" class="badge badge-danger">invalid</span>
+                        </td>
+                        <td x-text="p.size_bytes?(p.size_bytes/1024).toFixed(1)+' KB':'—'" class="text-dim"></td>
+                        <td style="display:flex;gap:4px">
+                          <button class="btn btn-xs" @click="installDeps(p.name)">Deps</button>
+                          <button class="btn btn-xs btn-danger" @click="removePlugin(p.name)">Remove</button>
+                        </td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table></div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Registry Tab -->
+          <template x-if="tab==='registry'">
+            <div>
+              <template x-if="regLoading"><div class="text-dim">Loading registries...</div></template>
+              <template x-if="!regLoading && registries.length===0"><div class="empty-state"><h3>No registries configured</h3></div></template>
+              <template x-for="reg in registries" :key="reg.github_repo">
+                <div style="margin-bottom:24px">
+                  <h3 style="margin-bottom:4px" x-text="reg.name"></h3>
+                  <div class="text-dim text-xs" style="margin-bottom:12px">
+                    <a :href="'https://github.com/'+reg.github_repo" target="_blank" x-text="reg.github_repo" style="color:var(--primary)"></a>
+                    <span x-show="reg.error" class="badge badge-danger" x-text="reg.error" style="margin-left:8px"></span>
+                  </div>
+                  <template x-if="reg.plugins && reg.plugins.length>0">
+                    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">
+                      <template x-for="p in reg.plugins" :key="p.name">
+                        <div class="card" style="padding:16px">
+                          <div style="display:flex;justify-content:space-between;align-items:center">
+                            <strong x-text="p.name"></strong>
+                            <template x-if="p.installed"><span class="badge badge-success">Installed</span></template>
+                            <template x-if="!p.installed"><button class="btn btn-xs btn-primary" @click="registryInstall(p.name, reg.github_repo)">Install</button></template>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="!reg.plugins || reg.plugins.length===0">
+                    <div class="text-dim">No plugins available</div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <!-- Install Dialog -->
+          <template x-if="showInstall">
+            <div class="modal-overlay" @click.self="showInstall=false">
+              <div class="modal" style="max-width:480px">
+                <h3>Install Plugin</h3>
+                <div style="margin:12px 0">
+                  <label>Source</label>
+                  <select x-model="installSource" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
+                    <option value="registry">Registry</option>
+                    <option value="local">Local Path</option>
+                    <option value="git">Git URL</option>
+                  </select>
+                </div>
+                <template x-if="installSource==='registry'">
+                  <div style="margin:12px 0">
+                    <label>Plugin Name</label>
+                    <input x-model="installName" placeholder="e.g. echo-memory" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
+                    <label style="margin-top:8px;display:block">Registry (optional)</label>
+                    <input x-model="installRegistry" placeholder="owner/repo (default: official)" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
+                  </div>
+                </template>
+                <template x-if="installSource==='local'">
+                  <div style="margin:12px 0"><label>Path</label><input x-model="installPath" placeholder="/path/to/plugin" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)"></div>
+                </template>
+                <template x-if="installSource==='git'">
+                  <div style="margin:12px 0">
+                    <label>URL</label><input x-model="installUrl" placeholder="https://github.com/..." style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
+                    <label style="margin-top:8px;display:block">Branch (optional)</label><input x-model="installBranch" placeholder="main" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
+                  </div>
+                </template>
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+                  <button class="btn btn-sm" @click="showInstall=false">Cancel</button>
+                  <button class="btn btn-sm btn-primary" @click="installPlugin()">Install</button>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Scaffold Dialog -->
+          <template x-if="showScaffold">
+            <div class="modal-overlay" @click.self="showScaffold=false">
+              <div class="modal" style="max-width:480px">
+                <h3>Create New Plugin</h3>
+                <div style="margin:12px 0"><label>Name</label><input x-model="scaffoldName" placeholder="my-plugin" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)"></div>
+                <div style="margin:12px 0"><label>Description</label><input x-model="scaffoldDesc" placeholder="What does this plugin do?" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)"></div>
+                <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+                  <button class="btn btn-sm" @click="showScaffold=false">Cancel</button>
+                  <button class="btn btn-sm btn-primary" @click="scaffoldPlugin()">Create</button>
+                </div>
+              </div>
+            </div>
+          </template>
         </div>
       </div>
     </template>
