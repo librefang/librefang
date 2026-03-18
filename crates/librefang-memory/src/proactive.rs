@@ -315,7 +315,7 @@ impl ProactiveMemoryStore {
                 let mut metadata = item.metadata.clone();
                 metadata.insert("category".to_string(), serde_json::json!(&item.category));
                 // Store with embedding if available
-                self.semantic.remember_with_embedding(
+                let mem_id = self.semantic.remember_with_embedding(
                     agent_id,
                     &item.content,
                     MemorySource::Conversation,
@@ -323,11 +323,11 @@ impl ProactiveMemoryStore {
                     metadata,
                     query_embedding.as_deref(),
                 )?;
-                // Also store in KV so get()/list() can find it
+                // Also store in KV using the semantic store's ID for consistency
                 if let Ok(json) = serde_json::to_value(item) {
                     let _ = self
                         .structured
-                        .set(agent_id, &format!("memory:{}", item.id), json);
+                        .set(agent_id, &format!("memory:{}", mem_id), json);
                 }
                 tracing::debug!(
                     "Memory decision: ADD new: {}",
@@ -1090,7 +1090,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
                 return Ok(Vec::new());
             }
 
-            self.semantic.remember(
+            let mem_id = self.semantic.remember(
                 agent_id,
                 &content,
                 MemorySource::Conversation,
@@ -1099,11 +1099,11 @@ impl ProactiveMemory for ProactiveMemoryStore {
             )?;
 
             let item = MemoryItem::new(content, MemoryLevel::Session);
-            // Also store in KV so get()/list() can find it
+            // Also store in KV using the semantic store's ID for consistency
             if let Ok(json) = serde_json::to_value(&item) {
                 let _ = self
                     .structured
-                    .set(agent_id, &format!("memory:{}", item.id), json);
+                    .set(agent_id, &format!("memory:{}", mem_id), json);
             }
             return Ok(vec![item]);
         }
@@ -1148,7 +1148,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
             return Ok(());
         }
 
-        self.semantic.remember(
+        let mem_id = self.semantic.remember(
             agent_id,
             &content,
             MemorySource::Conversation,
@@ -1156,12 +1156,12 @@ impl ProactiveMemory for ProactiveMemoryStore {
             HashMap::new(),
         )?;
 
-        // Also store in KV so get()/list()/stats() can find it
+        // Also store in KV using the semantic store's ID for consistency
         let item = MemoryItem::new(content, level);
         if let Ok(json) = serde_json::to_value(&item) {
             let _ = self
                 .structured
-                .set(agent_id, &format!("memory:{}", item.id), json);
+                .set(agent_id, &format!("memory:{}", mem_id), json);
         }
 
         Ok(())
