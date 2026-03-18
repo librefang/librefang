@@ -688,7 +688,8 @@ pub fn load_plugin(
 
     // Resolve relative hook paths to absolute paths within the plugin dir
     // and verify they don't escape the plugin directory (path traversal guard).
-    let canon_plugin_dir = std::fs::canonicalize(&plugin_dir).unwrap_or_else(|_| plugin_dir.clone());
+    let canon_plugin_dir =
+        std::fs::canonicalize(&plugin_dir).unwrap_or_else(|_| plugin_dir.clone());
 
     let resolve_and_sandbox = |rel_path: &str| -> LibreFangResult<String> {
         let abs_path = plugin_dir.join(rel_path);
