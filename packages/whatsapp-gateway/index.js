@@ -1,15 +1,29 @@
 #!/usr/bin/env node
-'use strict';
 
-const http = require('node:http');
-const { randomUUID } = require('node:crypto');
+import http from 'node:http';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import makeWASocket, {
+  useMultiFileAuthState,
+  DisconnectReason,
+  fetchLatestBaileysVersion,
+  Browsers,
+} from '@whiskeysockets/baileys';
+import QRCode from 'qrcode';
+import pino from 'pino';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // ---------------------------------------------------------------------------
-// Config from environment
+// Config
 // ---------------------------------------------------------------------------
 const PORT = parseInt(process.env.WHATSAPP_GATEWAY_PORT || '3009', 10);
 const LIBREFANG_URL = (process.env.LIBREFANG_URL || 'http://127.0.0.1:4545').replace(/\/+$/, '');
 const DEFAULT_AGENT = process.env.LIBREFANG_DEFAULT_AGENT || 'assistant';
+const AGENT_UUID_CACHE = new Map();
 
 // Owner routing: responses to external DMs go to the owner, not back to the sender.
 // Set WHATSAPP_OWNER_JID to the owner's phone number (e.g. "393760105565").
@@ -29,26 +43,69 @@ if (OWNER_JID_RAW) {
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
-let sock = null;          // Baileys socket
-let sessionId = '';       // current session identifier
-let qrDataUrl = '';       // latest QR code as data:image/png;base64,...
-let connStatus = 'disconnected'; // disconnected | qr_ready | connected
+let sock = null;
+let sessionId = '';
+let qrDataUrl = '';
+let connStatus = 'disconnected';
 let qrExpired = false;
 let statusMessage = 'Not started';
-let reconnectAttempts = 0;
-let isConnecting = false;
+let reconnectAttempt = 0;
+let reconnectTimer = null;
+let connectedSince = null;
+let flushInterval = null;
+let evProcessUnsub = null;
 const MAX_RECONNECT_DELAY = 60_000;
-const MAX_RECONNECT_ATTEMPTS = 10;
 const MAX_FORWARD_RETRIES = 1;
 const MAX_BODY_SIZE = 64 * 1024;
 const ALLOWED_ORIGIN_RE = /^(https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?|tauri:\/\/localhost|app:\/\/localhost)$/i;
+const pendingReplies = new Map();
 
-// Cached agent UUID — resolved from DEFAULT_AGENT name on first use
-let cachedAgentId = null;
+// ---------------------------------------------------------------------------
+// Message deduplication — prevents processing the same message multiple times
+// (e.g. after Signal session re-establishment / decryption retry)
+// ---------------------------------------------------------------------------
+const PROCESSED_IDS_PATH = path.join(__dirname, '.processed_ids.json');
+const DEDUP_MAX_SIZE = 500;
+let processedIds = new Set();
+try {
+  const raw = fs.readFileSync(PROCESSED_IDS_PATH, 'utf8');
+  const arr = JSON.parse(raw);
+  if (Array.isArray(arr)) processedIds = new Set(arr.slice(-DEDUP_MAX_SIZE));
+} catch (_) {}
 
-// The user's own JID (set after connection opens) for self-chat detection
-let ownJid = null;
+function markProcessed(msgId) {
+  processedIds.add(msgId);
+  // Trim to max size
+  if (processedIds.size > DEDUP_MAX_SIZE) {
+    const arr = [...processedIds];
+    processedIds = new Set(arr.slice(-Math.floor(DEDUP_MAX_SIZE * 0.8)));
+  }
+  // Persist async (non-blocking)
+  fs.writeFile(PROCESSED_IDS_PATH, JSON.stringify([...processedIds]), () => {});
+}
 
+// Per-sender serial queue: ensures only one LibreFang call per sender at a time
+const senderQueues = new Map();
+function enqueueSender(senderJid, fn) {
+  const prev = senderQueues.get(senderJid) || Promise.resolve();
+  const next = prev.then(fn, fn);
+  senderQueues.set(senderJid, next);
+  next.finally(() => {
+    if (senderQueues.get(senderJid) === next) senderQueues.delete(senderJid);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+const log = (level, msg) => {
+  const ts = new Date().toISOString();
+  console[level === 'error' ? 'error' : 'log'](`[gateway] [${ts}] ${msg}`);
+};
+
+// ---------------------------------------------------------------------------
+// Helpers (from main: CORS, body-size limit, httpError)
+// ---------------------------------------------------------------------------
 function httpError(statusCode, message) {
   const err = new Error(message);
   err.statusCode = statusCode;
@@ -72,121 +129,78 @@ function buildCorsHeaders(origin) {
   };
 }
 
-async function cleanupSocket() {
-  if (!sock) {
-    return;
-  }
-
-  const previousSock = sock;
-  sock = null;
-  ownJid = null;
-
-  try {
-    previousSock.ev?.removeAllListeners?.();
-  } catch (err) {
-    console.warn('[gateway] Failed to remove old socket listeners:', err.message);
-  }
-
-  try {
-    previousSock.ws?.close?.();
-  } catch (err) {
-    console.warn('[gateway] Failed to close old socket transport:', err.message);
-  }
-
-  try {
-    previousSock.end?.();
-  } catch (err) {
-    console.warn('[gateway] Failed to end old socket:', err.message);
-  }
+// ---------------------------------------------------------------------------
+// Markdown → WhatsApp formatting
+// ---------------------------------------------------------------------------
+function markdownToWhatsApp(text) {
+  if (!text) return text;
+  // Bold: **text** or __text__ → *text*
+  text = text.replace(/\*\*(.+?)\*\*/g, '*$1*');
+  text = text.replace(/__(.+?)__/g, '*$1*');
+  // Italic: *text* (single) or _text_ → _text_ (WhatsApp italic)
+  // Be careful not to convert already-bold markers
+  text = text.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '_$1_');
+  // Strikethrough: ~~text~~ → ~text~
+  text = text.replace(/~~(.+?)~~/g, '~$1~');
+  // Code blocks: ```text``` → ```text```  (WhatsApp supports this natively)
+  // Inline code: `text` → ```text``` (no inline code in WhatsApp)
+  text = text.replace(/(?<!`)(`{1})(?!`)(.+?)(?<!`)\1(?!`)/g, '```$2```');
+  return text;
 }
 
 // ---------------------------------------------------------------------------
-// Resolve agent name → UUID via LibreFang API
+// Cleanup socket
 // ---------------------------------------------------------------------------
-function resolveAgentId() {
-  return new Promise((resolve, reject) => {
-    // If DEFAULT_AGENT is already a UUID, use it directly
-    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(DEFAULT_AGENT)) {
-      cachedAgentId = DEFAULT_AGENT;
-      return resolve(DEFAULT_AGENT);
+function cleanupSocket() {
+  if (flushInterval) {
+    clearInterval(flushInterval);
+    flushInterval = null;
+  }
+  if (evProcessUnsub) {
+    try { evProcessUnsub(); } catch (_) {}
+    evProcessUnsub = null;
+  }
+  if (sock) {
+    try { sock.end(undefined); } catch (_) {}
+    sock = null;
+  }
+  connectedSince = null;
+}
+
+// ---------------------------------------------------------------------------
+// Schedule reconnect with exponential backoff
+// ---------------------------------------------------------------------------
+function scheduleReconnect(reason) {
+  if (reconnectTimer) {
+    log('info', `Reconnect already scheduled, skipping (${reason})`);
+    return;
+  }
+  reconnectAttempt++;
+  const delay = Math.min(1000 * Math.pow(2, reconnectAttempt - 1), MAX_RECONNECT_DELAY);
+  log('info', `Scheduling reconnect #${reconnectAttempt} in ${delay}ms — reason: ${reason}`);
+  statusMessage = `Reconnecting (attempt ${reconnectAttempt})...`;
+  connStatus = 'disconnected';
+
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    try {
+      await startConnection();
+    } catch (err) {
+      log('error', `Reconnect failed: ${err.message}`);
+      scheduleReconnect('reconnect-error');
     }
-
-    const url = new URL(`${LIBREFANG_URL}/api/agents`);
-
-    const req = http.request(
-      {
-        hostname: url.hostname,
-        port: url.port || 4545,
-        path: url.pathname,
-        method: 'GET',
-        headers: { 'Accept': 'application/json' },
-        timeout: 10_000,
-      },
-      (res) => {
-        let body = '';
-        res.on('data', (chunk) => (body += chunk));
-        res.on('end', () => {
-          try {
-            const parsed = JSON.parse(body);
-            // Handle both array and paginated { items: [...] } response formats
-            const agents = Array.isArray(parsed) ? parsed : (parsed.items || []);
-            if (!Array.isArray(agents)) {
-              return reject(new Error('Unexpected /api/agents response'));
-            }
-            // Match by name (case-insensitive)
-            const match = agents.find(
-              (a) => (a.name || '').toLowerCase() === DEFAULT_AGENT.toLowerCase()
-            );
-            if (match && match.id) {
-              cachedAgentId = match.id;
-              console.log(`[gateway] Resolved agent "${DEFAULT_AGENT}" → ${cachedAgentId}`);
-              resolve(cachedAgentId);
-            } else if (agents.length > 0) {
-              // Fallback: use first available agent
-              cachedAgentId = agents[0].id;
-              console.log(`[gateway] Agent "${DEFAULT_AGENT}" not found, using first agent: ${cachedAgentId}`);
-              resolve(cachedAgentId);
-            } else {
-              reject(new Error('No agents available on LibreFang'));
-            }
-          } catch (e) {
-            reject(new Error(`Failed to parse /api/agents: ${e.message}`));
-          }
-        });
-      },
-    );
-
-    req.on('error', reject);
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('LibreFang /api/agents timeout'));
-    });
-    req.end();
-  });
+  }, delay);
 }
 
 // ---------------------------------------------------------------------------
 // Baileys connection
 // ---------------------------------------------------------------------------
 async function startConnection() {
-  if (isConnecting) {
-    console.log('[gateway] Connection attempt already in progress, skipping');
-    return;
-  }
-  isConnecting = true;
-  try {
+  cleanupSocket();
 
-  // Dynamic imports — Baileys is ESM-only in v6+
-  const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } =
-    await import('@whiskeysockets/baileys');
-  const QRCode = (await import('qrcode')).default || await import('qrcode');
-  const pino = (await import('pino')).default || await import('pino');
-
-  const logger = pino({ level: 'warn' });
-
-  const { state, saveCreds } = await useMultiFileAuthState(
-    require('node:path').join(__dirname, 'auth_store')
-  );
+  const logger = pino({ level: 'info' });
+  const authDir = path.join(__dirname, 'auth_store');
+  const { state, saveCreds } = await useMultiFileAuthState(authDir);
   const { version } = await fetchLatestBaileysVersion();
 
   sessionId = randomUUID();
@@ -194,217 +208,377 @@ async function startConnection() {
   qrExpired = false;
   connStatus = 'disconnected';
   statusMessage = 'Connecting...';
-  await cleanupSocket();
 
-  const activeSock = makeWASocket({
+  log('info', `Starting connection (Baileys v${version.join('.')})`);
+
+  sock = makeWASocket({
     version,
     auth: state,
     logger,
-    printQRInTerminal: true,
-    browser: ['LibreFang', 'Desktop', '1.0.0'],
-  });
-  sock = activeSock;
-
-  // Save credentials whenever they update
-  activeSock.ev.on('creds.update', saveCreds);
-
-  // Connection state changes (QR code, connected, disconnected)
-  activeSock.ev.on('connection.update', async (update) => {
-    if (sock !== activeSock) return;
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr) {
-      // New QR code generated — convert to data URL
-      try {
-        qrDataUrl = await QRCode.toDataURL(qr, { width: 256, margin: 2 });
-        connStatus = 'qr_ready';
-        qrExpired = false;
-        statusMessage = 'Scan this QR code with WhatsApp → Linked Devices';
-        console.log('[gateway] QR code ready — waiting for scan');
-      } catch (err) {
-        console.error('[gateway] QR generation failed:', err.message);
-      }
-    }
-
-    if (connection === 'close') {
-      const statusCode = lastDisconnect?.error?.output?.statusCode;
-      const reason = lastDisconnect?.error?.output?.payload?.message || 'unknown';
-      console.log(`[gateway] Connection closed: ${reason} (${statusCode})`);
-
-      if (statusCode === DisconnectReason.loggedOut) {
-        // User logged out from phone — clear auth and stop
-        connStatus = 'disconnected';
-        statusMessage = 'Logged out. Generate a new QR code to reconnect.';
-        qrDataUrl = '';
-        await cleanupSocket();
-        reconnectAttempts = 0;
-        // Invalidate cached agent ID so it re-resolves on next connect
-        cachedAgentId = null;
-        // Remove auth store so next connect gets a fresh QR
-        const fs = require('node:fs');
-        const path = require('node:path');
-        const authPath = path.join(__dirname, 'auth_store');
-        if (fs.existsSync(authPath)) {
-          fs.rmSync(authPath, { recursive: true, force: true });
-        }
-      } else if (statusCode === DisconnectReason.forbidden) {
-        // Non-recoverable — don't auto-reconnect
-        connStatus = 'disconnected';
-        statusMessage = `Disconnected: ${reason}. Use POST /login/start to reconnect.`;
-        qrDataUrl = '';
-        await cleanupSocket();
-      } else {
-        // All other disconnect reasons are treated as recoverable:
-        // restartRequired, timedOut, connectionClosed, connectionLost,
-        // connectionReplaced, multideviceMismatch, badSession, etc.
-        reconnectAttempts += 1;
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-          console.error(`[gateway] Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`);
-          connStatus = 'disconnected';
-          statusMessage = `Max reconnection attempts (${MAX_RECONNECT_ATTEMPTS}) reached. Manual restart required.`;
-        } else {
-          const delay = Math.min(
-            2000 * Math.pow(1.5, reconnectAttempts - 1),
-            MAX_RECONNECT_DELAY,
-          );
-          console.log(
-            `[gateway] Reconnecting in ${Math.round(delay / 1000)}s (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`,
-          );
-          connStatus = 'disconnected';
-          statusMessage = `Reconnecting (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
-          setTimeout(() => startConnection(), delay);
-        }
-      }
-    }
-
-    if (connection === 'open') {
-      connStatus = 'connected';
-      qrExpired = false;
-      qrDataUrl = '';
-      reconnectAttempts = 0;
-      statusMessage = 'Connected to WhatsApp';
-      console.log('[gateway] Connected to WhatsApp!');
-
-      // Capture own JID for self-chat detection
-      if (activeSock.user?.id) {
-        // Baileys user.id is like "1234567890:42@s.whatsapp.net" — normalize
-        ownJid = activeSock.user.id.replace(/:.*@/, '@');
-        console.log(`[gateway] Own JID: ${ownJid}`);
-      }
-
-      // Invalidate cached agent UUID on reconnect — the daemon may have
-      // restarted and agents may have new UUIDs.
-      cachedAgentId = null;
-    }
+    browser: Browsers.ubuntu('Chrome'),
+    keepAliveIntervalMs: 25_000,
+    connectTimeoutMs: 20_000,
+    retryRequestDelayMs: 250,
+    markOnlineOnConnect: true,
+    defaultQueryTimeoutMs: 60_000,
+    emitOwnEvents: false,
+    fireInitQueries: true,
+    syncFullHistory: false,
+    generateHighQualityLinkPreview: false,
+    getMessage: async () => undefined,
   });
 
-  // Incoming messages → forward to LibreFang
-  activeSock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (sock !== activeSock) return;
-    if (type !== 'notify') return;
+  // ------------------------------------------------------------------
+  // Use sock.ev.process() — the canonical Baileys v6 event API.
+  // This receives consolidated event batches AFTER the internal
+  // buffer is flushed, avoiding the "events stuck in buffer" problem.
+  // ------------------------------------------------------------------
+  evProcessUnsub = sock.ev.process(async (events) => {
+    // Credentials update
+    if (events['creds.update']) {
+      await saveCreds();
+    }
 
-    for (const msg of messages) {
-      // Skip status broadcasts
-      if (msg.key.remoteJid === 'status@broadcast') continue;
+    // Connection state
+    if (events['connection.update']) {
+      await handleConnectionUpdate(events['connection.update']);
+    }
 
-      // Handle self-chat ("Notes to Self"): fromMe messages to own JID.
-      // Normal messages from others have fromMe=false.
-      // Self-chat messages have fromMe=true AND remoteJid === own JID.
-      if (msg.key.fromMe) {
-        const isSelfChat = ownJid && msg.key.remoteJid === ownJid;
-        if (!isSelfChat) continue; // Skip regular outgoing messages
+    // Incoming messages
+    if (events['messages.upsert']) {
+      const { messages, type } = events['messages.upsert'];
+      log('info', `messages.upsert event: ${messages.length} message(s), type=${type}`);
+
+      if (type !== 'notify') {
+        log('info', `Skipping non-notify batch (type=${type})`);
+        return;
       }
 
-      const sender = msg.key.remoteJid || '';
+      for (const msg of messages) {
+        if (msg.key.fromMe) {
+          log('info', `Skipping own message ${msg.key.id}`);
+          continue;
+        }
+        if (msg.key.remoteJid === 'status@broadcast') continue;
 
-      // Extract text from various message types.
-      // Baileys decrypts E2EE internally; these fields are already plaintext.
-      // Protocol messages (key distribution, receipts) have no user text.
-      const innerMsg = msg.message || {};
-      const text = innerMsg.conversation
-        || innerMsg.extendedTextMessage?.text
-        || innerMsg.imageMessage?.caption
-        || innerMsg.videoMessage?.caption
-        || innerMsg.documentWithCaptionMessage?.message?.documentMessage?.caption
-        || '';
+        // --- Deduplication: skip already-processed messages ---
+        const msgId = msg.key.id;
+        if (processedIds.has(msgId)) {
+          log('info', `Skipping duplicate message ${msgId}`);
+          continue;
+        }
 
-      if (!text) continue;
+        const remoteJid = msg.key.remoteJid || '';
+        const isGroup = remoteJid.endsWith('@g.us');
 
-      // Extract phone number from JID (e.g. "1234567890@s.whatsapp.net" → "+1234567890")
-      const phone = '+' + sender.replace(/@.*$/, '');
-      const pushName = msg.pushName || phone;
+        // In groups, the actual sender is in msg.key.participant;
+        // in DMs, the sender is remoteJid itself.
+        const sender = isGroup
+          ? (msg.key.participant || remoteJid)
+          : remoteJid;
 
-      console.log(`[gateway] Incoming from ${pushName} (${phone}): ${text.substring(0, 80)}`);
+        let text =
+          msg.message?.conversation ||
+          msg.message?.extendedTextMessage?.text ||
+          msg.message?.imageMessage?.caption ||
+          msg.message?.videoMessage?.caption ||
+          '';
 
-      // Forward to LibreFang agent
-      try {
-        const response = await forwardToLibreFang(text, phone, pushName);
-        if (response && sock) {
-          // Owner routing: for DMs from external contacts, send the agent's
-          // response to the owner instead of back to the external contact.
-          // This prevents the bot from accidentally replying to shops/services
-          // with messages meant for the owner (e.g. "Signore, X ha risposto...").
-          const isGroup = sender.endsWith('@g.us');
-          let replyJid = sender;
-          let replyText = response;
-          if (!isGroup && OWNER_JID && sender !== OWNER_JID) {
-            replyJid = OWNER_JID;
-            // Prefix with sender context so the owner knows who triggered it
-            replyText = `[From ${pushName} (${phone})]\n${response}`;
-            console.log(`[gateway] Owner routing: redirecting response from ${pushName} (${phone}) -> owner`);
+        // vCard / contact message support
+        if (!text && msg.message?.contactMessage) {
+          const vc = msg.message.contactMessage;
+          const vcardStr = vc.vcard || '';
+          // Extract name from displayName or vCard FN field
+          const contactName = vc.displayName || (vcardStr.match(/FN:(.*)/)?.[1]?.trim()) || 'Sconosciuto';
+          // Extract phone numbers from TEL fields
+          const phones = [...vcardStr.matchAll(/TEL[^:]*:([\d\s+\-().]+)/g)].map(m => m[1].trim());
+          text = `[Contatto condiviso] ${contactName}` + (phones.length ? ` — ${phones.join(', ')}` : '');
+          log('info', `vCard received from ${sender}: ${contactName}, phones: ${phones.join(', ')}`);
+        }
 
-            // Send a brief LLM-generated ack to the external sender in their language
-            try {
-              const ack = await generateSenderAck(text, pushName);
-              if (ack) {
-                await sock.sendMessage(sender, { text: ack });
-              }
-            } catch (ackErr) {
-              console.error(`[gateway] Failed to send ack to ${pushName}:`, ackErr.message);
-            }
+        // Multi-contact message (contactsArrayMessage)
+        if (!text && msg.message?.contactsArrayMessage) {
+          const contacts = msg.message.contactsArrayMessage.contacts || [];
+          const entries = contacts.map(c => {
+            const vcardStr = c.vcard || '';
+            const name = c.displayName || (vcardStr.match(/FN:(.*)/)?.[1]?.trim()) || '?';
+            const phones = [...vcardStr.matchAll(/TEL[^:]*:([\d\s+\-().]+)/g)].map(m => m[1].trim());
+            return `${name}${phones.length ? ` (${phones.join(', ')})` : ''}`;
+          });
+          text = `[Contatti condivisi] ${entries.join('; ')}`;
+          log('info', `Multi-vCard received from ${sender}: ${entries.length} contacts`);
+        }
+
+        if (!text) {
+          log('info', `No text content in message from ${sender} (stub=${msg.messageStubType || 'none'})`);
+          continue;
+        }
+
+        // Mark as processed BEFORE forwarding (prevents re-processing on decrypt retry)
+        markProcessed(msgId);
+
+        const phone = '+' + sender.replace(/@.*$/, '');
+        const pushName = msg.pushName || phone;
+
+        // Detect @mention of the bot in groups
+        let wasMentioned = false;
+        if (isGroup && sock?.user?.id) {
+          const botJid = sock.user.id.replace(/:\d+@/, '@'); // normalize "123:45@s.whatsapp.net" → "123@s.whatsapp.net"
+          const mentionedJids = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+          wasMentioned = mentionedJids.includes(botJid) || mentionedJids.includes(sock.user.id);
+          // Also check raw text for @phone patterns
+          if (!wasMentioned) {
+            const botPhone = botJid.replace(/@.*$/, '');
+            wasMentioned = (text || '').includes(`@${botPhone}`);
           }
-
-          await sock.sendMessage(replyJid, { text: replyText });
-          const target = replyJid === OWNER_JID && replyJid !== sender
-            ? `owner (via ${pushName})` : pushName;
-          console.log(`[gateway] Replied to ${target}`);
         }
-      } catch (err) {
-        console.error(`[gateway] Forward/reply failed:`, err.message);
+
+        const groupLabel = isGroup ? ` [group:${remoteJid}]` : '';
+        log('info', `Incoming from ${pushName} (${phone})${groupLabel}: ${text.substring(0, 120)}`);
+
+        // Read receipt (blue ticks)
+        try {
+          if (sock) await sock.readMessages([msg.key]);
+        } catch (err) {
+          log('error', `Read receipt failed: ${err.message}`);
+        }
+
+        // In groups, reply to the group; in DMs, reply to the individual.
+        const replyJid = isGroup ? remoteJid : sender;
+
+        // Enqueue per-sender to serialize LibreFang calls per contact
+        enqueueSender(sender, () =>
+          handleIncoming(text, phone, pushName, replyJid, isGroup, remoteJid, wasMentioned).catch((err) => {
+            log('error', `Handle failed for ${pushName}: ${err.message}`);
+          })
+        );
       }
     }
   });
-  } finally {
-    isConnecting = false;
+
+  // ------------------------------------------------------------------
+  // Safety net: periodic buffer flush every 3 seconds.
+  // In theory processNodeWithBuffer already flushes, but if a code
+  // path inside Baileys activates the buffer without flushing, this
+  // ensures events don't get stuck forever.
+  // ------------------------------------------------------------------
+  flushInterval = setInterval(() => {
+    try {
+      if (sock?.ev?.flush) sock.ev.flush();
+    } catch (_) {}
+  }, 3_000);
+
+  log('info', 'Event handlers registered via sock.ev.process()');
+}
+
+// ---------------------------------------------------------------------------
+// Handle connection updates
+// ---------------------------------------------------------------------------
+async function handleConnectionUpdate(update) {
+  const { connection, lastDisconnect, qr } = update;
+
+  if (qr) {
+    try {
+      qrDataUrl = await QRCode.toDataURL(qr, { width: 256, margin: 2 });
+      connStatus = 'qr_ready';
+      qrExpired = false;
+      statusMessage = 'Scan QR with WhatsApp > Linked Devices';
+      log('info', 'QR code ready');
+    } catch (err) {
+      log('error', `QR generation failed: ${err.message}`);
+    }
+  }
+
+  if (connection === 'open') {
+    connStatus = 'connected';
+    qrExpired = false;
+    qrDataUrl = '';
+    reconnectAttempt = 0;
+    connectedSince = Date.now();
+    statusMessage = 'Connected to WhatsApp';
+    log('info', 'Connected to WhatsApp!');
+
+    // TCP keepalive — prevents silent network deaths in containers
+    try {
+      const rawSocket = sock?.ws?.socket?._socket;
+      if (rawSocket && typeof rawSocket.setKeepAlive === 'function') {
+        rawSocket.setKeepAlive(true, 10_000);
+        log('info', 'TCP keepalive enabled');
+      }
+    } catch (_) {}
+
+    flushPendingReplies();
+  }
+
+  if (connection === 'close') {
+    const statusCode = lastDisconnect?.error?.output?.statusCode;
+    const reason = lastDisconnect?.error?.output?.payload?.message || 'unknown';
+    const uptime = connectedSince ? Math.round((Date.now() - connectedSince) / 1000) : 0;
+    log('info', `Closed after ${uptime}s — ${reason} (code: ${statusCode})`);
+
+    if (statusCode === DisconnectReason.loggedOut) {
+      connStatus = 'disconnected';
+      statusMessage = 'Logged out. POST /login/start to reconnect.';
+      qrDataUrl = '';
+      cleanupSocket();
+      reconnectAttempt = 0;
+      const authPath = path.join(__dirname, 'auth_store');
+      if (fs.existsSync(authPath)) {
+        fs.rmSync(authPath, { recursive: true, force: true });
+      }
+      log('info', 'Auth cleared');
+    } else if (statusCode === DisconnectReason.connectionReplaced) {
+      log('info', 'Connection replaced — backing off');
+      reconnectAttempt = Math.max(reconnectAttempt, 3);
+      scheduleReconnect('connection-replaced');
+    } else {
+      scheduleReconnect(reason);
+    }
   }
 }
 
 // ---------------------------------------------------------------------------
-// Forward incoming message to LibreFang API, return agent response
+// Handle incoming → LibreFang → reply
 // ---------------------------------------------------------------------------
-async function forwardToLibreFang(text, phone, pushName, retryCount = 0) {
-  // Resolve agent UUID if not cached (or if invalidated on reconnect)
-  if (!cachedAgentId) {
+async function handleIncoming(text, phone, pushName, replyJid, isGroup, groupJid, wasMentioned) {
+  let response;
+  try {
+    response = await forwardToLibreFang(text, phone, pushName, isGroup, groupJid, wasMentioned);
+  } catch (err) {
+    log('error', `LibreFang error for ${pushName}: ${err.message}`);
+    return;
+  }
+  if (!response) {
+    log('info', `No response from LibreFang for ${pushName}`);
+    return;
+  }
+
+  // Convert markdown formatting to WhatsApp-native formatting
+  response = markdownToWhatsApp(response);
+
+  if (sock && connStatus === 'connected') {
     try {
-      await resolveAgentId();
+      // Owner routing: for DMs from external contacts, send the agent's
+      // response to the owner instead of back to the external contact.
+      let actualReplyJid = replyJid;
+      let replyText = response;
+      if (!isGroup && OWNER_JID && replyJid !== OWNER_JID) {
+        actualReplyJid = OWNER_JID;
+        // Prefix with sender context so the owner knows who triggered it
+        replyText = `[From ${pushName} (${phone})]\n${response}`;
+        log('info', `Owner routing: redirecting response from ${pushName} (${phone}) -> owner`);
+
+        // Send a brief LLM-generated ack to the external sender in their language
+        try {
+          const ack = await generateSenderAck(text, pushName);
+          if (ack) {
+            await sock.sendMessage(replyJid, { text: ack });
+          }
+        } catch (ackErr) {
+          log('error', `Failed to send ack to ${pushName}: ${ackErr.message}`);
+        }
+      }
+
+      await sock.sendMessage(actualReplyJid, { text: replyText });
+      const target = isGroup ? `group ${groupJid}` : (actualReplyJid === OWNER_JID && actualReplyJid !== replyJid ? `owner (via ${pushName})` : pushName);
+      log('info', `Replied to ${target} (${response.length} chars)`);
+      return;
     } catch (err) {
-      console.error(`[gateway] Agent resolution failed: ${err.message}`);
-      throw err;
+      log('error', `Send failed for ${pushName}: ${err.message}`);
     }
   }
 
+  log('info', `Buffering reply for ${pushName}`);
+  pendingReplies.set(replyJid, { text: response, timestamp: Date.now() });
+}
+
+// ---------------------------------------------------------------------------
+// Flush pending replies
+// ---------------------------------------------------------------------------
+async function flushPendingReplies() {
+  if (pendingReplies.size === 0) return;
+  const maxAge = 5 * 60_000;
+  const now = Date.now();
+
+  for (const [jid, { text, timestamp }] of pendingReplies) {
+    pendingReplies.delete(jid);
+    if (now - timestamp > maxAge) {
+      log('info', `Discarding stale reply for ${jid}`);
+      continue;
+    }
+    try {
+      await sock.sendMessage(jid, { text });
+      log('info', `Flushed reply to ${jid}`);
+    } catch (err) {
+      log('error', `Flush failed for ${jid}: ${err.message}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Resolve agent name → UUID
+// ---------------------------------------------------------------------------
+async function resolveAgentUUID(nameOrUUID) {
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(nameOrUUID)) {
+    return nameOrUUID;
+  }
+  if (AGENT_UUID_CACHE.has(nameOrUUID)) {
+    return AGENT_UUID_CACHE.get(nameOrUUID);
+  }
   return new Promise((resolve, reject) => {
-    const payload = JSON.stringify({
+    http.get(`${LIBREFANG_URL}/api/agents`, (res) => {
+      let body = '';
+      res.on('data', (chunk) => (body += chunk));
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(body);
+          // Handle both array and paginated { items: [...] } response formats
+          const agents = Array.isArray(parsed) ? parsed : (parsed.items || []);
+          if (!Array.isArray(agents)) {
+            return reject(new Error('Unexpected /api/agents response'));
+          }
+          // Match by name (case-insensitive)
+          const agent = agents.find(
+            (a) => (a.name || '').toLowerCase() === nameOrUUID.toLowerCase()
+          );
+          if (agent) {
+            AGENT_UUID_CACHE.set(nameOrUUID, agent.id);
+            resolve(agent.id);
+          } else if (agents.length > 0) {
+            // Fallback: use first available agent
+            AGENT_UUID_CACHE.set(nameOrUUID, agents[0].id);
+            log('info', `Agent "${nameOrUUID}" not found, using first agent: ${agents[0].id}`);
+            resolve(agents[0].id);
+          } else {
+            reject(new Error('No agents available on LibreFang'));
+          }
+        } catch (e) {
+          reject(new Error(`Parse agents failed: ${e.message}`));
+        }
+      });
+    }).on('error', reject);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Forward to LibreFang
+// ---------------------------------------------------------------------------
+async function forwardToLibreFang(text, phone, pushName, isGroup, groupJid, wasMentioned, retryCount = 0) {
+  const agentId = await resolveAgentUUID(DEFAULT_AGENT);
+  return new Promise((resolve, reject) => {
+    const body = {
       message: text,
-      metadata: {
-        channel: 'whatsapp',
-        sender: phone,
-        sender_name: pushName,
-      },
-    });
-
-    const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(cachedAgentId)}/message`);
-
+      sender_id: phone,
+      sender_name: pushName,
+      channel_type: 'whatsapp',
+    };
+    if (isGroup) {
+      body.is_group = true;
+      body.group_id = groupJid;
+      body.was_mentioned = wasMentioned;
+    }
+    const payload = JSON.stringify(body);
+    const url = new URL(`${LIBREFANG_URL}/api/agents/${agentId}/message`);
     const req = http.request(
       {
         hostname: url.hostname,
@@ -415,7 +589,7 @@ async function forwardToLibreFang(text, phone, pushName, retryCount = 0) {
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(payload),
         },
-        timeout: 120_000, // LLM calls can be slow
+        timeout: 300_000,
       },
       (res) => {
         let body = '';
@@ -424,22 +598,20 @@ async function forwardToLibreFang(text, phone, pushName, retryCount = 0) {
           // If the agent UUID became stale (404), invalidate cache and retry once
           if (res.statusCode === 404) {
             if (retryCount < MAX_FORWARD_RETRIES) {
-              console.log('[gateway] Agent UUID stale (404), re-resolving...');
-              cachedAgentId = null;
-              // Retry once with fresh UUID
-              resolveAgentId()
-                .then(() => forwardToLibreFang(text, phone, pushName, retryCount + 1))
+              log('info', 'Agent UUID stale (404), re-resolving...');
+              AGENT_UUID_CACHE.delete(DEFAULT_AGENT);
+              resolveAgentUUID(DEFAULT_AGENT)
+                .then(() => forwardToLibreFang(text, phone, pushName, isGroup, groupJid, wasMentioned, retryCount + 1))
                 .then(resolve)
                 .catch(reject);
               return;
             }
-            console.error('[gateway] Agent UUID still 404 after retry, giving up');
+            log('error', 'Agent UUID still 404 after retry, giving up');
             return reject(new Error('Agent not found after retry'));
           }
 
           try {
             const data = JSON.parse(body);
-            // The /api/agents/{id}/message endpoint returns { response: "..." }
             resolve(data.response || data.message || data.text || '');
           } catch {
             resolve(body.trim() || '');
@@ -447,12 +619,8 @@ async function forwardToLibreFang(text, phone, pushName, retryCount = 0) {
         });
       },
     );
-
     req.on('error', reject);
-    req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('LibreFang API timeout'));
-    });
+    req.on('timeout', () => { req.destroy(); reject(new Error('LibreFang timeout')); });
     req.write(payload);
     req.end();
   });
@@ -462,9 +630,8 @@ async function forwardToLibreFang(text, phone, pushName, retryCount = 0) {
 // Generate a brief ack for external senders via LLM (language-aware)
 // ---------------------------------------------------------------------------
 async function generateSenderAck(originalMessage, pushName) {
-  if (!cachedAgentId) {
-    try { await resolveAgentId(); } catch { return ''; }
-  }
+  let agentId;
+  try { agentId = await resolveAgentUUID(DEFAULT_AGENT); } catch { return ''; }
 
   const prompt = [
     `[SYSTEM-ACK] An external contact named "${pushName}" just sent a WhatsApp message.`,
@@ -480,7 +647,7 @@ async function generateSenderAck(originalMessage, pushName) {
       metadata: { channel: 'whatsapp', sender: 'system', sender_name: 'system-ack' },
     });
 
-    const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(cachedAgentId)}/message`);
+    const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(agentId)}/message`);
 
     const req = http.request(
       {
@@ -508,12 +675,12 @@ async function generateSenderAck(originalMessage, pushName) {
       },
     );
     req.on('error', (err) => {
-      console.error(`[gateway] generateSenderAck failed: ${err.message}`);
+      log('error', `generateSenderAck failed: ${err.message}`);
       resolve('');
     });
     req.on('timeout', () => {
       req.destroy();
-      console.error('[gateway] generateSenderAck timeout');
+      log('error', 'generateSenderAck timeout');
       resolve('');
     });
     req.write(payload);
@@ -522,16 +689,11 @@ async function generateSenderAck(originalMessage, pushName) {
 }
 
 // ---------------------------------------------------------------------------
-// Send a message via Baileys (called by LibreFang for outgoing)
+// Send outgoing message
 // ---------------------------------------------------------------------------
 async function sendMessage(to, text) {
-  if (!sock || connStatus !== 'connected') {
-    throw new Error('WhatsApp not connected');
-  }
-
-  // Normalize phone → JID: "+1234567890" → "1234567890@s.whatsapp.net"
+  if (!sock || connStatus !== 'connected') throw new Error('WhatsApp not connected');
   const jid = to.replace(/^\+/, '').replace(/@.*$/, '') + '@s.whatsapp.net';
-
   await sock.sendMessage(jid, { text });
 }
 
@@ -586,7 +748,6 @@ function jsonResponse(req, res, status, data) {
 }
 
 const server = http.createServer(async (req, res) => {
-  // CORS preflight
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
       ...buildCorsHeaders(req.headers.origin),
@@ -595,128 +756,79 @@ const server = http.createServer(async (req, res) => {
   }
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
-  const path = url.pathname;
+  const pathname = url.pathname;
 
   try {
-    // POST /login/start — start Baileys connection, return QR
-    if (req.method === 'POST' && path === '/login/start') {
-      // If already connected, just return success
+    if (req.method === 'POST' && pathname === '/login/start') {
       if (connStatus === 'connected') {
         return jsonResponse(req, res, 200, {
-          qr_data_url: '',
-          session_id: sessionId,
-          message: 'Already connected to WhatsApp',
-          connected: true,
+          qr_data_url: '', session_id: sessionId,
+          message: 'Already connected', connected: true,
         });
       }
-
-      // Start a new connection (resets any existing)
       await startConnection();
-
-      // Wait briefly for QR to generate (Baileys emits it quickly)
       let waited = 0;
       while (!qrDataUrl && connStatus !== 'connected' && waited < 15_000) {
         await new Promise((r) => setTimeout(r, 300));
         waited += 300;
       }
-
       return jsonResponse(req, res, 200, {
-        qr_data_url: qrDataUrl,
-        session_id: sessionId,
-        message: statusMessage,
-        connected: connStatus === 'connected',
+        qr_data_url: qrDataUrl, session_id: sessionId,
+        message: statusMessage, connected: connStatus === 'connected',
       });
     }
 
-    // GET /login/status — poll for connection status
-    if (req.method === 'GET' && path === '/login/status') {
+    if (req.method === 'GET' && pathname === '/login/status') {
       return jsonResponse(req, res, 200, {
         connected: connStatus === 'connected',
         message: statusMessage,
         expired: qrExpired,
+        uptime: connectedSince ? Math.round((Date.now() - connectedSince) / 1000) : 0,
       });
     }
 
-    // POST /message/send — send outgoing message via Baileys
-    if (req.method === 'POST' && path === '/message/send') {
+    if (req.method === 'POST' && pathname === '/message/send') {
       const body = await parseBody(req);
-      const { to, text } = body;
-
-      if (!to || !text) {
-        return jsonResponse(req, res, 400, { error: 'Missing "to" or "text" field' });
-      }
-
-      await sendMessage(to, text);
+      if (!body.to || !body.text) return jsonResponse(req, res, 400, { error: 'Missing "to" or "text"' });
+      await sendMessage(body.to, body.text);
       return jsonResponse(req, res, 200, { success: true, message: 'Sent' });
     }
 
-    // GET /health — health check
-    if (req.method === 'GET' && path === '/health') {
+    if (req.method === 'GET' && pathname === '/health') {
       return jsonResponse(req, res, 200, {
         status: 'ok',
         connected: connStatus === 'connected',
         session_id: sessionId || null,
+        uptime: connectedSince ? Math.round((Date.now() - connectedSince) / 1000) : 0,
+        pending_replies: pendingReplies.size,
       });
     }
 
-    // 404
     jsonResponse(req, res, 404, { error: 'Not found' });
   } catch (err) {
-    console.error(`[gateway] ${req.method} ${path} error:`, err.message);
+    log('error', `${req.method} ${pathname}: ${err.message}`);
     jsonResponse(req, res, err.statusCode || 500, { error: err.message });
   }
 });
 
-function startServer() {
-  server.listen(PORT, '127.0.0.1', async () => {
-    console.log(`[gateway] WhatsApp Web gateway listening on http://127.0.0.1:${PORT}`);
-    console.log(`[gateway] LibreFang URL: ${LIBREFANG_URL}`);
-    console.log(`[gateway] Default agent: ${DEFAULT_AGENT}`);
+// ---------------------------------------------------------------------------
+// Start
+// ---------------------------------------------------------------------------
+server.listen(PORT, '127.0.0.1', () => {
+  log('info', `Listening on http://127.0.0.1:${PORT}`);
+  log('info', `LibreFang: ${LIBREFANG_URL} | Agent: ${DEFAULT_AGENT}`);
 
-    // Auto-connect from existing credentials on startup
-    const fs = require('node:fs');
-    const authPath = require('node:path').join(__dirname, 'auth_store', 'creds.json');
-    if (fs.existsSync(authPath)) {
-      console.log('[gateway] Found existing auth — auto-connecting...');
-      try {
-        await startConnection();
-      } catch (err) {
-        console.error('[gateway] Auto-connect failed:', err.message);
-        // Schedule a retry after a short delay — the daemon may still be booting
-        console.log('[gateway] Will retry auto-connect in 10s...');
-        setTimeout(async () => {
-          try {
-            await startConnection();
-          } catch (retryErr) {
-            console.error('[gateway] Auto-connect retry failed:', retryErr.message);
-          }
-        }, 10_000);
-      }
-    } else {
-      console.log('[gateway] No auth found — waiting for POST /login/start to begin QR flow...');
-    }
-  });
+  const credsPath = path.join(__dirname, 'auth_store', 'creds.json');
+  if (fs.existsSync(credsPath)) {
+    log('info', 'Credentials found — auto-connecting...');
+    startConnection().catch((err) => {
+      log('error', `Auto-connect failed: ${err.message}`);
+      statusMessage = 'Auto-connect failed. POST /login/start to retry.';
+    });
+  } else {
+    log('info', 'No credentials. POST /login/start for QR flow.');
+  }
+});
 
-  // Graceful shutdown
-  process.on('SIGINT', () => {
-    console.log('\n[gateway] Shutting down...');
-    if (sock) sock.end();
-    server.close(() => process.exit(0));
-  });
-
-  process.on('SIGTERM', () => {
-    if (sock) sock.end();
-    server.close(() => process.exit(0));
-  });
-}
-
-if (require.main === module) {
-  startServer();
-}
-
-module.exports = {
-  MAX_BODY_SIZE,
-  buildCorsHeaders,
-  isAllowedOrigin,
-  parseBody,
-};
+process.on('SIGINT', () => { log('info', 'SIGINT'); cleanupSocket(); server.close(() => process.exit(0)); });
+process.on('SIGTERM', () => { log('info', 'SIGTERM'); cleanupSocket(); server.close(() => process.exit(0)); });
