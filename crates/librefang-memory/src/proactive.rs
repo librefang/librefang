@@ -321,6 +321,12 @@ impl ProactiveMemoryStore {
                     metadata,
                     query_embedding.as_deref(),
                 )?;
+                // Also store in KV so get()/list() can find it
+                if let Ok(json) = serde_json::to_value(item) {
+                    let _ = self
+                        .structured
+                        .set(agent_id, &format!("memory:{}", item.id), json);
+                }
                 tracing::debug!(
                     "Memory decision: ADD new: {}",
                     truncate_for_log(&item.content, 80)
@@ -384,6 +390,12 @@ impl ProactiveMemoryStore {
                 // Update content in-place (preserves ID, agent, scope, access stats)
                 self.semantic
                     .update_content(old_mid, &item.content, Some(metadata))?;
+                // Also update in KV so get()/list() reflect the change
+                if let Ok(json) = serde_json::to_value(item) {
+                    let _ = self
+                        .structured
+                        .set(agent_id, &format!("memory:{}", existing_id), json);
+                }
 
                 tracing::debug!(
                     "Memory decision: UPDATE {} -> {}",
@@ -896,7 +908,14 @@ impl ProactiveMemory for ProactiveMemoryStore {
                 HashMap::new(),
             )?;
 
-            return Ok(vec![MemoryItem::new(content, MemoryLevel::Session)]);
+            let item = MemoryItem::new(content, MemoryLevel::Session);
+            // Also store in KV so get()/list() can find it
+            if let Ok(json) = serde_json::to_value(&item) {
+                let _ = self
+                    .structured
+                    .set(agent_id, &format!("memory:{}", item.id), json);
+            }
+            return Ok(vec![item]);
         }
 
         // Step 2-4: For each extracted memory, decide and execute
@@ -1135,7 +1154,10 @@ fn truncate_for_log(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        match s.char_indices().nth(max) {
+            Some((idx, _)) => format!("{}...", &s[..idx]),
+            None => s.to_string(),
+        }
     }
 }
 
@@ -1193,7 +1215,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         let count = self
             .consolidation_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if count > 0 && count.is_multiple_of(10) {
+        if count > 0 && count % 10 == 0 {
             match self.consolidate(user_id).await {
                 Ok(merged) if merged > 0 => {
                     tracing::info!("Auto-consolidation: merged {} duplicate memories", merged);

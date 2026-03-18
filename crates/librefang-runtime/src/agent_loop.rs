@@ -394,17 +394,9 @@ pub async fn run_agent_loop(
             .unwrap_or_default()
     };
 
-    // Proactive memory: clean up expired session memories, then auto-retrieve
+    // Proactive memory: auto-retrieve (cleanup runs inside auto_retrieve)
     if let Some(ref pm_store_arc) = proactive_memory {
         let user_id = session.agent_id.0.to_string();
-
-        // Clean up session memories older than 24 hours to prevent unbounded growth
-        let ttl_hours = pm_store_arc.config().session_ttl_hours as i64;
-        if let Err(e) =
-            pm_store_arc.cleanup_expired_sessions(&user_id, chrono::Duration::hours(ttl_hours))
-        {
-            debug!("Session memory cleanup skipped: {e}");
-        }
 
         match pm_store_arc.auto_retrieve(&user_id, user_message).await {
             Ok(pm_memories) if !pm_memories.is_empty() => {
@@ -451,6 +443,9 @@ pub async fn run_agent_loop(
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&crate::prompt_builder::build_memory_section(&mem_pairs));
     }
+
+    // Track message count before this turn so auto_memorize only processes new messages.
+    let messages_before = session.messages.len();
 
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
@@ -750,9 +745,11 @@ pub async fn run_agent_loop(
 
                 // Run auto_memorize directly (not via hook) for proper result handling.
                 // Relations are stored inside auto_memorize via store_relations().
+                // Only send new messages from this turn, not the full session history.
                 if let Some(ref pm_store) = proactive_memory {
                     let user_id = session.agent_id.0.to_string();
-                    let messages_json = serialize_session_messages(&session.messages);
+                    let new_messages = &session.messages[messages_before..];
+                    let messages_json = serialize_session_messages(new_messages);
                     match pm_store.auto_memorize(&user_id, &messages_json).await {
                         Ok(result) if result.has_content => {
                             debug!(
@@ -1449,16 +1446,9 @@ pub async fn run_agent_loop_streaming(
             .unwrap_or_default()
     };
 
-    // Proactive memory: clean up expired session memories, then auto-retrieve (streaming)
+    // Proactive memory: auto-retrieve (cleanup runs inside auto_retrieve)
     if let Some(ref pm_store_arc) = proactive_memory {
         let user_id = session.agent_id.0.to_string();
-
-        let ttl_hours = pm_store_arc.config().session_ttl_hours as i64;
-        if let Err(e) =
-            pm_store_arc.cleanup_expired_sessions(&user_id, chrono::Duration::hours(ttl_hours))
-        {
-            debug!("Session memory cleanup skipped (streaming): {e}");
-        }
 
         match pm_store_arc.auto_retrieve(&user_id, user_message).await {
             Ok(pm_memories) if !pm_memories.is_empty() => {
@@ -1508,6 +1498,9 @@ pub async fn run_agent_loop_streaming(
         system_prompt.push_str("\n\n");
         system_prompt.push_str(&crate::prompt_builder::build_memory_section(&mem_pairs));
     }
+
+    // Track message count before this turn so auto_memorize only processes new messages.
+    let messages_before = session.messages.len();
 
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
@@ -1822,9 +1815,11 @@ pub async fn run_agent_loop_streaming(
 
                 // Run auto_memorize directly for streaming path.
                 // Relations are stored inside auto_memorize via store_relations().
+                // Only send new messages from this turn, not the full session history.
                 if let Some(ref pm_store) = proactive_memory {
                     let user_id = session.agent_id.0.to_string();
-                    let messages_json = serialize_session_messages(&session.messages);
+                    let new_messages = &session.messages[messages_before..];
+                    let messages_json = serialize_session_messages(new_messages);
                     match pm_store.auto_memorize(&user_id, &messages_json).await {
                         Ok(result) if result.has_content => {
                             debug!(

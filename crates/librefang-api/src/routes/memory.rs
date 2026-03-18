@@ -60,7 +60,7 @@ fn get_pm_store(
 }
 
 fn default_user_id() -> String {
-    "default".to_string()
+    "00000000-0000-0000-0000-000000000000".to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -143,7 +143,7 @@ pub async fn memory_list(
 /// Get all memories for a specific user.
 #[utoipa::path(
     get,
-    path = "/api/memory/{user_id}",
+    path = "/api/memory/user/{user_id}",
     tag = "memory",
     params(("user_id" = String, Path, description = "User ID")),
     responses((status = 200, description = "User memories", body = serde_json::Value))
@@ -216,7 +216,7 @@ pub async fn memory_add(
 /// Update a memory's content by ID.
 #[utoipa::path(
     put,
-    path = "/api/memory/{memory_id}",
+    path = "/api/memory/items/{memory_id}",
     tag = "memory",
     params(("memory_id" = String, Path, description = "Memory ID")),
     request_body = serde_json::Value,
@@ -256,7 +256,7 @@ pub async fn memory_update(
 /// Delete a specific memory by ID.
 #[utoipa::path(
     delete,
-    path = "/api/memory/{memory_id}",
+    path = "/api/memory/items/{memory_id}",
     tag = "memory",
     params(("memory_id" = String, Path, description = "Memory ID")),
     responses((status = 200, description = "Memory deleted", body = serde_json::Value))
@@ -500,7 +500,7 @@ pub async fn memory_duplicates(
 /// Get the version history of a specific memory.
 #[utoipa::path(
     get,
-    path = "/api/memory/{memory_id}/history",
+    path = "/api/memory/items/{memory_id}/history",
     tag = "memory",
     params(("memory_id" = String, Path, description = "Memory ID")),
     responses((status = 200, description = "Memory version history", body = serde_json::Value))

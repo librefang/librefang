@@ -56,7 +56,7 @@ function memoryPage() {
     deleteMemory: function(id) {
       var self = this;
       if (!confirm('Delete this memory?')) return;
-      LibreFangAPI.request('DELETE', '/api/memory/' + id).then(function() {
+      LibreFangAPI.request('DELETE', '/api/memory/items/' + id).then(function() {
         self.memories = self.memories.filter(function(m) { return m.id !== id; });
         self.loadStats();
         LibreFangToast.success('Memory deleted');
@@ -67,7 +67,7 @@ function memoryPage() {
 
     viewHistory: function(id) {
       var self = this;
-      LibreFangAPI.request('GET', '/api/memory/' + id + '/history').then(function(data) {
+      LibreFangAPI.request('GET', '/api/memory/items/' + id + '/history').then(function(data) {
         self.historyItems = data.versions || [];
         self.showHistory = true;
       }).catch(function() {

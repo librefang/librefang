@@ -217,12 +217,9 @@ impl MemoryExtractor for LlmMemoryExtractor {
         // Build the LLM request
         let request = crate::llm_driver::CompletionRequest {
             model: self.model.clone(),
-            messages: vec![
-                librefang_types::message::Message::system(EXTRACTION_SYSTEM_PROMPT),
-                librefang_types::message::Message::user(format!(
-                    "Extract memories from this conversation:\n\n{conversation_text}"
-                )),
-            ],
+            messages: vec![librefang_types::message::Message::user(format!(
+                "Extract memories from this conversation:\n\n{conversation_text}"
+            ))],
             tools: Vec::new(),
             max_tokens: 1024,
             temperature: 0.1,
@@ -273,10 +270,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
 
         let request = crate::llm_driver::CompletionRequest {
             model: self.model.clone(),
-            messages: vec![
-                librefang_types::message::Message::system(DECISION_SYSTEM_PROMPT),
-                librefang_types::message::Message::user(user_msg),
-            ],
+            messages: vec![librefang_types::message::Message::user(user_msg)],
             tools: Vec::new(),
             max_tokens: 256,
             temperature: 0.0,
