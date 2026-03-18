@@ -1719,6 +1719,24 @@
     "noMemoriesFound": "未找到记忆",
     "versionHistory": "版本历史",
     "replacedAt": "替换于：",
-    "noPreviousVersions": "无历史版本"
+    "noPreviousVersions": "无历史版本",
+    "allAgents": "所有智能体",
+    "filterByAgent": "按智能体筛选",
+    "addMemory": "添加记忆",
+    "contentLabel": "内容",
+    "contentPlaceholder": "输入记忆内容...",
+    "levelLabel": "级别",
+    "save": "保存",
+    "saving": "保存中...",
+    "contentRequired": "请输入记忆内容",
+    "memoryAdded": "已添加 {count} 条记忆",
+    "addMemoryFailed": "添加记忆失败：{message}",
+    "memoryDeleted": "记忆已删除",
+    "deleteMemoryFailed": "删除记忆失败",
+    "confirmDelete": "确定删除此记忆？",
+    "memoriesUsed": "条记忆被使用",
+    "memoriesSaved": "条记忆已保存",
+    "recalled": "已检索",
+    "saved": "已保存"
   }
 }

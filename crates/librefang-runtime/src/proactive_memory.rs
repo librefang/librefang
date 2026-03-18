@@ -132,28 +132,63 @@ pub fn init_proactive_memory_with_defaults(
 // LLM-powered Memory Extractor
 // ---------------------------------------------------------------------------
 
-const EXTRACTION_SYSTEM_PROMPT: &str = r#"You are a memory extraction system. Analyze the conversation and extract important information that should be remembered for future interactions.
+const EXTRACTION_SYSTEM_PROMPT: &str = r#"You are a memory extraction system. Your goal: help a future assistant feel like it truly knows this person — their style, preferences, expertise, and what matters to them.
 
-Extract ONLY clearly stated facts, preferences, and important context. Do NOT infer or assume.
+Extract ONLY clearly stated or strongly demonstrated facts. Do NOT infer personality traits from single messages. Prioritize what would most change how you interact with someone.
+
+## What to extract (in priority order)
+
+1. **Communication style & language**: Concise vs. detailed? Formal vs. casual? Do they write in a specific language (e.g., Chinese, English)? Do they prefer code-heavy answers or conceptual explanations?
+2. **Frustrations & pet peeves**: What annoys them? What mistakes should be avoided? These are the most actionable memories — they prevent you from doing things the person hates.
+3. **Preferences & opinions**: Tools, languages, frameworks, themes, workflows they like or dislike. Strong opinions about how things should be done.
+4. **Work style & autonomy**: Do they want you to just do it, or discuss first? Step-by-step or big-picture? Do they review diffs or trust you?
+5. **Technical background**: Expertise level, technologies they work with, role, domain. What they know well vs. what they're learning.
+6. **Project context**: Key projects, architectures, recurring tasks, decisions made and why.
+7. **Personal details**: Name, timezone, team, anything they voluntarily shared.
+
+## How to write memories
+
+Write each memory as a natural observation that captures nuance — not as a flat database entry.
+
+GOOD: "Prefers concise, direct answers — skips caveats and gets to the point"
+BAD: "User prefers concise communication"
+
+GOOD: "Gets frustrated when code suggestions don't compile — always verify before suggesting"
+BAD: "User dislikes compilation errors"
+
+GOOD: "Communicates in Chinese; switch to Chinese unless they write in English first"
+BAD: "User language: Chinese"
+
+GOOD: "Highly autonomous — wants changes made, not discussed. Just do it and explain after."
+BAD: "User prefers autonomous execution"
+
+## Response format
 
 Respond with a JSON object containing two arrays:
 
 1. "memories" - Facts and preferences to remember:
-   - "content": the extracted memory (concise, one sentence)
-   - "category": one of: user_preference, important_fact, task_context
-   - "level": "user" for personal info, "session" for task context, "agent" for agent-specific
+   - "content": the extracted memory (concise, one natural sentence with actionable nuance)
+   - "category": one of: communication_style, preference, expertise, work_style, project_context, personal_detail, frustration
+   - "level": "user" for personal/preference info, "session" for current task context, "agent" for agent-specific learnings
 
 2. "relations" - Entity relationships (knowledge graph triples):
    - "subject": entity name (e.g., "Alice")
    - "subject_type": person, organization, project, concept, location, tool
-   - "relation": works_at, uses, prefers, knows_about, located_in, part_of, depends_on
+   - "relation": works_at, uses, prefers, knows_about, located_in, part_of, depends_on, dislikes, experienced_with
    - "object": related entity name (e.g., "Acme Corp")
    - "object_type": same types as subject_type
 
 Example:
 {
-  "memories": [{"content": "User prefers Rust over Go", "category": "user_preference", "level": "user"}],
-  "relations": [{"subject": "User", "subject_type": "person", "relation": "prefers", "object": "Rust", "object_type": "tool"}]
+  "memories": [
+    {"content": "Experienced Rust developer who works on the LibreFang project — treat as expert, skip beginner explanations", "category": "expertise", "level": "user"},
+    {"content": "Prefers concise code reviews — skip obvious comments, focus on logic and correctness issues only", "category": "work_style", "level": "user"},
+    {"content": "Uses dark mode and minimal UI everywhere — avoid suggesting light themes or busy layouts", "category": "preference", "level": "user"}
+  ],
+  "relations": [
+    {"subject": "User", "subject_type": "person", "relation": "experienced_with", "object": "Rust", "object_type": "tool"},
+    {"subject": "User", "subject_type": "person", "relation": "works_at", "object": "LibreFang", "object_type": "project"}
+  ]
 }
 
 If nothing worth extracting: {"memories": [], "relations": []}"#;
@@ -300,14 +335,23 @@ impl MemoryExtractor for LlmMemoryExtractor {
             return String::new();
         }
 
-        let mut context = String::from("## Relevant Memories\n\n");
+        let mut context = String::from(
+            "You have the following understanding of this person from previous conversations. \
+             This is knowledge you have — not a list to recite. Let it naturally shape how you \
+             respond:\n\
+             \n\
+             - Reference relevant context when it helps (\"since you're working in Rust...\", \
+             \"keeping it concise like you prefer...\") but only when it genuinely adds value.\n\
+             - Let remembered preferences silently guide your style, format, and depth — you \
+             don't need to announce that you're doing so.\n\
+             - NEVER say \"based on my memory\", \"according to my records\", \"I recall that you...\", \
+             or mechanically list what you know. A friend doesn't preface every remark with \
+             \"I remember you told me...\".\n\
+             - If a memory is clearly outdated or the user contradicts it, trust the current \
+             conversation over stored context.\n\n",
+        );
         for mem in memories {
-            let level_str = match mem.level {
-                MemoryLevel::User => "[User]",
-                MemoryLevel::Session => "[Session]",
-                MemoryLevel::Agent => "[Agent]",
-            };
-            context.push_str(&format!("- {} {}\n", level_str, mem.content));
+            context.push_str(&format!("- {}\n", mem.content));
         }
         context
     }

@@ -226,6 +226,38 @@ function chatPage() {
       });
     },
 
+    // Memory indicator helpers
+    memoryToolCount(tools) {
+      if (!tools || !tools.length) return 0;
+      return tools.filter(function(t) {
+        var n = (t.name || '').toLowerCase();
+        return n === 'memory_recall' || n === 'memory_store' || n === 'memory_search' || n === 'memory_save';
+      }).length;
+    },
+
+    memoryTools(tools) {
+      if (!tools || !tools.length) return [];
+      return tools.filter(function(t) {
+        var n = (t.name || '').toLowerCase();
+        return n === 'memory_recall' || n === 'memory_store' || n === 'memory_search' || n === 'memory_save';
+      });
+    },
+
+    memoryIndicatorText(tools) {
+      var count = this.memoryToolCount(tools);
+      var recalled = 0;
+      var saved = 0;
+      (tools || []).forEach(function(t) {
+        var n = (t.name || '').toLowerCase();
+        if (n === 'memory_recall' || n === 'memory_search') recalled++;
+        if (n === 'memory_store' || n === 'memory_save') saved++;
+      });
+      var parts = [];
+      if (recalled > 0) parts.push(recalled + ' ' + this.t('memoryPage.memoriesUsed', 'memories used'));
+      if (saved > 0) parts.push(saved + ' ' + this.t('memoryPage.memoriesSaved', 'memories saved'));
+      return parts.join(', ') || (count + ' ' + this.t('memoryPage.memoriesUsed', 'memories used'));
+    },
+
     footerStatusText() {
       if (this.tokenCount > 0) {
         return '~' + this.tokenCount + ' ' + this.t('agentChat.tokens', 'tokens');

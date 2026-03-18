@@ -1717,6 +1717,24 @@
     "noMemoriesFound": "No memories found",
     "versionHistory": "Version History",
     "replacedAt": "Replaced at:",
-    "noPreviousVersions": "No previous versions"
+    "noPreviousVersions": "No previous versions",
+    "allAgents": "All Agents",
+    "filterByAgent": "Filter by agent",
+    "addMemory": "Add Memory",
+    "contentLabel": "Content",
+    "contentPlaceholder": "Enter memory content...",
+    "levelLabel": "Level",
+    "save": "Save",
+    "saving": "Saving...",
+    "contentRequired": "Please enter memory content",
+    "memoryAdded": "{count} memory/memories added",
+    "addMemoryFailed": "Failed to add memory: {message}",
+    "memoryDeleted": "Memory deleted",
+    "deleteMemoryFailed": "Failed to delete memory",
+    "confirmDelete": "Delete this memory?",
+    "memoriesUsed": "memories used",
+    "memoriesSaved": "memories saved",
+    "recalled": "recalled",
+    "saved": "saved"
   }
 }

@@ -665,19 +665,24 @@ async fn handle_text_message(
                                 "low"
                             };
 
-                            let _ = send_json(
-                                sender,
-                                &serde_json::json!({
-                                    "type": "response",
-                                    "content": content,
-                                    "input_tokens": result.total_usage.input_tokens,
-                                    "output_tokens": result.total_usage.output_tokens,
-                                    "iterations": result.iterations,
-                                    "cost_usd": result.cost_usd,
-                                    "context_pressure": pressure,
-                                }),
-                            )
-                            .await;
+                            let mut resp_json = serde_json::json!({
+                                "type": "response",
+                                "content": content,
+                                "input_tokens": result.total_usage.input_tokens,
+                                "output_tokens": result.total_usage.output_tokens,
+                                "iterations": result.iterations,
+                                "cost_usd": result.cost_usd,
+                                "context_pressure": pressure,
+                            });
+                            if !result.memories_saved.is_empty() {
+                                resp_json["memories_saved"] =
+                                    serde_json::json!(result.memories_saved);
+                            }
+                            if !result.memories_used.is_empty() {
+                                resp_json["memories_used"] =
+                                    serde_json::json!(result.memories_used);
+                            }
+                            let _ = send_json(sender, &resp_json).await;
                         }
                         Ok(Err(e)) => {
                             stream_task.abort();

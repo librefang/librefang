@@ -827,6 +827,8 @@ pub async fn send_message(
                     iterations: result.iterations,
                     cost_usd: result.cost_usd,
                     decision_traces: result.decision_traces,
+                    memories_saved: result.memories_saved,
+                    memories_used: result.memories_used,
                 })),
             )
         }

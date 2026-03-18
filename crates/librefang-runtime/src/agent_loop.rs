@@ -246,6 +246,12 @@ pub struct AgentLoopResult {
     /// Structured decision traces for each tool call made during the loop.
     /// Captures reasoning, inputs, timing, and outcomes for debugging and auditing.
     pub decision_traces: Vec<DecisionTrace>,
+    /// Summaries of memories that were saved during this turn (from auto_memorize).
+    /// Empty when no new memories were extracted.
+    pub memories_saved: Vec<String>,
+    /// Summaries of memories that were recalled and injected as context (from auto_retrieve).
+    /// Empty when no relevant memories were found.
+    pub memories_used: Vec<String>,
 }
 
 /// Check if stable_prefix_mode is enabled via manifest metadata.
@@ -431,21 +437,41 @@ pub async fn run_agent_loop(
         let _ = hook_reg.fire(&ctx);
     }
 
+    // Capture summaries of recalled memories for user-visible feedback.
+    let memories_used: Vec<String> = memories.iter().map(|m| m.content.clone()).collect();
+
     // Build the system prompt — base prompt comes from kernel (prompt_builder),
     // we append recalled memories here since they are resolved at loop time.
-    // In stable_prefix_mode, skip appending to keep the prefix stable for caching.
+    // In stable_prefix_mode, memories are injected as a context message instead
+    // (see below) to keep the system prompt prefix stable for caching.
     let mut system_prompt = manifest.model.system_prompt.clone();
-    if !stable_prefix_mode && !memories.is_empty() {
+    let memory_context_msg = if !memories.is_empty() {
         let mem_pairs: Vec<(String, String)> = memories
             .iter()
             .map(|m| (String::new(), m.content.clone()))
             .collect();
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(&crate::prompt_builder::build_memory_section(&mem_pairs));
-    }
+        if stable_prefix_mode {
+            // In stable_prefix_mode, inject personal context only (no tool
+            // instructions) as a standalone context message to keep the system
+            // prompt prefix stable for caching.
+            let personal_ctx =
+                crate::prompt_builder::format_memory_items_as_personal_context(&mem_pairs);
+            Some(personal_ctx)
+        } else {
+            let section = crate::prompt_builder::build_memory_section(&mem_pairs);
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&section);
+            None
+        }
+    } else {
+        None
+    };
 
     // Track message count before this turn so auto_memorize only processes new messages.
     let messages_before = session.messages.len();
+
+    // Mutable collector for memories saved during this turn (populated by auto_memorize).
+    let mut memories_saved: Vec<String> = Vec::new();
 
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
@@ -478,6 +504,19 @@ pub async fn run_agent_loop(
         if !cc_msg.is_empty() {
             messages.insert(0, Message::user(cc_msg));
         }
+    }
+
+    // In stable_prefix_mode, inject recalled memories as a context message
+    // (after canonical context, before conversation) to avoid polluting the
+    // system prompt prefix that benefits from provider prompt caching.
+    // Framed as system context so the LLM treats it as background knowledge.
+    if let Some(mem_msg) = memory_context_msg {
+        messages.insert(
+            0,
+            Message::user(format!(
+                "[System context — what you know about this person]\n{mem_msg}"
+            )),
+        );
     }
 
     let mut total_usage = TokenUsage::default();
@@ -628,6 +667,8 @@ pub async fn run_agent_loop(
                             silent: true,
                         },
                         decision_traces,
+                        memories_saved: Vec::new(),
+                        memories_used: memories_used.clone(),
                     });
                 }
 
@@ -757,6 +798,8 @@ pub async fn run_agent_loop(
                                 result.memories.len(),
                                 result.relations.len(),
                             );
+                            memories_saved
+                                .extend(result.memories.iter().map(|m| m.content.clone()));
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -787,6 +830,8 @@ pub async fn run_agent_loop(
                     silent: false,
                     directives: Default::default(),
                     decision_traces,
+                    memories_saved,
+                    memories_used,
                 });
             }
             StopReason::ToolUse => {
@@ -1093,6 +1138,8 @@ pub async fn run_agent_loop(
                         silent: false,
                         directives: Default::default(),
                         decision_traces,
+                        memories_saved,
+                        memories_used,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -1486,21 +1533,41 @@ pub async fn run_agent_loop_streaming(
         let _ = hook_reg.fire(&ctx);
     }
 
+    // Capture summaries of recalled memories for user-visible feedback (streaming).
+    let memories_used: Vec<String> = memories.iter().map(|m| m.content.clone()).collect();
+
     // Build the system prompt — base prompt comes from kernel (prompt_builder),
     // we append recalled memories here since they are resolved at loop time.
-    // In stable_prefix_mode, skip appending to keep the prefix stable for caching.
+    // In stable_prefix_mode, memories are injected as a context message instead
+    // (see below) to keep the system prompt prefix stable for caching.
     let mut system_prompt = manifest.model.system_prompt.clone();
-    if !stable_prefix_mode && !memories.is_empty() {
+    let memory_context_msg = if !memories.is_empty() {
         let mem_pairs: Vec<(String, String)> = memories
             .iter()
             .map(|m| (String::new(), m.content.clone()))
             .collect();
-        system_prompt.push_str("\n\n");
-        system_prompt.push_str(&crate::prompt_builder::build_memory_section(&mem_pairs));
-    }
+        if stable_prefix_mode {
+            // In stable_prefix_mode, inject personal context only (no tool
+            // instructions) as a standalone context message to keep the system
+            // prompt prefix stable for caching.
+            let personal_ctx =
+                crate::prompt_builder::format_memory_items_as_personal_context(&mem_pairs);
+            Some(personal_ctx)
+        } else {
+            let section = crate::prompt_builder::build_memory_section(&mem_pairs);
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&section);
+            None
+        }
+    } else {
+        None
+    };
 
     // Track message count before this turn so auto_memorize only processes new messages.
     let messages_before = session.messages.len();
+
+    // Mutable collector for memories saved during this turn (populated by auto_memorize).
+    let mut memories_saved: Vec<String> = Vec::new();
 
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
@@ -1531,6 +1598,19 @@ pub async fn run_agent_loop_streaming(
         if !cc_msg.is_empty() {
             messages.insert(0, Message::user(cc_msg));
         }
+    }
+
+    // In stable_prefix_mode, inject recalled memories as a context message
+    // (after canonical context, before conversation) to avoid polluting the
+    // system prompt prefix that benefits from provider prompt caching.
+    // Framed as system context so the LLM treats it as background knowledge.
+    if let Some(mem_msg) = memory_context_msg {
+        messages.insert(
+            0,
+            Message::user(format!(
+                "[System context — what you know about this person]\n{mem_msg}"
+            )),
+        );
     }
 
     let mut total_usage = TokenUsage::default();
@@ -1699,6 +1779,8 @@ pub async fn run_agent_loop_streaming(
                             silent: true,
                         },
                         decision_traces,
+                        memories_saved: Vec::new(),
+                        memories_used: memories_used.clone(),
                     });
                 }
 
@@ -1827,6 +1909,8 @@ pub async fn run_agent_loop_streaming(
                                 result.memories.len(),
                                 result.relations.len(),
                             );
+                            memories_saved
+                                .extend(result.memories.iter().map(|m| m.content.clone()));
                         }
                         Ok(_) => {}
                         Err(e) => {
@@ -1857,6 +1941,8 @@ pub async fn run_agent_loop_streaming(
                     silent: false,
                     directives: Default::default(),
                     decision_traces,
+                    memories_saved,
+                    memories_used,
                 });
             }
             StopReason::ToolUse => {
@@ -2169,6 +2255,8 @@ pub async fn run_agent_loop_streaming(
                         silent: false,
                         directives: Default::default(),
                         decision_traces,
+                        memories_saved,
+                        memories_used,
                     });
                 }
                 let text = response.text();

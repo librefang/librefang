@@ -682,6 +682,26 @@
                             </div>
                           </div>
                         </template>
+                        <!-- Memory hit indicator -->
+                        <template x-if="msg.role === 'agent' && !msg.thinking && !msg.streaming && msg.tools && msg.tools.length && memoryToolCount(msg.tools) > 0">
+                          <div class="memory-indicator" @click="msg._memExpanded = !msg._memExpanded" style="position:relative;display:inline-flex;align-items:center;gap:4px;padding:3px 8px;margin:4px 0;border-radius:12px;background:var(--surface);border:1px solid var(--border);cursor:pointer;font-size:12px;color:var(--text-secondary);transition:background 0.15s" @mouseenter="$el.style.background='var(--hover)'" @mouseleave="$el.style.background='var(--surface)'">
+                            <span style="font-size:14px">&#x1F9E0;</span>
+                            <span x-text="memoryIndicatorText(msg.tools)"></span>
+                            <span class="tool-expand-chevron" :style="msg._memExpanded ? 'transform:rotate(90deg)' : ''" style="transition:transform 0.15s;font-size:10px">&#9654;</span>
+                            <template x-if="msg._memExpanded">
+                              <div @click.stop style="position:absolute;z-index:10;top:100%;left:0;min-width:260px;max-width:400px;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);padding:8px 12px;margin-top:4px;font-size:12px">
+                                <template x-for="tool in memoryTools(msg.tools)" :key="tool.id">
+                                  <div style="padding:4px 0;border-bottom:1px solid var(--border)">
+                                    <div style="display:flex;align-items:center;gap:4px">
+                                      <span class="badge" :class="tool.name === 'memory_recall' ? 'badge-user' : 'badge-agent'" x-text="tool.name === 'memory_recall' ? t('memoryPage.recalled', 'recalled') : t('memoryPage.saved', 'saved')"></span>
+                                      <span class="text-dim" x-text="tool.input ? (typeof tool.input === 'string' ? tool.input.substring(0, 80) : JSON.stringify(tool.input).substring(0, 80)) : ''"></span>
+                                    </div>
+                                  </div>
+                                </template>
+                              </div>
+                            </template>
+                          </div>
+                        </template>
                         <!-- Timestamp + meta row -->
                         <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
                           <div class="message-time" x-text="formatTime(msg.ts)" x-show="msg.ts && !msg.thinking"></div>
@@ -4433,12 +4453,41 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           </div>
         </div>
 
-        <!-- Search -->
-        <div style="display:flex;gap:8px;margin-bottom:16px">
-          <input type="text" x-model="searchQuery" @keyup.enter="searchMemories()" placeholder="Search memories..." data-i18n-placeholder="memoryPage.searchPlaceholder" style="flex:1" class="form-input">
+        <!-- Agent filter + Search + Add -->
+        <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
+          <select x-model="selectedAgentId" @change="onAgentFilterChange()" class="form-input" style="max-width:220px">
+            <option value="" x-text="t('memoryPage.allAgents', 'All Agents')">All Agents</option>
+            <template x-for="agent in agents" :key="agent.id">
+              <option :value="agent.id" x-text="agent.name || agent.id"></option>
+            </template>
+          </select>
+          <input type="text" x-model="searchQuery" @keyup.enter="searchMemories()" placeholder="Search memories..." data-i18n-placeholder="memoryPage.searchPlaceholder" style="flex:1;min-width:180px" class="form-input">
           <button @click="searchMemories()" class="btn btn-primary" data-i18n="memoryPage.search">Search</button>
           <button @click="loadMemories()" class="btn btn-secondary" data-i18n="memoryPage.all">All</button>
+          <button @click="toggleAddForm()" class="btn btn-secondary" :class="{ 'btn-primary': showAddForm }" x-text="t('memoryPage.addMemory', 'Add Memory')">Add Memory</button>
         </div>
+
+        <!-- Manual memory creation form -->
+        <template x-if="showAddForm">
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:16px;margin-bottom:16px">
+            <div style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap">
+              <div style="flex:1;min-width:240px">
+                <label style="display:block;font-size:13px;font-weight:500;margin-bottom:4px;color:var(--text-secondary)" x-text="t('memoryPage.contentLabel', 'Content')">Content</label>
+                <input type="text" x-model="addForm.content" class="form-input" :placeholder="t('memoryPage.contentPlaceholder', 'Enter memory content...')" style="width:100%" @keyup.enter="addMemory()">
+              </div>
+              <div style="min-width:120px">
+                <label style="display:block;font-size:13px;font-weight:500;margin-bottom:4px;color:var(--text-secondary)" x-text="t('memoryPage.levelLabel', 'Level')">Level</label>
+                <select x-model="addForm.level" class="form-input" style="width:100%">
+                  <option value="user">user</option>
+                  <option value="session">session</option>
+                  <option value="agent">agent</option>
+                </select>
+              </div>
+              <button @click="addMemory()" class="btn btn-primary" :disabled="addingMemory" x-text="addingMemory ? t('memoryPage.saving', 'Saving...') : t('memoryPage.save', 'Save')">Save</button>
+              <button @click="toggleAddForm()" class="btn btn-secondary" x-text="t('btn.cancel', 'Cancel')">Cancel</button>
+            </div>
+          </div>
+        </template>
 
         <!-- Memory list -->
         <div class="table-container">

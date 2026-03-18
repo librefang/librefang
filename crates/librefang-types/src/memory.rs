@@ -555,19 +555,23 @@ impl MemoryExtractor for DefaultMemoryExtractor {
             return String::new();
         }
 
-        let mut context = String::from("## Relevant Memories\n\n");
+        let mut context = String::from(
+            "You have the following understanding of this person from previous conversations. \
+             This is knowledge you have — not a list to recite. Let it naturally shape how you \
+             respond:\n\
+             \n\
+             - Reference relevant context when it helps (\"since you're working in Rust...\", \
+             \"keeping it concise like you prefer...\") but only when it genuinely adds value.\n\
+             - Let remembered preferences silently guide your style, format, and depth — you \
+             don't need to announce that you're doing so.\n\
+             - NEVER say \"based on my memory\", \"according to my records\", \"I recall that you...\", \
+             or mechanically list what you know. A friend doesn't preface every remark with \
+             \"I remember you told me...\".\n\
+             - If a memory is clearly outdated or the user contradicts it, trust the current \
+             conversation over stored context.\n\n",
+        );
         for mem in memories {
-            let level_str = match mem.level {
-                MemoryLevel::User => "[User Preference]",
-                MemoryLevel::Session => "[Session Context]",
-                MemoryLevel::Agent => "[Agent Learning]",
-            };
-            context.push_str(&format!(
-                "- {} {}\n  {}\n",
-                level_str,
-                mem.category.as_deref().unwrap_or("general"),
-                mem.content
-            ));
+            context.push_str(&format!("- {}\n", mem.content));
         }
         context
     }

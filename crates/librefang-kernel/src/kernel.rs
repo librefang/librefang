@@ -2261,6 +2261,8 @@ impl LibreFangKernel {
             silent: false,
             directives: Default::default(),
             decision_traces: Vec::new(),
+            memories_saved: Vec::new(),
+            memories_used: Vec::new(),
         })
     }
 
@@ -2323,6 +2325,8 @@ impl LibreFangKernel {
             silent: false,
             directives: Default::default(),
             decision_traces: Vec::new(),
+            memories_saved: Vec::new(),
+            memories_used: Vec::new(),
         })
     }
 
@@ -2518,6 +2522,8 @@ impl LibreFangKernel {
             silent: result.silent,
             directives: result.directives,
             decision_traces: result.decision_traces,
+            memories_saved: result.memories_saved,
+            memories_used: result.memories_used,
         }
     }
 

@@ -442,6 +442,8 @@ pub fn spawn_daemon_stream(
             silent: false,
             directives: Default::default(),
             decision_traces: Vec::new(),
+            memories_saved: Vec::new(),
+            memories_used: Vec::new(),
         })));
     });
 }
@@ -480,6 +482,8 @@ fn daemon_fallback(
             silent: false,
             directives: Default::default(),
             decision_traces: Vec::new(),
+            memories_saved: Vec::new(),
+            memories_used: Vec::new(),
         })
     } else {
         Err(body["error"]
