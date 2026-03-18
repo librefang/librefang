@@ -6,6 +6,7 @@
 
 # Cloudflare Wrangler
 .wrangler/
+.serena
 
 # Environment & secrets
 .env
