@@ -3714,13 +3714,37 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     </div>
                     <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.autoRetrieveDesc">Automatically recall relevant memories before each agent execution to enrich context.</div>
                   </div>
+                  <!-- Max retrieve -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.maxRetrieve">Max Retrieve</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="number" style="width:120px" min="1" max="50" step="1" x-model.number="pmSettings.max_retrieve">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.maxRetrieveDesc">Maximum number of memories to retrieve per query.</div>
+                  </div>
+                  <!-- Extraction threshold -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.extractionThreshold">Extraction Threshold</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="number" style="width:120px" min="0" max="1" step="0.05" x-model.number="pmSettings.extraction_threshold">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.extractionThresholdDesc">Confidence threshold for near-duplicate detection during extraction (0.0 - 1.0).</div>
+                  </div>
                   <!-- Extraction model -->
                   <div class="detail-row" style="align-items:center">
                     <span class="detail-label" data-i18n="settingsPage.extractionModel">Extraction Model</span>
                     <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
                       <input class="form-input" type="text" style="flex:1" x-model="pmSettings.extraction_model" data-i18n-placeholder="settingsPage.extractionModelPlaceholder" placeholder="Leave empty to use agent's default model">
                     </div>
-                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.extractionModelDesc">LLM model for memory extraction. If empty, uses rule-based extraction instead.</div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.extractionModelDesc">LLM model for memory extraction. If empty, uses the agent's default model.</div>
+                  </div>
+                  <!-- Extract categories -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.extractCategories">Extract Categories</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="text" style="flex:1" x-model="pmCategoriesText" @change="pmSettings.extract_categories = $el.value.split(',').map(s => s.trim()).filter(s => s)" data-i18n-placeholder="settingsPage.extractCategoriesPlaceholder" placeholder="preference, frustration, workflow, fact, ...">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.extractCategoriesDesc">Comma-separated list of memory categories to extract. Leave empty for defaults.</div>
                   </div>
                   <!-- Session TTL hours -->
                   <div class="detail-row" style="align-items:center">

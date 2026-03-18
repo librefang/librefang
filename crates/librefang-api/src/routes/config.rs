@@ -298,7 +298,10 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "proactive_memory": {
             "auto_memorize": config.proactive_memory.auto_memorize,
             "auto_retrieve": config.proactive_memory.auto_retrieve,
+            "max_retrieve": config.proactive_memory.max_retrieve,
+            "extraction_threshold": config.proactive_memory.extraction_threshold,
             "extraction_model": config.proactive_memory.extraction_model,
+            "extract_categories": config.proactive_memory.extract_categories,
             "session_ttl_hours": config.proactive_memory.session_ttl_hours,
             "confidence_decay_rate": config.proactive_memory.confidence_decay_rate,
             "duplicate_threshold": config.proactive_memory.duplicate_threshold,
@@ -687,7 +690,10 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
                 "fields": {
                     "auto_memorize": "boolean",
                     "auto_retrieve": "boolean",
+                    "max_retrieve": "number",
+                    "extraction_threshold": "number",
                     "extraction_model": "string",
+                    "extract_categories": "array",
                     "session_ttl_hours": "number",
                     "confidence_decay_rate": "number",
                     "duplicate_threshold": "number"

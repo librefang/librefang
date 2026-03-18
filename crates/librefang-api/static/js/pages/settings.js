@@ -238,7 +238,10 @@ function settingsPage() {
     pmSettings: {
       auto_memorize: true,
       auto_retrieve: true,
+      max_retrieve: 5,
+      extraction_threshold: 0.7,
       extraction_model: '',
+      extract_categories: [],
       session_ttl_hours: 24,
       confidence_decay_rate: 0.01,
       duplicate_threshold: 0.5,
@@ -247,6 +250,7 @@ function settingsPage() {
     pmLoading: false,
     pmSaving: false,
     pmSaveStatus: '',
+    pmCategoriesText: '',
 
     // -- Dynamic config state --
     configSchema: null,
@@ -792,11 +796,15 @@ function settingsPage() {
         this.pmSettings = {
           auto_memorize: pm.auto_memorize !== undefined ? pm.auto_memorize : true,
           auto_retrieve: pm.auto_retrieve !== undefined ? pm.auto_retrieve : true,
+          max_retrieve: pm.max_retrieve || 5,
+          extraction_threshold: pm.extraction_threshold !== undefined ? pm.extraction_threshold : 0.7,
           extraction_model: pm.extraction_model || '',
+          extract_categories: pm.extract_categories || [],
           session_ttl_hours: pm.session_ttl_hours || 24,
           confidence_decay_rate: pm.confidence_decay_rate !== undefined ? pm.confidence_decay_rate : 0.01,
           duplicate_threshold: pm.duplicate_threshold !== undefined ? pm.duplicate_threshold : 0.5,
         };
+        this.pmCategoriesText = (this.pmSettings.extract_categories || []).join(', ');
         this.pmLoaded = true;
       } catch(e) {
         LibreFangToast.error(this.t('settingsPage.loadProactiveMemoryFailed', 'Failed to load proactive memory settings: {message}', { message: e.message }));
@@ -811,12 +819,18 @@ function settingsPage() {
         var fields = [
           { path: 'proactive_memory.auto_memorize', value: this.pmSettings.auto_memorize },
           { path: 'proactive_memory.auto_retrieve', value: this.pmSettings.auto_retrieve },
+          { path: 'proactive_memory.max_retrieve', value: this.pmSettings.max_retrieve },
+          { path: 'proactive_memory.extraction_threshold', value: this.pmSettings.extraction_threshold },
           { path: 'proactive_memory.session_ttl_hours', value: this.pmSettings.session_ttl_hours },
           { path: 'proactive_memory.confidence_decay_rate', value: this.pmSettings.confidence_decay_rate },
           { path: 'proactive_memory.duplicate_threshold', value: this.pmSettings.duplicate_threshold },
         ];
         // Only set extraction_model if non-empty, otherwise set to empty string to clear it
         fields.push({ path: 'proactive_memory.extraction_model', value: this.pmSettings.extraction_model || '' });
+        // Save categories as comma-separated string to TOML array
+        if (this.pmSettings.extract_categories && this.pmSettings.extract_categories.length > 0) {
+          fields.push({ path: 'proactive_memory.extract_categories', value: this.pmSettings.extract_categories });
+        }
 
         for (var i = 0; i < fields.length; i++) {
           await LibreFangAPI.post('/api/config/set', { path: fields[i].path, value: fields[i].value });
