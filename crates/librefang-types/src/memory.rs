@@ -380,13 +380,12 @@ pub trait MemoryExtractor: Send + Sync {
                 0.6
             };
 
-            if similarity > update_threshold {
-                if best_update
+            if similarity > update_threshold
+                && best_update
                     .as_ref()
-                    .map_or(true, |(best_sim, _)| similarity > *best_sim)
-                {
-                    best_update = Some((similarity, existing.id.to_string()));
-                }
+                    .is_none_or(|(best_sim, _)| similarity > *best_sim)
+            {
+                best_update = Some((similarity, existing.id.to_string()));
             }
         }
 
