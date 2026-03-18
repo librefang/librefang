@@ -238,6 +238,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/workflows",
             axum::routing::get(routes::list_workflows).post(routes::create_workflow),
         )
+        .route("/workflows/{id}", axum::routing::get(routes::get_workflow))
         .route(
             "/workflows/{id}/run",
             axum::routing::post(routes::run_workflow),
@@ -457,6 +458,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route(
             "/providers/{name}/url",
             axum::routing::put(routes::set_provider_url),
+        )
+        .route(
+            "/providers/{name}",
+            axum::routing::get(routes::get_provider),
         )
         .route("/skills/create", axum::routing::post(routes::create_skill))
         .route("/extensions", axum::routing::get(routes::list_extensions))

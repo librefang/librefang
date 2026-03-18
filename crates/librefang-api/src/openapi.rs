@@ -150,6 +150,7 @@ use crate::types;
         routes::add_custom_model,
         routes::remove_custom_model,
         routes::list_providers,
+        routes::get_provider,
         routes::set_provider_key,
         routes::delete_provider_key,
         routes::test_provider,

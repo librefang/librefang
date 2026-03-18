@@ -246,6 +246,31 @@ pub async fn get_model(
     }
 }
 
+/// Attach local-provider probe results to a JSON entry and optionally merge
+/// discovered models into the catalog.
+fn attach_probe_result(
+    entry: &mut serde_json::Value,
+    probe: &librefang_runtime::provider_health::ProbeResult,
+    provider_id: &str,
+    catalog: &std::sync::RwLock<librefang_types::model_catalog::ModelCatalog>,
+) {
+    entry["is_local"] = serde_json::json!(true);
+    entry["reachable"] = serde_json::json!(probe.reachable);
+    entry["latency_ms"] = serde_json::json!(probe.latency_ms);
+    if !probe.discovered_models.is_empty() {
+        entry["discovered_models"] = serde_json::json!(&probe.discovered_models);
+        if let Ok(mut cat) = catalog.write() {
+            cat.merge_discovered_models(provider_id, &probe.discovered_models);
+        }
+    }
+    if !probe.discovered_model_info.is_empty() {
+        entry["discovered_model_info"] = serde_json::json!(&probe.discovered_model_info);
+    }
+    if let Some(err) = &probe.error {
+        entry["error"] = serde_json::json!(err);
+    }
+}
+
 /// GET /api/providers — List all providers with auth status.
 ///
 /// For local providers (ollama, vllm, lmstudio), also probes reachability and
@@ -314,22 +339,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
 
         // For local providers, attach the probe result
         if let Some(probe) = probe_map.remove(&i) {
-            entry["is_local"] = serde_json::json!(true);
-            entry["reachable"] = serde_json::json!(probe.reachable);
-            entry["latency_ms"] = serde_json::json!(probe.latency_ms);
-            if !probe.discovered_models.is_empty() {
-                entry["discovered_models"] = serde_json::json!(probe.discovered_models);
-                // Merge discovered models into the catalog so agents can use them
-                if let Ok(mut catalog) = state.kernel.model_catalog.write() {
-                    catalog.merge_discovered_models(&p.id, &probe.discovered_models);
-                }
-            }
-            if !probe.discovered_model_info.is_empty() {
-                entry["discovered_model_info"] = serde_json::json!(probe.discovered_model_info);
-            }
-            if let Some(err) = &probe.error {
-                entry["error"] = serde_json::json!(err);
-            }
+            attach_probe_result(&mut entry, &probe, &p.id, &state.kernel.model_catalog);
         } else if librefang_runtime::provider_health::is_local_provider(&p.id) {
             // Local HTTP provider with no probe result yet — still label it local.
             entry["is_local"] = serde_json::json!(true);
@@ -346,6 +356,94 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "total": total,
         })),
     )
+}
+
+/// GET /api/providers/{name} — Get details for a single provider.
+#[utoipa::path(
+    get,
+    path = "/api/providers/{name}",
+    tag = "models",
+    params(("name" = String, Path, description = "Provider identifier")),
+    responses(
+        (status = 200, description = "Provider details", body = serde_json::Value),
+        (status = 404, description = "Provider not found")
+    )
+)]
+pub async fn get_provider(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    let (provider, models) = {
+        let catalog = state
+            .kernel
+            .model_catalog
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
+        match catalog.get_provider(&name) {
+            Some(p) => {
+                let models: Vec<serde_json::Value> = catalog
+                    .models_by_provider(&name)
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "id": m.id,
+                            "display_name": m.display_name,
+                            "tier": m.tier,
+                            "context_window": m.context_window,
+                            "max_output_tokens": m.max_output_tokens,
+                            "input_cost_per_m": m.input_cost_per_m,
+                            "output_cost_per_m": m.output_cost_per_m,
+                            "supports_tools": m.supports_tools,
+                            "supports_vision": m.supports_vision,
+                            "supports_streaming": m.supports_streaming,
+                        })
+                    })
+                    .collect();
+                (p.clone(), models)
+            }
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": format!("Provider '{}' not found", name)})),
+                );
+            }
+        }
+    };
+
+    let mut entry = serde_json::json!({
+        "id": provider.id,
+        "display_name": provider.display_name,
+        "auth_status": provider.auth_status,
+        "model_count": provider.model_count,
+        "key_required": provider.key_required,
+        "api_key_env": provider.api_key_env,
+        "base_url": provider.base_url,
+        "models": models,
+    });
+
+    // For local providers, run a probe and attach the result
+    if librefang_runtime::provider_health::is_local_provider(&provider.id)
+        && !provider.base_url.is_empty()
+    {
+        let cache = &state.provider_probe_cache;
+        let probe = librefang_runtime::provider_health::probe_provider_cached(
+            &provider.id,
+            &provider.base_url,
+            cache,
+        )
+        .await;
+
+        attach_probe_result(
+            &mut entry,
+            &probe,
+            &provider.id,
+            &state.kernel.model_catalog,
+        );
+    } else if librefang_runtime::provider_health::is_local_provider(&provider.id) {
+        entry["is_local"] = serde_json::json!(true);
+    }
+
+    (StatusCode::OK, Json(entry))
 }
 
 /// POST /api/models/custom — Add a custom model to the catalog.

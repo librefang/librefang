@@ -61,6 +61,12 @@ pub enum ChannelContent {
         url: String,
         duration_seconds: u32,
     },
+    Video {
+        url: String,
+        caption: Option<String>,
+        duration_seconds: u32,
+        filename: Option<String>,
+    },
     Location {
         lat: f64,
         lon: f64,
@@ -447,11 +453,18 @@ mod tests {
             lat: 40.7128,
             lon: -74.0060,
         };
+        let video = ChannelContent::Video {
+            url: "https://example.com/video.mp4".to_string(),
+            caption: Some("my video".to_string()),
+            duration_seconds: 30,
+            filename: Some("video.mp4".to_string()),
+        };
 
         // Just verify they serialize without panic
         serde_json::to_string(&text).unwrap();
         serde_json::to_string(&cmd).unwrap();
         serde_json::to_string(&loc).unwrap();
+        serde_json::to_string(&video).unwrap();
     }
 
     // ----- AgentPhase tests -----
