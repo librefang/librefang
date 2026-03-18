@@ -177,9 +177,9 @@ pub async fn get_workflow(
                             StepAgent::ByName { name } => serde_json::json!({"agent_name": name}),
                         },
                         "prompt_template": s.prompt_template,
-                        "mode": format!("{:?}", s.mode),
+                        "mode": serde_json::to_value(&s.mode).unwrap_or_default(),
                         "timeout_secs": s.timeout_secs,
-                        "error_mode": format!("{:?}", s.error_mode),
+                        "error_mode": serde_json::to_value(&s.error_mode).unwrap_or_default(),
                         "output_var": s.output_var,
                     })
                 }).collect::<Vec<_>>(),
