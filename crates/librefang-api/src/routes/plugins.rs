@@ -1,11 +1,9 @@
 //! Context engine plugin management endpoints.
 
-use super::AppState;
-use axum::extract::{Path, State};
+use axum::extract::Path;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
-use std::sync::Arc;
 
 /// GET /api/plugins — List all installed context engine plugins.
 #[utoipa::path(

@@ -14,6 +14,28 @@ use librefang_types::config::PluginManifest;
 use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
+/// Validate that a plugin name is a safe directory component (no path traversal).
+pub fn validate_plugin_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("Plugin name cannot be empty".to_string());
+    }
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name == "." {
+        return Err(format!(
+            "Invalid plugin name '{name}': must be a simple identifier (no /, \\, or ..)"
+        ));
+    }
+    // Only allow alphanumeric, hyphens, underscores
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!(
+            "Invalid plugin name '{name}': only alphanumeric, hyphens, and underscores allowed"
+        ));
+    }
+    Ok(())
+}
+
 /// Default plugin directory: `~/.librefang/plugins/`.
 pub fn plugins_dir() -> PathBuf {
     dirs::home_dir()
@@ -73,6 +95,7 @@ pub fn load_plugin_manifest(plugin_dir: &Path) -> Result<PluginManifest, String>
 
 /// Get detailed info about a single installed plugin.
 pub fn get_plugin_info(plugin_name: &str) -> Result<PluginInfo, String> {
+    validate_plugin_name(plugin_name)?;
     let plugin_dir = plugins_dir().join(plugin_name);
     if !plugin_dir.exists() {
         return Err(format!("Plugin '{plugin_name}' is not installed"));
@@ -136,6 +159,8 @@ pub async fn install_plugin(source: &PluginSource) -> Result<PluginInfo, String>
 fn install_from_local(src: &Path, plugins_dir: &Path) -> Result<PluginInfo, String> {
     // Validate source has a plugin.toml
     let manifest = load_plugin_manifest(src)?;
+    // Validate manifest name is safe for use as a directory name
+    validate_plugin_name(&manifest.name)?;
     let target_dir = plugins_dir.join(&manifest.name);
 
     if target_dir.exists() {
@@ -154,6 +179,7 @@ fn install_from_local(src: &Path, plugins_dir: &Path) -> Result<PluginInfo, Stri
 
 /// Install from the GitHub registry.
 async fn install_from_registry(name: &str, plugins_dir: &Path) -> Result<PluginInfo, String> {
+    validate_plugin_name(name)?;
     let target_dir = plugins_dir.join(name);
     if target_dir.exists() {
         return Err(format!(
@@ -195,9 +221,19 @@ async fn install_from_registry(name: &str, plugins_dir: &Path) -> Result<PluginI
     std::fs::create_dir_all(&target_dir)
         .map_err(|e| format!("Failed to create plugin dir: {e}"))?;
 
-    // Download each file
-    for file in &files {
-        download_github_entry(&client, file, &target_dir).await?;
+    // Download each file — cleanup on failure
+    let download_result = async {
+        for file in &files {
+            download_github_entry(&client, file, &target_dir).await?;
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+
+    if let Err(e) = download_result {
+        // Clean up partial download
+        let _ = std::fs::remove_dir_all(&target_dir);
+        return Err(format!("Failed to download plugin '{name}': {e}"));
     }
 
     info!(plugin = name, "Installed plugin from registry");
@@ -210,6 +246,26 @@ async fn install_from_git(
     branch: Option<&str>,
     plugins_dir: &Path,
 ) -> Result<PluginInfo, String> {
+    // Validate URL to prevent argument injection (git interprets `-` prefixed args as flags)
+    if url.starts_with('-') {
+        return Err("Invalid git URL: must not start with '-'".to_string());
+    }
+    if !url.starts_with("https://")
+        && !url.starts_with("http://")
+        && !url.starts_with("git://")
+        && !url.starts_with("ssh://")
+        && !url.contains('@')
+    {
+        return Err(
+            "Invalid git URL: must start with https://, http://, git://, or ssh://".to_string(),
+        );
+    }
+    if let Some(b) = branch {
+        if b.starts_with('-') {
+            return Err("Invalid branch name: must not start with '-'".to_string());
+        }
+    }
+
     // Clone into a temp dir, validate, then move
     let temp_dir = tempfile::tempdir().map_err(|e| format!("Failed to create temp dir: {e}"))?;
 
@@ -218,7 +274,8 @@ async fn install_from_git(
     if let Some(b) = branch {
         cmd.arg("--branch").arg(b);
     }
-    cmd.arg(url).arg(temp_dir.path());
+    // Use `--` to separate options from positional args
+    cmd.arg("--").arg(url).arg(temp_dir.path());
 
     let output = cmd
         .output()
@@ -230,8 +287,9 @@ async fn install_from_git(
         return Err(format!("git clone failed: {stderr}"));
     }
 
-    // Validate the cloned repo has a plugin.toml
+    // Validate the cloned repo has a plugin.toml with a safe name
     let manifest = load_plugin_manifest(temp_dir.path())?;
+    validate_plugin_name(&manifest.name)?;
     let target_dir = plugins_dir.join(&manifest.name);
 
     if target_dir.exists() {
@@ -257,6 +315,7 @@ async fn install_from_git(
 
 /// Remove an installed plugin.
 pub fn remove_plugin(name: &str) -> Result<(), String> {
+    validate_plugin_name(name)?;
     let plugin_dir = plugins_dir().join(name);
     if !plugin_dir.exists() {
         return Err(format!("Plugin '{name}' is not installed"));
@@ -279,6 +338,7 @@ pub fn remove_plugin(name: &str) -> Result<(), String> {
 
 /// Create a scaffold for a new plugin.
 pub fn scaffold_plugin(name: &str, description: &str) -> Result<PathBuf, String> {
+    validate_plugin_name(name)?;
     let plugins = ensure_plugins_dir().map_err(|e| format!("Cannot create plugins dir: {e}"))?;
     let plugin_dir = plugins.join(name);
 
@@ -290,19 +350,21 @@ pub fn scaffold_plugin(name: &str, description: &str) -> Result<PathBuf, String>
     std::fs::create_dir_all(&hooks_dir)
         .map_err(|e| format!("Failed to create plugin directory: {e}"))?;
 
-    // Write plugin.toml
-    let manifest = format!(
-        r#"name = "{name}"
-version = "0.1.0"
-description = "{description}"
-author = ""
-
-[hooks]
-ingest = "hooks/ingest.py"
-after_turn = "hooks/after_turn.py"
-"#
-    );
-    std::fs::write(plugin_dir.join("plugin.toml"), manifest)
+    // Write plugin.toml — use toml serialization to avoid injection
+    let manifest = PluginManifest {
+        name: name.to_string(),
+        version: "0.1.0".to_string(),
+        description: Some(description.to_string()),
+        author: None,
+        hooks: librefang_types::config::ContextEngineHooks {
+            ingest: Some("hooks/ingest.py".to_string()),
+            after_turn: Some("hooks/after_turn.py".to_string()),
+        },
+        requirements: None,
+    };
+    let manifest_toml =
+        toml::to_string_pretty(&manifest).map_err(|e| format!("Failed to serialize TOML: {e}"))?;
+    std::fs::write(plugin_dir.join("plugin.toml"), manifest_toml)
         .map_err(|e| format!("Failed to write plugin.toml: {e}"))?;
 
     // Write template ingest hook
@@ -378,6 +440,7 @@ if __name__ == "__main__":
 
 /// Install Python requirements for a plugin.
 pub async fn install_requirements(plugin_name: &str) -> Result<String, String> {
+    validate_plugin_name(plugin_name)?;
     let plugin_dir = plugins_dir().join(plugin_name);
     let requirements = plugin_dir.join("requirements.txt");
 
@@ -519,14 +582,19 @@ fn dir_size(path: &Path) -> u64 {
     total
 }
 
-/// Recursively copy a directory.
+/// Recursively copy a directory. Symlinks are skipped for security.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        let ft = entry.file_type()?;
+        // Skip symlinks to prevent following links outside the plugin directory
+        if ft.is_symlink() {
+            continue;
+        }
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        if ft.is_dir() {
             copy_dir_recursive(&src_path, &dst_path)?;
         } else {
             std::fs::copy(&src_path, &dst_path)?;
