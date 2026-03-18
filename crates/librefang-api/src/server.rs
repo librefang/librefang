@@ -401,6 +401,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/approvals",
             axum::routing::get(routes::list_approvals).post(routes::create_approval),
         )
+        .route("/approvals/{id}", axum::routing::get(routes::get_approval))
         .route(
             "/approvals/{id}/approve",
             axum::routing::post(routes::approve_request),
@@ -435,7 +436,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/sessions/{id}",
-            axum::routing::delete(routes::delete_session),
+            axum::routing::get(routes::get_session).delete(routes::delete_session),
         )
         .route(
             "/sessions/{id}/label",
@@ -628,7 +629,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/integrations/{id}",
-            axum::routing::delete(routes::remove_integration),
+            axum::routing::get(routes::get_integration).delete(routes::remove_integration),
         )
         .route(
             "/integrations/{id}/reconnect",

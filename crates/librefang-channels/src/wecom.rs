@@ -262,7 +262,7 @@ impl WeComAdapter {
     }
 
     /// Obtain a valid access token, refreshing if expired or missing.
-    async fn get_token(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn get_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let mut cached = self.cached_token.write().await;
 
         // Check if we have a valid cached token
@@ -315,7 +315,7 @@ impl WeComAdapter {
         &self,
         user_id: &str,
         content: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let token = self.get_token().await?;
 
         let url = format!("{}?access_token={}", WECOM_SEND_URL, token);
@@ -348,7 +348,7 @@ impl WeComAdapter {
     }
 
     /// Validate credentials by getting the token.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let _token = self.get_token().await?;
         // Token obtained successfully means credentials are valid
         Ok(format!("corp_id={}", self.corp_id))
@@ -367,8 +367,10 @@ impl ChannelAdapter for WeComAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let _ = self.validate().await?;
         info!("WeCom adapter initialized");
@@ -586,7 +588,7 @@ impl ChannelAdapter for WeComAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let user_id = &user.platform_id;
 
         match content {
@@ -608,7 +610,7 @@ impl ChannelAdapter for WeComAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

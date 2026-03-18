@@ -84,7 +84,7 @@ impl RocketChatAdapter {
     }
 
     /// Validate credentials by calling `/api/v1/me`.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/v1/me", self.server_url);
         let resp = self.auth_headers(self.client.get(&url)).send().await?;
 
@@ -102,7 +102,7 @@ impl RocketChatAdapter {
         &self,
         room_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/v1/chat.sendMessage", self.server_url);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -149,8 +149,10 @@ impl ChannelAdapter for RocketChatAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let username = self.validate().await?;
         info!("Rocket.Chat adapter authenticated as {username}");
@@ -368,7 +370,7 @@ impl ChannelAdapter for RocketChatAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -381,7 +383,10 @@ impl ChannelAdapter for RocketChatAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Rocket.Chat supports typing notifications via REST
         let url = format!("{}/api/v1/chat.sendMessage", self.server_url);
         // There's no dedicated typing endpoint in REST; this is a no-op.
@@ -391,7 +396,7 @@ impl ChannelAdapter for RocketChatAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

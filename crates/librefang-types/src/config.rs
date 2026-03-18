@@ -2537,6 +2537,10 @@ impl Default for IrcConfig {
 pub struct GoogleChatConfig {
     /// Env var name holding the service account JSON key.
     pub service_account_env: String,
+    /// Path to a Google service account JSON key file (alternative to env var).
+    /// When set, JWT authentication is used to obtain OAuth2 access tokens.
+    #[serde(default)]
+    pub service_account_key_path: Option<String>,
     /// Space IDs to listen in.
     #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
     pub space_ids: Vec<String>,
@@ -2556,6 +2560,7 @@ impl Default for GoogleChatConfig {
     fn default() -> Self {
         Self {
             service_account_env: "GOOGLE_CHAT_SERVICE_ACCOUNT".to_string(),
+            service_account_key_path: None,
             space_ids: vec![],
             webhook_port: 8444,
             account_id: None,
@@ -3742,12 +3747,16 @@ impl KernelConfig {
             }
         }
         for gc in self.channels.google_chat.iter() {
-            if std::env::var(&gc.service_account_env)
+            let has_env = !std::env::var(&gc.service_account_env)
                 .unwrap_or_default()
-                .is_empty()
-            {
+                .is_empty();
+            let has_key_path = gc
+                .service_account_key_path
+                .as_ref()
+                .is_some_and(|p| !p.is_empty());
+            if !has_env && !has_key_path {
                 warnings.push(format!(
-                    "Google Chat configured but {} is not set",
+                    "Google Chat configured but neither {} nor service_account_key_path is set",
                     gc.service_account_env
                 ));
             }

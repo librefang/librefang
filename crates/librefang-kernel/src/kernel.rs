@@ -30,13 +30,14 @@ use librefang_runtime::sandbox::{SandboxConfig, WasmSandbox};
 use librefang_runtime::tool_runner::builtin_tool_definitions;
 use librefang_types::agent::*;
 use librefang_types::capability::Capability;
-use librefang_types::config::{KernelConfig, OutputFormat};
+use librefang_types::config::{AuthProfile, KernelConfig, OutputFormat};
 use librefang_types::error::LibreFangError;
 use librefang_types::event::*;
 use librefang_types::memory::Memory;
 use librefang_types::tool::ToolDefinition;
 
 use async_trait::async_trait;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
@@ -58,6 +59,68 @@ impl LlmDriver for StubDriver {
                 .to_string(),
         ))
     }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct RotationKeySpec {
+    name: String,
+    api_key: String,
+    use_primary_driver: bool,
+}
+
+/// Custom Debug impl that redacts the API key to prevent accidental log leakage.
+impl std::fmt::Debug for RotationKeySpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RotationKeySpec")
+            .field("name", &self.name)
+            .field("api_key", &"<redacted>")
+            .field("use_primary_driver", &self.use_primary_driver)
+            .finish()
+    }
+}
+
+fn collect_rotation_key_specs(
+    profiles: Option<&[AuthProfile]>,
+    primary_api_key: Option<&str>,
+) -> Vec<RotationKeySpec> {
+    let mut seen_keys = HashSet::new();
+    let mut specs = Vec::new();
+    let mut sorted_profiles = profiles.map_or_else(Vec::new, |items| items.to_vec());
+    sorted_profiles.sort_by_key(|profile| profile.priority);
+
+    for profile in sorted_profiles {
+        let Ok(api_key) = std::env::var(&profile.api_key_env) else {
+            warn!(
+                profile = %profile.name,
+                env_var = %profile.api_key_env,
+                "Auth profile env var not set — skipping"
+            );
+            continue;
+        };
+        if api_key.is_empty() || !seen_keys.insert(api_key.clone()) {
+            continue;
+        }
+        specs.push(RotationKeySpec {
+            name: profile.name,
+            use_primary_driver: primary_api_key == Some(api_key.as_str()),
+            api_key,
+        });
+    }
+
+    if let Some(primary_api_key) = primary_api_key.filter(|key| !key.is_empty()) {
+        if seen_keys.insert(primary_api_key.to_string()) {
+            specs.insert(
+                0,
+                RotationKeySpec {
+                    name: "primary".to_string(),
+                    api_key: primary_api_key.to_string(),
+                    use_primary_driver: true,
+                },
+            );
+        }
+    }
+
+    specs
 }
 
 pub struct LibreFangKernel {
@@ -574,15 +637,16 @@ impl LibreFangKernel {
             let env_var = config.resolve_api_key_env(&config.default_model.provider);
             std::env::var(&env_var).ok()
         };
+        let default_base_url = config.default_model.base_url.clone().or_else(|| {
+            config
+                .provider_urls
+                .get(&config.default_model.provider)
+                .cloned()
+        });
         let driver_config = DriverConfig {
             provider: config.default_model.provider.clone(),
-            api_key: default_api_key,
-            base_url: config.default_model.base_url.clone().or_else(|| {
-                config
-                    .provider_urls
-                    .get(&config.default_model.provider)
-                    .cloned()
-            }),
+            api_key: default_api_key.clone(),
+            base_url: default_base_url.clone(),
             vertex_ai: config.vertex_ai.clone(),
             skip_permissions: true,
         };
@@ -591,39 +655,98 @@ impl LibreFangKernel {
         let primary_result = drivers::create_driver(&driver_config);
         let mut driver_chain: Vec<Arc<dyn LlmDriver>> = Vec::new();
 
-        match &primary_result {
-            Ok(d) => driver_chain.push(d.clone()),
-            Err(e) => {
-                warn!(
+        let rotation_specs = collect_rotation_key_specs(
+            config
+                .auth_profiles
+                .get(&config.default_model.provider)
+                .map(Vec::as_slice),
+            default_api_key.as_deref(),
+        );
+
+        if rotation_specs.len() > 1 || (primary_result.is_err() && !rotation_specs.is_empty()) {
+            let mut rotation_drivers: Vec<(Arc<dyn LlmDriver>, String)> = Vec::new();
+
+            for spec in rotation_specs {
+                if spec.use_primary_driver {
+                    if let Ok(driver) = &primary_result {
+                        rotation_drivers.push((driver.clone(), spec.name));
+                        continue;
+                    }
+                }
+
+                let profile_name = spec.name;
+                let profile_config = DriverConfig {
+                    provider: config.default_model.provider.clone(),
+                    api_key: Some(spec.api_key),
+                    base_url: default_base_url.clone(),
+                    vertex_ai: config.vertex_ai.clone(),
+                    skip_permissions: true,
+                };
+                match drivers::create_driver(&profile_config) {
+                    Ok(profile_driver) => {
+                        rotation_drivers.push((profile_driver, profile_name));
+                    }
+                    Err(e) => {
+                        warn!(
+                            profile = %profile_name,
+                            error = %e,
+                            "Auth profile driver creation failed — skipped"
+                        );
+                    }
+                }
+            }
+
+            if rotation_drivers.len() > 1 {
+                info!(
                     provider = %config.default_model.provider,
-                    error = %e,
-                    "Primary LLM driver init failed — trying auto-detect"
+                    pool_size = rotation_drivers.len(),
+                    "Token rotation enabled for default provider"
                 );
-                // Auto-detect: scan env for any configured provider key
-                if let Some((provider, model, env_var)) = drivers::detect_available_provider() {
-                    let auto_config = DriverConfig {
-                        provider: provider.to_string(),
-                        api_key: std::env::var(env_var).ok(),
-                        base_url: config.provider_urls.get(provider).cloned(),
-                        vertex_ai: config.vertex_ai.clone(),
-                        skip_permissions: true,
-                    };
-                    match drivers::create_driver(&auto_config) {
-                        Ok(d) => {
-                            info!(
-                                provider = %provider,
-                                model = %model,
-                                "Auto-detected provider from {} — using as default",
-                                env_var
-                            );
-                            driver_chain.push(d);
-                            // Update the running config so agents get the right model
-                            config.default_model.provider = provider.to_string();
-                            config.default_model.model = model.to_string();
-                            config.default_model.api_key_env = env_var.to_string();
-                        }
-                        Err(e2) => {
-                            warn!(provider = %provider, error = %e2, "Auto-detected provider also failed");
+                let rotation = drivers::token_rotation::TokenRotationDriver::new(
+                    rotation_drivers,
+                    config.default_model.provider.clone(),
+                );
+                driver_chain.push(Arc::new(rotation));
+            } else if let Some((driver, _)) = rotation_drivers.pop() {
+                driver_chain.push(driver);
+            }
+        }
+
+        if driver_chain.is_empty() {
+            match &primary_result {
+                Ok(d) => driver_chain.push(d.clone()),
+                Err(e) => {
+                    warn!(
+                        provider = %config.default_model.provider,
+                        error = %e,
+                        "Primary LLM driver init failed — trying auto-detect"
+                    );
+                    // Auto-detect: scan env for any configured provider key
+                    if let Some((provider, model, env_var)) = drivers::detect_available_provider() {
+                        let auto_config = DriverConfig {
+                            provider: provider.to_string(),
+                            api_key: std::env::var(env_var).ok(),
+                            base_url: config.provider_urls.get(provider).cloned(),
+                            vertex_ai: config.vertex_ai.clone(),
+                            skip_permissions: true,
+                        };
+                        match drivers::create_driver(&auto_config) {
+                            Ok(d) => {
+                                info!(
+                                    provider = %provider,
+                                    model = %model,
+                                    "Auto-detected provider from {} — using as default",
+                                    env_var
+                                );
+                                driver_chain.push(d);
+                                // Update the running config so agents get the right model
+                                config.default_model.provider = provider.to_string();
+                                config.default_model.model = model.to_string();
+                                config.default_model.api_key_env = env_var.to_string();
+                            }
+                            Err(e2) => {
+                                warn!(provider = %provider, error = %e2, "Auto-detected provider also failed");
+                            }
                         }
                     }
                 }
@@ -6467,6 +6590,92 @@ impl librefang_wire::peer::PeerHandle for LibreFangKernel {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    struct EnvVarGuard {
+        key: &'static str,
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            std::env::remove_var(self.key);
+        }
+    }
+
+    fn set_test_env(key: &'static str, value: &str) -> EnvVarGuard {
+        std::env::set_var(key, value);
+        EnvVarGuard { key }
+    }
+
+    #[test]
+    fn test_collect_rotation_key_specs_dedupes_primary_profile_key() {
+        let _primary = set_test_env("LIBREFANG_TEST_ROTATION_PRIMARY_KEY_A", "key-1");
+        let _secondary = set_test_env("LIBREFANG_TEST_ROTATION_SECONDARY_KEY_A", "key-2");
+        let profiles = [
+            AuthProfile {
+                name: "secondary".to_string(),
+                api_key_env: "LIBREFANG_TEST_ROTATION_SECONDARY_KEY_A".to_string(),
+                priority: 10,
+            },
+            AuthProfile {
+                name: "profile-a".to_string(),
+                api_key_env: "LIBREFANG_TEST_ROTATION_PRIMARY_KEY_A".to_string(),
+                priority: 0,
+            },
+        ];
+
+        let specs = collect_rotation_key_specs(Some(&profiles), Some("key-1"));
+
+        assert_eq!(
+            specs,
+            vec![
+                RotationKeySpec {
+                    name: "profile-a".to_string(),
+                    api_key: "key-1".to_string(),
+                    use_primary_driver: true,
+                },
+                RotationKeySpec {
+                    name: "secondary".to_string(),
+                    api_key: "key-2".to_string(),
+                    use_primary_driver: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_collect_rotation_key_specs_prepends_distinct_primary_and_skips_missing_profiles() {
+        let _secondary = set_test_env("LIBREFANG_TEST_ROTATION_SECONDARY_KEY_B", "key-2");
+        let profiles = [
+            AuthProfile {
+                name: "missing".to_string(),
+                api_key_env: "LIBREFANG_TEST_ROTATION_MISSING_KEY_B".to_string(),
+                priority: 0,
+            },
+            AuthProfile {
+                name: "secondary".to_string(),
+                api_key_env: "LIBREFANG_TEST_ROTATION_SECONDARY_KEY_B".to_string(),
+                priority: 1,
+            },
+        ];
+
+        let specs = collect_rotation_key_specs(Some(&profiles), Some("key-0"));
+
+        assert_eq!(
+            specs,
+            vec![
+                RotationKeySpec {
+                    name: "primary".to_string(),
+                    api_key: "key-0".to_string(),
+                    use_primary_driver: true,
+                },
+                RotationKeySpec {
+                    name: "secondary".to_string(),
+                    api_key: "key-2".to_string(),
+                    use_primary_driver: false,
+                },
+            ]
+        );
+    }
 
     #[test]
     fn test_manifest_to_capabilities() {

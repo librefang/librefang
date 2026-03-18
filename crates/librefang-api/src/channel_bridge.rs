@@ -99,12 +99,14 @@ use librefang_channels::wecom::WeComAdapter;
 
 use async_trait::async_trait;
 use librefang_kernel::LibreFangKernel;
+use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
 use std::sync::Arc;
 #[cfg(feature = "channel-telegram")]
 use std::time::Duration;
 use std::time::Instant;
-use tracing::{error, info, warn};
+use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
 
 use librefang_runtime::str_utils::safe_truncate_str;
 
@@ -150,6 +152,69 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             .await
             .map_err(|e| format!("{e}"))?;
         Ok(result.response)
+    }
+
+    async fn send_message_streaming(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> Result<mpsc::Receiver<String>, String> {
+        let (mut event_rx, kernel_handle) = self
+            .kernel
+            .send_message_streaming(agent_id, message, None)
+            .map_err(|e| format!("{e}"))?;
+
+        // Bridge StreamEvent -> text-only mpsc channel for the adapter.
+        let (tx, rx) = mpsc::channel::<String>(64);
+
+        let bridge_handle = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    StreamEvent::TextDelta { text } => {
+                        if tx.send(text).await.is_err() {
+                            break; // receiver dropped
+                        }
+                    }
+                    StreamEvent::ContentComplete { .. } => {
+                        // Do NOT break here. ContentComplete fires at the end of each
+                        // LLM turn (iteration), not at the end of the entire agent loop.
+                        // In a multi-iteration scenario — e.g. the router agent's first
+                        // turn is a tool call (no text) and the second turn contains the
+                        // actual text response — breaking here would cause us to exit
+                        // before the text-bearing iteration is even reached.
+                        //
+                        // The loop naturally terminates when `event_rx.recv()` returns
+                        // `None`, which happens when the kernel drops the sender after
+                        // the full agent loop completes.
+                    }
+                    _ => {
+                        // ToolUseStart, ToolInputDelta, ThinkingDelta, etc. — skip
+                        debug!("Streaming bridge: skipping non-text event");
+                    }
+                }
+            }
+        });
+
+        // Spawn a supervisor that awaits both handles and logs panics / errors.
+        tokio::spawn(async move {
+            match kernel_handle.await {
+                Err(e) => error!("Streaming kernel task panicked: {e}"),
+                Ok(Err(e)) => error!("Streaming kernel task returned error: {e}"),
+                Ok(Ok(result)) => {
+                    debug!(
+                        input_tokens = result.total_usage.input_tokens,
+                        output_tokens = result.total_usage.output_tokens,
+                        iterations = result.iterations,
+                        "Streaming kernel task completed"
+                    );
+                }
+            }
+            if let Err(e) = bridge_handle.await {
+                error!("Streaming bridge task panicked: {e}");
+            }
+        });
+
+        Ok(rx)
     }
 
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
@@ -1410,7 +1475,20 @@ pub async fn start_channel_bridge_with_config(
     // Google Chat
     #[cfg(feature = "channel-google-chat")]
     for gc_config in config.google_chat.iter() {
-        if let Some(key) = read_token(&gc_config.service_account_env, "Google Chat") {
+        // Try service_account_key_path first, then fall back to env var
+        let key = gc_config
+            .service_account_key_path
+            .as_ref()
+            .filter(|p| !p.is_empty())
+            .and_then(|path| match std::fs::read_to_string(path) {
+                Ok(contents) => Some(contents),
+                Err(e) => {
+                    warn!("Google Chat: failed to read service account key from {path}: {e}");
+                    None
+                }
+            })
+            .or_else(|| read_token(&gc_config.service_account_env, "Google Chat"));
+        if let Some(key) = key {
             let adapter = Arc::new(
                 GoogleChatAdapter::new(key, gc_config.space_ids.clone(), gc_config.webhook_port)
                     .with_account_id(gc_config.account_id.clone()),
@@ -1420,6 +1498,8 @@ pub async fn start_channel_bridge_with_config(
                 gc_config.default_agent.clone(),
                 gc_config.account_id.clone(),
             ));
+        } else {
+            warn!("Google Chat configured but no credentials found (neither service_account_key_path nor {} env var), skipping", gc_config.service_account_env);
         }
     }
 

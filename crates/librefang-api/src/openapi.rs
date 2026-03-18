@@ -131,6 +131,7 @@ use crate::types;
 
         // ── Integrations ──
         routes::list_integrations,
+        routes::get_integration,
         routes::list_available_integrations,
         routes::add_integration,
         routes::remove_integration,
@@ -189,6 +190,7 @@ use crate::types;
 
         // ── Sessions ──
         routes::list_sessions,
+        routes::get_session,
         routes::delete_session,
         routes::set_session_label,
         routes::find_session_by_label,
@@ -237,6 +239,7 @@ use crate::types;
         // ── Approvals ──
         routes::list_approvals,
         routes::create_approval,
+        routes::get_approval,
         routes::approve_request,
         routes::reject_request,
 

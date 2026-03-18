@@ -87,7 +87,7 @@ impl WhatsAppAdapter {
         &self,
         to: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "https://graph.facebook.com/v21.0/{}/messages",
             self.phone_number_id
@@ -124,7 +124,10 @@ impl WhatsAppAdapter {
 
     /// Mark a message as read.
     #[allow(dead_code)]
-    async fn api_mark_read(&self, message_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn api_mark_read(
+        &self,
+        message_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!(
             "https://graph.facebook.com/v21.0/{}/messages",
             self.phone_number_id
@@ -153,7 +156,7 @@ impl WhatsAppAdapter {
         gateway_url: &str,
         to: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/message/send", gateway_url.trim_end_matches('/'));
         let body = serde_json::json!({ "to": to, "text": text });
 
@@ -194,8 +197,10 @@ impl ChannelAdapter for WhatsAppAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let (_tx, rx) = mpsc::channel::<ChannelMessage>(256);
         let port = self.webhook_port;
         let _verify_token = self.verify_token.clone();
@@ -225,7 +230,7 @@ impl ChannelAdapter for WhatsAppAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Web/QR gateway mode: route all messages through the gateway
         if let Some(ref gw) = self.gateway_url {
             let text = match &content {
@@ -323,7 +328,7 @@ impl ChannelAdapter for WhatsAppAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

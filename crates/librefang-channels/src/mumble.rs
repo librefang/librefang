@@ -290,8 +290,10 @@ impl ChannelAdapter for MumbleAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let addr = format!("{}:{}", self.host, self.port);
         info!("Mumble adapter connecting to {addr}");
 
@@ -486,7 +488,7 @@ impl ChannelAdapter for MumbleAdapter {
         &self,
         _user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(t) => t,
             _ => "(Unsupported content type)".to_string(),
@@ -511,12 +513,15 @@ impl ChannelAdapter for MumbleAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Mumble has no typing indicator in its protocol.
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         // Drop the writer to close the TCP connection
         let mut lock = self.stream.lock().await;
