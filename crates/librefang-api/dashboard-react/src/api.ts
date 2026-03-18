@@ -1,10 +1,18 @@
+export interface HealthCheck {
+  name: string;
+  status: string;
+}
+
 export interface HealthResponse {
   status?: string;
+  checks?: HealthCheck[];
 }
 
 export interface StatusResponse {
   version?: string;
   agent_count?: number;
+  active_agent_count?: number;
+  memory_used_mb?: number;
   uptime_seconds?: number;
   default_provider?: string;
   default_model?: string;
@@ -99,6 +107,7 @@ export interface DashboardSnapshot {
   channels: ChannelItem[];
   agents: AgentItem[];
   skillCount: number;
+  workflowCount: number;
 }
 
 export interface AgentIdentity {
@@ -528,13 +537,14 @@ async function del<T>(path: string): Promise<T> {
 }
 
 export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
-  const [health, status, providersRaw, channelsRaw, skillsRaw, agents] = await Promise.all([
+  const [health, status, providersRaw, channelsRaw, skillsRaw, agents, workflows] = await Promise.all([
     get<HealthResponse>("/api/health"),
     get<StatusResponse>("/api/status"),
     get<ProvidersResponse>("/api/providers"),
     get<ChannelsResponse>("/api/channels"),
     get<SkillsResponse>("/api/skills"),
-    listAgents()
+    listAgents(),
+    get<{ workflows?: any[] }>("/api/workflows")
   ]);
 
   return {
@@ -543,9 +553,11 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
     providers: providersRaw.providers ?? [],
     channels: channelsRaw.channels ?? [],
     agents: agents ?? [],
-    skillCount: skillsRaw.skills?.length ?? 0
+    skillCount: skillsRaw.skills?.length ?? 0,
+    workflowCount: workflows.workflows?.length ?? 0
   };
 }
+
 
 export async function listAgents(): Promise<AgentItem[]> {
   const data = await get<PaginatedResponse<AgentItem>>(

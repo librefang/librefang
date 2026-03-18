@@ -1,0 +1,94 @@
+{
+  "nav": {
+    "core": "Core", "automation": "Automation", "resources": "Resources", "system": "System",
+    "overview": "Overview", "canvas": "Canvas", "chat": "Chat", "sessions": "Sessions", "approvals": "Approvals",
+    "workflows": "Workflows", "scheduler": "Scheduler", "goals": "Goals", "agents": "Agents",
+    "providers": "Providers", "channels": "Channels", "skills": "Skills", "hands": "Hands",
+    "analytics": "Analytics", "memory": "Memory", "comms": "Comms", "runtime": "Runtime", "logs": "Logs", "settings": "Settings"
+  },
+  "common": {
+    "refresh": "Refresh", "status": "Status", "daemon_online": "Daemon Online", "infrastructure": "Infrastructure",
+    "toggle_theme": "Toggle theme", "change_language": "Change language", "delete": "Delete", "cancel": "Cancel",
+    "save": "Save", "edit": "Edit", "confirm": "Confirm", "loading": "Loading...", "search": "Search",
+    "actions": "Actions", "clear": "Clear", "load": "Load", "active": "Active", "idle": "Idle", "running": "Running",
+    "online": "Online", "offline": "Offline", "setup": "Setup", "ok": "OK", "config": "Config", "interact": "Interact",
+    "never": "Never", "unknown": "Unknown", "no_data": "No data", "resume": "Resume", "close": "Close",
+    "kernel_runtime": "Kernel Runtime", "run_now": "Run Now", "view_all": "View All", "created": "Created",
+    "symbols": { "separator": ":", "arrow": "→", "none": "-", "slash": "/", "expand": "+", "collapse": "−" },
+    "units": { "mb": "MB", "ms": "ms", "days_short": "d", "hours_short": "h", "minutes_short": "m", "seconds_short": "s" }
+  },
+  "status": {
+    "running": "Running", "idle": "Idle", "error": "Error", "active": "Active", "paused": "Paused", "configured": "Configured", "nominal": "Nominal", "unknown": "Unknown"
+  },
+  "overview": {
+    "welcome": "Welcome to LibreFang", "description": "Manage your autonomous agent infrastructure and multi-channel workflows.",
+    "system_overview": "System Overview", "operational": "Operational", "alert": "System Alert", "active_agents": "Active Agents",
+    "active": "active", "active_count": "{{count}} active", "workflows": "Workflows", "design_with_canvas": "Design with visual canvas",
+    "providers": "Providers", "configured": "configured", "channels": "Channels", "adapters_available": "adapters available",
+    "quick_actions": "Quick Actions", "new_workflow": "New Workflow", "deploy_agent": "Deploy Agent", "open_chat": "Open Chat",
+    "recent_agents": "Recent Agents", "view_all": "View All", "system_status": "System Status", "uptime": "Uptime", "memory_usage": "Memory",
+    "version": "Version", "telemetry": "Service Telemetry", "pro_tip": "Pro Tip", "pro_tip_text": "Use the Canvas to orchestrate agents across multiple channels.",
+    "no_active_agents": "No active agents configured", "no_telemetry": "No telemetry data available"
+  },
+  "agents": {
+    "title": "Agents", "subtitle": "Active autonomous units managed by the LibreFang kernel.",
+    "model": "Model", "provider": "Provider", "last_active": "Last Active", "no_matching": "No agents matching your search."
+  },
+  "providers": {
+    "title": "Providers", "subtitle": "Manage LLM API connections and health.",
+    "configured_count": "{{configured}} / {{total}} Configured", "models": "Models", "latency": "Latency", "test_connection": "Test Connection", "analyzing": "Analyzing..."
+  },
+  "channels": {
+    "title": "Channels", "subtitle": "Messaging adapters and integration gateways.",
+    "configured_count": "{{count}} Active Connectors", "setup_adapter": "Setup Adapter", "no_channels": "No channels discovered."
+  },
+  "skills": {
+    "title": "Skills", "subtitle": "Atomic capabilities that extend agent reasoning.",
+    "tools": "Tools", "author": "Author", "uninstall": "Uninstall", "no_skills": "No skills available."
+  },
+  "hands": {
+    "title": "Hands", "subtitle": "Autonomous capability packages.",
+    "available": "Available Hands", "instances": "Active Instances", "telemetry": "Telemetry", "activate": "Activate",
+    "orchestration": "Capability Orchestration", "ready_hands": "Ready Hands", "ready_description": "Ready to be deployed to an agent."
+  },
+  "analytics": {
+    "title": "Analytics", "subtitle": "Usage statistics and performance telemetry.",
+    "intelligence": "System Intelligence", "compute": "Compute Usage", "compute_desc": "Resources consumed by providers.",
+    "runtime": "Runtime Status", "runtime_desc": "Core system execution metrics.",
+    "active_agents": "Active Agents", "configured_channels": "Configured Channels", "available_skills": "Available Skills", "health_checks": "Health Checks",
+    "advanced": "Advanced Metrics", "advanced_desc": "Detailed analysis coming soon."
+  },
+  "memory": {
+    "title": "Memory", "subtitle": "Persistent vector storage for agent context.",
+    "cognitive_layer": "Cognitive Layer", "objects_stored": "{{count}} Objects Stored"
+  },
+  "comms": {
+    "bus": "Communication Bus", "subtitle": "Real-time message traffic and connectivity.",
+    "active_channels": "Active Channels", "active_channels_description": "Connectivity status of adapters.",
+    "unconfigured": "Unconfigured", "health_description": "Sub-system checks.", "awaiting_telemetry": "Awaiting telemetry...",
+    "topology": "Network Topology", "topology_description": "High-performance event bus coordination."
+  },
+  "workflows": {
+    "title": "Workflows", "subtitle": "Automation hub.", "all_workflows": "All Workflows", "run_workflow": "Run Workflow",
+    "select_workflow": "Select workflow", "recent_runs": "Recent Runs", "no_runs": "No runs yet",
+    "select_workflow_hint": "Select a workflow to view runs", "steps_count": "{{count}} steps", "automation_hub": "Automation Hub"
+  },
+  "scheduler": {
+    "title": "Scheduler", "subtitle": "Cron jobs and tasks.", "create_job": "Create Schedule", "create_job_desc": "Define new task sequence.",
+    "job_name": "Job Name", "job_name_placeholder": "e.g. Weekly Health Check", "cron_exp": "Cron Expression",
+    "target_agent": "Target Agent", "select_agent": "Select agent...", "active_schedules": "Active Schedules", "run_now": "Run Now",
+    "event_triggers": "Event Triggers", "system_cron": "System Cron"
+  },
+  "runtime": {
+    "title": "Runtime", "subtitle": "Engine status and resource management.", "kernel": "Kernel Execution Environment",
+    "environment": "Environment", "engine_version": "Engine Version", "system_uptime": "System Uptime"
+  },
+  "logs": {
+    "title": "Logs", "subtitle": "Real-time diagnostic events.", "export_json": "Export JSON",
+    "timestamp": "Timestamp", "module": "Module", "message": "Message"
+  },
+  "settings": {
+    "title": "Settings", "subtitle": "System parameters.", "appearance": "Appearance",
+    "theme": "Interface Theme", "language": "Language", "theme_light": "Light", "theme_dark": "Dark", "system_config": "System Configuration"
+  }
+}

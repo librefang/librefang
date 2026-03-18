@@ -1,10 +1,13 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import i18n from "./i18n";
 
 interface UIState {
   theme: "light" | "dark";
+  language: string;
   isMobileMenuOpen: boolean;
   toggleTheme: () => void;
+  setLanguage: (lang: string) => void;
   setMobileMenuOpen: (open: boolean) => void;
 }
 
@@ -12,14 +15,19 @@ export const useUIStore = create<UIState>()(
   persist(
     (set) => ({
       theme: "dark",
+      language: i18n.language || "en",
       isMobileMenuOpen: false,
       toggleTheme: () =>
         set((state) => ({ theme: state.theme === "light" ? "dark" : "light" })),
+      setLanguage: (lang) => {
+        void i18n.changeLanguage(lang);
+        set({ language: lang });
+      },
       setMobileMenuOpen: (open) => set({ isMobileMenuOpen: open }),
     }),
     {
       name: "librefang-ui-storage",
-      partialize: (state) => ({ theme: state.theme }), // Only persist theme
+      partialize: (state) => ({ theme: state.theme, language: state.language }),
     }
   )
 );

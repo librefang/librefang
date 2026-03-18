@@ -1,231 +1,114 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useTranslation } from "react-i18next";
 import {
   deleteWorkflow,
   listWorkflowRuns,
   listWorkflows,
   runWorkflow,
-  type WorkflowItem,
-  type WorkflowRunItem
 } from "../api";
+import { WorkflowEditor } from "../components/WorkflowEditor";
 
 const REFRESH_MS = 30000;
 
-function toDateText(value?: string | null): string {
-  if (!value) return "-";
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  return date.toLocaleString();
-}
-
 export function WorkflowsPage() {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
+  const [isEditing, setIsEditing] = useState(false);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>("");
   const [runInput, setRunInput] = useState("");
-  const [running, setRunning] = useState(false);
   const [runResult, setRunResult] = useState<string>("");
 
-  const workflowsQuery = useQuery({
-    queryKey: ["workflows", "list"],
-    queryFn: listWorkflows,
-    refetchInterval: REFRESH_MS
-  });
+  const workflowsQuery = useQuery({ queryKey: ["workflows", "list"], queryFn: listWorkflows, refetchInterval: REFRESH_MS });
+  const runsQuery = useQuery({ queryKey: ["workflows", "runs", selectedWorkflowId], queryFn: () => listWorkflowRuns(selectedWorkflowId), enabled: Boolean(selectedWorkflowId) });
 
-  const runsQuery = useQuery({
-    queryKey: ["workflows", "runs", selectedWorkflowId],
-    queryFn: () => listWorkflowRuns(selectedWorkflowId),
-    enabled: Boolean(selectedWorkflowId)
-  });
+  const runMutation = useMutation({ mutationFn: ({ workflowId, input }: any) => runWorkflow(workflowId, input) });
+  const deleteMutation = useMutation({ mutationFn: deleteWorkflow });
 
-  const runMutation = useMutation({
-    mutationFn: ({ workflowId, input }: { workflowId: string; input: string }) =>
-      runWorkflow(workflowId, input)
-  });
+  const workflows = useMemo(() => [...(workflowsQuery.data ?? [])].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")), [workflowsQuery.data]);
 
-  const deleteMutation = useMutation({
-    mutationFn: deleteWorkflow
-  });
-
-  const workflows = useMemo(
-    () => [...(workflowsQuery.data ?? [])].sort(
-      (a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")
-    ),
-    [workflowsQuery.data]
-  );
-
-  const runs = runsQuery.data ?? [];
-
-  async function handleRun() {
-    if (!selectedWorkflowId || !runInput.trim()) return;
-    setRunning(true);
+  const handleRun = async () => {
+    if (!selectedWorkflowId) return;
     try {
-      const result = await runMutation.mutateAsync({
-        workflowId: selectedWorkflowId,
-        input: runInput
-      });
+      const result = await runMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
       setRunResult(typeof result.message === "string" ? result.message : JSON.stringify(result));
       await runsQuery.refetch();
-    } catch (err) {
-      setRunResult(`Error: ${err}`);
-    } finally {
-      setRunning(false);
-    }
-  }
+    } catch (err: any) { setRunResult(`Error: ${err.message}`); }
+  };
 
-  async function handleDelete(workflowId: string) {
-    const wf = workflows.find(w => w.id === workflowId);
-    if (!confirm(`Delete workflow "${wf?.name || workflowId}"?`)) return;
+  const handleDelete = async (id: string) => {
+    if (!window.confirm(t("common.confirm"))) return;
+    try { await deleteMutation.mutateAsync(id); await queryClient.invalidateQueries({ queryKey: ["workflows"] }); } catch {}
+  };
 
-    try {
-      await deleteMutation.mutateAsync(workflowId);
-      if (selectedWorkflowId === workflowId) {
-        setSelectedWorkflowId("");
-      }
-      await queryClient.invalidateQueries({ queryKey: ["workflows"] });
-    } catch {}
+  if (isEditing) {
+    return <WorkflowEditor onClose={() => setIsEditing(false)} onSave={() => setIsEditing(false)} />;
   }
 
   return (
-    <section className="flex flex-col gap-4">
-      <header className="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+    <div className="flex flex-col gap-6 transition-colors duration-300">
+      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
-          <h1 className="m-0 text-2xl font-semibold">Workflows</h1>
-          <p className="text-sm text-slate-400">Manage your automation workflows.</p>
+          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" /></svg>
+            {t("workflows.automation_hub")}
+          </div>
+          <h1 className="mt-2 text-3xl font-extrabold tracking-tight md:text-4xl">{t("workflows.title")}</h1>
+          <p className="mt-1 text-text-dim font-medium">{t("workflows.subtitle")}</p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => navigate({ to: "/canvas" })}
-            className="rounded-lg border border-sky-500 bg-sky-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-sky-500"
-          >
-            + New Canvas
+        <div className="flex gap-3">
+          <button onClick={() => setIsEditing(true)} className="px-6 py-2 rounded-xl bg-brand text-white text-sm font-black shadow-lg shadow-brand/20 hover:opacity-90 transition-all">
+            {t("common.symbols.expand")} {t("overview.new_workflow")}
           </button>
-          <button
-            onClick={() => void workflowsQuery.refetch()}
-            className="rounded-lg border border-slate-600 bg-slate-800 px-3 py-2 text-sm text-slate-300 transition hover:bg-slate-700"
-            disabled={workflowsQuery.isFetching}
-          >
-            Refresh
+          <button className="flex h-9 items-center gap-2 rounded-xl border border-border-subtle bg-surface px-4 text-sm font-bold text-text-dim hover:text-brand transition-all shadow-sm" onClick={() => void workflowsQuery.refetch()}>
+            <svg className={`h-3.5 w-3.5 ${workflowsQuery.isFetching ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+            {t("common.refresh")}
           </button>
         </div>
       </header>
 
-      <div className="grid gap-4 lg:grid-cols-[1fr_320px]">
-        {/* Workflow List */}
-        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-          <h2 className="mb-3 mt-0 text-base font-semibold">All Workflows</h2>
-
-          {workflowsQuery.isLoading && workflows.length === 0 ? (
-            <p className="text-sm text-slate-400">Loading workflows...</p>
-          ) : workflows.length === 0 ? (
-            <div className="py-8 text-center">
-              <p className="mb-4 text-sm text-slate-400">No workflows yet</p>
-              <button
-                onClick={() => navigate({ to: "/canvas" })}
-                className="rounded-lg border border-sky-500 bg-sky-600 px-4 py-2 text-sm font-medium text-white"
-              >
-                Create Your First Workflow
-              </button>
-            </div>
-          ) : (
-            <div className="grid gap-2 sm:grid-cols-2">
-              {workflows.map((wf) => (
-                <article
-                  key={wf.id}
-                  className={`cursor-pointer rounded-lg border p-3 transition ${
-                    selectedWorkflowId === wf.id
-                      ? "border-sky-500 bg-sky-500/10"
-                      : "border-slate-700 bg-slate-800/50 hover:border-slate-600"
-                  }`}
-                  onClick={() => setSelectedWorkflowId(wf.id)}
-                >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <h3 className="m-0 text-sm font-semibold text-slate-200">{wf.name}</h3>
-                      <p className="mt-1 text-xs text-slate-400">{wf.description || "No description"}</p>
-                      <p className="mt-2 text-xs text-slate-500">
-                        {wf.steps || 0} steps · {toDateText(wf.created_at)}
-                      </p>
+      <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
+        <div className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm">
+          <h2 className="text-lg font-black tracking-tight mb-6">{t("workflows.all_workflows")}</h2>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {workflows.map(wf => (
+              <article key={wf.id} onClick={() => setSelectedWorkflowId(wf.id)} className={`group cursor-pointer rounded-xl border p-4 transition-all ${selectedWorkflowId === wf.id ? 'border-brand bg-brand/5 shadow-sm' : 'border-border-subtle bg-main/40 hover:border-brand/30'}`}>
+                <div className="flex justify-between items-start">
+                  <div className="min-w-0 flex-1">
+                    <h3 className="text-sm font-black truncate group-hover:text-brand transition-colors">{wf.name}</h3>
+                    <p className="text-[10px] text-text-dim mt-1 line-clamp-1 italic">{wf.description || t("common.no_data")}</p>
+                    <div className="mt-3 flex items-center gap-3 text-[9px] font-bold text-text-dim/60 uppercase">
+                      <span>{t("workflows.steps_count", { count: wf.steps || 0 })}</span>
+                      <div className="h-1 w-1 rounded-full bg-border-subtle" />
+                      <span>{t("common.created")}: {new Date(wf.created_at || "").toLocaleDateString()}</span>
                     </div>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }}
-                      className="rounded border border-red-700 bg-red-700/20 px-2 py-1 text-xs text-red-400 hover:bg-red-700/30"
-                    >
-                      Delete
-                    </button>
                   </div>
-                </article>
-              ))}
-            </div>
-          )}
+                  <button onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }} className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-text-dim hover:text-error transition-all">
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
         </div>
 
-        {/* Selected Workflow Details */}
-        <div className="flex flex-col gap-4">
-          {/* Run Panel */}
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-            <h3 className="mb-3 mt-0 text-sm font-semibold">Run Workflow</h3>
-
-            <select
-              value={selectedWorkflowId}
-              onChange={(e) => setSelectedWorkflowId(e.target.value)}
-              className="mb-3 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
-            >
-              <option value="">Select workflow</option>
-              {workflows.map((wf) => (
-                <option key={wf.id} value={wf.id}>{wf.name}</option>
-              ))}
+        <aside className="flex flex-col gap-6">
+          <div className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm">
+            <h3 className="text-xs font-black uppercase tracking-widest text-text-dim mb-4">{t("workflows.run_workflow")}</h3>
+            <select value={selectedWorkflowId} onChange={(e) => setSelectedWorkflowId(e.target.value)} className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm mb-3 outline-none focus:border-brand">
+              <option value="">{t("workflows.select_workflow")}</option>
+              {workflows.map(wf => <option key={wf.id} value={wf.id}>{wf.name}</option>)}
             </select>
-
-            <textarea
-              value={runInput}
-              onChange={(e) => setRunInput(e.target.value)}
-              placeholder="Input (optional)"
-              rows={3}
-              className="mb-3 w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-200"
-            />
-
-            <button
-              onClick={handleRun}
-              disabled={!selectedWorkflowId || !runInput.trim() || running}
-              className="w-full rounded-lg border border-emerald-600 bg-emerald-700 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {running ? "Running..." : "Run Now"}
-            </button>
-
-            {runResult && (
-              <pre className="mt-3 max-h-32 overflow-auto rounded border border-slate-700 bg-slate-950 p-2 text-xs text-slate-300 whitespace-pre-wrap">
-                {runResult}
-              </pre>
-            )}
+            <textarea value={runInput} onChange={e => setRunInput(e.target.value)} placeholder={t("chat.transmit_command")} rows={3} className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm mb-4 outline-none focus:border-brand resize-none" />
+            <button disabled={!selectedWorkflowId || runMutation.isPending} onClick={handleRun} className="w-full py-2.5 rounded-xl bg-success text-white text-xs font-black shadow-lg shadow-success/20 hover:opacity-90 transition-all disabled:opacity-30">{t("scheduler.run_now")}</button>
           </div>
 
-          {/* Recent Runs */}
-          <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-4">
-            <h3 className="mb-3 mt-0 text-sm font-semibold">Recent Runs</h3>
-
-            {!selectedWorkflowId ? (
-              <p className="text-xs text-slate-400">Select a workflow to view runs</p>
-            ) : runsQuery.isLoading ? (
-              <p className="text-xs text-slate-400">Loading...</p>
-            ) : runs.length === 0 ? (
-              <p className="text-xs text-slate-400">No runs yet</p>
-            ) : (
-              <div className="space-y-2">
-                {runs.slice(0, 10).map((run, i) => (
-                  <div key={run.id ?? i} className="rounded border border-slate-700 bg-slate-800/50 p-2">
-                    <p className="text-xs text-slate-300">{run.workflow_name}</p>
-                    <p className="text-[10px] text-slate-500">
-                      {run.steps_completed ?? 0} steps · {toDateText(run.started_at)}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            )}
+          <div className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm">
+            <h3 className="text-xs font-black uppercase tracking-widest text-text-dim mb-4">{t("workflows.recent_runs")}</h3>
+            <p className="text-[10px] text-text-dim italic text-center py-8">{selectedWorkflowId ? t("workflows.no_runs") : t("workflows.select_workflow_hint")}</p>
           </div>
-        </div>
+        </aside>
       </div>
-    </section>
+    </div>
   );
 }
