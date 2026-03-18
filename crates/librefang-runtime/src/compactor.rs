@@ -173,7 +173,7 @@ fn estimate_message_tokens(msg: &Message) -> usize {
             .map(|b| match b {
                 ContentBlock::Text { text, .. } => estimate_str_tokens(text),
                 ContentBlock::ToolResult { content, .. } => estimate_str_tokens(content),
-                ContentBlock::Thinking { thinking } => estimate_str_tokens(thinking),
+                ContentBlock::Thinking { thinking, .. } => estimate_str_tokens(thinking),
                 ContentBlock::ToolUse {
                     name, id, input, ..
                 } => {
