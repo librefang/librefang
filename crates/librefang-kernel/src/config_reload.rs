@@ -5,7 +5,7 @@
 //!
 //! **No-op** (informational only): log_level, language, mode.
 //!
-//! **Restart required**: api_listen, api_key, network, memory, stable_prefix_mode.
+//! **Restart required**: api_listen, api_key, network, memory, proxy, stable_prefix_mode.
 
 use librefang_types::config::{KernelConfig, ReloadMode};
 use tracing::{info, warn};
@@ -163,6 +163,14 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         plan.restart_required = true;
         plan.restart_reasons
             .push("memory config changed".to_string());
+    }
+
+    // Proxy config is applied once during boot and exported into process env,
+    // so changes require a restart to rebuild clients consistently.
+    if field_changed(&old.proxy, &new.proxy) {
+        plan.restart_required = true;
+        plan.restart_reasons
+            .push("proxy config changed".to_string());
     }
 
     // Default model — hot-reloadable (just swap config fields, new agents pick it up)
@@ -449,6 +457,19 @@ mod tests {
             .restart_reasons
             .iter()
             .any(|r| r.contains("stable_prefix_mode")));
+    }
+
+    #[test]
+    fn test_proxy_config_requires_restart() {
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.proxy.http_proxy = Some("http://proxy.example.com:8080".to_string());
+        let plan = build_reload_plan(&a, &b);
+        assert!(plan.restart_required);
+        assert!(plan
+            .restart_reasons
+            .iter()
+            .any(|r| r.contains("proxy config changed")));
     }
 
     // -----------------------------------------------------------------------
