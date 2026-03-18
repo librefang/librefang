@@ -65,6 +65,11 @@ clap_complete = "4"
 # HTTP client (for LLM drivers)
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "multipart", "rustls", "gzip", "deflate", "brotli", "form", "query"] }
 
+# TLS fallback — bundled Mozilla CA roots for systems without system certs (musl, Termux, minimal containers)
+rustls = "0.23"
+webpki-roots = "1"
+rustls-native-certs = "0.8"
+
 # Async trait
 async-trait = "0.1"
 
@@ -149,6 +154,9 @@ mailparse = "0.16"
 # Internationalization (i18n)
 fluent = "0.17"
 unic-langid = "0.9"
+
+# MQTT client
+rumqttc = "0.24"
 
 # Testing
 tokio-test = "0.4"

@@ -2569,11 +2569,11 @@ pub async fn test_webhook(
 
     let payload_bytes = serde_json::to_vec(&test_payload).unwrap_or_default();
 
-    let client = reqwest::Client::builder()
+    let client = librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap_or_default();
+        .expect("HTTP client build");
 
     let mut request = client
         .post(&webhook.url)

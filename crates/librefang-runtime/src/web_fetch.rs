@@ -22,14 +22,14 @@ pub struct WebFetchEngine {
 impl WebFetchEngine {
     /// Create a new fetch engine from config with a shared cache.
     pub fn new(config: WebFetchConfig, cache: Arc<WebCache>) -> Self {
-        let client = reqwest::Client::builder()
+        let client = crate::http_client::client_builder()
             .user_agent(crate::USER_AGENT)
             .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .gzip(true)
             .deflate(true)
             .brotli(true)
             .build()
-            .unwrap_or_default();
+            .expect("HTTP client build");
         Self {
             config,
             client,

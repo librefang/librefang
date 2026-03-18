@@ -202,7 +202,7 @@ pub fn run(_config: Option<PathBuf>) -> LauncherChoice {
         let _ = std::panic::catch_unwind(|| {
             let result = crate::find_daemon();
             let agent_count = result.as_ref().map_or(0, |base| {
-                let client = reqwest::blocking::Client::builder()
+                let client = crate::http_client::client_builder()
                     .timeout(Duration::from_secs(2))
                     .build()
                     .ok();

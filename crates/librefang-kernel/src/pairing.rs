@@ -205,7 +205,7 @@ impl PairingManager {
 
                 let full_url = format!("{}/{}", url.trim_end_matches('/'), topic);
 
-                let client = reqwest::Client::new();
+                let client = librefang_runtime::http_client::new_client();
                 match client
                     .post(&full_url)
                     .header("Title", title)
@@ -261,7 +261,7 @@ impl PairingManager {
                     "priority": 5,
                 });
 
-                let client = reqwest::Client::new();
+                let client = librefang_runtime::http_client::new_client();
                 match client
                     .post(&url)
                     .header("X-Gotify-Key", &app_token)

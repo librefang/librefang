@@ -209,7 +209,7 @@ pub async fn exchange_code_for_tokens(
         ("redirect_uri", &redirect_uri),
     ];
 
-    let client = reqwest::Client::new();
+    let client = crate::http_client::new_client();
     let resp = client
         .post(TOKEN_URL)
         .form(&params)
@@ -260,7 +260,7 @@ pub async fn refresh_access_token(refresh_token: &str) -> Result<ChatGptAuthResu
         ("refresh_token", refresh_token),
     ];
 
-    let client = reqwest::Client::new();
+    let client = crate::http_client::new_client();
     let resp = client
         .post(TOKEN_URL)
         .form(&params)
@@ -315,7 +315,7 @@ pub async fn fetch_best_codex_model(access_token: &str) -> String {
         "{CHATGPT_BASE_URL}/codex/models?client_version={}",
         librefang_types::VERSION
     );
-    let client = reqwest::Client::new();
+    let client = crate::http_client::new_client();
     let resp = match client.get(&url).bearer_auth(access_token).send().await {
         Ok(r) => r,
         Err(e) => {

@@ -1146,7 +1146,7 @@ async fn download_image_to_blocks(url: &str, caption: Option<&str>) -> Vec<Conte
     // 5 MB limit to prevent memory abuse from oversized images
     const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-    let client = reqwest::Client::new();
+    let client = crate::http_client::new_client();
     let resp = match client.get(url).send().await {
         Ok(r) => r,
         Err(e) => {

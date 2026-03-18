@@ -100,7 +100,7 @@ impl TtsEngine {
             "speed": self.config.openai.speed,
         });
 
-        let client = reqwest::Client::new();
+        let client = crate::http_client::new_client();
         let response = client
             .post("https://api.openai.com/v1/audio/speech")
             .header("Authorization", format!("Bearer {}", api_key))
@@ -172,7 +172,7 @@ impl TtsEngine {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = crate::http_client::new_client();
         let response = client
             .post(&url)
             .header("xi-api-key", &api_key)

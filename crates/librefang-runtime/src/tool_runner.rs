@@ -1368,7 +1368,7 @@ async fn tool_apply_patch(
 /// Legacy web fetch (no SSRF protection, no readability). Used when WebToolsContext is unavailable.
 async fn tool_web_fetch_legacy(input: &serde_json::Value) -> Result<String, String> {
     let url = input["url"].as_str().ok_or("Missing 'url' parameter")?;
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
@@ -1408,7 +1408,7 @@ async fn tool_web_search_legacy(input: &serde_json::Value) -> Result<String, Str
 
     debug!(query, "Executing web search via DuckDuckGo HTML");
 
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
@@ -2642,7 +2642,7 @@ fn format_file_size(bytes: usize) -> String {
 // ---------------------------------------------------------------------------
 
 async fn tool_location_get() -> Result<String, String> {
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {e}"))?;
