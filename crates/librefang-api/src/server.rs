@@ -307,10 +307,11 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/workflows",
             axum::routing::get(routes::list_workflows).post(routes::create_workflow),
         )
-        .route("/workflows/{id}", axum::routing::get(routes::get_workflow))
         .route(
             "/workflows/{id}",
-            axum::routing::put(routes::update_workflow).delete(routes::delete_workflow),
+            axum::routing::get(routes::get_workflow)
+                .put(routes::update_workflow)
+                .delete(routes::delete_workflow),
         )
         .route(
             "/workflows/{id}/run",

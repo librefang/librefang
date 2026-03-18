@@ -307,11 +307,17 @@ pub async fn update_workflow(
         created_at: existing.created_at,
     };
 
-    state
+    if !state
         .kernel
         .workflows
         .update_workflow(workflow_id, updated)
-        .await;
+        .await
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Workflow not found"})),
+        );
+    }
 
     (
         StatusCode::OK,
