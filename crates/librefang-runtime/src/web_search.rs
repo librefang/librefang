@@ -124,9 +124,15 @@ impl WebSearchEngine {
             }
         }
 
-        // DuckDuckGo always available as zero-config fallback
+        // DuckDuckGo as zero-config fallback — but it often gets captcha-blocked,
+        // so treat it as best-effort and surface the last upstream error if it also
+        // fails, giving the user a more actionable message.
         debug!("Auto: falling back to DuckDuckGo");
-        self.search_duckduckgo(query, max_results).await
+        match self.search_duckduckgo(query, max_results).await {
+            Ok(result) if !result.trim().is_empty() => Ok(result),
+            Ok(_) => Err("All search providers failed; DuckDuckGo returned empty results (likely captcha-blocked). Configure a Brave, Tavily, or Perplexity API key for reliable search.".to_string()),
+            Err(e) => Err(format!("All search providers exhausted. Last error (DuckDuckGo): {e}")),
+        }
     }
 
     /// Search via Brave Search API with auth_profile key rotation.

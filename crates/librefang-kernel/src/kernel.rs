@@ -224,6 +224,10 @@ pub struct LibreFangKernel {
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
     agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// Cooldown tracker for hand routing failures. Maps hand_id → (expiry, consecutive_failures).
+    /// Prevents the router from repeatedly dispatching to a hand that keeps failing.
+    /// After `MAX_HAND_FAILURES` consecutive failures the hand is auto-deactivated.
+    hand_route_cooldowns: dashmap::DashMap<String, (std::time::Instant, u32)>,
     /// Per-agent decision traces from the most recent message exchange.
     /// Stored for retrieval via `/api/agents/{id}/traces`.
     pub decision_traces: dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
@@ -1159,6 +1163,7 @@ impl LibreFangKernel {
             channel_adapters: dashmap::DashMap::new(),
             default_model_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
+            hand_route_cooldowns: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
             command_queue,
             self_handle: OnceLock::new(),
@@ -2305,6 +2310,11 @@ impl LibreFangKernel {
         })
     }
 
+    /// Duration to suppress routing to a hand after a dispatch failure.
+    const HAND_ROUTE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+    /// Auto-deactivate a hand after this many consecutive routing failures.
+    const MAX_HAND_FAILURES: u32 = 3;
+
     async fn execute_router_agent(
         &self,
         entry: &AgentEntry,
@@ -2317,13 +2327,36 @@ impl LibreFangKernel {
         let template_selection =
             router::auto_select_template(message, &self.config.home_dir.join("agents"));
 
-        if let Some(hand_id) = hand_selection.hand_id {
+        // ── Route decision trace ──
+        info!(
+            router = %entry.name,
+            hand_candidate = hand_selection.hand_id.unwrap_or("none"),
+            hand_score = hand_selection.score,
+            hand_reason = %hand_selection.reason,
+            template_candidate = %template_selection.template,
+            template_score = template_selection.score,
+            template_reason = %template_selection.reason,
+            "Route decision: scoring complete"
+        );
+
+        // ── Compare hand vs template score and pick the best ──
+        let hand_usable = hand_selection.hand_id.is_some()
+            && !self.is_hand_cooled_down(hand_selection.hand_id.unwrap())
+            && self.hand_requirements_met(hand_selection.hand_id.unwrap());
+
+        let prefer_hand = hand_usable && hand_selection.score >= template_selection.score;
+
+        if prefer_hand {
+            let hand_id = hand_selection.hand_id.unwrap();
             info!(
                 router = %entry.name,
                 route_type = "hand",
                 target = hand_id,
+                hand_score = hand_selection.score,
+                template = %template_selection.template,
+                template_score = template_selection.score,
                 reason = %hand_selection.reason,
-                "Router selected hand"
+                "Router selected hand (score comparison)"
             );
             match self
                 .execute_routed_hand(
@@ -2334,14 +2367,26 @@ impl LibreFangKernel {
                 )
                 .await
             {
-                Ok(result) => return Ok(result),
-                Err(err) => warn!(
-                    router = %entry.name,
-                    hand_id,
-                    error = %err,
-                    "Router hand dispatch failed, falling back"
-                ),
+                Ok(result) => {
+                    // Success — clear any previous failure count
+                    self.hand_route_cooldowns.remove(hand_id);
+                    return Ok(result);
+                }
+                Err(err) => {
+                    self.record_hand_failure(hand_id, &entry.name, &err);
+                }
             }
+        } else if let Some(hand_id) = hand_selection.hand_id {
+            // Log why hand was skipped despite matching
+            info!(
+                router = %entry.name,
+                hand = hand_id,
+                hand_score = hand_selection.score,
+                template = %template_selection.template,
+                template_score = template_selection.score,
+                hand_usable,
+                "Route decision: skipped hand"
+            );
         }
 
         if template_selection.score > 0 {
@@ -2387,6 +2432,89 @@ impl LibreFangKernel {
             content_blocks,
         )
         .await
+    }
+
+    /// Record a hand dispatch failure: apply cooldown, increment failure count,
+    /// and auto-deactivate after `MAX_HAND_FAILURES` consecutive failures.
+    fn record_hand_failure(&self, hand_id: &str, router_name: &str, err: &KernelError) {
+        let failures = self
+            .hand_route_cooldowns
+            .get(hand_id)
+            .map(|e| e.1)
+            .unwrap_or(0)
+            + 1;
+
+        if failures >= Self::MAX_HAND_FAILURES {
+            warn!(
+                router = %router_name,
+                hand = %hand_id,
+                consecutive_failures = failures,
+                error = %err,
+                "Hand exceeded max failures — auto-deactivating"
+            );
+            // Try to deactivate the hand
+            if let Some(instance_id) = self.active_hand_instance_id(hand_id) {
+                if let Err(e) = self.hand_registry.deactivate(instance_id) {
+                    warn!(hand = %hand_id, error = %e, "Failed to auto-deactivate hand");
+                } else {
+                    info!(hand = %hand_id, "Hand auto-deactivated after repeated failures");
+                    self.persist_hand_state();
+                }
+            }
+            self.hand_route_cooldowns.remove(hand_id);
+        } else {
+            warn!(
+                router = %router_name,
+                hand = %hand_id,
+                consecutive_failures = failures,
+                error = %err,
+                "Router hand dispatch failed, applying cooldown"
+            );
+            self.hand_route_cooldowns.insert(
+                hand_id.to_string(),
+                (
+                    std::time::Instant::now() + Self::HAND_ROUTE_COOLDOWN,
+                    failures,
+                ),
+            );
+        }
+    }
+
+    /// Check if a hand is in cooldown after a recent dispatch failure.
+    fn is_hand_cooled_down(&self, hand_id: &str) -> bool {
+        if let Some(entry) = self.hand_route_cooldowns.get(hand_id) {
+            let (expiry, failures) = *entry;
+            if std::time::Instant::now() < expiry {
+                debug!(hand = %hand_id, failures, "Hand still in route cooldown, skipping");
+                return true;
+            }
+            // Cooldown expired — remove entry
+            drop(entry);
+            self.hand_route_cooldowns.remove(hand_id);
+        }
+        false
+    }
+
+    /// Check if a hand's requirements (binaries, API keys) are satisfied.
+    /// Returns true if requirements cannot be checked (hand not in registry)
+    /// to avoid blocking legitimate routing.
+    fn hand_requirements_met(&self, hand_id: &str) -> bool {
+        match self.hand_registry.check_requirements(hand_id) {
+            Ok(results) => {
+                for (req, satisfied) in &results {
+                    if !satisfied {
+                        info!(
+                            hand = %hand_id,
+                            requirement = %req.label,
+                            "Hand requirement not met, skipping auto-route"
+                        );
+                        return false;
+                    }
+                }
+                true
+            }
+            Err(_) => true, // hand not found in registry — let it through
+        }
     }
 
     async fn execute_routed_hand(
@@ -2482,6 +2610,18 @@ impl LibreFangKernel {
                     .and_then(|definition| self.registry.find_by_name(&definition.agent.name))
                     .map(|entry| entry.id)
             })
+    }
+
+    /// Get the instance UUID for an active hand (for deactivation).
+    fn active_hand_instance_id(&self, hand_id: &str) -> Option<uuid::Uuid> {
+        self.hand_registry
+            .list_instances()
+            .into_iter()
+            .find(|instance| {
+                instance.hand_id == hand_id
+                    && instance.status == librefang_hands::HandStatus::Active
+            })
+            .map(|instance| instance.instance_id)
     }
 
     fn wrap_routed_result(result: AgentLoopResult) -> AgentLoopResult {
@@ -3882,6 +4022,10 @@ impl LibreFangKernel {
                 }
             }
         }
+
+        // Invalidate the router manifest cache so newly installed/removed
+        // agents are picked up on the next routing call.
+        router::invalidate_manifest_cache();
     }
 
     /// Publish an event to the bus and evaluate triggers.

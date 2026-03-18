@@ -1,9 +1,10 @@
 use librefang_types::agent::AgentManifest;
 use regex_lite::Regex;
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 const ROUTING_EXCLUDED_TEMPLATES: &[&str] = &["assistant", "router"];
 // Keep this in sync with crates/librefang-cli/src/bundled_agents.rs so the kernel
@@ -664,6 +665,11 @@ const TEMPLATE_RULES: &[RouteRule] = &[
     },
 ];
 
+/// Minimum score required for a hand match to be considered. A single weak
+/// keyword hit (score 1) is too noisy — require at least one strong hit (3)
+/// or two weak hits (2) to route to a hand.
+const MIN_HAND_SCORE: usize = 2;
+
 pub fn auto_select_hand(message: &str) -> HandSelection {
     let mut scored: Vec<(usize, &'static str, Vec<&'static str>)> = Vec::new();
 
@@ -671,7 +677,7 @@ pub fn auto_select_hand(message: &str) -> HandSelection {
         let strong_hits = matched_labels(message, rule.strong);
         let weak_hits = matched_labels(message, rule.weak);
         let score = strong_hits.len() * 3 + weak_hits.len();
-        if score > 0 {
+        if score >= MIN_HAND_SCORE {
             let mut hits = strong_hits;
             hits.extend(weak_hits);
             scored.push((score, rule.target, hits));
@@ -808,7 +814,33 @@ fn auto_select_template_from_metadata(
     })
 }
 
+/// Cached manifest route candidates. Invalidated via `invalidate_manifest_cache()`,
+/// which should be called on config hot-reload or agent install/uninstall.
+static MANIFEST_CACHE: OnceLock<Mutex<Option<Vec<ManifestRouteCandidate>>>> = OnceLock::new();
+
+/// Invalidate the cached manifest route candidates so they are rebuilt on the
+/// next routing call. Call this after config hot-reload or agent changes.
+pub fn invalidate_manifest_cache() {
+    if let Some(cache) = MANIFEST_CACHE.get() {
+        if let Ok(mut guard) = cache.lock() {
+            *guard = None;
+        }
+    }
+}
+
 fn manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandidate> {
+    let cache = MANIFEST_CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(ref cached) = *guard {
+        return cached.clone();
+    }
+
+    let candidates = build_manifest_route_candidates(agents_dir);
+    *guard = Some(candidates.clone());
+    candidates
+}
+
+fn build_manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandidate> {
     let mut candidates = Vec::new();
 
     for template in all_template_names(agents_dir) {
@@ -921,10 +953,20 @@ fn matched_labels(message: &str, patterns: &[(&'static str, &'static str)]) -> V
         .collect()
 }
 
+/// Global cache of compiled regex patterns (keyed by the raw pattern string).
+/// Avoids recompiling the same patterns on every incoming message.
+static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Regex>>> = OnceLock::new();
+
 fn regex_matches(message: &str, pattern: &str) -> bool {
-    Regex::new(&format!("(?i){pattern}"))
-        .map(|regex| regex.is_match(message))
-        .unwrap_or(false)
+    let cache = REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = cache.lock().unwrap_or_else(|e| e.into_inner());
+    let regex = map.entry(pattern.to_string()).or_insert_with(|| {
+        match Regex::new(&format!("(?i){pattern}")) {
+            Ok(r) => r,
+            Err(_) => Regex::new("(?!x)x").unwrap(), // never-match sentinel
+        }
+    });
+    regex.is_match(message)
 }
 
 fn english_variants(text: &str) -> Vec<String> {
