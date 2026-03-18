@@ -202,7 +202,7 @@ enum Commands {
     /// Manage event triggers (list, create, delete) [*].
     #[command(
         subcommand,
-        long_about = "Manage event triggers that fire agents on system events.\n\nTriggers let agents react to lifecycle events, other agents spawning, or\ncustom patterns.\n\nExamples:\n  librefang trigger list                   # List all triggers\n  librefang trigger list --agent-id <ID>   # Filter by agent\n  librefang trigger create <AGENT_ID> '{\"lifecycle\":{}}' --prompt \"Event: {{event}}\"\n  librefang trigger delete <TRIGGER_ID>"
+        long_about = "Manage event triggers that fire agents on system events.\n\nTriggers let agents react to lifecycle events, other agents spawning, or\ncustom patterns.\n\nExamples:\n  librefang trigger list                   # List all triggers\n  librefang trigger list --agent-id <ID>   # Filter by agent\n  librefang trigger create <AGENT_ID> '\"lifecycle\"' --prompt \"Event: {{event}}\"\n  librefang trigger delete <TRIGGER_ID>"
     )]
     Trigger(TriggerCommands),
     /// Migrate from another agent framework to LibreFang.
@@ -934,7 +934,7 @@ enum TriggerCommands {
     },
     /// Create a trigger for an agent.
     #[command(
-        long_about = "Create an event trigger that fires an agent when a matching event occurs.\n\nThe pattern is a JSON object describing what events to match. Use the\n{{event}} placeholder in the prompt template.\n\nExamples:\n  librefang trigger create <AGENT_ID> '{\"lifecycle\":{}}'\n  librefang trigger create <AGENT_ID> '{\"agent_spawned\":{\"name_pattern\":\"*\"}}' \\\n    --prompt \"New agent: {{event}}\" --max-fires 10"
+        long_about = "Create an event trigger that fires an agent when a matching event occurs.\n\nThe pattern is a JSON object describing what events to match. Use the\n{{event}} placeholder in the prompt template.\n\nExamples:\n  librefang trigger create <AGENT_ID> '\"lifecycle\"'\n  librefang trigger create <AGENT_ID> '{\"agent_spawned\":{\"name_pattern\":\"*\"}}' \\\n    --prompt \"New agent: {{event}}\" --max-fires 10"
     )]
     Create {
         /// Agent ID (UUID) that owns the trigger.
@@ -4382,13 +4382,14 @@ fn cmd_trigger_list(agent_id: Option<&str>) {
 
 fn cmd_trigger_create(agent_id: &str, pattern_json: &str, prompt: &str, max_fires: u64) {
     let base = require_daemon("trigger create");
+    let agent_id = resolve_agent_id(&base, agent_id);
     let pattern: serde_json::Value = serde_json::from_str(pattern_json).unwrap_or_else(|e| {
         eprintln!("Invalid pattern JSON: {e}");
         eprintln!("Examples:");
-        eprintln!("  '{{\"lifecycle\":{{}}}}'");
+        eprintln!("  '\"lifecycle\"'");
         eprintln!("  '{{\"agent_spawned\":{{\"name_pattern\":\"*\"}}}}'");
-        eprintln!("  '{{\"agent_terminated\":{{}}}}'");
-        eprintln!("  '{{\"all\":{{}}}}'");
+        eprintln!("  '\"agent_terminated\"'");
+        eprintln!("  '\"all\"'");
         std::process::exit(1);
     });
 
@@ -7165,6 +7166,7 @@ fn cmd_cron_list(json: bool) {
 
 fn cmd_cron_create(agent: &str, spec: &str, prompt: &str, explicit_name: Option<&str>) {
     let base = require_daemon("cron create");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
 
     // Use explicit name if provided, otherwise derive from agent + prompt
@@ -7724,6 +7726,7 @@ fn cmd_webhooks_list(json: bool) {
 
 fn cmd_webhooks_create(agent: &str, url: &str) {
     let base = require_daemon("webhooks create");
+    let agent = resolve_agent_id(&base, agent);
     let client = daemon_client();
     let body = daemon_json(
         client
