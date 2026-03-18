@@ -7234,10 +7234,7 @@ fn cmd_cron_create(agent: &str, spec: &str, prompt: &str, explicit_name: Option<
             }))
             .send(),
     );
-    if let Some(id) = body["job_id"]
-        .as_str()
-        .or_else(|| body["id"].as_str())
-    {
+    if let Some(id) = body["job_id"].as_str().or_else(|| body["id"].as_str()) {
         ui::success(&i18n::t_args("cron-created", &[("id", id)]));
     } else {
         ui::error(&i18n::t_args(
