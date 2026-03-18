@@ -292,8 +292,7 @@ impl ContextEngine for DefaultContextEngine {
     ) -> LibreFangResult<AssembleResult> {
         // Stage 1: Overflow recovery pipeline (4-stage cascade, respects pinned messages)
         // Uses the per-agent context window size, not the boot-time default.
-        let recovery =
-            recover_from_overflow(messages, system_prompt, tools, context_window_tokens);
+        let recovery = recover_from_overflow(messages, system_prompt, tools, context_window_tokens);
 
         if recovery == RecoveryStage::FinalError {
             warn!("ContextEngine: overflow unrecoverable — suggest /reset or /compact");
@@ -321,7 +320,7 @@ impl ContextEngine for DefaultContextEngine {
             id: librefang_types::agent::SessionId::new(),
             agent_id,
             messages: messages.to_vec(),
-            context_window_tokens: self.config.context_window_tokens,
+            context_window_tokens: self.config.context_window_tokens as u64,
             label: None,
         };
 
@@ -592,41 +591,18 @@ impl ContextEngine for ScriptableContextEngine {
 // Plugin loader — resolves `plugin = "name"` to hook paths
 // ---------------------------------------------------------------------------
 
-/// Default plugin directory: `~/.librefang/plugins/`.
-pub fn plugins_dir() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".librefang")
-        .join("plugins")
-}
-
 /// Load a plugin manifest from `~/.librefang/plugins/<name>/plugin.toml`.
 ///
 /// Hook paths in the manifest are relative to the plugin directory — this
 /// function resolves them to absolute paths so the script runner can find them.
-/// Validate that a plugin name is a safe directory component (no path traversal).
-fn validate_plugin_name(name: &str) -> LibreFangResult<()> {
-    if name.is_empty()
-        || name.contains('/')
-        || name.contains('\\')
-        || name.contains("..")
-        || name == "."
-    {
-        return Err(LibreFangError::Internal(format!(
-            "Invalid plugin name '{name}': must be a simple identifier (no /, \\, or ..)"
-        )));
-    }
-    Ok(())
-}
-
 pub fn load_plugin(
     plugin_name: &str,
 ) -> LibreFangResult<(
     librefang_types::config::PluginManifest,
     librefang_types::config::ContextEngineHooks,
 )> {
-    validate_plugin_name(plugin_name)?;
-    let plugin_dir = plugins_dir().join(plugin_name);
+    crate::plugin_manager::validate_plugin_name(plugin_name).map_err(LibreFangError::Internal)?;
+    let plugin_dir = crate::plugin_manager::plugins_dir().join(plugin_name);
     let manifest_path = plugin_dir.join("plugin.toml");
 
     if !manifest_path.exists() {
@@ -671,21 +647,12 @@ pub fn load_plugin(
 }
 
 /// List all installed plugins in `~/.librefang/plugins/`.
+///
+/// Delegates to [`crate::plugin_manager::list_plugins`] and extracts manifests.
 pub fn list_installed_plugins() -> Vec<librefang_types::config::PluginManifest> {
-    let dir = plugins_dir();
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-
-    entries
-        .filter_map(|entry| {
-            let entry = entry.ok()?;
-            if !entry.file_type().ok()?.is_dir() {
-                return None;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            load_plugin(&name).ok().map(|(manifest, _)| manifest)
-        })
+    crate::plugin_manager::list_plugins()
+        .into_iter()
+        .map(|info| info.manifest)
         .collect()
 }
 
@@ -870,7 +837,7 @@ mod tests {
 
     #[test]
     fn test_plugins_dir() {
-        let dir = plugins_dir();
+        let dir = crate::plugin_manager::plugins_dir();
         assert!(dir.ends_with("plugins"));
         assert!(dir.to_string_lossy().contains(".librefang"));
     }

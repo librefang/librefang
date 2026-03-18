@@ -155,6 +155,7 @@ pub async fn install_plugin(Json(body): Json<serde_json::Value>) -> impl IntoRes
                 "name": info.manifest.name,
                 "version": info.manifest.version,
                 "path": info.path.display().to_string(),
+                "restart_required": true,
             })),
         ),
         Err(e) => {
