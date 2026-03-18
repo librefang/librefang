@@ -64,30 +64,45 @@ const TRUNCATION_MARKER: &str = "\n\n[...truncated middle...]\n\n";
 /// with a truncation marker in between. This preserves both the beginning
 /// (context, parameters) and the end (errors, final output) of tool results.
 pub fn truncate_tool_result_dynamic(content: &str, budget: &ContextBudget) -> String {
-    let cap = budget.per_result_cap();
-    if content.len() <= cap {
+    let cap = budget.per_result_cap(); // character budget
+    let char_count = content.chars().count();
+    if char_count <= cap {
         return content.to_string();
     }
 
-    let marker_len = TRUNCATION_MARKER.len();
-    // Reserve space for the marker and the summary line
-    let summary_reserve = 100; // space for the "[TRUNCATED: ...]" suffix
-    let usable = cap.saturating_sub(marker_len + summary_reserve);
-    let head_budget = (usable as f64 * 0.6) as usize;
-    let tail_budget = usable.saturating_sub(head_budget);
+    // Compute average bytes-per-char ratio so we can convert char budgets
+    // to byte positions for slicing. This correctly handles CJK (≈3 bytes/char)
+    // and ASCII (≈1 byte/char) without over-truncating.
+    let bytes_per_char = if char_count > 0 {
+        content.len() as f64 / char_count as f64
+    } else {
+        1.0
+    };
 
-    let head_end = find_safe_break_before(content, head_budget);
-    let tail_start = find_safe_break_after(content, content.len().saturating_sub(tail_budget));
+    let marker_len = TRUNCATION_MARKER.chars().count();
+    // Reserve space for the marker and the summary line
+    let summary_reserve = 100; // chars for the "[TRUNCATED: ...]" suffix
+    let usable = cap.saturating_sub(marker_len + summary_reserve);
+    let head_chars = (usable as f64 * 0.6) as usize;
+    let tail_chars = usable.saturating_sub(head_chars);
+
+    // Convert char budgets to byte positions for slicing
+    let head_byte_budget = (head_chars as f64 * bytes_per_char) as usize;
+    let tail_byte_budget = (tail_chars as f64 * bytes_per_char) as usize;
+
+    let head_end = find_safe_break_before(content, head_byte_budget);
+    let tail_start = find_safe_break_after(content, content.len().saturating_sub(tail_byte_budget));
 
     // Only use head+tail if there's actually a gap to skip
     if tail_start <= head_end {
         // Not enough content to skip; just keep the head
-        let break_point = find_safe_break_before(content, cap.saturating_sub(summary_reserve));
+        let cap_bytes = (cap.saturating_sub(summary_reserve) as f64 * bytes_per_char) as usize;
+        let break_point = find_safe_break_before(content, cap_bytes);
         return format!(
             "{}\n\n[TRUNCATED: result was {} chars, showing first {} (budget: {}% of {}K context window)]",
             &content[..break_point],
-            content.len(),
-            break_point,
+            char_count,
+            content[..break_point].chars().count(),
             30,
             budget.context_window_tokens / 1000
         );
@@ -98,9 +113,9 @@ pub fn truncate_tool_result_dynamic(content: &str, budget: &ContextBudget) -> St
         &content[..head_end],
         TRUNCATION_MARKER,
         &content[tail_start..],
-        content.len(),
-        head_end,
-        content.len() - tail_start,
+        char_count,
+        content[..head_end].chars().count(),
+        content[tail_start..].chars().count(),
         30,
         budget.context_window_tokens / 1000
     )
@@ -132,7 +147,7 @@ pub fn apply_context_guard(
         if let MessageContent::Blocks(blocks) = &msg.content {
             for (block_idx, block) in blocks.iter().enumerate() {
                 if let ContentBlock::ToolResult { content, .. } = block {
-                    let len = content.len();
+                    let len = content.chars().count();
                     total_chars += len;
                     locations.push(ToolResultLoc {
                         msg_idx,

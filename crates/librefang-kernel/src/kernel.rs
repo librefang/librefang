@@ -1151,12 +1151,13 @@ impl LibreFangKernel {
             let emb_arc: Option<
                 Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>,
             > = embedding_driver.as_ref().map(|d| Arc::clone(d));
-            Some(librefang_runtime::context_engine::build_context_engine(
+            let engine = librefang_runtime::context_engine::build_context_engine(
                 &config.context_engine,
                 ce_config,
                 memory.clone(),
                 emb_arc,
-            ))
+            );
+            Some(engine)
         };
 
         let kernel = Self {
@@ -3706,9 +3707,18 @@ impl LibreFangKernel {
         let driver = self.resolve_driver(&entry.manifest)?;
         let model = entry.manifest.model.model.clone();
 
-        let result = compact_session(driver, &model, &session, &config)
-            .await
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?;
+        // Delegate to the context engine when available, otherwise fall back
+        // to the built-in compactor directly.
+        let result = if let Some(engine) = self.context_engine.as_deref() {
+            engine
+                .compact(agent_id, &session.messages, Arc::clone(&driver), &model)
+                .await
+                .map_err(KernelError::LibreFang)?
+        } else {
+            compact_session(driver, &model, &session, &config)
+                .await
+                .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?
+        };
 
         // Store the LLM summary in the canonical session
         self.memory

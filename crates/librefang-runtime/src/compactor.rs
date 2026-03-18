@@ -174,9 +174,14 @@ fn estimate_message_tokens(msg: &Message) -> usize {
                 ContentBlock::Text { text, .. } => estimate_str_tokens(text),
                 ContentBlock::ToolResult { content, .. } => estimate_str_tokens(content),
                 ContentBlock::Thinking { thinking } => estimate_str_tokens(thinking),
-                ContentBlock::ToolUse { .. }
-                | ContentBlock::Image { .. }
-                | ContentBlock::Unknown => 0,
+                ContentBlock::ToolUse {
+                    name, id, input, ..
+                } => {
+                    estimate_str_tokens(name)
+                        + estimate_str_tokens(id)
+                        + estimate_str_tokens(&serde_json::to_string(input).unwrap_or_default())
+                }
+                ContentBlock::Image { .. } | ContentBlock::Unknown => 0,
             })
             .sum(),
     }

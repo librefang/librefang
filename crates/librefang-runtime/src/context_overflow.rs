@@ -37,18 +37,31 @@ fn estimate_tokens(messages: &[Message], system_prompt: &str, tools: &[ToolDefin
 /// Pinned messages are preserved in their original positions.
 /// Returns the number of messages actually removed.
 fn drain_unpinned_from_front(messages: &mut Vec<Message>, target: usize) -> usize {
-    let mut removed = 0;
-    let mut i = 0;
-    while removed < target && i < messages.len() {
-        if messages[i].pinned {
-            // Skip pinned messages
-            i += 1;
-        } else {
-            messages.remove(i);
-            removed += 1;
-            // Don't increment i — next element shifted into this position
+    // Count how many non-pinned messages we'll remove (scanning from front)
+    let mut to_remove = 0;
+    let mut scanned = 0;
+    for msg in messages.iter() {
+        if to_remove >= target {
+            break;
+        }
+        scanned += 1;
+        if !msg.pinned {
+            to_remove += 1;
         }
     }
+
+    // Use retain with a counter — O(n) single pass instead of O(n²)
+    let mut removed = 0;
+    let mut idx = 0;
+    messages.retain(|msg| {
+        idx += 1;
+        if idx > scanned || msg.pinned {
+            true // keep
+        } else {
+            removed += 1;
+            false // remove
+        }
+    });
     removed
 }
 

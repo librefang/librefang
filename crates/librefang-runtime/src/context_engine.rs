@@ -126,14 +126,16 @@ pub trait ContextEngine: Send + Sync {
 
     /// Called when the context window is under pressure.
     ///
-    /// Summarize older history to free space. The default implementation
-    /// uses LLM-based compaction with 3 strategies (single-pass, chunked,
+    /// Summarize older history to free space. `model` is the agent's
+    /// configured LLM model name. The default implementation uses
+    /// LLM-based compaction with 3 strategies (single-pass, chunked,
     /// fallback).
     async fn compact(
         &self,
         agent_id: AgentId,
         messages: &[Message],
         driver: Arc<dyn LlmDriver>,
+        model: &str,
     ) -> LibreFangResult<CompactionResult>;
 
     /// Called after a complete turn (LLM response + tool execution).
@@ -168,8 +170,10 @@ pub trait ContextEngine: Send + Sync {
 
     /// Truncate a tool result according to the engine's budget policy.
     ///
+    /// `context_window_tokens` is the **current agent's** model context size
+    /// so budget-based caps scale correctly per agent.
     /// Default implementation uses head+tail truncation strategy.
-    fn truncate_tool_result(&self, content: &str) -> String;
+    fn truncate_tool_result(&self, content: &str, context_window_tokens: usize) -> String;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,7 +189,6 @@ pub trait ContextEngine: Send + Sync {
 /// - Embedding-based semantic memory recall with LIKE fallback
 pub struct DefaultContextEngine {
     config: ContextEngineConfig,
-    budget: ContextBudget,
     memory: Arc<MemorySubstrate>,
     embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
     compaction_config: CompactionConfig,
@@ -198,23 +201,16 @@ impl DefaultContextEngine {
         memory: Arc<MemorySubstrate>,
         embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
     ) -> Self {
-        let budget = ContextBudget::new(config.context_window_tokens);
         let compaction_config = CompactionConfig {
             context_window_tokens: config.context_window_tokens,
             ..CompactionConfig::default()
         };
         Self {
             config,
-            budget,
             memory,
             embedding_driver,
             compaction_config,
         }
-    }
-
-    /// Get the context budget.
-    pub fn budget(&self) -> &ContextBudget {
-        &self.budget
     }
 
     /// Get the context window size in tokens.
@@ -261,21 +257,30 @@ impl ContextEngine for DefaultContextEngine {
                     self.memory
                         .recall_with_embedding_async(user_message, limit, filter, Some(&query_vec))
                         .await
-                        .unwrap_or_default()
+                        .unwrap_or_else(|e| {
+                            warn!("ContextEngine: vector recall query failed: {e}");
+                            Vec::new()
+                        })
                 }
                 Err(e) => {
                     warn!("ContextEngine: embedding recall failed, falling back to text: {e}");
                     self.memory
                         .recall(user_message, limit, filter)
                         .await
-                        .unwrap_or_default()
+                        .unwrap_or_else(|e| {
+                            warn!("ContextEngine: text recall failed: {e}");
+                            Vec::new()
+                        })
                 }
             }
         } else {
             self.memory
                 .recall(user_message, limit, filter)
                 .await
-                .unwrap_or_default()
+                .unwrap_or_else(|e| {
+                    warn!("ContextEngine: memory recall failed: {e}");
+                    Vec::new()
+                })
         };
 
         Ok(IngestResult {
@@ -292,8 +297,7 @@ impl ContextEngine for DefaultContextEngine {
     ) -> LibreFangResult<AssembleResult> {
         // Stage 1: Overflow recovery pipeline (4-stage cascade, respects pinned messages)
         // Uses the per-agent context window size, not the boot-time default.
-        let recovery =
-            recover_from_overflow(messages, system_prompt, tools, context_window_tokens);
+        let recovery = recover_from_overflow(messages, system_prompt, tools, context_window_tokens);
 
         if recovery == RecoveryStage::FinalError {
             warn!("ContextEngine: overflow unrecoverable — suggest /reset or /compact");
@@ -305,7 +309,9 @@ impl ContextEngine for DefaultContextEngine {
         }
 
         // Stage 2: Context guard — compact oversized tool results
-        apply_context_guard(messages, &self.budget, tools);
+        // Build a per-agent budget so tool result caps match the actual context window.
+        let agent_budget = ContextBudget::new(context_window_tokens);
+        apply_context_guard(messages, &agent_budget, tools);
 
         Ok(AssembleResult { recovery })
     }
@@ -315,17 +321,18 @@ impl ContextEngine for DefaultContextEngine {
         agent_id: AgentId,
         messages: &[Message],
         driver: Arc<dyn LlmDriver>,
+        model: &str,
     ) -> LibreFangResult<CompactionResult> {
         // Build a temporary session for the compactor
         let session = librefang_memory::session::Session {
             id: librefang_types::agent::SessionId::new(),
             agent_id,
             messages: messages.to_vec(),
-            context_window_tokens: self.config.context_window_tokens,
+            context_window_tokens: self.config.context_window_tokens as u64,
             label: None,
         };
 
-        compactor::compact_session(driver, "default", &session, &self.compaction_config)
+        compactor::compact_session(driver, model, &session, &self.compaction_config)
             .await
             .map_err(LibreFangError::Internal)
     }
@@ -339,8 +346,9 @@ impl ContextEngine for DefaultContextEngine {
         Ok(())
     }
 
-    fn truncate_tool_result(&self, content: &str) -> String {
-        crate::context_budget::truncate_tool_result_dynamic(content, &self.budget)
+    fn truncate_tool_result(&self, content: &str, context_window_tokens: usize) -> String {
+        let budget = ContextBudget::new(context_window_tokens);
+        crate::context_budget::truncate_tool_result_dynamic(content, &budget)
     }
 }
 
@@ -442,8 +450,6 @@ impl ScriptableContextEngine {
         .map_err(|e| format!("Hook script failed: {e}"))?;
 
         // Parse response as JSON; wrap plain-text output gracefully
-        serde_json::from_str(&result.response)
-            .unwrap_or_else(|_| serde_json::json!({"text": result.response}));
         Ok(serde_json::from_str(&result.response)
             .unwrap_or_else(|_| serde_json::json!({"text": result.response})))
     }
@@ -473,6 +479,13 @@ impl ContextEngine for ScriptableContextEngine {
     }
 
     async fn ingest(&self, agent_id: AgentId, user_message: &str) -> LibreFangResult<IngestResult> {
+        // In stable_prefix_mode, skip all recall (including hooks) to keep prompt stable
+        if self.inner.config.stable_prefix_mode {
+            return Ok(IngestResult {
+                recalled_memories: Vec::new(),
+            });
+        }
+
         // If no ingest script, delegate entirely to default engine
         let Some(ref script) = self.ingest_script else {
             return self.inner.ingest(agent_id, user_message).await;
@@ -540,9 +553,10 @@ impl ContextEngine for ScriptableContextEngine {
         agent_id: AgentId,
         messages: &[Message],
         driver: Arc<dyn LlmDriver>,
+        model: &str,
     ) -> LibreFangResult<CompactionResult> {
         // Always delegate to Rust — requires LLM driver access
-        self.inner.compact(agent_id, messages, driver).await
+        self.inner.compact(agent_id, messages, driver, model).await
     }
 
     async fn after_turn(&self, agent_id: AgentId, messages: &[Message]) -> LibreFangResult<()> {
@@ -559,7 +573,7 @@ impl ContextEngine for ScriptableContextEngine {
             .iter()
             .map(|m| {
                 serde_json::json!({
-                    "role": format!("{:?}", m.role).to_lowercase(),
+                    "role": serde_json::to_value(&m.role).unwrap_or_default(),
                     "content": m.content.text_content().chars().take(500).collect::<String>(),
                 })
             })
@@ -571,20 +585,27 @@ impl ContextEngine for ScriptableContextEngine {
             "messages": msg_summaries,
         });
 
-        // Spawn as fire-and-forget — after_turn is best-effort, don't block the agent
+        // Spawn as fire-and-forget — after_turn is best-effort, don't block the agent.
+        // Log if the task panics so failures aren't silently swallowed.
         let script = script.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             match Self::run_hook(&script, input).await {
                 Ok(_) => debug!("After-turn hook completed"),
                 Err(e) => warn!("After-turn hook failed: {e}"),
+            }
+        });
+        tokio::spawn(async move {
+            if let Err(e) = handle.await {
+                warn!("After-turn hook task panicked: {e}");
             }
         });
 
         Ok(())
     }
 
-    fn truncate_tool_result(&self, content: &str) -> String {
-        self.inner.truncate_tool_result(content)
+    fn truncate_tool_result(&self, content: &str, context_window_tokens: usize) -> String {
+        self.inner
+            .truncate_tool_result(content, context_window_tokens)
     }
 }
 
@@ -606,14 +627,15 @@ pub fn plugins_dir() -> std::path::PathBuf {
 /// function resolves them to absolute paths so the script runner can find them.
 /// Validate that a plugin name is a safe directory component (no path traversal).
 fn validate_plugin_name(name: &str) -> LibreFangResult<()> {
+    // Strict whitelist: only ASCII alphanumeric, hyphens, and underscores.
+    // Rejects spaces, null bytes, path separators, unicode, and shell specials.
     if name.is_empty()
-        || name.contains('/')
-        || name.contains('\\')
-        || name.contains("..")
-        || name == "."
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return Err(LibreFangError::Internal(format!(
-            "Invalid plugin name '{name}': must be a simple identifier (no /, \\, or ..)"
+            "Invalid plugin name '{name}': must contain only ASCII letters, digits, hyphens, and underscores"
         )));
     }
     Ok(())
@@ -702,6 +724,15 @@ pub fn build_context_engine(
     embedding_driver: Option<Arc<dyn EmbeddingDriver + Send + Sync>>,
 ) -> Box<dyn ContextEngine> {
     let default = DefaultContextEngine::new(runtime_config, memory, embedding_driver);
+
+    // Warn if an unknown engine name is configured
+    if toml_config.engine != "default" {
+        warn!(
+            engine = toml_config.engine.as_str(),
+            "Unknown context engine '{}' — only 'default' is built-in, falling back",
+            toml_config.engine
+        );
+    }
 
     // Plugin takes precedence
     if let Some(ref plugin_name) = toml_config.plugin {
@@ -843,7 +874,7 @@ mod tests {
         };
         let engine = DefaultContextEngine::new(config, make_memory(), None);
         let big_content = "x".repeat(10_000);
-        let truncated = engine.truncate_tool_result(&big_content);
+        let truncated = engine.truncate_tool_result(&big_content, 500);
         assert!(truncated.len() < big_content.len());
         assert!(truncated.contains("[TRUNCATED:"));
     }
