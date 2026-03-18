@@ -157,10 +157,7 @@ pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResp
         };
         (name, a2a_cfg.description.clone())
     } else {
-        (
-            "LibreFang Agent OS".to_string(),
-            String::new(),
-        )
+        ("LibreFang Agent OS".to_string(), String::new())
     };
 
     // Aggregate skills from ALL agents.
