@@ -508,7 +508,8 @@ async fn test_spawn_list_kill_agent() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let agents: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 2);
     let test_agent = agents.iter().find(|a| a["name"] == "test-agent").unwrap();
     assert_eq!(test_agent["id"], agent_id);
@@ -531,7 +532,8 @@ async fn test_spawn_list_kill_agent() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let agents: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 1);
     assert_eq!(agents[0]["name"], "router");
 }
@@ -936,7 +938,8 @@ memory_write = ["self.*"]
         .send()
         .await
         .unwrap();
-    let agents: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 4);
 
     // Status should agree
@@ -962,7 +965,8 @@ memory_write = ["self.*"]
         .send()
         .await
         .unwrap();
-    let agents: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 3);
 
     // Kill the rest
@@ -980,8 +984,187 @@ memory_write = ["self.*"]
         .send()
         .await
         .unwrap();
-    let agents: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Agent list filtering, pagination, and sorting tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_agent_list_paginated_response_format() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Default list should return paginated object with items, total, offset, limit
+    let resp = client
+        .get(format!("{}/api/agents", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["items"].is_array(), "Response should have 'items' array");
+    assert!(body["total"].is_number(), "Response should have 'total' number");
+    assert!(body["offset"].is_number(), "Response should have 'offset' number");
+    // limit should be null when not specified
+    assert!(body["limit"].is_null(), "limit should be null when not specified");
+}
+
+#[tokio::test]
+async fn test_agent_list_invalid_sort_returns_400() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{}/api/agents?sort=invalid_field", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let error = body["error"].as_str().unwrap();
+    assert!(
+        error.contains("Invalid sort field"),
+        "Error should mention invalid sort field, got: {}",
+        error
+    );
+    assert!(error.contains("invalid_field"));
+}
+
+#[tokio::test]
+async fn test_agent_list_valid_sort_fields() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // All valid sort fields should return 200
+    for field in &["name", "created_at", "last_active", "state"] {
+        let resp = client
+            .get(format!("{}/api/agents?sort={}", server.base_url, field))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "Sort by '{}' should return 200",
+            field
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_agent_list_limit_clamped_to_max() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Request with limit > 100 should be clamped
+    let resp = client
+        .get(format!("{}/api/agents?limit=9999", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    // limit in response should be clamped to 100
+    assert_eq!(body["limit"].as_u64().unwrap(), 100);
+}
+
+#[tokio::test]
+async fn test_agent_list_pagination() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Spawn 2 extra agents
+    for i in 0..2 {
+        let manifest = format!(
+            r#"
+name = "page-agent-{i}"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "Agent {i}."
+"#
+        );
+        client
+            .post(format!("{}/api/agents", server.base_url))
+            .json(&serde_json::json!({"manifest_toml": manifest}))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Get first page with limit=1
+    let resp = client
+        .get(format!("{}/api/agents?limit=1&offset=0", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1, "Should return exactly 1 item");
+    assert!(body["total"].as_u64().unwrap() >= 3, "Total should include all agents");
+
+    // Get second page
+    let resp = client
+        .get(format!("{}/api/agents?limit=1&offset=1", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let items2 = body["items"].as_array().unwrap();
+    assert_eq!(items2.len(), 1, "Second page should return 1 item");
+}
+
+#[tokio::test]
+async fn test_agent_list_text_search() {
+    let server = start_test_server().await;
+    let client = reqwest::Client::new();
+
+    let manifest = r#"
+name = "unique-searchable-agent"
+description = "A very special description for testing search"
+module = "builtin:chat"
+
+[model]
+provider = "ollama"
+model = "test-model"
+system_prompt = "Test."
+"#;
+    client
+        .post(format!("{}/api/agents", server.base_url))
+        .json(&serde_json::json!({"manifest_toml": manifest}))
+        .send()
+        .await
+        .unwrap();
+
+    // Search by name
+    let resp = client
+        .get(format!("{}/api/agents?q=unique-searchable", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let items = body["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["name"], "unique-searchable-agent");
+
+    // Search with no match
+    let resp = client
+        .get(format!(
+            "{}/api/agents?q=nonexistent-xyz-agent",
+            server.base_url
+        ))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let items = body["items"].as_array().unwrap();
+    assert!(items.is_empty(), "No agents should match non-existent query");
 }
 
 // ---------------------------------------------------------------------------
