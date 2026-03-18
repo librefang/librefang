@@ -77,30 +77,29 @@ function settingsPage() {
     getProviderTiers() {
       var freeIds = ['ollama', 'lmstudio', 'groq'];
       var recommendedIds = ['openai', 'anthropic', 'gemini', 'deepseek'];
-      return [
-        {
-          tier: 'free',
-          label: this.t('provider.tierFree', 'Free / Local'),
-          providers: this.providers.filter(function(p) {
-            return freeIds.indexOf(p.id) !== -1 || !p.key_required;
-          })
-        },
-        {
-          tier: 'recommended',
-          label: this.t('provider.tierRecommended', 'Recommended'),
-          providers: this.providers.filter(function(p) {
-            return recommendedIds.indexOf(p.id) !== -1;
-          })
-        },
-        {
-          tier: 'other',
-          label: this.t('provider.tierOther', 'Other Providers'),
-          providers: this.providers.filter(function(p) {
-            return freeIds.indexOf(p.id) === -1 &&
-                   recommendedIds.indexOf(p.id) === -1 &&
-                   p.key_required;
-          })
+      // 按优先级分配，每个 provider 只出现在一个 tier 中
+      var assigned = {};
+      var free = this.providers.filter(function(p) {
+        if (freeIds.indexOf(p.id) !== -1 || !p.key_required) {
+          assigned[p.id] = true;
+          return true;
         }
+        return false;
+      });
+      var recommended = this.providers.filter(function(p) {
+        if (!assigned[p.id] && recommendedIds.indexOf(p.id) !== -1) {
+          assigned[p.id] = true;
+          return true;
+        }
+        return false;
+      });
+      var other = this.providers.filter(function(p) {
+        return !assigned[p.id];
+      });
+      return [
+        { tier: 'free', label: this.t('provider.tierFree', 'Free / Local'), providers: free },
+        { tier: 'recommended', label: this.t('provider.tierRecommended', 'Recommended'), providers: recommended },
+        { tier: 'other', label: this.t('provider.tierOther', 'Other Providers'), providers: other }
       ];
     },
 
