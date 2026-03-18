@@ -28,9 +28,9 @@
       </div>
       <div class="sidebar-header-controls">
         <div class="theme-switcher">
-          <button class="theme-opt" :class="{ active: themeMode === 'light' }" @click="setTheme('light')" title="Light">&#9788;</button>
-          <button class="theme-opt" :class="{ active: themeMode === 'system' }" @click="setTheme('system')" title="System">&#9675;</button>
-          <button class="theme-opt" :class="{ active: themeMode === 'dark' }" @click="setTheme('dark')" title="Dark">&#9790;</button>
+          <button class="theme-opt" :class="{ active: themeMode === 'light' }" @click="setTheme('light')" data-i18n-title="theme.light" title="Light">&#9788;</button>
+          <button class="theme-opt" :class="{ active: themeMode === 'system' }" @click="setTheme('system')" data-i18n-title="theme.system" title="System">&#9675;</button>
+          <button class="theme-opt" :class="{ active: themeMode === 'dark' }" @click="setTheme('dark')" data-i18n-title="theme.dark" title="Dark">&#9790;</button>
         </div>
         <div class="language-switcher" x-data="{ lang: (typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en') }">
           <button class="lang-opt" :class="{ active: lang === 'en' }" @click="i18n.setLanguage('en').then(() => lang = 'en')" title="English">EN</button>
@@ -191,7 +191,7 @@
     </div>
 
     <div class="sidebar-footer">
-      <div class="sidebar-label text-xs text-dim" style="padding:0 16px 4px;letter-spacing:0.5px">Ctrl+K agents | Ctrl+N new</div>
+      <div class="sidebar-label text-xs text-dim" style="padding:0 16px 4px;letter-spacing:0.5px" data-i18n="sidebar.shortcutHint">Ctrl+K agents | Ctrl+N new</div>
     </div>
     <div class="sidebar-toggle" @click="toggleSidebar()" x-text="sidebarCollapsed ? '\u276F' : '\u276E'"></div>
   </nav>
@@ -594,7 +594,7 @@
                 <button class="btn btn-ghost btn-sm" @click="toggleSearch()" :title="t('agentChat.searchMessages', 'Search messages (Ctrl+F)')">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
                 </button>
-                <button class="btn btn-ghost btn-sm" @click="$store.app.toggleFocusMode()" title="Ctrl+Shift+F">
+                <button class="btn btn-ghost btn-sm" @click="$store.app.toggleFocusMode()" data-i18n-title="agentChat2.focusMode" title="Ctrl+Shift+F">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><g x-show="!$store.app.focusMode"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></g><g x-show="$store.app.focusMode"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></g></svg>
                 </button>
                 <button class="btn btn-danger btn-sm" @click="killAgent()" data-i18n="btn.stop">Stop</button>
@@ -812,9 +812,9 @@
                 <div class="flex items-center gap-2">
                   <!-- Model Switcher -->
                   <div style="position:relative" x-show="currentAgent" @click.outside="showModelSwitcher = false" @keydown.escape.window="showModelSwitcher = false">
-                    <button class="model-switcher-btn" @click="toggleModelSwitcher()" :disabled="sending" title="Switch model (Ctrl+M)">
+                    <button class="model-switcher-btn" @click="toggleModelSwitcher()" :disabled="sending" data-i18n-title="agentChat2.switchModel" title="Switch model (Ctrl+M)">
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-                      <span class="model-switcher-label" x-text="modelDisplayName || 'Model'"></span>
+                      <span class="model-switcher-label" x-text="modelDisplayName || t('label.model', 'Model')"></span>
                       <svg class="model-switcher-chevron" :class="{'open': showModelSwitcher}" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
                     </button>
                     <!-- Dropdown -->
@@ -845,13 +845,13 @@
                                 <div style="flex:1;min-width:0">
                                   <div style="display:flex;align-items:center;gap:6px">
                                     <span class="model-switcher-item-name" x-text="m.display_name || m.id"></span>
-                                    <span class="model-switcher-tier" :class="'tier-' + (m.tier || 'balanced').toLowerCase()" x-text="m.tier || 'Balanced'"></span>
+                                    <span class="model-switcher-tier" :class="'tier-' + (m.tier || 'balanced').toLowerCase()" x-text="m.tier || t('profile.balanced.label', 'Balanced')"></span>
                                   </div>
                                   <div style="display:flex;align-items:center;gap:6px;margin-top:2px">
                                     <span class="text-xs text-dim" x-text="m.id" style="font-family:var(--font-mono)"></span>
                                     <span class="text-xs text-dim" x-show="m.context_window" x-text="m.context_window >= 1000000 ? (m.context_window/1000000).toFixed(1)+'M' : Math.round(m.context_window/1000)+'K'"></span>
-                                    <svg x-show="m.supports_vision" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="opacity:0.5" title="Vision"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-                                    <svg x-show="m.supports_tools" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="opacity:0.5" title="Tools"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+                                    <svg x-show="m.supports_vision" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="opacity:0.5" data-i18n-title="agentChat2.vision" title="Vision"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                                    <svg x-show="m.supports_tools" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="opacity:0.5" data-i18n-title="agentChat2.tools" title="Tools"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
                                   </div>
                                 </div>
                                 <svg x-show="currentAgent && m.id === currentAgent.model_name" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>
@@ -900,7 +900,7 @@
                     <div class="text-xs text-dim font-mono" style="font-size:11px" x-text="agent.model_name"></div>
                   </div>
                   <span class="badge" :class="'badge-' + agent.state.toLowerCase()" x-text="agent.state" style="font-size:10px"></span>
-                  <button class="agent-chip-config-btn" @click.stop="showDetail(agent)" title="Agent settings" style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;border:1px solid var(--border);background:transparent;cursor:pointer;color:var(--text-dim);transition:all 0.15s;flex-shrink:0" @mouseenter="$el.style.borderColor='var(--accent)';$el.style.color='var(--accent)';$el.style.background='var(--surface2)'" @mouseleave="$el.style.borderColor='var(--border)';$el.style.color='var(--text-dim)';$el.style.background='transparent'">
+                  <button class="agent-chip-config-btn" @click.stop="showDetail(agent)" data-i18n-title="agentChat2.agentSettings" title="Agent settings" style="display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:50%;border:1px solid var(--border);background:transparent;cursor:pointer;color:var(--text-dim);transition:all 0.15s;flex-shrink:0" @mouseenter="$el.style.borderColor='var(--accent)';$el.style.color='var(--accent)';$el.style.background='var(--surface2)'" @mouseleave="$el.style.borderColor='var(--border)';$el.style.color='var(--text-dim)';$el.style.background='transparent'">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                   </button>
                 </div>
@@ -965,11 +965,11 @@
                       </template>
                       <template x-if="editingModel">
                         <span class="flex gap-1" style="align-items:center">
-                          <input class="form-input" style="width:240px;font-size:12px" x-model="newModelValue" placeholder="provider/model" @keydown.enter="changeModel()" @keydown.escape="editingModel = false">
+                          <input class="form-input" style="width:240px;font-size:12px" x-model="newModelValue" data-i18n-placeholder="agentChat2.providerModelPlaceholder" placeholder="provider/model" @keydown.enter="changeModel()" @keydown.escape="editingModel = false">
                           <button class="btn btn-primary btn-sm" @click="changeModel()" :disabled="modelSaving" style="padding:2px 10px">
-                            <span x-show="!modelSaving">Save</span><span x-show="modelSaving">...</span>
+                            <span x-show="!modelSaving" data-i18n="btn.save">Save</span><span x-show="modelSaving">...</span>
                           </button>
-                          <button class="btn btn-ghost btn-sm" @click="editingModel = false" style="padding:2px 8px">Cancel</button>
+                          <button class="btn btn-ghost btn-sm" @click="editingModel = false" style="padding:2px 8px" data-i18n="btn.cancel">Cancel</button>
                         </span>
                       </template>
                     </div>
@@ -1181,7 +1181,7 @@
                     </div>
                     <div class="form-group">
                       <label data-i18n="label.model">Model</label>
-                      <input class="form-input" x-model="spawnForm.model" placeholder="e.g. llama-3.3-70b-versatile">
+                      <input class="form-input" x-model="spawnForm.model" data-i18n-placeholder="agentsPage2.modelPlaceholder" placeholder="e.g. llama-3.3-70b-versatile">
                     </div>
                     <div class="form-group">
                       <label data-i18n="detail.systemPrompt">System Prompt</label>
@@ -1828,7 +1828,7 @@
                         </td>
                         <td class="text-xs" x-text="new Date(t.created_at).toLocaleDateString()"></td>
                         <td>
-                          <button class="btn btn-danger btn-sm" @click="deleteTrigger(t)">Delete</button>
+                          <button class="btn btn-danger btn-sm" @click="deleteTrigger(t)" data-i18n="schedulerPage2.deleteTrigger">Delete</button>
                         </td>
                       </tr>
                     </template>
@@ -1883,32 +1883,32 @@
         <div class="page-container">
           <div class="page-header">
             <h2 data-i18n="goalsPage.title">Goals</h2>
-            <button class="btn btn-primary btn-sm" @click="showCreateForm = true">+ New Goal</button>
+            <button class="btn btn-primary btn-sm" @click="showCreateForm = true" data-i18n="goalsPage.newGoal">+ New Goal</button>
           </div>
 
           <!-- Stats bar -->
           <div class="stat-grid" style="margin-bottom:16px">
             <div class="stat-card">
-              <div class="stat-label">Total</div>
+              <div class="stat-label" data-i18n="goalsPage.statTotal">Total</div>
               <div class="stat-value" x-text="stats.total"></div>
             </div>
             <div class="stat-card">
-              <div class="stat-label">In Progress</div>
+              <div class="stat-label" data-i18n="goalsPage.statInProgress">In Progress</div>
               <div class="stat-value" x-text="stats.inProgress"></div>
             </div>
             <div class="stat-card">
-              <div class="stat-label">Completed</div>
+              <div class="stat-label" data-i18n="goalsPage.statCompleted">Completed</div>
               <div class="stat-value" x-text="stats.completed"></div>
             </div>
             <div class="stat-card">
-              <div class="stat-label">Pending</div>
+              <div class="stat-label" data-i18n="goalsPage.statPending">Pending</div>
               <div class="stat-value" x-text="stats.pending"></div>
             </div>
           </div>
 
           <!-- Loading / Error -->
           <template x-if="loading">
-            <div class="empty-state"><div class="spinner"></div> Loading goals...</div>
+            <div class="empty-state"><div class="spinner"></div> <span data-i18n="goalsPage.loading">Loading goals...</span></div>
           </template>
           <template x-if="loadError">
             <div class="empty-state" style="color:var(--red)" x-text="loadError"></div>
@@ -1919,8 +1919,8 @@
             <div>
               <template x-if="flatTree.length === 0">
                 <div class="empty-state">
-                  <div style="font-size:13px;margin-bottom:8px">No goals yet</div>
-                  <button class="btn btn-primary" @click="showCreateForm = true">+ Create Your First Goal</button>
+                  <div style="font-size:13px;margin-bottom:8px" data-i18n="goalsPage.noGoalsYet">No goals yet</div>
+                  <button class="btn btn-primary" @click="showCreateForm = true" data-i18n="goalsPage.createFirstGoal">+ Create Your First Goal</button>
                 </div>
               </template>
 
@@ -1929,11 +1929,11 @@
                   <table class="table" style="width:100%">
                     <thead>
                       <tr>
-                        <th style="min-width:260px">Title</th>
-                        <th>Status</th>
-                        <th style="min-width:120px">Progress</th>
-                        <th>Agent</th>
-                        <th style="min-width:100px">Actions</th>
+                        <th style="min-width:260px" data-i18n="goalsPage.thTitle">Title</th>
+                        <th data-i18n="goalsPage.thStatus">Status</th>
+                        <th style="min-width:120px" data-i18n="goalsPage.thProgress">Progress</th>
+                        <th data-i18n="goalsPage.thAgent">Agent</th>
+                        <th style="min-width:100px" data-i18n="goalsPage.thActions">Actions</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -1963,10 +1963,10 @@
                           <td>
                             <template x-if="editingGoal === item.goal.id">
                               <select class="input" style="font-size:12px;padding:4px 6px" x-model="editForm.status">
-                                <option value="pending">Pending</option>
-                                <option value="in_progress">In Progress</option>
-                                <option value="completed">Completed</option>
-                                <option value="cancelled">Cancelled</option>
+                                <option value="pending" data-i18n="goalsPage.statusPending">Pending</option>
+                                <option value="in_progress" data-i18n="goalsPage.statusInProgress">In Progress</option>
+                                <option value="completed" data-i18n="goalsPage.statusCompleted">Completed</option>
+                                <option value="cancelled" data-i18n="goalsPage.statusCancelled">Cancelled</option>
                               </select>
                             </template>
                             <template x-if="editingGoal !== item.goal.id">
@@ -1998,15 +1998,15 @@
                           <td>
                             <template x-if="editingGoal === item.goal.id">
                               <div class="flex gap-1">
-                                <button class="btn btn-ghost btn-sm" @click="saveEdit(item.goal.id)" :disabled="saving">Save</button>
-                                <button class="btn btn-ghost btn-sm" @click="cancelEdit()">Cancel</button>
+                                <button class="btn btn-ghost btn-sm" @click="saveEdit(item.goal.id)" :disabled="saving" data-i18n="btn.save">Save</button>
+                                <button class="btn btn-ghost btn-sm" @click="cancelEdit()" data-i18n="btn.cancel">Cancel</button>
                               </div>
                             </template>
                             <template x-if="editingGoal !== item.goal.id">
                               <div class="flex gap-1">
-                                <button class="btn btn-ghost btn-sm" @click="newGoal.parent_id = item.goal.id; showCreateForm = true" title="Add sub-goal">+</button>
-                                <button class="btn btn-ghost btn-sm" @click="startEdit(item.goal)" title="Edit">Edit</button>
-                                <button class="btn btn-ghost btn-sm" style="color:var(--red)" @click="deleteGoal(item.goal.id)" title="Delete">Del</button>
+                                <button class="btn btn-ghost btn-sm" @click="newGoal.parent_id = item.goal.id; showCreateForm = true" data-i18n-title="goalsPage.addSubGoal" title="Add sub-goal">+</button>
+                                <button class="btn btn-ghost btn-sm" @click="startEdit(item.goal)" data-i18n-title="btn.edit" title="Edit" data-i18n="btn.edit">Edit</button>
+                                <button class="btn btn-ghost btn-sm" style="color:var(--red)" @click="deleteGoal(item.goal.id)" data-i18n-title="btn.delete" title="Delete" data-i18n="goalsPage.del">Del</button>
                               </div>
                             </template>
                           </td>
@@ -2024,40 +2024,40 @@
             <div class="modal-backdrop" @click.self="showCreateForm = false">
               <div class="modal" style="max-width:480px">
                 <div class="modal-header">
-                  <h3>Create Goal</h3>
+                  <h3 data-i18n="goalsPage.createGoal">Create Goal</h3>
                   <button class="btn btn-ghost btn-sm" @click="showCreateForm = false">&times;</button>
                 </div>
                 <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
                   <div>
-                    <label class="label">Title *</label>
-                    <input type="text" class="input" x-model="newGoal.title" placeholder="Goal title" @keydown.enter="createGoal()">
+                    <label class="label" data-i18n="goalsPage.labelTitle">Title *</label>
+                    <input type="text" class="input" x-model="newGoal.title" data-i18n-placeholder="goalsPage.placeholderTitle" placeholder="Goal title" @keydown.enter="createGoal()">
                   </div>
                   <div>
-                    <label class="label">Description</label>
-                    <textarea class="input" rows="3" x-model="newGoal.description" placeholder="Describe the goal..."></textarea>
+                    <label class="label" data-i18n="goalsPage.labelDescription">Description</label>
+                    <textarea class="input" rows="3" x-model="newGoal.description" data-i18n-placeholder="goalsPage.placeholderDescription" placeholder="Describe the goal..."></textarea>
                   </div>
                   <div>
-                    <label class="label">Parent Goal</label>
+                    <label class="label" data-i18n="goalsPage.labelParentGoal">Parent Goal</label>
                     <select class="input" x-model="newGoal.parent_id">
-                      <option value="">None (top-level goal)</option>
+                      <option value="" data-i18n="goalsPage.noneTopLevel">None (top-level goal)</option>
                       <template x-for="g in goals" :key="g.id">
                         <option :value="g.id" x-text="g.title"></option>
                       </template>
                     </select>
                   </div>
                   <div>
-                    <label class="label">Status</label>
+                    <label class="label" data-i18n="goalsPage.labelStatus">Status</label>
                     <select class="input" x-model="newGoal.status">
-                      <option value="pending">Pending</option>
-                      <option value="in_progress">In Progress</option>
+                      <option value="pending" data-i18n="goalsPage.statusPending">Pending</option>
+                      <option value="in_progress" data-i18n="goalsPage.statusInProgress">In Progress</option>
                     </select>
                   </div>
                 </div>
                 <div class="modal-footer">
-                  <button class="btn btn-ghost" @click="showCreateForm = false">Cancel</button>
+                  <button class="btn btn-ghost" @click="showCreateForm = false" data-i18n="btn.cancel">Cancel</button>
                   <button class="btn btn-primary" @click="createGoal()" :disabled="creating || !newGoal.title.trim()">
-                    <span x-show="creating">Creating...</span>
-                    <span x-show="!creating">Create Goal</span>
+                    <span x-show="creating" data-i18n="goalsPage.creating">Creating...</span>
+                    <span x-show="!creating" data-i18n="goalsPage.createGoal">Create Goal</span>
                   </button>
                 </div>
               </div>
@@ -2065,7 +2065,7 @@
           </template>
 
           <div class="flex gap-2" style="margin-top:12px">
-            <button class="btn btn-ghost btn-sm" @click="loadGoals()">Refresh</button>
+            <button class="btn btn-ghost btn-sm" @click="loadGoals()" data-i18n="btn.refresh">Refresh</button>
           </div>
         </div>
       </div>
@@ -3379,7 +3379,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 <template x-if="installSource==='registry'">
                   <div style="margin:12px 0">
                     <label data-i18n="pluginsPage.pluginName">Plugin Name</label>
-                    <input x-model="installName" placeholder="e.g. echo-memory" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
+                    <input x-model="installName" data-i18n-placeholder="settingsPage2.pluginNamePlaceholder" placeholder="e.g. echo-memory" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
                     <label style="margin-top:8px;display:block" data-i18n="pluginsPage.registryOptional">Registry (optional)</label>
                     <input x-model="installRegistry" data-i18n-placeholder="pluginsPage.registryPlaceholder" placeholder="owner/repo (default: official)" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
                   </div>
@@ -4114,13 +4114,13 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 <div class="detail-grid" style="margin-top:12px">
                   <!-- Master enabled toggle -->
                   <div class="detail-row" style="align-items:center">
-                    <span class="detail-label">Enabled</span>
+                    <span class="detail-label" data-i18n="settingsPage2.enabled">Enabled</span>
                     <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
                       <label class="form-checkbox" style="margin:0">
                         <input type="checkbox" x-model="pmSettings.enabled">
                       </label>
                     </div>
-                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px">Master toggle for the entire proactive memory subsystem. When off, no memories are stored or retrieved.</div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage2.pmMasterToggleDesc">Master toggle for the entire proactive memory subsystem. When off, no memories are stored or retrieved.</div>
                   </div>
                   <!-- Auto-memorize toggle -->
                   <div class="detail-row" style="align-items:center">
@@ -4312,43 +4312,43 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
     <!-- Page: Analytics -->
     <template x-if="page === 'analytics'">
       <div x-data="analyticsPage">
-        <div class="page-header"><h2>Analytics</h2></div>
+        <div class="page-header"><h2 data-i18n="analyticsPage.title">Analytics</h2></div>
         <div class="page-body" x-init="loadUsage()">
-          <div x-show="loading" class="loading-state"><div class="spinner"></div><span>Loading usage data...</span></div>
+          <div x-show="loading" class="loading-state"><div class="spinner"></div><span data-i18n="analyticsPage.loading">Loading usage data...</span></div>
           <div x-show="!loading && loadError" class="error-state">
             <span class="error-icon">!</span>
             <p x-text="loadError"></p>
-            <button class="btn btn-ghost btn-sm" @click="loadData()">Retry</button>
+            <button class="btn btn-ghost btn-sm" @click="loadData()" data-i18n="btn.retry">Retry</button>
           </div>
           <div x-show="!loading && !loadError">
           <div class="stats-row">
-            <div class="stat-card"><div class="stat-value" x-text="formatTokens((summary.total_input_tokens || 0) + (summary.total_output_tokens || 0))"></div><div class="stat-label">Total Tokens</div></div>
-            <div class="stat-card"><div class="stat-value" x-text="formatCost(summary.total_cost_usd)"></div><div class="stat-label">Estimated Cost</div></div>
-            <div class="stat-card"><div class="stat-value" x-text="summary.call_count || 0"></div><div class="stat-label">API Calls</div></div>
-            <div class="stat-card"><div class="stat-value" x-text="summary.total_tool_calls || 0"></div><div class="stat-label">Tool Calls</div></div>
+            <div class="stat-card"><div class="stat-value" x-text="formatTokens((summary.total_input_tokens || 0) + (summary.total_output_tokens || 0))"></div><div class="stat-label" data-i18n="analyticsPage.totalTokens">Total Tokens</div></div>
+            <div class="stat-card"><div class="stat-value" x-text="formatCost(summary.total_cost_usd)"></div><div class="stat-label" data-i18n="analyticsPage.estimatedCost">Estimated Cost</div></div>
+            <div class="stat-card"><div class="stat-value" x-text="summary.call_count || 0"></div><div class="stat-label" data-i18n="analyticsPage.apiCalls">API Calls</div></div>
+            <div class="stat-card"><div class="stat-value" x-text="summary.total_tool_calls || 0"></div><div class="stat-label" data-i18n="analyticsPage.toolCalls">Tool Calls</div></div>
           </div>
           <div class="tabs mt-4">
-            <div class="tab" :class="{ active: tab === 'summary' }" @click="tab = 'summary'">Summary</div>
-            <div class="tab" :class="{ active: tab === 'by-model' }" @click="tab = 'by-model'">By Model</div>
-            <div class="tab" :class="{ active: tab === 'by-agent' }" @click="tab = 'by-agent'">By Agent</div>
-            <div class="tab" :class="{ active: tab === 'costs' }" @click="tab = 'costs'">Costs</div>
+            <div class="tab" :class="{ active: tab === 'summary' }" @click="tab = 'summary'" data-i18n="analyticsPage.tabSummary">Summary</div>
+            <div class="tab" :class="{ active: tab === 'by-model' }" @click="tab = 'by-model'" data-i18n="analyticsPage.tabByModel">By Model</div>
+            <div class="tab" :class="{ active: tab === 'by-agent' }" @click="tab = 'by-agent'" data-i18n="analyticsPage.tabByAgent">By Agent</div>
+            <div class="tab" :class="{ active: tab === 'costs' }" @click="tab = 'costs'" data-i18n="analyticsPage.tabCosts">Costs</div>
           </div>
           <div x-show="tab === 'summary'">
             <div class="card mt-4">
-              <div class="card-header">Token Breakdown</div>
+              <div class="card-header" data-i18n="analyticsPage.tokenBreakdown">Token Breakdown</div>
               <div class="detail-grid" style="margin-top:8px">
-                <div class="detail-row"><span class="detail-label">Input Tokens</span><span class="detail-value" x-text="formatTokens(summary.total_input_tokens)"></span></div>
-                <div class="detail-row"><span class="detail-label">Output Tokens</span><span class="detail-value" x-text="formatTokens(summary.total_output_tokens)"></span></div>
-                <div class="detail-row"><span class="detail-label">Total Cost</span><span class="detail-value" x-text="formatCost(summary.total_cost_usd)"></span></div>
-                <div class="detail-row"><span class="detail-label">API Calls</span><span class="detail-value" x-text="summary.call_count || 0"></span></div>
-                <div class="detail-row"><span class="detail-label">Tool Calls</span><span class="detail-value" x-text="summary.total_tool_calls || 0"></span></div>
+                <div class="detail-row"><span class="detail-label" data-i18n="analyticsPage.inputTokens">Input Tokens</span><span class="detail-value" x-text="formatTokens(summary.total_input_tokens)"></span></div>
+                <div class="detail-row"><span class="detail-label" data-i18n="analyticsPage.outputTokens">Output Tokens</span><span class="detail-value" x-text="formatTokens(summary.total_output_tokens)"></span></div>
+                <div class="detail-row"><span class="detail-label" data-i18n="analyticsPage.totalCost">Total Cost</span><span class="detail-value" x-text="formatCost(summary.total_cost_usd)"></span></div>
+                <div class="detail-row"><span class="detail-label" data-i18n="analyticsPage.apiCalls">API Calls</span><span class="detail-value" x-text="summary.call_count || 0"></span></div>
+                <div class="detail-row"><span class="detail-label" data-i18n="analyticsPage.toolCalls">Tool Calls</span><span class="detail-value" x-text="summary.total_tool_calls || 0"></span></div>
               </div>
             </div>
           </div>
           <div x-show="tab === 'by-model'">
             <div class="table-wrap mt-4" x-show="byModel.length">
               <table>
-                <thead><tr><th>Model</th><th>Calls</th><th>Input Tokens</th><th>Output Tokens</th><th>Cost</th><th style="width:30%">Usage</th></tr></thead>
+                <thead><tr><th data-i18n="analyticsPage.thModel">Model</th><th data-i18n="analyticsPage.thCalls">Calls</th><th data-i18n="analyticsPage.thInputTokens">Input Tokens</th><th data-i18n="analyticsPage.thOutputTokens">Output Tokens</th><th data-i18n="analyticsPage.thCost">Cost</th><th style="width:30%" data-i18n="analyticsPage.thUsage">Usage</th></tr></thead>
                 <tbody>
                   <template x-for="m in byModel" :key="m.model">
                     <tr>
@@ -4363,12 +4363,12 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 </tbody>
               </table>
             </div>
-            <div class="empty-state" x-show="!byModel.length"><p>No model usage data yet.</p></div>
+            <div class="empty-state" x-show="!byModel.length"><p data-i18n="analyticsPage.noModelData">No model usage data yet.</p></div>
           </div>
           <div x-show="tab === 'by-agent'">
             <div class="table-wrap mt-4" x-show="byAgent.length">
               <table>
-                <thead><tr><th>Agent</th><th>Total Tokens</th><th>Tool Calls</th></tr></thead>
+                <thead><tr><th data-i18n="analyticsPage.thAgent">Agent</th><th data-i18n="analyticsPage.thTotalTokens">Total Tokens</th><th data-i18n="analyticsPage.thToolCalls">Tool Calls</th></tr></thead>
                 <tbody>
                   <template x-for="a in byAgent" :key="a.agent_id">
                     <tr>
@@ -4380,7 +4380,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 </tbody>
               </table>
             </div>
-            <div class="empty-state" x-show="!byAgent.length"><p>No agent usage data yet.</p></div>
+            <div class="empty-state" x-show="!byAgent.length"><p data-i18n="analyticsPage.noAgentData">No agent usage data yet.</p></div>
           </div>
 
           <!-- Costs Tab -->
@@ -4390,19 +4390,19 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             <div class="stats-row mt-4">
               <div class="stat-card">
                 <div class="stat-value" x-text="formatCost(summary.total_cost_usd)"></div>
-                <div class="stat-label">Total Spend</div>
+                <div class="stat-label" data-i18n="analyticsPage.totalSpend">Total Spend</div>
               </div>
               <div class="stat-card">
                 <div class="stat-value" x-text="formatCost(todayCost)"></div>
-                <div class="stat-label">Today's Spend</div>
+                <div class="stat-label" data-i18n="analyticsPage.todaysSpend">Today's Spend</div>
               </div>
               <div class="stat-card">
                 <div class="stat-value" x-text="formatCost(projectedMonthlyCost())"></div>
-                <div class="stat-label">Projected Monthly</div>
+                <div class="stat-label" data-i18n="analyticsPage.projectedMonthly">Projected Monthly</div>
               </div>
               <div class="stat-card">
                 <div class="stat-value" x-text="formatCost(avgCostPerMessage())"></div>
-                <div class="stat-label">Avg Cost / Message</div>
+                <div class="stat-label" data-i18n="analyticsPage.avgCostPerMessage">Avg Cost / Message</div>
               </div>
             </div>
 
@@ -4411,8 +4411,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
               <!-- Donut Chart: Cost by Provider -->
               <div class="card cost-chart-panel">
-                <div class="card-header">Cost by Provider</div>
-                <div x-show="costByProvider().length === 0" class="text-sm text-dim" style="padding:20px;text-align:center">No cost data yet.</div>
+                <div class="card-header" data-i18n="analyticsPage.costByProvider">Cost by Provider</div>
+                <div x-show="costByProvider().length === 0" class="text-sm text-dim" style="padding:20px;text-align:center" data-i18n="analyticsPage.noCostData">No cost data yet.</div>
                 <div x-show="costByProvider().length > 0" class="donut-chart-wrap">
                   <div class="donut-chart">
                     <svg viewBox="0 0 160 160" width="160" height="160">
@@ -4432,7 +4432,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                       </template>
                       <!-- Center text -->
                       <text x="80" y="76" text-anchor="middle" fill="var(--text)" style="font-size:14px;font-weight:700;font-family:var(--font-mono)" x-text="formatCost(summary.total_cost_usd)"></text>
-                      <text x="80" y="92" text-anchor="middle" fill="var(--text-muted)" style="font-size:9px;font-family:var(--font-mono)">TOTAL</text>
+                      <text x="80" y="92" text-anchor="middle" fill="var(--text-muted)" style="font-size:9px;font-family:var(--font-mono)" data-i18n="analyticsPage2.total">TOTAL</text>
                     </svg>
                   </div>
                   <div class="donut-legend">
@@ -4450,8 +4450,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
               <!-- Bar Chart: Daily Cost (last 7 days) -->
               <div class="card cost-chart-panel">
-                <div class="card-header">Daily Cost (Last 7 Days)</div>
-                <div x-show="barChartData().length === 0" class="text-sm text-dim" style="padding:20px;text-align:center">No daily data yet.</div>
+                <div class="card-header" data-i18n="analyticsPage.dailyCost">Daily Cost (Last 7 Days)</div>
+                <div x-show="barChartData().length === 0" class="text-sm text-dim" style="padding:20px;text-align:center" data-i18n="analyticsPage.noDailyData">No daily data yet.</div>
                 <div x-show="barChartData().length > 0" class="bar-chart">
                   <svg :viewBox="'0 0 ' + (barChartData().length * 50 + 20) + ' 180'" :width="barChartData().length * 50 + 20" height="180">
                     <!-- Baseline -->
@@ -4498,19 +4498,19 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
             <!-- Cost by Model Table -->
             <div class="card mt-4">
-              <div class="card-header">Cost by Model</div>
+              <div class="card-header" data-i18n="analyticsPage.costByModel">Cost by Model</div>
               <div class="table-wrap" x-show="costByModelSorted().length" style="border:none;margin-top:8px">
                 <table>
                   <thead>
                     <tr>
-                      <th>Model</th>
-                      <th>Provider</th>
-                      <th>Tier</th>
-                      <th>Input Tokens</th>
-                      <th>Output Tokens</th>
-                      <th>Calls</th>
-                      <th>Cost</th>
-                      <th style="width:20%">Cost Share</th>
+                      <th data-i18n="analyticsPage.thModel">Model</th>
+                      <th data-i18n="analyticsPage.thProvider">Provider</th>
+                      <th data-i18n="analyticsPage.thTier">Tier</th>
+                      <th data-i18n="analyticsPage.thInputTokens">Input Tokens</th>
+                      <th data-i18n="analyticsPage.thOutputTokens">Output Tokens</th>
+                      <th data-i18n="analyticsPage.thCalls">Calls</th>
+                      <th data-i18n="analyticsPage.thCost">Cost</th>
+                      <th style="width:20%" data-i18n="analyticsPage.thCostShare">Cost Share</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -4537,7 +4537,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   </tbody>
                 </table>
               </div>
-              <div x-show="!costByModelSorted().length" class="text-sm text-dim" style="padding:20px;text-align:center">No model cost data yet.</div>
+              <div x-show="!costByModelSorted().length" class="text-sm text-dim" style="padding:20px;text-align:center" data-i18n="analyticsPage.noModelCostData">No model cost data yet.</div>
             </div>
 
           </div>
@@ -4699,9 +4699,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             </span>
             <select class="form-select" style="width:100px" x-model="levelFilter">
               <option value="" data-i18n="logsPage.allLevels">All</option>
-              <option value="info">INFO</option>
-              <option value="warn">WARN</option>
-              <option value="error">ERROR</option>
+              <option value="info" data-i18n="logsPage2.levelInfo">INFO</option>
+              <option value="warn" data-i18n="logsPage2.levelWarn">WARN</option>
+              <option value="error" data-i18n="logsPage2.levelError">ERROR</option>
             </select>
             <input class="form-input" style="width:180px" data-i18n-placeholder="logsPage.searchPlaceholder" placeholder="Search..." x-model="textFilter">
             <button class="btn btn-ghost btn-sm" @click="togglePause()" x-text="streamPaused ? t('logsPage.resume', 'Resume') : t('logsPage.pause', 'Pause')"></button>
@@ -5016,7 +5016,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <button @click="showRelations = !showRelations; if (showRelations && relations.length === 0) loadRelations()" class="btn btn-secondary" x-show="selectedAgentId" :class="{ 'btn-primary': showRelations }" x-text="t('memoryPage.relations', 'Relations')">Relations</button>
           <button @click="cleanupExpired()" class="btn btn-secondary" x-text="t('memoryPage.cleanup', 'Cleanup Expired')">Cleanup Expired</button>
           <button @click="decayConfidence()" class="btn btn-secondary" x-text="t('memoryPage.decay', 'Decay Confidence')">Decay Confidence</button>
-          <button @click="bulkDelete()" class="btn btn-danger" x-show="selectedIds.length > 0" x-text="'Delete ' + selectedIds.length + ' selected'">Delete selected</button>
+          <button @click="bulkDelete()" class="btn btn-danger" x-show="selectedIds.length > 0" x-text="t('memoryPage2.deleteSelected', 'Delete {count} selected').replace('{count}', selectedIds.length)">Delete selected</button>
         </div>
 
         <!-- Manual memory creation form -->
@@ -5053,13 +5053,13 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <td><input type="checkbox" :checked="selectedIds.indexOf(mem.id) !== -1" @change="toggleSelect(mem.id)"></td>
                   <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
                     <template x-if="!mem._editing">
-                      <span x-text="mem.content" @dblclick="startEdit(mem)" title="Double-click to edit" style="cursor:text"></span>
+                      <span x-text="mem.content" @dblclick="startEdit(mem)" data-i18n-title="agentChat2.doubleClickToEdit" title="Double-click to edit" style="cursor:text"></span>
                     </template>
                     <template x-if="mem._editing">
                       <div style="display:flex;gap:4px;align-items:center">
                         <input type="text" x-model="mem._editContent" class="form-input" style="flex:1;font-size:13px;padding:2px 6px" @keyup.enter="saveEdit(mem)" @keyup.escape="cancelEdit(mem)">
-                        <button @click="saveEdit(mem)" class="btn btn-sm btn-primary" title="Save">&#x2713;</button>
-                        <button @click="cancelEdit(mem)" class="btn btn-sm" title="Cancel">&#x2715;</button>
+                        <button @click="saveEdit(mem)" class="btn btn-sm btn-primary" data-i18n-title="btn.save" title="Save">&#x2713;</button>
+                        <button @click="cancelEdit(mem)" class="btn btn-sm" data-i18n-title="btn.cancel" title="Cancel">&#x2715;</button>
                       </div>
                     </template>
                   </td>
@@ -5067,9 +5067,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <td x-text="mem.category || '—'" style="color:var(--text-secondary)"></td>
                   <td x-text="new Date(mem.created_at).toLocaleDateString()" style="white-space:nowrap"></td>
                   <td>
-                    <button @click="startEdit(mem)" class="btn btn-sm" title="Edit" x-show="!mem._editing">&#x270E;</button>
-                    <button @click="viewHistory(mem.id)" class="btn btn-sm" title="History">&#x1f4dc;</button>
-                    <button @click="deleteMemory(mem.id)" class="btn btn-sm btn-danger" title="Delete">&#x2715;</button>
+                    <button @click="startEdit(mem)" class="btn btn-sm" data-i18n-title="btn.edit" title="Edit" x-show="!mem._editing">&#x270E;</button>
+                    <button @click="viewHistory(mem.id)" class="btn btn-sm" data-i18n-title="memoryPage.versionHistory" title="History">&#x1f4dc;</button>
+                    <button @click="deleteMemory(mem.id)" class="btn btn-sm btn-danger" data-i18n-title="btn.delete" title="Delete">&#x2715;</button>
                   </td>
                 </tr>
               </template>
@@ -5284,7 +5284,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
               <template x-if="selectedProviderObj && !providerIsConfigured(selectedProviderObj) && selectedProvider !== 'claude-code'">
                 <div class="card" style="border-left:3px solid var(--accent);margin-top:16px">
-                  <div class="card-header" x-text="'Configure ' + selectedProviderObj.display_name"></div>
+                  <div class="card-header" x-text="t('setupWizard2.configure', 'Configure {name}').replace('{name}', selectedProviderObj.display_name)"></div>
                   <div class="text-xs text-dim mb-2" x-show="selectedProviderObj.api_key_env">
                     <span data-i18n="setupWizard.environmentVariable">Environment variable:</span> <code style="color:var(--accent-light);background:var(--bg);padding:1px 4px;border-radius:2px" x-text="selectedProviderObj.api_key_env"></code>
                   </div>
@@ -5448,7 +5448,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
 
               <template x-if="selectedChannelObj">
                 <div class="card" style="border-left:3px solid var(--accent)">
-                  <div class="card-header" x-text="'Configure ' + selectedChannelObj.display_name"></div>
+                  <div class="card-header" x-text="t('setupWizard2.configure', 'Configure {name}').replace('{name}', selectedChannelObj.display_name)"></div>
                   <div class="text-xs text-dim mb-2" x-text="selectedChannelObj.help"></div>
                   <div class="form-group">
                     <label x-text="selectedChannelObj.token_label"></label>

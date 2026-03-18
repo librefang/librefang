@@ -1808,5 +1808,46 @@
     "memoriesSaved": "memories saved",
     "recalled": "recalled",
     "saved": "saved"
+  },
+  "theme": {
+    "light": "Light",
+    "system": "System",
+    "dark": "Dark"
+  },
+  "sidebar": {
+    "shortcutHint": "Ctrl+K agents | Ctrl+N new"
+  },
+  "agentChat2": {
+    "focusMode": "Focus mode (Ctrl+Shift+F)",
+    "switchModel": "Switch model (Ctrl+M)",
+    "vision": "Vision",
+    "tools": "Tools",
+    "agentSettings": "Agent settings",
+    "providerModelPlaceholder": "provider/model",
+    "doubleClickToEdit": "Double-click to edit"
+  },
+  "settingsPage2": {
+    "enabled": "Enabled",
+    "pmMasterToggleDesc": "Master toggle for the entire proactive memory subsystem. When off, no memories are stored or retrieved.",
+    "pluginNamePlaceholder": "e.g. echo-memory"
+  },
+  "agentsPage2": {
+    "modelPlaceholder": "e.g. llama-3.3-70b-versatile"
+  },
+  "schedulerPage2": {
+    "deleteTrigger": "Delete"
+  },
+  "analyticsPage2": {
+    "total": "TOTAL"
+  },
+  "memoryPage2": {
+    "deleteSelected": "Delete {count} selected"
+  },
+  "confirm": {
+    "cancel": "Cancel",
+    "confirm": "Confirm"
+  },
+  "setupWizard2": {
+    "configure": "Configure {name}"
   }
 }

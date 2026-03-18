@@ -1810,5 +1810,46 @@
     "memoriesSaved": "条记忆已保存",
     "recalled": "已检索",
     "saved": "已保存"
+  },
+  "theme": {
+    "light": "浅色",
+    "system": "跟随系统",
+    "dark": "深色"
+  },
+  "sidebar": {
+    "shortcutHint": "Ctrl+K 智能体 | Ctrl+N 新建"
+  },
+  "agentChat2": {
+    "focusMode": "专注模式 (Ctrl+Shift+F)",
+    "switchModel": "切换模型 (Ctrl+M)",
+    "vision": "视觉",
+    "tools": "工具",
+    "agentSettings": "智能体设置",
+    "providerModelPlaceholder": "提供商/模型",
+    "doubleClickToEdit": "双击编辑"
+  },
+  "settingsPage2": {
+    "enabled": "启用",
+    "pmMasterToggleDesc": "主开关，控制整个主动记忆子系统。关闭后将不会存储或检索任何记忆。",
+    "pluginNamePlaceholder": "例如 echo-memory"
+  },
+  "agentsPage2": {
+    "modelPlaceholder": "例如 llama-3.3-70b-versatile"
+  },
+  "schedulerPage2": {
+    "deleteTrigger": "删除"
+  },
+  "analyticsPage2": {
+    "total": "总计"
+  },
+  "memoryPage2": {
+    "deleteSelected": "删除 {count} 条已选"
+  },
+  "confirm": {
+    "cancel": "取消",
+    "confirm": "确认"
+  },
+  "setupWizard2": {
+    "configure": "配置 {name}"
   }
 }
