@@ -96,6 +96,11 @@ pub enum ContentBlock {
     Thinking {
         /// The thinking/reasoning text.
         thinking: String,
+        /// Provider-specific metadata (e.g. Gemini `thoughtSignature`).
+        /// Opaque to the core — drivers read/write this to round-trip
+        /// fields the provider requires on subsequent requests.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<serde_json::Value>,
     },
     /// Catch-all for unrecognized content block types (forward compatibility).
     #[serde(other)]
@@ -148,7 +153,7 @@ impl MessageContent {
                 .map(|b| match b {
                     ContentBlock::Text { text, .. } => text.len(),
                     ContentBlock::ToolResult { content, .. } => content.len(),
-                    ContentBlock::Thinking { thinking } => thinking.len(),
+                    ContentBlock::Thinking { thinking, .. } => thinking.len(),
                     ContentBlock::ToolUse { .. }
                     | ContentBlock::Image { .. }
                     | ContentBlock::Unknown => 0,

@@ -32,6 +32,9 @@ dashmap = { workspace = true }
 regex-lite = { workspace = true }
 rusqlite = { workspace = true }
 tokio-tungstenite = { workspace = true }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+rustls-native-certs = { workspace = true }
 shlex = "1"
 toml = { workspace = true }
 dirs = { workspace = true }

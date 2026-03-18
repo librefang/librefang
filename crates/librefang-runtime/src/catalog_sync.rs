@@ -37,7 +37,7 @@ pub async fn sync_catalog() -> Result<CatalogSyncResult, String> {
     std::fs::create_dir_all(&providers_dir)
         .map_err(|e| format!("Failed to create cache dir: {e}"))?;
 
-    let client = reqwest::Client::builder()
+    let client = crate::http_client::client_builder()
         .user_agent(crate::USER_AGENT)
         .build()
         .map_err(|e| format!("HTTP client error: {e}"))?;

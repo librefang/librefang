@@ -6298,7 +6298,7 @@ async fn cron_deliver_response(
         }
         CronDelivery::Webhook { url } => {
             tracing::debug!(url = %url, "Cron: delivering via webhook");
-            let client = reqwest::Client::builder()
+            let client = librefang_runtime::http_client::client_builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build();
             if let Ok(client) = client {

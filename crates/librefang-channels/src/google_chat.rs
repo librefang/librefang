@@ -118,7 +118,7 @@ impl GoogleChatAdapter {
             service_account_key: Zeroizing::new(service_account_key),
             space_ids,
             webhook_port,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,

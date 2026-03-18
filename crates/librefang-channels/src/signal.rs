@@ -40,7 +40,7 @@ impl SignalAdapter {
         Self {
             api_url,
             phone_number,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             allowed_users,
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),

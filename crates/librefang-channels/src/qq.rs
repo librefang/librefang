@@ -64,7 +64,7 @@ impl QqAdapter {
         Self {
             app_id,
             app_secret: Zeroizing::new(app_secret),
-            client: reqwest::Client::builder()
+            client: crate::http_client::client_builder()
                 .timeout(Duration::from_secs(30))
                 .build()
                 .expect("failed to build HTTP client"),

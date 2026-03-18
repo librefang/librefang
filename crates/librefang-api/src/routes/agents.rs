@@ -668,10 +668,10 @@ pub async fn resolve_url_attachments(
 ) -> Vec<librefang_types::message::ContentBlock> {
     use base64::Engine;
 
-    let client = reqwest::Client::builder()
+    let client = librefang_runtime::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .unwrap_or_default();
+        .expect("HTTP client build");
     let mut blocks = Vec::new();
 
     for att in attachments {
@@ -3022,6 +3022,103 @@ pub async fn set_agent_file(
             "status": "ok",
             "name": filename,
             "size_bytes": size_bytes,
+        })),
+    )
+}
+
+/// DELETE /api/agents/{id}/files/{filename} — Delete a workspace identity file.
+#[utoipa::path(
+    delete,
+    path = "/api/agents/{id}/files/{filename}",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("filename" = String, Path, description = "Identity file name"),
+    ),
+    responses(
+        (status = 200, description = "File deleted successfully", body = serde_json::Value),
+        (status = 404, description = "File not found", body = serde_json::Value)
+    )
+)]
+pub async fn delete_agent_file(
+    State(state): State<Arc<AppState>>,
+    Path((id, filename)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            );
+        }
+    };
+
+    // Validate filename whitelist
+    if !KNOWN_IDENTITY_FILES.contains(&filename.as_str()) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "File not in whitelist"})),
+        );
+    }
+
+    let workspace = match state.kernel.registry.get(agent_id) {
+        Some(e) => match e.manifest.workspace {
+            Some(ref ws) => ws.clone(),
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "Agent has no workspace"})),
+                );
+            }
+        },
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Agent not found"})),
+            );
+        }
+    };
+
+    // Security: canonicalize and verify stays inside workspace
+    let file_path = workspace.join(&filename);
+    let canonical = match file_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "File not found"})),
+            );
+        }
+    };
+    let ws_canonical = match workspace.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Workspace path error"})),
+            );
+        }
+    };
+    if !canonical.starts_with(&ws_canonical) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Path traversal denied"})),
+        );
+    }
+
+    if let Err(e) = std::fs::remove_file(&canonical) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Delete failed: {e}")})),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "name": filename,
         })),
     )
 }

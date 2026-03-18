@@ -59,7 +59,7 @@ impl NtfyAdapter {
             server_url,
             topic,
             token: Zeroizing::new(token),
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -174,10 +174,10 @@ impl ChannelAdapter for NtfyAdapter {
         let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
-            let sse_client = reqwest::Client::builder()
+            let sse_client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(0)) // No timeout for SSE
                 .build()
-                .unwrap_or_default();
+                .expect("HTTP client build");
 
             let mut backoff = Duration::from_secs(1);
 
