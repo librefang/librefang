@@ -116,6 +116,7 @@ function memoryPage() {
       var self = this;
       self.loading = true;
       self.searchQuery = '';
+      self.selectedIds = [];
       LibreFangAPI.request('GET', this.listEndpoint).then(function(data) {
         self.memories = data.memories || [];
         self.totalMemories = data.total || self.memories.length;
