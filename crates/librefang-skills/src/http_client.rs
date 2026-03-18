@@ -14,9 +14,3 @@ pub fn client_builder() -> ClientBuilder {
         .with_no_client_auth();
     ClientBuilder::new().use_preconfigured_tls(tls_config)
 }
-
-pub fn new_client() -> reqwest::Client {
-    client_builder()
-        .build()
-        .expect("HTTP client with bundled CA roots should always build")
-}
