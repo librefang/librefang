@@ -76,8 +76,6 @@ impl Default for ContextEngineConfig {
 /// Result from the `assemble` lifecycle hook.
 #[derive(Debug)]
 pub struct AssembleResult {
-    /// Messages to send to the LLM, ordered and within budget.
-    pub messages: Vec<Message>,
     /// Recovery stage applied during assembly (if any).
     pub recovery: RecoveryStage,
 }
@@ -112,9 +110,9 @@ pub trait ContextEngine: Send + Sync {
 
     /// Called before each LLM call to assemble the context window.
     ///
-    /// Given the current messages and available tools, return an ordered
-    /// set of messages that fits within the token budget. This is the
-    /// core hook — it controls exactly what the model "sees".
+    /// Given the current messages and available tools, trim and reorder
+    /// them to fit within the agent's token budget. `context_window_tokens`
+    /// is the **current agent's** model context size (not a global default).
     ///
     /// The default implementation applies overflow recovery, context
     /// guard compaction, and session repair.
@@ -123,6 +121,7 @@ pub trait ContextEngine: Send + Sync {
         messages: &mut Vec<Message>,
         system_prompt: &str,
         tools: &[ToolDefinition],
+        context_window_tokens: usize,
     ) -> LibreFangResult<AssembleResult>;
 
     /// Called when the context window is under pressure.
@@ -289,14 +288,12 @@ impl ContextEngine for DefaultContextEngine {
         messages: &mut Vec<Message>,
         system_prompt: &str,
         tools: &[ToolDefinition],
+        context_window_tokens: usize,
     ) -> LibreFangResult<AssembleResult> {
         // Stage 1: Overflow recovery pipeline (4-stage cascade, respects pinned messages)
-        let recovery = recover_from_overflow(
-            messages,
-            system_prompt,
-            tools,
-            self.config.context_window_tokens,
-        );
+        // Uses the per-agent context window size, not the boot-time default.
+        let recovery =
+            recover_from_overflow(messages, system_prompt, tools, context_window_tokens);
 
         if recovery == RecoveryStage::FinalError {
             warn!("ContextEngine: overflow unrecoverable — suggest /reset or /compact");
@@ -310,10 +307,7 @@ impl ContextEngine for DefaultContextEngine {
         // Stage 2: Context guard — compact oversized tool results
         apply_context_guard(messages, &self.budget, tools);
 
-        Ok(AssembleResult {
-            messages: messages.clone(),
-            recovery,
-        })
+        Ok(AssembleResult { recovery })
     }
 
     async fn compact(
@@ -533,9 +527,12 @@ impl ContextEngine for ScriptableContextEngine {
         messages: &mut Vec<Message>,
         system_prompt: &str,
         tools: &[ToolDefinition],
+        context_window_tokens: usize,
     ) -> LibreFangResult<AssembleResult> {
         // Always delegate to Rust — too performance-critical for Python
-        self.inner.assemble(messages, system_prompt, tools).await
+        self.inner
+            .assemble(messages, system_prompt, tools, context_window_tokens)
+            .await
     }
 
     async fn compact(
@@ -805,9 +802,11 @@ mod tests {
         let config = ContextEngineConfig::default();
         let engine = DefaultContextEngine::new(config, make_memory(), None);
         let mut messages = vec![Message::user("hi"), Message::assistant("hello")];
-        let result = engine.assemble(&mut messages, "system", &[]).await.unwrap();
+        let result = engine
+            .assemble(&mut messages, "system", &[], 200_000)
+            .await
+            .unwrap();
         assert_eq!(result.recovery, RecoveryStage::None);
-        assert_eq!(result.messages.len(), 2);
     }
 
     #[tokio::test]
@@ -829,7 +828,10 @@ mod tests {
             })
             .collect();
 
-        let result = engine.assemble(&mut messages, "system", &[]).await.unwrap();
+        let result = engine
+            .assemble(&mut messages, "system", &[], 100)
+            .await
+            .unwrap();
         assert_ne!(result.recovery, RecoveryStage::None);
     }
 
