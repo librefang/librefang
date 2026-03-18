@@ -73,7 +73,7 @@ export function OverviewPage() {
           <button onClick={() => navigate({ to: "/canvas" })} className={statCardClass}>
             <div className="absolute -right-4 -top-4 text-accent/5 transition-transform group-hover:scale-110 group-hover:text-accent/10"><svg className="h-24 w-24" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" /></svg></div>
             <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim">{t("overview.workflows")}</p>
-            <div className="mt-2 flex items-baseline gap-2"><span className="text-4xl font-black tracking-tight">{t("common.brands.n8n")}</span><span className="text-xs font-semibold text-accent">{t("common.active")}</span></div>
+            <div className="mt-2 flex items-baseline gap-2"><span className="text-4xl font-black tracking-tight">{snapshot?.workflowCount ?? 0}</span><span className="text-xs font-semibold text-accent">{t("common.active")}</span></div>
             <p className="mt-4 text-[10px] text-text-dim group-hover:text-brand transition-colors italic font-medium">{t("overview.design_with_canvas")} {t("common.symbols.arrow")}</p>
           </button>
 
