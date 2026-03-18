@@ -823,6 +823,7 @@ mod tests {
                 input: serde_json::Value::Null,
                 provider_metadata: None,
             }]),
+            pinned: false,
         };
         let api_msg = convert_message(&msg);
         match api_msg.content {

@@ -199,6 +199,7 @@ mod tests {
             vec![Message {
                 role: Role::User,
                 content: MessageContent::text("Hello!"),
+                pinned: false,
             }],
             vec![],
         );
@@ -217,6 +218,7 @@ mod tests {
                     "Write a function that implements async file reading with struct and impl blocks:\n\
                      ```rust\nfn main() { }\n```"
                 ),
+                pinned: false,
             }],
             vec![],
         );
@@ -239,6 +241,7 @@ mod tests {
             vec![Message {
                 role: Role::User,
                 content: MessageContent::text("Use the available tools to solve this problem."),
+                pinned: false,
             }],
             tools,
         );
@@ -258,6 +261,7 @@ mod tests {
                     "This is message {} with enough content to add some token weight to the conversation.",
                     i
                 )),
+                pinned: false,
             })
             .collect();
         let request = make_request(messages, vec![]);
@@ -354,6 +358,7 @@ mod tests {
             vec![Message {
                 role: Role::User,
                 content: MessageContent::text("Hi"),
+                pinned: false,
             }],
             vec![],
         );
@@ -364,6 +369,7 @@ mod tests {
             vec![Message {
                 role: Role::User,
                 content: MessageContent::text("Hi"),
+                pinned: false,
             }],
             vec![],
         );

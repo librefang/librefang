@@ -633,6 +633,7 @@ mod tests {
             messages: vec![Message {
                 role: Role::User,
                 content: MessageContent::Text("Hello".to_string()),
+                pinned: false,
             }],
             tools: Vec::new(),
             max_tokens: 1024,
@@ -657,10 +658,12 @@ mod tests {
                 Message {
                     role: Role::System,
                     content: MessageContent::Text("System prompt.".to_string()),
+                    pinned: false,
                 },
                 Message {
                     role: Role::User,
                     content: MessageContent::Text("Hi".to_string()),
+                    pinned: false,
                 },
             ],
             tools: Vec::new(),

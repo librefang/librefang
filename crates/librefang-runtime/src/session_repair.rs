@@ -110,6 +110,7 @@ pub fn validate_and_repair_with_stats(messages: &[Message]) -> (Vec<Message>, Re
         cleaned.push(Message {
             role: msg.role,
             content: new_content,
+            pinned: msg.pinned,
         });
     }
 
@@ -310,6 +311,7 @@ fn reorder_tool_results(messages: &mut Vec<Message>) -> usize {
                     Message {
                         role: Role::User,
                         content: MessageContent::Blocks(blocks),
+                        pinned: false,
                     },
                 );
             }
@@ -401,6 +403,7 @@ fn insert_synthetic_results(messages: &mut Vec<Message>) -> usize {
                 Message {
                     role: Role::User,
                     content: MessageContent::Blocks(blocks),
+                    pinned: false,
                 },
             );
         }
@@ -791,6 +794,7 @@ mod tests {
                     content: "some result".to_string(),
                     is_error: false,
                 }]),
+                pinned: false,
             },
             Message::assistant("Done"),
         ];
@@ -825,6 +829,7 @@ mod tests {
             Message {
                 role: Role::User,
                 content: MessageContent::Text(String::new()),
+                pinned: false,
             },
             Message::assistant("Hi"),
         ];
@@ -844,6 +849,7 @@ mod tests {
                     input: serde_json::json!({"query": "rust"}),
                     provider_metadata: None,
                 }]),
+                pinned: false,
             },
             Message {
                 role: Role::User,
@@ -853,6 +859,7 @@ mod tests {
                     content: "Results found".to_string(),
                     is_error: false,
                 }]),
+                pinned: false,
             },
             Message::assistant("Here are the results"),
         ];
@@ -876,6 +883,7 @@ mod tests {
                     input: serde_json::json!({"query": "rust"}),
                     provider_metadata: None,
                 }]),
+                pinned: false,
             },
             Message::user("While you search, I have another question"),
             Message {
@@ -886,6 +894,7 @@ mod tests {
                     content: "Search results".to_string(),
                     is_error: false,
                 }]),
+                pinned: false,
             },
             Message::assistant("Here are results"),
         ];
@@ -930,6 +939,7 @@ mod tests {
                     input: serde_json::json!({"path": "/etc/hosts"}),
                     provider_metadata: None,
                 }]),
+                pinned: false,
             },
             Message::assistant("I tried to read the file"),
         ];
@@ -968,6 +978,7 @@ mod tests {
                     input: serde_json::json!({}),
                     provider_metadata: None,
                 }]),
+                pinned: false,
             },
             Message {
                 role: Role::User,
@@ -977,6 +988,7 @@ mod tests {
                     content: "First result".to_string(),
                     is_error: false,
                 }]),
+                pinned: false,
             },
             Message {
                 role: Role::User,
@@ -986,6 +998,7 @@ mod tests {
                     content: "Duplicate result".to_string(),
                     is_error: false,
                 }]),
+                pinned: false,
             },
             Message::assistant("Done"),
         ];
@@ -1076,11 +1089,13 @@ mod tests {
                     content: "lost".to_string(),
                     is_error: false,
                 }]),
+                pinned: false,
             },
             Message::user("World"),
             Message {
                 role: Role::User,
                 content: MessageContent::Text(String::new()),
+                pinned: false,
             },
             Message::assistant("Hi"),
         ];
@@ -1103,6 +1118,7 @@ mod tests {
                     text: String::new(),
                     provider_metadata: None,
                 }]),
+                pinned: false,
             },
             Message::user("Never mind"),
             Message::assistant("OK"),
@@ -1149,6 +1165,7 @@ mod tests {
                         provider_metadata: None,
                     },
                 ]),
+                pinned: false,
             },
             // Only tu-a has a result, tu-b is missing
             Message {
@@ -1159,6 +1176,7 @@ mod tests {
                     content: "search result".to_string(),
                     is_error: false,
                 }]),
+                pinned: false,
             },
             // Orphaned result from a non-existent tool use
             Message {
@@ -1169,11 +1187,13 @@ mod tests {
                     content: "ghost result".to_string(),
                     is_error: false,
                 }]),
+                pinned: false,
             },
             // Empty message
             Message {
                 role: Role::User,
                 content: MessageContent::Text(String::new()),
+                pinned: false,
             },
             Message::assistant("Done"),
         ];
@@ -1225,6 +1245,7 @@ mod tests {
                         is_error: false,
                     },
                 ]),
+                pinned: false,
             },
             Message::assistant("Hi"),
         ];
@@ -1345,6 +1366,7 @@ mod tests {
                     input: serde_json::json!({}),
                     provider_metadata: None,
                 }]),
+                pinned: false,
             },
             Message {
                 role: Role::User,
@@ -1354,6 +1376,7 @@ mod tests {
                     content: "ok".into(),
                     is_error: false,
                 }]),
+                pinned: false,
             },
             Message::user("q2"),
             Message::assistant("a2"),
@@ -1378,6 +1401,7 @@ mod tests {
                     input: serde_json::json!({}),
                     provider_metadata: None,
                 }]),
+                pinned: false,
             },
             Message {
                 role: Role::User,
@@ -1387,6 +1411,7 @@ mod tests {
                     content: "ok".into(),
                     is_error: false,
                 }]),
+                pinned: false,
             },
         ];
         // min_trim = 2, forward scan hits ToolUse+ToolResult only, backward finds index 0
