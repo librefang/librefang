@@ -73,26 +73,28 @@ pub fn init_proxy(cfg: ProxyConfig) {
     // without going through our builder (e.g. librefang-channels).
     if let Some(ref url) = cfg.http_proxy {
         if !url.is_empty() {
-            if !is_valid_proxy_url(url) {
+            if is_valid_proxy_url(url) {
+                std::env::set_var("HTTP_PROXY", url);
+                std::env::set_var("http_proxy", url);
+            } else {
                 tracing::warn!(
-                    "http_proxy should start with http:// or https://: {}",
+                    "http_proxy has invalid scheme (expected http://, https://, or socks5://): {}",
                     librefang_types::config::redact_proxy_url(url)
                 );
             }
-            std::env::set_var("HTTP_PROXY", url);
-            std::env::set_var("http_proxy", url);
         }
     }
     if let Some(ref url) = cfg.https_proxy {
         if !url.is_empty() {
-            if !is_valid_proxy_url(url) {
+            if is_valid_proxy_url(url) {
+                std::env::set_var("HTTPS_PROXY", url);
+                std::env::set_var("https_proxy", url);
+            } else {
                 tracing::warn!(
-                    "https_proxy should start with http:// or https://: {}",
+                    "https_proxy has invalid scheme (expected http://, https://, or socks5://): {}",
                     librefang_types::config::redact_proxy_url(url)
                 );
             }
-            std::env::set_var("HTTPS_PROXY", url);
-            std::env::set_var("https_proxy", url);
         }
     }
     if let Some(ref no) = cfg.no_proxy {
