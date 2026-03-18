@@ -340,9 +340,26 @@ pub struct HandDefinition {
     /// Dashboard metrics schema.
     #[serde(default)]
     pub dashboard: HandDashboard,
+    /// Routing keywords for the deterministic router.
+    #[serde(default)]
+    pub routing: HandRouting,
     /// Bundled skill content (populated at load time, not in TOML).
     #[serde(skip)]
     pub skill_content: Option<String>,
+}
+
+/// Routing keywords for deterministic hand selection.
+///
+/// Keywords are English-only. Cross-lingual matching is handled by
+/// semantic embedding fallback in the router, not by translating keywords.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HandRouting {
+    /// Strong aliases — high-confidence intent signals (score ×3 each).
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// Weak aliases — supporting signals (score ×1 each).
+    #[serde(default)]
+    pub weak_aliases: Vec<String>,
 }
 
 /// Runtime status of a Hand instance.

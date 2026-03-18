@@ -1329,6 +1329,9 @@ pub struct KernelConfig {
     /// External authentication provider configuration (OAuth2/OIDC).
     #[serde(default)]
     pub external_auth: ExternalAuthConfig,
+    /// Tool policy configuration (global deny/allow rules, groups, depth limits).
+    #[serde(default)]
+    pub tool_policy: crate::tool_policy::ToolPolicy,
     /// Proactive memory (mem0-style) configuration.
     #[serde(default)]
     pub proactive_memory: crate::memory::ProactiveMemoryConfig,
@@ -1780,6 +1783,7 @@ impl Default for KernelConfig {
             session: SessionConfig::default(),
             queue: QueueConfig::default(),
             external_auth: ExternalAuthConfig::default(),
+            tool_policy: crate::tool_policy::ToolPolicy::default(),
             proactive_memory: crate::memory::ProactiveMemoryConfig::default(),
         }
     }

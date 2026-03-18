@@ -804,6 +804,23 @@ pub async fn send_message(
         .await
     {
         Ok(result) => {
+            // When the agent intentionally chose not to reply (NO_REPLY / [[silent]]),
+            // return an empty response with the silent flag so callers can distinguish
+            // intentional silence from a bug.
+            if result.silent {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "response": "",
+                        "silent": true,
+                        "input_tokens": result.total_usage.input_tokens,
+                        "output_tokens": result.total_usage.output_tokens,
+                        "iterations": result.iterations,
+                        "cost_usd": result.cost_usd,
+                    })),
+                );
+            }
+
             // Strip <think>...</think> blocks from model output
             let cleaned = crate::ws::strip_think_tags(&result.response);
 

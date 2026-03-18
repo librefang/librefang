@@ -5,6 +5,10 @@ category = "productivity"
 icon = "\U0001F3AF"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
+[routing]
+aliases = ["strategic analysis", "competitive analysis", "business plan", "market research"]
+weak_aliases = ["swot", "industry report", "competitive landscape"]
+
 # ─── Configurable settings ───────────────────────────────────────────────────
 
 [[settings]]

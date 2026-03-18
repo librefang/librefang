@@ -511,7 +511,9 @@ async fn handle_send_error<F, Fut>(
         match send_fn(new_id).await {
             Ok(response) => {
                 send_lifecycle_reaction(adapter, sender, msg_id, AgentPhase::Done).await;
-                send_response(adapter, sender, response, thread_id, output_format).await;
+                if !response.is_empty() {
+                    send_response(adapter, sender, response, thread_id, output_format).await;
+                }
                 handle
                     .record_delivery(new_id, ct_str, &sender.platform_id, true, None, thread_id)
                     .await;
@@ -806,8 +808,13 @@ async fn dispatch_message(
                     for jh in handles_vec {
                         if let Ok((name, _aid, result)) = jh.await {
                             match result {
-                                Ok(r) => responses.push(format!("[{name}]: {r}")),
-                                Err(e) => responses.push(format!("[{name}]: Error: {e}")),
+                                Ok(r) if !r.is_empty() => responses.push(format!("[{name}]: {r}")),
+                                Ok(_) => {} // silent response — skip
+                                Err(e) => {
+                                    if !adapter.suppress_error_responses() {
+                                        responses.push(format!("[{name}]: Error: {e}"));
+                                    }
+                                }
                             }
                         }
                     }
@@ -816,8 +823,13 @@ async fn dispatch_message(
                     for (name, maybe_id) in &targets {
                         if let Some(aid) = maybe_id {
                             match handle.send_message(*aid, &text).await {
-                                Ok(r) => responses.push(format!("[{name}]: {r}")),
-                                Err(e) => responses.push(format!("[{name}]: Error: {e}")),
+                                Ok(r) if !r.is_empty() => responses.push(format!("[{name}]: {r}")),
+                                Ok(_) => {} // silent response — skip
+                                Err(e) => {
+                                    if !adapter.suppress_error_responses() {
+                                        responses.push(format!("[{name}]: Error: {e}"));
+                                    }
+                                }
                             }
                         }
                     }
@@ -825,7 +837,9 @@ async fn dispatch_message(
             }
 
             let combined = responses.join("\n\n");
-            send_response(adapter, &message.sender, combined, thread_id, output_format).await;
+            if !combined.is_empty() {
+                send_response(adapter, &message.sender, combined, thread_id, output_format).await;
+            }
             return;
         }
     }
@@ -1045,7 +1059,11 @@ async fn dispatch_message(
     match handle.send_message(agent_id, &text).await {
         Ok(response) => {
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
-            send_response(adapter, &message.sender, response, thread_id, output_format).await;
+            // Empty response means the agent intentionally chose to stay silent
+            // (NO_REPLY / [[silent]]) — do not leak a message to the channel.
+            if !response.is_empty() {
+                send_response(adapter, &message.sender, response, thread_id, output_format).await;
+            }
             handle
                 .record_delivery(
                     agent_id,
@@ -1302,7 +1320,9 @@ async fn dispatch_with_blocks(
     {
         Ok(response) => {
             send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Done).await;
-            send_response(adapter, &message.sender, response, thread_id, output_format).await;
+            if !response.is_empty() {
+                send_response(adapter, &message.sender, response, thread_id, output_format).await;
+            }
             handle
                 .record_delivery(
                     agent_id,

@@ -5,6 +5,10 @@ category = "communication"
 icon = "\U0001D54F"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
+[routing]
+aliases = ["twitter", "tweet", "x.com", "scheduled tweet"]
+weak_aliases = ["social media post", "engagement tracking"]
+
 [[requires]]
 key = "TWITTER_BEARER_TOKEN"
 label = "Twitter API Bearer Token"

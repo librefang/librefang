@@ -5,6 +5,10 @@ category = "communication"
 icon = "\U0001F4E2"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
+[routing]
+aliases = ["reddit", "subreddit", "reddit post", "reddit monitor"]
+weak_aliases = ["karma", "reddit thread"]
+
 [[requires]]
 key = "REDDIT_CLIENT_ID"
 label = "Reddit API Client ID"
