@@ -711,6 +711,17 @@ async fn dispatch_message(
         } => {
             format!("[User sent a voice message ({duration_seconds}s): {url}]")
         }
+        ChannelContent::Video {
+            ref url,
+            ref caption,
+            duration_seconds,
+            ..
+        } => match caption {
+            Some(c) => {
+                format!("[User sent a video ({duration_seconds}s): {url}]\nCaption: {c}")
+            }
+            None => format!("[User sent a video ({duration_seconds}s): {url}]"),
+        },
         ChannelContent::Location { lat, lon } => {
             format!("[User shared location: {lat}, {lon}]")
         }

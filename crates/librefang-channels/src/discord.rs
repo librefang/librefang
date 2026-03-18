@@ -498,7 +498,11 @@ async fn parse_discord_message(
     }
 
     let content_text = d["content"].as_str().unwrap_or("");
-    if content_text.is_empty() {
+    let attachments = d["attachments"].as_array();
+    let has_attachments = attachments.map(|a| !a.is_empty()).unwrap_or(false);
+
+    // Skip messages with no text and no attachments
+    if content_text.is_empty() && !has_attachments {
         return None;
     }
 
@@ -518,8 +522,14 @@ async fn parse_discord_message(
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .unwrap_or_else(chrono::Utc::now);
 
-    // Parse commands (messages starting with /)
-    let content = if content_text.starts_with('/') {
+    // Determine content: first check for attachments, then fall back to text/commands.
+    // If both text and attachments exist, attachments take priority (text goes into caption/metadata).
+    // NOTE: Attachments take priority over slash commands. If a user sends
+    // `/command args` with an attachment, the command text becomes the
+    // attachment caption rather than being parsed as a command.
+    let content = if has_attachments {
+        parse_discord_attachment(attachments.unwrap(), content_text)
+    } else if content_text.starts_with('/') {
         let parts: Vec<&str> = content_text.splitn(2, ' ').collect();
         let cmd_name = &parts[0][1..];
         let args = if parts.len() > 1 {
@@ -573,6 +583,80 @@ async fn parse_discord_message(
         thread_id: None,
         metadata,
     })
+}
+
+/// Parse the first Discord attachment into a `ChannelContent` variant.
+///
+/// Discord attachments include a `content_type` field (MIME) and a direct `url`.
+/// We map common MIME prefixes to the appropriate content variant:
+///   - `image/*`  → `Image`
+///   - `video/*`  → `Video`
+///   - `audio/*`  → `Voice`
+///   - everything else → `File`
+fn parse_discord_attachment(
+    attachments: &[serde_json::Value],
+    companion_text: &str,
+) -> ChannelContent {
+    // Take the first attachment (most common case; multi-attachment is rare for bots).
+    if attachments.len() > 1 {
+        warn!(
+            "Discord: {} additional attachment(s) ignored, only first processed",
+            attachments.len() - 1
+        );
+    }
+    let att = match attachments.first() {
+        Some(a) => a,
+        None => {
+            // Defensive: caller checks has_attachments but guard against empty slice.
+            return ChannelContent::Text(companion_text.to_string());
+        }
+    };
+
+    let url = att["url"].as_str().unwrap_or("").to_string();
+    if url.is_empty() {
+        warn!("Discord attachment has empty URL, falling back to text");
+        return ChannelContent::Text(companion_text.to_string());
+    }
+
+    let filename = att["filename"].as_str().unwrap_or("attachment").to_string();
+    let content_type = att["content_type"].as_str().unwrap_or("");
+
+    let caption = if companion_text.is_empty() {
+        None
+    } else {
+        Some(companion_text.to_string())
+    };
+
+    if content_type.starts_with("image/") {
+        ChannelContent::Image { url, caption }
+    } else if content_type.starts_with("video/") {
+        // Discord does not provide duration in attachment metadata.
+        ChannelContent::Video {
+            url,
+            caption,
+            duration_seconds: 0,
+            filename: Some(filename),
+        }
+    } else if content_type.starts_with("audio/") {
+        if !companion_text.is_empty() {
+            warn!(
+                "Discord audio attachment has companion text that cannot be sent as caption: {:?}",
+                companion_text
+            );
+        }
+        ChannelContent::Voice {
+            url,
+            duration_seconds: 0,
+        }
+    } else {
+        if !companion_text.is_empty() {
+            warn!(
+                "Discord file attachment has companion text that cannot be sent as caption: {:?}",
+                companion_text
+            );
+        }
+        ChannelContent::File { url, filename }
+    }
 }
 
 #[cfg(test)]
@@ -924,5 +1008,146 @@ mod tests {
         );
         assert_eq!(adapter.name(), "discord");
         assert_eq!(adapter.channel_type(), ChannelType::Discord);
+    }
+
+    #[test]
+    fn test_parse_discord_attachment_image() {
+        let attachments = vec![serde_json::json!({
+            "id": "att1",
+            "filename": "photo.png",
+            "content_type": "image/png",
+            "url": "https://cdn.discord.com/photo.png",
+            "size": 12345
+        })];
+        let content = parse_discord_attachment(&attachments, "look at this");
+        match content {
+            ChannelContent::Image { url, caption } => {
+                assert_eq!(url, "https://cdn.discord.com/photo.png");
+                assert_eq!(caption.as_deref(), Some("look at this"));
+            }
+            other => panic!("Expected Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_discord_attachment_video() {
+        let attachments = vec![serde_json::json!({
+            "id": "att1",
+            "filename": "clip.mp4",
+            "content_type": "video/mp4",
+            "url": "https://cdn.discord.com/clip.mp4",
+            "size": 999999
+        })];
+        let content = parse_discord_attachment(&attachments, "");
+        match content {
+            ChannelContent::Video {
+                url,
+                caption,
+                filename,
+                ..
+            } => {
+                assert_eq!(url, "https://cdn.discord.com/clip.mp4");
+                assert!(caption.is_none());
+                assert_eq!(filename.as_deref(), Some("clip.mp4"));
+            }
+            other => panic!("Expected Video, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_discord_attachment_audio() {
+        let attachments = vec![serde_json::json!({
+            "id": "att1",
+            "filename": "voice.ogg",
+            "content_type": "audio/ogg",
+            "url": "https://cdn.discord.com/voice.ogg",
+            "size": 5000
+        })];
+        let content = parse_discord_attachment(&attachments, "");
+        assert!(matches!(content, ChannelContent::Voice { .. }));
+    }
+
+    #[test]
+    fn test_parse_discord_attachment_file() {
+        let attachments = vec![serde_json::json!({
+            "id": "att1",
+            "filename": "report.pdf",
+            "content_type": "application/pdf",
+            "url": "https://cdn.discord.com/report.pdf",
+            "size": 50000
+        })];
+        let content = parse_discord_attachment(&attachments, "");
+        match content {
+            ChannelContent::File { url, filename } => {
+                assert_eq!(url, "https://cdn.discord.com/report.pdf");
+                assert_eq!(filename, "report.pdf");
+            }
+            other => panic!("Expected File, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_discord_message_with_image_attachment() {
+        let bot_id = Arc::new(RwLock::new(Some("bot123".to_string())));
+        let d = serde_json::json!({
+            "id": "msg1",
+            "channel_id": "ch1",
+            "content": "check this out",
+            "author": {
+                "id": "user456",
+                "username": "alice",
+                "discriminator": "0",
+                "bot": false
+            },
+            "timestamp": "2024-01-01T00:00:00+00:00",
+            "attachments": [{
+                "id": "att1",
+                "filename": "screenshot.png",
+                "content_type": "image/png",
+                "url": "https://cdn.discord.com/screenshot.png",
+                "size": 12345
+            }]
+        });
+
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true)
+            .await
+            .unwrap();
+        match &msg.content {
+            ChannelContent::Image { url, caption } => {
+                assert_eq!(url, "https://cdn.discord.com/screenshot.png");
+                assert_eq!(caption.as_deref(), Some("check this out"));
+            }
+            other => panic!("Expected Image, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_discord_message_attachment_no_text() {
+        let bot_id = Arc::new(RwLock::new(Some("bot123".to_string())));
+        let d = serde_json::json!({
+            "id": "msg1",
+            "channel_id": "ch1",
+            "content": "",
+            "author": {
+                "id": "user456",
+                "username": "alice",
+                "discriminator": "0",
+                "bot": false
+            },
+            "timestamp": "2024-01-01T00:00:00+00:00",
+            "attachments": [{
+                "id": "att1",
+                "filename": "doc.pdf",
+                "content_type": "application/pdf",
+                "url": "https://cdn.discord.com/doc.pdf",
+                "size": 50000
+            }]
+        });
+
+        // Should NOT be None — attachment-only messages must be accepted
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true)
+            .await
+            .unwrap();
+        assert!(matches!(msg.content, ChannelContent::File { .. }));
     }
 }
