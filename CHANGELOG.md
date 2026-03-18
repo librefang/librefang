@@ -5,6 +5,41 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-03-18
+
+### Added
+
+- Graceful degradation when no LLM provider configured (#1185) (@SenZhangAI)
+
+### Fixed
+
+- Remove markdown fence wrapper from dev.to articles (#1167) (@houko)
+- Resolve secret scanning alert for MongoDB example URI (#1168) (@houko)
+- Handle paginated response in agents list and chat resolver (#1169) (@houko)
+- Resolve agent names to UUIDs in message and kill commands (#1170) (@houko)
+- Return 409 Conflict when spawning duplicate agent (#1171) (@houko)
+- Parse model aliases from API response correctly (#1172) (@houko)
+- Include last_active in agent detail endpoint (#1173) (@houko)
+- Parse wrapped API responses in CLI table views (#1175) (@houko)
+- Resolve agent names in trigger, cron, and webhook commands (#1176) (@houko)
+- Complete dashboard i18n translation coverage (#1177) (@houko)
+- Webhook CLI commands use wrong API endpoints (#1178) (@houko)
+- A2A agent card uses service config instead of random agent (#1179) (@houko)
+- Budget PUT accepts GET response field names for read-modify-write (#1182) (@houko)
+- Models set sends wrong field name to config/set API (#1183) (@houko)
+- Cron create returns proper JSON instead of stringified blob (#1184) (@houko)
+- CLI cron list reads nested schedule/action fields (#1186) (@houko)
+- Triggers list returns wrapped object for consistency (#1187) (@houko)
+- Include system_prompt in GET /api/agents/:id response (#1188) (@houko)
+
+### Maintenance
+
+- Fix rustfmt in a2a_agent_card handler (#1181) (@houko)
+
+### Other
+
+- V0.6.0-20260318 (#1164) (@houko)
+
 ## [0.6.0] - 2026-03-18
 
 ### Added
