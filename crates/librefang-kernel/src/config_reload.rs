@@ -512,6 +512,20 @@ mod tests {
         assert!(plan.hot_actions.contains(&HotAction::ReloadProviderUrls));
     }
 
+    #[test]
+    fn test_tool_policy_hot_reload() {
+        use librefang_types::tool_policy::{PolicyEffect, ToolPolicyRule};
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.tool_policy.global_rules.push(ToolPolicyRule {
+            pattern: "shell_*".to_string(),
+            effect: PolicyEffect::Deny,
+        });
+        let plan = build_reload_plan(&a, &b);
+        assert!(!plan.restart_required);
+        assert!(plan.hot_actions.contains(&HotAction::UpdateToolPolicy));
+    }
+
     // -----------------------------------------------------------------------
     // Mixed changes
     // -----------------------------------------------------------------------

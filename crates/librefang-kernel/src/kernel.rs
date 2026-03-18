@@ -3886,6 +3886,18 @@ impl LibreFangKernel {
                         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
                     *guard = Some(new_config.default_model.clone());
                 }
+                HotAction::UpdateToolPolicy => {
+                    info!(
+                        "Hot-reload: updating tool policy ({} global rules, {} agent rules)",
+                        new_config.tool_policy.global_rules.len(),
+                        new_config.tool_policy.agent_rules.len(),
+                    );
+                    let mut guard = self
+                        .tool_policy_override
+                        .write()
+                        .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+                    *guard = Some(new_config.tool_policy.clone());
+                }
                 _ => {
                     // Other hot actions (channels, web, browser, extensions, etc.)
                     // are logged but not applied here — they require subsystem-specific
@@ -5353,11 +5365,20 @@ impl LibreFangKernel {
 
         // Step 5: Apply global tool_policy rules (deny/allow with glob patterns).
         // This filters tools based on the kernel-wide tool policy from config.toml.
-        if !self.config.tool_policy.is_empty() {
+        // Check hot-reloadable override first, then fall back to initial config.
+        let effective_policy = self
+            .tool_policy_override
+            .read()
+            .ok()
+            .and_then(|guard| guard.clone());
+        let effective_policy = effective_policy
+            .as_ref()
+            .unwrap_or(&self.config.tool_policy);
+        if !effective_policy.is_empty() {
             all_tools.retain(|t| {
                 let result = librefang_runtime::tool_policy::resolve_tool_access(
                     &t.name,
-                    &self.config.tool_policy,
+                    effective_policy,
                     0, // depth 0 for top-level available_tools; subagent depth handled elsewhere
                 );
                 matches!(
