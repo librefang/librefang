@@ -1332,6 +1332,9 @@ pub struct KernelConfig {
     /// Tool policy configuration (global deny/allow rules, groups, depth limits).
     #[serde(default)]
     pub tool_policy: crate::tool_policy::ToolPolicy,
+    /// Pluggable context engine configuration.
+    #[serde(default)]
+    pub context_engine: ContextEngineTomlConfig,
 }
 
 /// Vertex AI provider configuration.
@@ -1400,6 +1403,53 @@ pub struct VertexAiConfig {
 /// token_url = "https://github.com/login/oauth/access_token"
 /// userinfo_url = "https://api.github.com/user"
 /// client_id = "your-github-client-id"
+/// Pluggable context engine configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [context_engine]
+/// engine = "default"     # built-in engine: "default"
+///
+/// [context_engine.hooks]
+/// ingest = "~/.librefang/plugins/my_recall.py"
+/// after_turn = "~/.librefang/plugins/my_indexer.py"
+/// ```
+///
+/// Heavy hooks (`assemble`, `compact`) always run in Rust for performance.
+/// Light hooks (`ingest`, `after_turn`) can be overridden with Python scripts
+/// using the same JSON stdin/stdout protocol as Python agents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextEngineTomlConfig {
+    /// Built-in engine name. Default: `"default"`.
+    pub engine: String,
+    /// Optional Python script hooks that override specific lifecycle methods.
+    pub hooks: ContextEngineHooks,
+}
+
+impl Default for ContextEngineTomlConfig {
+    fn default() -> Self {
+        Self {
+            engine: "default".to_string(),
+            hooks: ContextEngineHooks::default(),
+        }
+    }
+}
+
+/// Python script overrides for individual context engine lifecycle hooks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextEngineHooks {
+    /// Python script for the `ingest` hook (called on new user message).
+    /// Receives: `{"type": "ingest", "agent_id": "...", "message": "..."}`
+    /// Returns: `{"type": "ingest_result", "memories": [{"content": "..."}]}`
+    pub ingest: Option<String>,
+    /// Python script for the `after_turn` hook (called after each turn).
+    /// Receives: `{"type": "after_turn", "agent_id": "...", "messages": [...]}`
+    /// Returns: `{"type": "ok"}` (acknowledgement)
+    pub after_turn: Option<String>,
+}
+
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"
 /// scopes = ["read:user", "user:email"]
 /// ```
@@ -1781,6 +1831,7 @@ impl Default for KernelConfig {
             queue: QueueConfig::default(),
             external_auth: ExternalAuthConfig::default(),
             tool_policy: crate::tool_policy::ToolPolicy::default(),
+            context_engine: ContextEngineTomlConfig::default(),
         }
     }
 }
