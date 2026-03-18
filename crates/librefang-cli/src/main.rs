@@ -7166,14 +7166,18 @@ fn cmd_cron_list(json: bool) {
                 "{:<38} {:<16} {:<20} {:<8} {}",
                 j["id"].as_str().unwrap_or("?"),
                 j["agent_id"].as_str().unwrap_or("?"),
-                j["cron_expr"].as_str().unwrap_or("?"),
+                j["schedule"]["expr"]
+                    .as_str()
+                    .or_else(|| j["cron_expr"].as_str())
+                    .unwrap_or("?"),
                 if j["enabled"].as_bool().unwrap_or(false) {
                     "yes"
                 } else {
                     "no"
                 },
-                j["prompt"]
+                j["action"]["message"]
                     .as_str()
+                    .or_else(|| j["prompt"].as_str())
                     .unwrap_or("")
                     .chars()
                     .take(40)
