@@ -471,6 +471,40 @@ impl SemanticStore {
         Ok(())
     }
 
+    /// Load stored embeddings for a batch of memory IDs.
+    ///
+    /// Returns a map of `id_string -> embedding_vec`. IDs without stored
+    /// embeddings are simply omitted from the result.
+    pub fn get_embeddings_batch(&self, ids: &[&str]) -> LibreFangResult<HashMap<String, Vec<f32>>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        // SQLite doesn't support IN with parameterized lists easily for large N,
+        // so we query one at a time for safety (N ≤ 100 in find_duplicates).
+        let mut map = HashMap::new();
+        let mut stmt = conn
+            .prepare("SELECT embedding FROM memories WHERE id = ?1 AND deleted = 0")
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        for id in ids {
+            if let Ok(bytes) = stmt.query_row(rusqlite::params![*id], |row| {
+                let b: Option<Vec<u8>> = row.get(0)?;
+                Ok(b)
+            }) {
+                if let Some(b) = bytes {
+                    if !b.is_empty() {
+                        map.insert(id.to_string(), embedding_from_bytes(&b));
+                    }
+                }
+            }
+        }
+        Ok(map)
+    }
+
     /// Soft-delete all memories for a specific agent.
     pub fn forget_by_agent(&self, agent_id: AgentId) -> LibreFangResult<u64> {
         let conn = self
@@ -690,7 +724,7 @@ fn escape_like(s: &str) -> String {
 }
 
 /// Compute cosine similarity between two vectors.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     if a.len() != b.len() || a.is_empty() {
         return 0.0;
     }
@@ -725,6 +759,176 @@ fn embedding_from_bytes(bytes: &[u8]) -> Vec<f32> {
         .chunks_exact(4)
         .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// SqliteVectorStore — VectorStore trait implementation for SQLite backend
+// ---------------------------------------------------------------------------
+
+use async_trait::async_trait;
+use librefang_types::memory::{VectorSearchResult, VectorStore};
+
+/// SQLite-backed vector store (the default backend).
+///
+/// Uses BLOB-serialized embeddings and in-process cosine similarity
+/// re-ranking. Suitable for single-node deployments with moderate
+/// memory counts (< 100k vectors).
+///
+/// For larger-scale or production deployments, implement the `VectorStore`
+/// trait for a dedicated vector database (Qdrant, Pinecone, Chroma, etc.).
+#[derive(Clone)]
+pub struct SqliteVectorStore {
+    conn: Arc<Mutex<Connection>>,
+}
+
+impl SqliteVectorStore {
+    /// Create a new SQLite vector store wrapping the given connection.
+    pub fn new(conn: Arc<Mutex<Connection>>) -> Self {
+        Self { conn }
+    }
+}
+
+#[async_trait]
+impl VectorStore for SqliteVectorStore {
+    async fn insert(
+        &self,
+        id: &str,
+        embedding: &[f32],
+        _payload: &str,
+        _metadata: HashMap<String, serde_json::Value>,
+    ) -> LibreFangResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let bytes = embedding_to_bytes(embedding);
+        conn.execute(
+            "UPDATE memories SET embedding = ?1 WHERE id = ?2",
+            rusqlite::params![bytes, id],
+        )
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn search(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        filter: Option<librefang_types::memory::MemoryFilter>,
+    ) -> LibreFangResult<Vec<VectorSearchResult>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let fetch_limit = (limit * 10).max(100);
+        let mut sql = String::from(
+            "SELECT id, content, metadata, embedding FROM memories WHERE deleted = 0 AND embedding IS NOT NULL",
+        );
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut param_idx = 1;
+
+        if let Some(ref f) = filter {
+            if let Some(agent_id) = f.agent_id {
+                sql.push_str(&format!(" AND agent_id = ?{param_idx}"));
+                params.push(Box::new(agent_id.0.to_string()));
+                param_idx += 1;
+            }
+            if let Some(ref scope) = f.scope {
+                sql.push_str(&format!(" AND scope = ?{param_idx}"));
+                params.push(Box::new(scope.clone()));
+                param_idx += 1;
+            }
+            let _ = param_idx;
+        }
+
+        sql.push_str(&format!(" LIMIT {fetch_limit}"));
+
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+
+        let rows = stmt
+            .query_map(param_refs.as_slice(), |row| {
+                let id: String = row.get(0)?;
+                let content: String = row.get(1)?;
+                let meta_str: String = row.get(2)?;
+                let emb_bytes: Vec<u8> = row.get(3)?;
+                Ok((id, content, meta_str, emb_bytes))
+            })
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        let mut results = Vec::new();
+        for row_result in rows {
+            let (id, content, meta_str, emb_bytes) =
+                row_result.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let emb = embedding_from_bytes(&emb_bytes);
+            let score = cosine_similarity(query_embedding, &emb);
+            let metadata: HashMap<String, serde_json::Value> =
+                serde_json::from_str(&meta_str).unwrap_or_default();
+            results.push(VectorSearchResult {
+                id,
+                payload: content,
+                score,
+                metadata,
+            });
+        }
+
+        // Sort by score descending, truncate to limit
+        results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        results.truncate(limit);
+        Ok(results)
+    }
+
+    async fn delete(&self, id: &str) -> LibreFangResult<()> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        conn.execute(
+            "UPDATE memories SET embedding = NULL WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn get_embeddings(&self, ids: &[&str]) -> LibreFangResult<HashMap<String, Vec<f32>>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let mut map = HashMap::new();
+        let mut stmt = conn
+            .prepare("SELECT embedding FROM memories WHERE id = ?1 AND deleted = 0")
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        for id in ids {
+            if let Ok(bytes) = stmt.query_row(rusqlite::params![*id], |row| {
+                let b: Option<Vec<u8>> = row.get(0)?;
+                Ok(b)
+            }) {
+                if let Some(b) = bytes {
+                    if !b.is_empty() {
+                        map.insert(id.to_string(), embedding_from_bytes(&b));
+                    }
+                }
+            }
+        }
+        Ok(map)
+    }
+
+    fn backend_name(&self) -> &str {
+        "sqlite"
+    }
 }
 
 #[cfg(test)]

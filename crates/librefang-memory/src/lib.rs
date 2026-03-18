@@ -30,8 +30,11 @@ pub use substrate::MemorySubstrate;
 pub use librefang_types::memory::{
     ExtractionResult, MemoryAction, MemoryAddResult, MemoryFilter, MemoryFragment, MemoryId,
     MemoryItem, MemoryLevel, MemorySource, ProactiveMemory, ProactiveMemoryConfig,
-    ProactiveMemoryHooks, RelationTriple,
+    ProactiveMemoryHooks, RelationTriple, VectorSearchResult, VectorStore,
 };
 
 // Re-export proactive memory store
 pub use proactive::{MemoryExportItem, MemoryStats, ProactiveMemoryStore};
+
+// Re-export vector store implementations
+pub use semantic::SqliteVectorStore;

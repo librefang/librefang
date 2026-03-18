@@ -143,7 +143,8 @@ pub struct ProactiveMemoryConfig {
     /// automatically before each agent execution. Default: 24 hours.
     pub session_ttl_hours: u32,
     /// Similarity threshold for duplicate detection (0.0 - 1.0).
-    /// Memories with Jaccard word overlap above this are considered duplicates.
+    /// When stored embeddings are available, uses vector cosine similarity
+    /// (mem0-quality); otherwise falls back to Jaccard word overlap.
     /// Default: 0.5.
     pub duplicate_threshold: f32,
     /// Confidence decay rate per day. Memories lose confidence over time when
@@ -296,16 +297,24 @@ pub trait MemoryExtractor: Send + Sync {
     /// - **Update(id)**: New info supersedes existing memory `id`.
     /// - **Noop**: Duplicate or already subsumed by existing memory.
     ///
-    /// Default implementation uses simple heuristic (substring matching).
+    /// Default implementation uses a tiered heuristic:
+    /// 1. Substring containment (exact / superset / subset detection)
+    /// 2. Vector cosine similarity (when stored embeddings are available —
+    ///    matches mem0's dedup quality)
+    /// 3. Jaccard word overlap (fallback when no embeddings)
+    ///
     /// LLM-powered implementations should use the model to reason about conflicts.
     async fn decide_action(
         &self,
         new_memory: &MemoryItem,
         existing_memories: &[MemoryFragment],
     ) -> crate::error::LibreFangResult<MemoryAction> {
-        // Default heuristic: substring-based dedup
+        let new_lower = new_memory.content.to_lowercase();
+
+        // Track the best update candidate (highest similarity)
+        let mut best_update: Option<(f32, String)> = None;
+
         for existing in existing_memories {
-            let new_lower = new_memory.content.to_lowercase();
             let old_lower = existing.content.to_lowercase();
 
             // Exact match → skip
@@ -325,23 +334,68 @@ pub trait MemoryExtractor: Send + Sync {
                 });
             }
 
-            // Same category and high textual overlap → likely an update
+            // Compute similarity: prefer vector cosine when the existing
+            // memory has a stored embedding. This matches mem0's dedup
+            // quality — cosine similarity on embeddings captures semantic
+            // equivalence that Jaccard word overlap misses (e.g. synonyms,
+            // rephrasing, different languages).
+            let similarity = if let Some(ref emb) = existing.embedding {
+                // Use the new memory's embedding from metadata if available
+                // (stashed by add_with_decision when embedding driver is active).
+                let new_emb = new_memory
+                    .metadata
+                    .get("_embedding")
+                    .and_then(|v| {
+                        v.as_array().map(|arr| {
+                            arr.iter()
+                                .filter_map(|x| x.as_f64().map(|f| f as f32))
+                                .collect::<Vec<f32>>()
+                        })
+                    })
+                    .filter(|e| !e.is_empty());
+                match new_emb {
+                    Some(ref ne) => cosine_similarity(ne, emb),
+                    None => text_similarity(&new_lower, &old_lower),
+                }
+            } else {
+                text_similarity(&new_lower, &old_lower)
+            };
+
+            // Very high similarity (≥ 0.95) → NOOP (near-duplicate)
+            if similarity >= 0.95 {
+                return Ok(MemoryAction::Noop);
+            }
+
+            // High similarity or same category → candidate for UPDATE
             let new_cat = new_memory.category.as_deref().unwrap_or("");
             let old_cat = existing
                 .metadata
                 .get("category")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if !new_cat.is_empty() && new_cat == old_cat {
-                let similarity = text_similarity(&new_lower, &old_lower);
-                if similarity > 0.6 {
-                    return Ok(MemoryAction::Update {
-                        existing_id: existing.id.to_string(),
-                    });
+
+            let update_threshold = if !new_cat.is_empty() && new_cat == old_cat {
+                0.5 // Lower threshold for same-category memories
+            } else {
+                0.6
+            };
+
+            if similarity > update_threshold {
+                if best_update
+                    .as_ref()
+                    .map_or(true, |(best_sim, _)| similarity > *best_sim)
+                {
+                    best_update = Some((similarity, existing.id.to_string()));
                 }
             }
         }
-        Ok(MemoryAction::Add)
+
+        // Return the best update candidate, or ADD if none found
+        if let Some((_, existing_id)) = best_update {
+            Ok(MemoryAction::Update { existing_id })
+        } else {
+            Ok(MemoryAction::Add)
+        }
     }
 
     /// Generate a search context from retrieved memories.
@@ -389,6 +443,30 @@ pub fn text_similarity(a: &str, b: &str) -> f32 {
         0.0
     } else {
         intersection as f32 / union as f32
+    }
+}
+
+/// Compute cosine similarity between two embedding vectors.
+///
+/// Returns a value in `[-1.0, 1.0]` where `1.0` means identical direction.
+/// Returns `0.0` for empty or mismatched-length vectors.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let mut dot = 0.0f32;
+    let mut norm_a = 0.0f32;
+    let mut norm_b = 0.0f32;
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        norm_a += a[i] * a[i];
+        norm_b += b[i] * b[i];
+    }
+    let denom = norm_a.sqrt() * norm_b.sqrt();
+    if denom < f32::EPSILON {
+        0.0
+    } else {
+        dot / denom
     }
 }
 
@@ -1027,6 +1105,85 @@ pub trait ProactiveMemoryHooks: Send + Sync {
     ) -> crate::error::LibreFangResult<Vec<MemoryItem>>;
 }
 
+// ---------------------------------------------------------------------------
+// VectorStore trait — backend-agnostic vector storage abstraction
+// ---------------------------------------------------------------------------
+
+/// Search result from a vector store query.
+#[derive(Debug, Clone)]
+pub struct VectorSearchResult {
+    /// The memory ID.
+    pub id: String,
+    /// The stored text payload.
+    pub payload: String,
+    /// Cosine similarity score (0.0–1.0).
+    pub score: f32,
+    /// Arbitrary metadata.
+    pub metadata: HashMap<String, serde_json::Value>,
+}
+
+/// Backend-agnostic vector store interface.
+///
+/// This trait abstracts the vector storage layer, enabling pluggable backends
+/// (SQLite, Qdrant, Pinecone, Chroma, PgVector, Milvus, etc.).
+///
+/// The default implementation uses SQLite with BLOB-serialized embeddings and
+/// in-process cosine similarity re-ranking. External backends can implement
+/// this trait to offload ANN search to a dedicated vector database.
+///
+/// # Example (implementing for Qdrant)
+///
+/// ```ignore
+/// struct QdrantVectorStore { client: QdrantClient, collection: String }
+///
+/// #[async_trait]
+/// impl VectorStore for QdrantVectorStore {
+///     async fn insert(&self, id: &str, embedding: &[f32], payload: &str,
+///                     metadata: HashMap<String, serde_json::Value>) -> LibreFangResult<()> {
+///         self.client.upsert_points(&self.collection, vec![point]).await?;
+///         Ok(())
+///     }
+///     // ...
+/// }
+/// ```
+#[async_trait]
+pub trait VectorStore: Send + Sync {
+    /// Insert or update a vector with its payload and metadata.
+    async fn insert(
+        &self,
+        id: &str,
+        embedding: &[f32],
+        payload: &str,
+        metadata: HashMap<String, serde_json::Value>,
+    ) -> crate::error::LibreFangResult<()>;
+
+    /// Search for the `limit` nearest vectors to `query_embedding`.
+    ///
+    /// The returned results are ordered by descending similarity score.
+    /// Implementations should apply the provided `filter` (agent, scope, etc.).
+    async fn search(
+        &self,
+        query_embedding: &[f32],
+        limit: usize,
+        filter: Option<MemoryFilter>,
+    ) -> crate::error::LibreFangResult<Vec<VectorSearchResult>>;
+
+    /// Delete a vector by ID.
+    async fn delete(&self, id: &str) -> crate::error::LibreFangResult<()>;
+
+    /// Retrieve stored embeddings for a batch of IDs.
+    ///
+    /// Returns a map of `id -> embedding`. IDs without stored embeddings
+    /// are omitted from the result.
+    async fn get_embeddings(
+        &self,
+        ids: &[&str],
+    ) -> crate::error::LibreFangResult<HashMap<String, Vec<f32>>>;
+
+    /// Return the name of this backend (e.g. "sqlite", "qdrant", "pinecone").
+    fn backend_name(&self) -> &str;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1078,5 +1235,33 @@ mod tests {
         assert!(config.auto_memorize);
         assert!(config.auto_retrieve);
         assert_eq!(config.max_retrieve, 10);
+    }
+
+    #[test]
+    fn test_cosine_similarity_identical() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![1.0, 0.0, 0.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!((sim - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_orthogonal() {
+        let a = vec![1.0, 0.0];
+        let b = vec![0.0, 1.0];
+        let sim = cosine_similarity(&a, &b);
+        assert!(sim.abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_similarity_empty() {
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+    }
+
+    #[test]
+    fn test_cosine_similarity_length_mismatch() {
+        let a = vec![1.0, 2.0];
+        let b = vec![1.0, 2.0, 3.0];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
     }
 }

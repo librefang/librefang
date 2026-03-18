@@ -717,8 +717,27 @@ impl ProactiveMemoryStore {
             results
         };
 
+        // Stash the query embedding in a temporary metadata key so the
+        // default decide_action heuristic can use vector cosine similarity
+        // against existing memories' stored embeddings (mem0-style dedup).
+        let mut enriched_item;
+        let decision_item = if let Some(ref qe) = query_embedding {
+            enriched_item = item.clone();
+            let emb_json: Vec<serde_json::Value> =
+                qe.iter().map(|&v| serde_json::json!(v)).collect();
+            enriched_item
+                .metadata
+                .insert("_embedding".to_string(), serde_json::json!(emb_json));
+            &enriched_item
+        } else {
+            item
+        };
+
         // Ask the extractor to decide: ADD, UPDATE, or NOOP
-        let action = self.extractor.decide_action(item, &existing).await?;
+        let action = self
+            .extractor
+            .decide_action(decision_item, &existing)
+            .await?;
 
         match action {
             MemoryAction::Noop => {
@@ -1435,8 +1454,12 @@ impl ProactiveMemoryStore {
 
     /// Find duplicate/near-duplicate memories for a user/agent.
     ///
-    /// Uses both substring containment and word-overlap (Jaccard) similarity
-    /// to detect semantic duplicates that simple exact-match would miss.
+    /// Uses a tiered similarity strategy (mem0-style):
+    /// 1. **Vector cosine similarity** (when stored embeddings are available) —
+    ///    the most accurate method, matching mem0's dedup quality.
+    /// 2. **Substring containment** — catches exact and super/sub-string matches.
+    /// 3. **Jaccard word overlap** — fallback when no embeddings are stored.
+    ///
     /// Uses configurable `duplicate_threshold` from config.
     pub async fn find_duplicates(
         &self,
@@ -1480,6 +1503,30 @@ impl ProactiveMemoryStore {
             all_items.truncate(100);
         }
 
+        // Load stored embeddings for all items (batch query).
+        // This enables vector cosine similarity — the same dedup method
+        // used by mem0 when a vector store is configured.
+        let id_strings: Vec<String> = all_items.iter().map(|m| m.id.clone()).collect();
+        let id_refs: Vec<&str> = id_strings.iter().map(|s| s.as_str()).collect();
+        let embeddings = self
+            .semantic
+            .get_embeddings_batch(&id_refs)
+            .unwrap_or_default();
+        let has_embeddings = !embeddings.is_empty();
+        if has_embeddings {
+            tracing::debug!(
+                "find_duplicates: loaded {} stored embeddings for {} items — using vector cosine similarity",
+                embeddings.len(),
+                all_items.len()
+            );
+        }
+
+        let threshold = self
+            .config
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .duplicate_threshold;
+
         let mut used = vec![false; all_items.len()];
         let mut groups: Vec<Vec<MemoryItem>> = Vec::new();
 
@@ -1490,6 +1537,7 @@ impl ProactiveMemoryStore {
             used[i] = true; // Mark seed so it cannot be absorbed into a later group
             let mut group = vec![all_items[i].clone()];
             let a_lower = all_items[i].content.to_lowercase();
+            let emb_a = embeddings.get(&all_items[i].id);
 
             for j in (i + 1)..all_items.len() {
                 if used[j] {
@@ -1497,21 +1545,31 @@ impl ProactiveMemoryStore {
                 }
                 let b_lower = all_items[j].content.to_lowercase();
 
-                // Check substring containment
+                // Check substring containment (fast path)
                 let is_substring =
                     a_lower.contains(&b_lower) || b_lower.contains(&a_lower) || a_lower == b_lower;
 
-                // Check semantic similarity (Jaccard word overlap)
-                let similarity = librefang_types::memory::text_similarity(&a_lower, &b_lower);
+                if is_substring {
+                    group.push(all_items[j].clone());
+                    used[j] = true;
+                    continue;
+                }
 
-                if is_substring
-                    || similarity
-                        > self
-                            .config
-                            .read()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .duplicate_threshold
-                {
+                // Tiered similarity: prefer vector cosine when both have embeddings,
+                // fall back to Jaccard word overlap otherwise.
+                let emb_b = embeddings.get(&all_items[j].id);
+                let similarity = match (emb_a, emb_b) {
+                    (Some(a), Some(b)) => {
+                        // Vector cosine similarity (mem0-quality dedup)
+                        librefang_types::memory::cosine_similarity(a, b)
+                    }
+                    _ => {
+                        // Jaccard word overlap fallback
+                        librefang_types::memory::text_similarity(&a_lower, &b_lower)
+                    }
+                };
+
+                if similarity > threshold {
                     group.push(all_items[j].clone());
                     used[j] = true;
                 }
