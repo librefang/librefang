@@ -175,7 +175,18 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                             break; // receiver dropped
                         }
                     }
-                    StreamEvent::ContentComplete { .. } => break,
+                    StreamEvent::ContentComplete { .. } => {
+                        // Do NOT break here. ContentComplete fires at the end of each
+                        // LLM turn (iteration), not at the end of the entire agent loop.
+                        // In a multi-iteration scenario — e.g. the router agent's first
+                        // turn is a tool call (no text) and the second turn contains the
+                        // actual text response — breaking here would cause us to exit
+                        // before the text-bearing iteration is even reached.
+                        //
+                        // The loop naturally terminates when `event_rx.recv()` returns
+                        // `None`, which happens when the kernel drops the sender after
+                        // the full agent loop completes.
+                    }
                     _ => {
                         // ToolUseStart, ToolInputDelta, ThinkingDelta, etc. — skip
                         debug!("Streaming bridge: skipping non-text event");
