@@ -1157,13 +1157,16 @@ impl LibreFangKernel {
         };
 
         // Initialize proactive memory system (mem0-style) from config.
-        // Passes through LLM driver (for extraction) and embedding driver (for vector search).
+        // Uses extraction_model if set, otherwise falls back to agent's default model.
+        // This allows using a cheap model (e.g., llama/haiku) for extraction while
+        // keeping an expensive model (e.g., opus/gpt-4o) for agent responses.
         {
             let pm_config = kernel.config.proactive_memory.clone();
-            let llm = pm_config
+            let extraction_model = pm_config
                 .extraction_model
                 .clone()
-                .map(|model| (Arc::clone(&kernel.default_driver) as _, model));
+                .unwrap_or_else(|| kernel.config.default_model.model.clone());
+            let llm = Some((Arc::clone(&kernel.default_driver) as _, extraction_model));
             let store = if let Some(ref emb) = kernel.embedding_driver {
                 librefang_runtime::proactive_memory::init_proactive_memory_with_embedding(
                     Arc::clone(&kernel.memory),
