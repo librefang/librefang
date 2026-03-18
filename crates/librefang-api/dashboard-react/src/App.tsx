@@ -19,8 +19,14 @@ export function App() {
           <Link to="/overview" className={navBase} activeProps={{ className: `${navBase} ${navActive}` }}>
             Overview
           </Link>
+          <Link to="/wizard" className={navBase} activeProps={{ className: `${navBase} ${navActive}` }}>
+            Wizard
+          </Link>
           <Link to="/agents" className={navBase} activeProps={{ className: `${navBase} ${navActive}` }}>
             Agents
+          </Link>
+          <Link to="/chat" className={navBase} activeProps={{ className: `${navBase} ${navActive}` }}>
+            Chat
           </Link>
           <Link to="/sessions" className={navBase} activeProps={{ className: `${navBase} ${navActive}` }}>
             Sessions
@@ -63,6 +69,9 @@ export function App() {
           </Link>
           <Link to="/logs" className={navBase} activeProps={{ className: `${navBase} ${navActive}` }}>
             Logs
+          </Link>
+          <Link to="/settings" className={navBase} activeProps={{ className: `${navBase} ${navActive}` }}>
+            Settings
           </Link>
         </nav>
       </aside>

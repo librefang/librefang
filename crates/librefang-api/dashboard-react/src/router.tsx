@@ -5,6 +5,7 @@ import { AgentsPage } from "./pages/AgentsPage";
 import { AnalyticsPage } from "./pages/AnalyticsPage";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { ChannelsPage } from "./pages/ChannelsPage";
+import { ChatPage } from "./pages/ChatPage";
 import { CommsPage } from "./pages/CommsPage";
 import { GoalsPage } from "./pages/GoalsPage";
 import { HandsPage } from "./pages/HandsPage";
@@ -15,7 +16,9 @@ import { ProvidersPage } from "./pages/ProvidersPage";
 import { RuntimePage } from "./pages/RuntimePage";
 import { SchedulerPage } from "./pages/SchedulerPage";
 import { SessionsPage } from "./pages/SessionsPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import { SkillsPage } from "./pages/SkillsPage";
+import { WizardPage } from "./pages/WizardPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
 
 const rootRoute = createRootRoute({
@@ -58,10 +61,28 @@ const channelsRoute = createRoute({
   component: ChannelsPage
 });
 
+const chatRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/chat",
+  component: ChatPage
+});
+
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings",
+  component: SettingsPage
+});
+
 const skillsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/skills",
   component: SkillsPage
+});
+
+const wizardRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/wizard",
+  component: WizardPage
 });
 
 const workflowsRoute = createRoute({
@@ -131,7 +152,10 @@ const routeTree = rootRoute.addChildren([
   sessionsRoute,
   providersRoute,
   channelsRoute,
+  chatRoute,
+  settingsRoute,
   skillsRoute,
+  wizardRoute,
   workflowsRoute,
   schedulerRoute,
   analyticsRoute,
