@@ -1418,11 +1418,29 @@ pub struct VertexAiConfig {
 /// Heavy hooks (`assemble`, `compact`) always run in Rust for performance.
 /// Light hooks (`ingest`, `after_turn`) can be overridden with Python scripts
 /// using the same JSON stdin/stdout protocol as Python agents.
+///
+/// # Usage
+///
+/// **Simple (plugin-based):**
+/// ```toml
+/// [context_engine]
+/// plugin = "qdrant-recall"   # resolves to ~/.librefang/plugins/qdrant-recall/
+/// ```
+///
+/// **Manual (direct hook paths):**
+/// ```toml
+/// [context_engine.hooks]
+/// ingest = "~/.librefang/scripts/my_recall.py"
+/// after_turn = "~/.librefang/scripts/my_indexer.py"
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContextEngineTomlConfig {
     /// Built-in engine name. Default: `"default"`.
     pub engine: String,
+    /// Plugin name. Resolves to `~/.librefang/plugins/<name>/plugin.toml`.
+    /// Takes precedence over manual `hooks` if set.
+    pub plugin: Option<String>,
     /// Optional Python script hooks that override specific lifecycle methods.
     pub hooks: ContextEngineHooks,
 }
@@ -1431,6 +1449,7 @@ impl Default for ContextEngineTomlConfig {
     fn default() -> Self {
         Self {
             engine: "default".to_string(),
+            plugin: None,
             hooks: ContextEngineHooks::default(),
         }
     }
@@ -1448,6 +1467,40 @@ pub struct ContextEngineHooks {
     /// Receives: `{"type": "after_turn", "agent_id": "...", "messages": [...]}`
     /// Returns: `{"type": "ok"}` (acknowledgement)
     pub after_turn: Option<String>,
+}
+
+/// Plugin manifest — parsed from `~/.librefang/plugins/<name>/plugin.toml`.
+///
+/// # Example `plugin.toml`
+///
+/// ```toml
+/// name = "qdrant-recall"
+/// version = "0.1.0"
+/// description = "Vector recall via Qdrant"
+/// author = "librefang"
+///
+/// [hooks]
+/// ingest = "hooks/ingest.py"      # relative to plugin dir
+/// after_turn = "hooks/after_turn.py"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginManifest {
+    /// Plugin name (must match directory name).
+    pub name: String,
+    /// Semver version string.
+    pub version: String,
+    /// Human-readable description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Plugin author.
+    #[serde(default)]
+    pub author: Option<String>,
+    /// Hook script paths, relative to the plugin directory.
+    #[serde(default)]
+    pub hooks: ContextEngineHooks,
+    /// Python dependencies file (relative to plugin dir, default: `requirements.txt`).
+    #[serde(default)]
+    pub requirements: Option<String>,
 }
 
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"

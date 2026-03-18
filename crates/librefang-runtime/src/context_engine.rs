@@ -588,10 +588,97 @@ impl ContextEngine for ScriptableContextEngine {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Plugin loader — resolves `plugin = "name"` to hook paths
+// ---------------------------------------------------------------------------
+
+/// Default plugin directory: `~/.librefang/plugins/`.
+pub fn plugins_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".librefang")
+        .join("plugins")
+}
+
+/// Load a plugin manifest from `~/.librefang/plugins/<name>/plugin.toml`.
+///
+/// Hook paths in the manifest are relative to the plugin directory — this
+/// function resolves them to absolute paths so the script runner can find them.
+pub fn load_plugin(
+    plugin_name: &str,
+) -> LibreFangResult<(
+    librefang_types::config::PluginManifest,
+    librefang_types::config::ContextEngineHooks,
+)> {
+    let plugin_dir = plugins_dir().join(plugin_name);
+    let manifest_path = plugin_dir.join("plugin.toml");
+
+    if !manifest_path.exists() {
+        return Err(LibreFangError::Internal(format!(
+            "Plugin '{plugin_name}' not found at {}",
+            manifest_path.display()
+        )));
+    }
+
+    let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        LibreFangError::Internal(format!("Failed to read {}: {e}", manifest_path.display()))
+    })?;
+
+    let manifest: librefang_types::config::PluginManifest =
+        toml::from_str(&content).map_err(|e| {
+            LibreFangError::Internal(format!("Invalid plugin.toml for '{plugin_name}': {e}"))
+        })?;
+
+    // Resolve relative hook paths to absolute paths within the plugin dir
+    let resolved_hooks = librefang_types::config::ContextEngineHooks {
+        ingest: manifest
+            .hooks
+            .ingest
+            .as_ref()
+            .map(|p| plugin_dir.join(p).to_string_lossy().into_owned()),
+        after_turn: manifest
+            .hooks
+            .after_turn
+            .as_ref()
+            .map(|p| plugin_dir.join(p).to_string_lossy().into_owned()),
+    };
+
+    debug!(
+        plugin = plugin_name,
+        dir = %plugin_dir.display(),
+        ingest = ?resolved_hooks.ingest,
+        after_turn = ?resolved_hooks.after_turn,
+        "Loaded plugin manifest"
+    );
+
+    Ok((manifest, resolved_hooks))
+}
+
+/// List all installed plugins in `~/.librefang/plugins/`.
+pub fn list_installed_plugins() -> Vec<librefang_types::config::PluginManifest> {
+    let dir = plugins_dir();
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+
+    entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.file_type().ok()?.is_dir() {
+                return None;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            load_plugin(&name).ok().map(|(manifest, _)| manifest)
+        })
+        .collect()
+}
+
 /// Build a context engine from config.
 ///
-/// Returns a `DefaultContextEngine` if no hooks are configured,
-/// or a `ScriptableContextEngine` if any Python hooks are set.
+/// Resolution order:
+/// 1. If `plugin` is set, load plugin manifest and use its hooks
+/// 2. If manual `hooks` are set, use them directly
+/// 3. Otherwise, return a plain `DefaultContextEngine`
 pub fn build_context_engine(
     toml_config: &librefang_types::config::ContextEngineTomlConfig,
     runtime_config: ContextEngineConfig,
@@ -600,6 +687,31 @@ pub fn build_context_engine(
 ) -> Box<dyn ContextEngine> {
     let default = DefaultContextEngine::new(runtime_config, memory, embedding_driver);
 
+    // Plugin takes precedence
+    if let Some(ref plugin_name) = toml_config.plugin {
+        match load_plugin(plugin_name) {
+            Ok((_manifest, hooks)) => {
+                if hooks.ingest.is_some() || hooks.after_turn.is_some() {
+                    return Box::new(ScriptableContextEngine::new(default, &hooks));
+                }
+                warn!(
+                    plugin = plugin_name.as_str(),
+                    "Plugin loaded but defines no hooks — using default engine"
+                );
+                return Box::new(default);
+            }
+            Err(e) => {
+                warn!(
+                    plugin = plugin_name.as_str(),
+                    error = %e,
+                    "Failed to load plugin — falling back to default engine"
+                );
+                return Box::new(default);
+            }
+        }
+    }
+
+    // Manual hooks
     if toml_config.hooks.ingest.is_some() || toml_config.hooks.after_turn.is_some() {
         Box::new(ScriptableContextEngine::new(default, &toml_config.hooks))
     } else {
@@ -733,5 +845,91 @@ mod tests {
         let child = AgentId::new();
         assert!(engine.prepare_subagent_context(parent, child).await.is_ok());
         assert!(engine.merge_subagent_context(parent, child).await.is_ok());
+    }
+
+    #[test]
+    fn test_plugins_dir() {
+        let dir = plugins_dir();
+        assert!(dir.ends_with("plugins"));
+        assert!(dir.to_string_lossy().contains(".librefang"));
+    }
+
+    #[test]
+    fn test_load_plugin_not_found() {
+        let result = load_plugin("nonexistent-plugin-12345");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not found"));
+    }
+
+    #[test]
+    fn test_list_installed_plugins_empty() {
+        // Should not panic even if the plugins dir doesn't exist
+        let plugins = list_installed_plugins();
+        // May or may not be empty depending on the environment
+        let _ = plugins;
+    }
+
+    #[test]
+    fn test_load_plugin_with_tempdir() {
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let plugin_dir = tmp.path().join("test-plugin");
+        std::fs::create_dir_all(plugin_dir.join("hooks")).unwrap();
+
+        // Write a plugin.toml
+        let manifest_content = r#"
+name = "test-plugin"
+version = "0.1.0"
+description = "A test plugin"
+author = "test"
+
+[hooks]
+ingest = "hooks/ingest.py"
+"#;
+        let mut f = std::fs::File::create(plugin_dir.join("plugin.toml")).unwrap();
+        f.write_all(manifest_content.as_bytes()).unwrap();
+
+        // Write a dummy hook
+        std::fs::File::create(plugin_dir.join("hooks/ingest.py")).unwrap();
+
+        // We can't use load_plugin directly because it hardcodes ~/.librefang/plugins,
+        // so test the manifest parsing + hook resolution manually
+        let manifest: librefang_types::config::PluginManifest =
+            toml::from_str(manifest_content).unwrap();
+
+        assert_eq!(manifest.name, "test-plugin");
+        assert_eq!(manifest.version, "0.1.0");
+        assert_eq!(manifest.hooks.ingest.as_deref(), Some("hooks/ingest.py"));
+        assert!(manifest.hooks.after_turn.is_none());
+
+        // Resolve hooks relative to plugin dir
+        let resolved = manifest
+            .hooks
+            .ingest
+            .as_ref()
+            .map(|p| plugin_dir.join(p).to_string_lossy().into_owned());
+        assert!(resolved.unwrap().contains("hooks/ingest.py"));
+    }
+
+    #[test]
+    fn test_build_context_engine_default() {
+        let toml_config = librefang_types::config::ContextEngineTomlConfig::default();
+        let runtime_config = ContextEngineConfig::default();
+        let engine = build_context_engine(&toml_config, runtime_config, make_memory(), None);
+        // Should not panic — returns DefaultContextEngine
+        let _ = engine;
+    }
+
+    #[test]
+    fn test_build_context_engine_missing_plugin_falls_back() {
+        let toml_config = librefang_types::config::ContextEngineTomlConfig {
+            plugin: Some("nonexistent-plugin-xyz".to_string()),
+            ..Default::default()
+        };
+        let runtime_config = ContextEngineConfig::default();
+        // Should fall back to default engine, not panic
+        let engine = build_context_engine(&toml_config, runtime_config, make_memory(), None);
+        let _ = engine;
     }
 }
