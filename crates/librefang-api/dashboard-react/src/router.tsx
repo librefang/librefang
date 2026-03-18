@@ -3,6 +3,7 @@ import { createHashHistory } from "@tanstack/history";
 import { App } from "./App";
 import { AgentsPage } from "./pages/AgentsPage";
 import { AnalyticsPage } from "./pages/AnalyticsPage";
+import { CanvasPage } from "./pages/CanvasPage";
 import { ApprovalsPage } from "./pages/ApprovalsPage";
 import { ChannelsPage } from "./pages/ChannelsPage";
 import { ChatPage } from "./pages/ChatPage";
@@ -35,6 +36,12 @@ const overviewRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/overview",
   component: OverviewPage
+});
+
+const canvasRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/canvas",
+  component: CanvasPage
 });
 
 const agentsRoute = createRoute({
@@ -148,6 +155,7 @@ const goalsRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   indexRoute,
   overviewRoute,
+  canvasRoute,
   agentsRoute,
   sessionsRoute,
   providersRoute,
