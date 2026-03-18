@@ -2027,8 +2027,8 @@ max_retrieve = 5
 # extraction_model = ""  # defaults to your default_model
 # extraction_threshold = 0.7
 # session_ttl_hours = 24
-# duplicate_threshold = 0.85
-# confidence_decay_rate = 0.05
+# duplicate_threshold = 0.5
+# confidence_decay_rate = 0.01
 # max_memories_per_agent = 1000
 "#
         );
@@ -3162,8 +3162,8 @@ max_retrieve = 5
 # extraction_model = ""  # defaults to your default_model
 # extraction_threshold = 0.7
 # session_ttl_hours = 24
-# duplicate_threshold = 0.85
-# confidence_decay_rate = 0.05
+# duplicate_threshold = 0.5
+# confidence_decay_rate = 0.01
 # max_memories_per_agent = 1000
 "#
                 );

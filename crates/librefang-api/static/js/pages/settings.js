@@ -238,7 +238,7 @@ function settingsPage() {
     pmSettings: {
       auto_memorize: true,
       auto_retrieve: true,
-      max_retrieve: 5,
+      max_retrieve: 10,
       extraction_threshold: 0.7,
       extraction_model: '',
       max_memories_per_agent: 1000,
@@ -797,7 +797,7 @@ function settingsPage() {
         this.pmSettings = {
           auto_memorize: pm.auto_memorize !== undefined ? pm.auto_memorize : true,
           auto_retrieve: pm.auto_retrieve !== undefined ? pm.auto_retrieve : true,
-          max_retrieve: pm.max_retrieve || 5,
+          max_retrieve: pm.max_retrieve || 10,
           extraction_threshold: pm.extraction_threshold !== undefined ? pm.extraction_threshold : 0.7,
           extraction_model: pm.extraction_model || '',
           extract_categories: pm.extract_categories || [],
