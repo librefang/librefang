@@ -1501,54 +1501,6 @@ impl Default for ContextEngineTomlConfig {
     }
 }
 
-/// Python script overrides for individual context engine lifecycle hooks.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ContextEngineHooks {
-    /// Python script for the `ingest` hook (called on new user message).
-    /// Receives: `{"type": "ingest", "agent_id": "...", "message": "..."}`
-    /// Returns: `{"type": "ingest_result", "memories": [{"content": "..."}]}`
-    pub ingest: Option<String>,
-    /// Python script for the `after_turn` hook (called after each turn).
-    /// Receives: `{"type": "after_turn", "agent_id": "...", "messages": [...]}`
-    /// Returns: `{"type": "ok"}` (acknowledgement)
-    pub after_turn: Option<String>,
-}
-
-/// Plugin manifest — parsed from `~/.librefang/plugins/<name>/plugin.toml`.
-///
-/// # Example `plugin.toml`
-///
-/// ```toml
-/// name = "qdrant-recall"
-/// version = "0.1.0"
-/// description = "Vector recall via Qdrant"
-/// author = "librefang"
-///
-/// [hooks]
-/// ingest = "hooks/ingest.py"      # relative to plugin dir
-/// after_turn = "hooks/after_turn.py"
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PluginManifest {
-    /// Plugin name (must match directory name).
-    pub name: String,
-    /// Semver version string.
-    pub version: String,
-    /// Human-readable description.
-    #[serde(default)]
-    pub description: Option<String>,
-    /// Plugin author.
-    #[serde(default)]
-    pub author: Option<String>,
-    /// Hook script paths, relative to the plugin directory.
-    #[serde(default)]
-    pub hooks: ContextEngineHooks,
-    /// Python dependencies file (relative to plugin dir, default: `requirements.txt`).
-    #[serde(default)]
-    pub requirements: Option<String>,
-}
-
 /// client_secret_env = "GITHUB_OAUTH_CLIENT_SECRET"
 /// scopes = ["read:user", "user:email"]
 /// ```
