@@ -861,6 +861,10 @@ pub async fn build_router(
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
+        .route(
+            "/react-assets/{*path}",
+            axum::routing::get(webchat::react_asset),
+        )
         .route("/logo.png", axum::routing::get(webchat::logo_png))
         .route("/favicon.ico", axum::routing::get(webchat::favicon_ico))
         .route("/locales/en.json", axum::routing::get(webchat::locale_en))

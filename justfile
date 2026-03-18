@@ -35,6 +35,10 @@ ci: fmt-check lint test
 doc:
     cargo doc --workspace --no-deps --open
 
+# Build the React dashboard assets used by librefang-api
+dashboard-build:
+    cd crates/librefang-api/dashboard-react && pnpm install && pnpm run build
+
 # Remove build artifacts
 clean:
     cargo clean

@@ -1,22 +1,16 @@
-//! Embedded WebChat UI served as static HTML.
+//! Dashboard pages and static assets served by the API daemon.
 //!
-//! The production dashboard is assembled at compile time from separate
-//! HTML/CSS/JS files under `static/` using `include_str!()`. This keeps
-//! single-binary deployment while allowing organized source files.
-//!
-//! Features:
-//! - Alpine.js SPA with hash-based routing (10 panels)
-//! - Dark/light theme toggle with system preference detection
-//! - Responsive layout with collapsible sidebar
-//! - Markdown rendering + syntax highlighting (bundled locally)
-//! - WebSocket real-time chat with HTTP fallback
-//! - Agent management, workflows, memory browser, audit log, and more
+//! The React dashboard is served at `/` and static build assets are served
+//! from `/react-assets/*`.
 
-use axum::http::header;
-use axum::response::IntoResponse;
+use axum::extract::Path;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
+use include_dir::{include_dir, Dir};
 
 /// Compile-time ETag based on the crate version.
 const ETAG: &str = concat!("\"librefang-", env!("CARGO_PKG_VERSION"), "\"");
+static REACT_DIST: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/static/react");
 
 /// Embedded logo PNG for single-binary deployment.
 const LOGO_PNG: &[u8] = include_bytes!("../static/logo.png");
@@ -68,98 +62,67 @@ pub async fn locale_zh_cn() -> impl IntoResponse {
     )
 }
 
-/// GET / — Serve the LibreFang Dashboard single-page application.
-///
-/// Returns the full SPA with ETag header based on package version for caching.
+/// GET / — Serve the React dashboard shell.
 pub async fn webchat_page() -> impl IntoResponse {
-    (
-        [
-            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-            (header::ETAG, ETAG),
-            (
-                header::CACHE_CONTROL,
-                "public, max-age=3600, must-revalidate",
-            ),
-        ],
-        WEBCHAT_HTML,
-    )
+    match REACT_DIST.get_file("index.html") {
+        Some(index) => (
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                (header::ETAG, ETAG),
+                (
+                    header::CACHE_CONTROL,
+                    "public, max-age=300, must-revalidate",
+                ),
+            ],
+            index.contents(),
+        )
+            .into_response(),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "React dashboard build missing (expected static/react/index.html)",
+        )
+            .into_response(),
+    }
 }
 
-/// The embedded HTML/CSS/JS for the LibreFang Dashboard.
-///
-/// Assembled at compile time from organized static files.
-/// All vendor libraries (Alpine.js, marked.js, highlight.js) are bundled
-/// locally — no CDN dependency. Alpine.js is included LAST because it
-/// immediately processes x-data directives and fires alpine:init on load.
-const WEBCHAT_HTML: &str = concat!(
-    include_str!("../static/index_head.html"),
-    "<style>\n",
-    include_str!("../static/css/theme.css"),
-    "\n",
-    include_str!("../static/css/layout.css"),
-    "\n",
-    include_str!("../static/css/components.css"),
-    "\n",
-    include_str!("../static/vendor/github-dark.min.css"),
-    "\n</style>\n",
-    include_str!("../static/index_body.html"),
-    // Vendor libs: marked + highlight first (used by app.js)
-    "<script>\n",
-    include_str!("../static/vendor/marked.min.js"),
-    "\n</script>\n",
-    "<script>\n",
-    include_str!("../static/vendor/highlight.min.js"),
-    "\n</script>\n",
-    "<script>\n",
-    include_str!("../static/js/i18n.js"),
-    "\n</script>\n",
-    // App code
-    "<script>\n",
-    include_str!("../static/js/api.js"),
-    "\n",
-    include_str!("../static/js/app.js"),
-    "\n",
-    include_str!("../static/js/pages/overview.js"),
-    "\n",
-    include_str!("../static/js/pages/chat.js"),
-    "\n",
-    include_str!("../static/js/pages/agents.js"),
-    "\n",
-    include_str!("../static/js/pages/workflows.js"),
-    "\n",
-    include_str!("../static/js/pages/workflow-builder.js"),
-    "\n",
-    include_str!("../static/js/pages/channels.js"),
-    "\n",
-    include_str!("../static/js/pages/skills.js"),
-    "\n",
-    include_str!("../static/js/pages/hands.js"),
-    "\n",
-    include_str!("../static/js/pages/scheduler.js"),
-    "\n",
-    include_str!("../static/js/pages/goals.js"),
-    "\n",
-    include_str!("../static/js/pages/settings.js"),
-    "\n",
-    include_str!("../static/js/pages/usage.js"),
-    "\n",
-    include_str!("../static/js/pages/sessions.js"),
-    "\n",
-    include_str!("../static/js/pages/logs.js"),
-    "\n",
-    include_str!("../static/js/pages/wizard.js"),
-    "\n",
-    include_str!("../static/js/pages/approvals.js"),
-    "\n",
-    include_str!("../static/js/pages/comms.js"),
-    "\n",
-    include_str!("../static/js/pages/runtime.js"),
-    "\n",
-    include_str!("../static/js/pages/memory.js"),
-    "\n</script>\n",
-    // Alpine.js MUST be last — it processes x-data and fires alpine:init
-    "<script>\n",
-    include_str!("../static/vendor/alpine.min.js"),
-    "\n</script>\n",
-    "</body></html>"
-);
+/// GET /react-assets/{*path} — Serve React build assets.
+pub async fn react_asset(Path(path): Path<String>) -> Response {
+    if path.contains("..") {
+        return (StatusCode::BAD_REQUEST, "invalid asset path").into_response();
+    }
+
+    let asset_path = path.trim_start_matches('/');
+    match REACT_DIST.get_file(asset_path) {
+        Some(file) => (
+            [
+                (header::CONTENT_TYPE, content_type_for(asset_path)),
+                (header::CACHE_CONTROL, "public, max-age=86400, immutable"),
+            ],
+            file.contents(),
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "asset not found").into_response(),
+    }
+}
+
+fn content_type_for(path: &str) -> &'static str {
+    if path.ends_with(".js") {
+        "application/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".html") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if path.ends_with(".ico") {
+        "image/x-icon"
+    } else if path.ends_with(".json") {
+        "application/json; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    }
+}
