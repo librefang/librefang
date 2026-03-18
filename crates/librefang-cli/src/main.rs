@@ -7569,7 +7569,7 @@ fn cmd_memory_set(agent: &str, key: &str, value: &str) {
     } else {
         ui::success(&i18n::t_args(
             "memory-set",
-            &[("key", key), ("agent", agent)],
+            &[("key", key), ("agent", &agent)],
         ));
     }
 }
@@ -7591,7 +7591,7 @@ fn cmd_memory_delete(agent: &str, key: &str) {
     } else {
         ui::success(&i18n::t_args(
             "memory-deleted",
-            &[("key", key), ("agent", agent)],
+            &[("key", key), ("agent", &agent)],
         ));
     }
 }
