@@ -7764,10 +7764,7 @@ fn cmd_webhooks_list(json: bool) {
             println!("No webhooks configured.");
             return;
         }
-        println!(
-            "{:<38} {:<20} {:<10} URL",
-            "ID", "NAME", "ENABLED"
-        );
+        println!("{:<38} {:<20} {:<10} URL", "ID", "NAME", "ENABLED");
         println!("{}", "-".repeat(90));
         for w in arr {
             println!(
