@@ -183,10 +183,10 @@ pub fn apply_context_guard(
                     continue;
                 }
                 if let ContentBlock::ToolResult { content, .. } = &mut blocks[loc.block_idx] {
-                    let old_len = content.len();
+                    let old_char_len = content.chars().count();
                     *content = truncate_to(content, single_max);
-                    total_chars -= old_len;
-                    total_chars += content.len();
+                    let new_char_len = content.chars().count();
+                    total_chars = total_chars.saturating_sub(old_char_len) + new_char_len;
                     compacted += 1;
                 }
             }
@@ -211,11 +211,11 @@ pub fn apply_context_guard(
                 continue;
             }
             if let ContentBlock::ToolResult { content, .. } = &mut blocks[loc.block_idx] {
-                if content.len() > compact_target {
-                    let old_len = content.len();
+                if content.chars().count() > compact_target {
+                    let old_char_len = content.chars().count();
                     *content = truncate_to(content, compact_target);
-                    total_chars -= old_len;
-                    total_chars += content.len();
+                    let new_char_len = content.chars().count();
+                    total_chars = total_chars.saturating_sub(old_char_len) + new_char_len;
                     compacted += 1;
                 }
             }
