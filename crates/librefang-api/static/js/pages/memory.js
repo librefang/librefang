@@ -153,6 +153,32 @@ function memoryPage() {
       });
     },
 
+    startEdit: function(mem) {
+      mem._editing = true;
+      mem._editContent = mem.content;
+    },
+
+    cancelEdit: function(mem) {
+      mem._editing = false;
+      delete mem._editContent;
+    },
+
+    saveEdit: function(mem) {
+      var self = this;
+      if (!mem._editContent || !mem._editContent.trim()) {
+        LibreFangToast.warn(self.t('memoryPage.contentRequired', 'Please enter memory content'));
+        return;
+      }
+      LibreFangAPI.request('PUT', '/api/memory/items/' + mem.id, { content: mem._editContent.trim() }).then(function() {
+        mem.content = mem._editContent.trim();
+        mem._editing = false;
+        delete mem._editContent;
+        LibreFangToast.success(self.t('memoryPage.memoryUpdated', 'Memory updated'));
+      }).catch(function() {
+        LibreFangToast.error(self.t('memoryPage.updateFailed', 'Failed to update memory'));
+      });
+    },
+
     deleteMemory: function(id) {
       var self = this;
       if (!confirm(this.t('memoryPage.confirmDelete', 'Delete this memory?'))) return;

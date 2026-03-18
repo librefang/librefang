@@ -226,7 +226,14 @@ function chatPage() {
       });
     },
 
-    // Memory indicator helpers
+    // Memory indicator helpers — checks both tool-based and proactive memory fields
+    hasMemoryActivity(msg) {
+      if (msg.memories_used && msg.memories_used.length) return true;
+      if (msg.memories_saved && msg.memories_saved.length) return true;
+      if (msg.tools && msg.tools.length && this.memoryToolCount(msg.tools) > 0) return true;
+      return false;
+    },
+
     memoryToolCount(tools) {
       if (!tools || !tools.length) return 0;
       return tools.filter(function(t) {
@@ -241,6 +248,41 @@ function chatPage() {
         var n = (t.name || '').toLowerCase();
         return n === 'memory_recall' || n === 'memory_store' || n === 'memory_search' || n === 'memory_save';
       });
+    },
+
+    memoryIndicatorForMsg(msg) {
+      var recalled = (msg.memories_used || []).length;
+      var saved = (msg.memories_saved || []).length;
+      // Also count tool-based memory ops
+      (msg.tools || []).forEach(function(t) {
+        var n = (t.name || '').toLowerCase();
+        if (n === 'memory_recall' || n === 'memory_search') recalled++;
+        if (n === 'memory_store' || n === 'memory_save') saved++;
+      });
+      var parts = [];
+      if (recalled > 0) parts.push(recalled + ' ' + this.t('memoryPage.memoriesUsed', 'memories used'));
+      if (saved > 0) parts.push(saved + ' ' + this.t('memoryPage.memoriesSaved', 'memories saved'));
+      return parts.join(', ');
+    },
+
+    // Build expandable detail items for the memory indicator popup
+    memoryDetailItems(msg) {
+      var items = [];
+      (msg.memories_used || []).forEach(function(content) {
+        items.push({ type: 'recalled', content: content });
+      });
+      (msg.memories_saved || []).forEach(function(content) {
+        items.push({ type: 'saved', content: content });
+      });
+      (msg.tools || []).forEach(function(t) {
+        var n = (t.name || '').toLowerCase();
+        if (n === 'memory_recall' || n === 'memory_search') {
+          items.push({ type: 'recalled', content: t.input ? (typeof t.input === 'string' ? t.input.substring(0, 80) : JSON.stringify(t.input).substring(0, 80)) : '' });
+        } else if (n === 'memory_store' || n === 'memory_save') {
+          items.push({ type: 'saved', content: t.input ? (typeof t.input === 'string' ? t.input.substring(0, 80) : JSON.stringify(t.input).substring(0, 80)) : '' });
+        }
+      });
+      return items;
     },
 
     memoryIndicatorText(tools) {
@@ -962,7 +1004,7 @@ function chatPage() {
           if (!finalText.trim() && streamedTools.length) {
             finalText = '';
           }
-          this.messages.push({ id: ++msgId, role: 'agent', text: finalText, meta: meta, tools: streamedTools, ts: Date.now(), memory_conflicts: data.memory_conflicts || [] });
+          this.messages.push({ id: ++msgId, role: 'agent', text: finalText, meta: meta, tools: streamedTools, ts: Date.now(), memory_conflicts: data.memory_conflicts || [], memories_saved: data.memories_saved || [], memories_used: data.memories_used || [] });
           this.sending = false;
           this.tokenCount = 0;
           this.scrollToBottom();
@@ -1161,7 +1203,7 @@ function chatPage() {
         var httpMeta = (res.input_tokens || 0) + ' in / ' + (res.output_tokens || 0) + ' out';
         if (res.cost_usd != null) httpMeta += ' | $' + res.cost_usd.toFixed(4);
         if (res.iterations) httpMeta += ' | ' + res.iterations + ' iter';
-        this.messages.push({ id: ++msgId, role: 'agent', text: res.response, meta: httpMeta, tools: [], ts: Date.now(), memory_conflicts: res.memory_conflicts || [] });
+        this.messages.push({ id: ++msgId, role: 'agent', text: res.response, meta: httpMeta, tools: [], ts: Date.now(), memory_conflicts: res.memory_conflicts || [], memories_saved: res.memories_saved || [], memories_used: res.memories_used || [] });
       } catch(e) {
         this.messages = this.messages.filter(function(m) { return !m.thinking; });
         this.messages.push({

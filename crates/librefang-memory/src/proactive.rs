@@ -926,20 +926,23 @@ impl ProactiveMemoryStore {
     /// Store extracted relation triples into the knowledge graph.
     ///
     /// Deduplicates: skips if an identical (source, relation, target) already exists.
-    pub fn store_relations(&self, triples: &[RelationTriple]) {
+    pub fn store_relations(&self, triples: &[RelationTriple], agent_id: &str) {
         for triple in triples {
             let source_type = parse_entity_type(&triple.subject_type);
             let target_type = parse_entity_type(&triple.object_type);
 
             // Upsert source entity
-            let source_id = match self.knowledge.add_entity(Entity {
-                id: normalize_entity_id(&triple.subject),
-                entity_type: source_type,
-                name: triple.subject.clone(),
-                properties: HashMap::new(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            }) {
+            let source_id = match self.knowledge.add_entity(
+                Entity {
+                    id: normalize_entity_id(&triple.subject),
+                    entity_type: source_type,
+                    name: triple.subject.clone(),
+                    properties: HashMap::new(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+                agent_id,
+            ) {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::warn!("Failed to add entity '{}': {}", triple.subject, e);
@@ -948,14 +951,17 @@ impl ProactiveMemoryStore {
             };
 
             // Upsert target entity
-            let target_id = match self.knowledge.add_entity(Entity {
-                id: normalize_entity_id(&triple.object),
-                entity_type: target_type,
-                name: triple.object.clone(),
-                properties: HashMap::new(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            }) {
+            let target_id = match self.knowledge.add_entity(
+                Entity {
+                    id: normalize_entity_id(&triple.object),
+                    entity_type: target_type,
+                    name: triple.object.clone(),
+                    properties: HashMap::new(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+                agent_id,
+            ) {
                 Ok(id) => id,
                 Err(e) => {
                     tracing::warn!("Failed to add entity '{}': {}", triple.object, e);
@@ -978,14 +984,17 @@ impl ProactiveMemoryStore {
                     );
                 }
                 Ok(false) => {
-                    if let Err(e) = self.knowledge.add_relation(Relation {
-                        source: source_id,
-                        relation: relation_type,
-                        target: target_id,
-                        properties: HashMap::new(),
-                        confidence: 0.9,
-                        created_at: chrono::Utc::now(),
-                    }) {
+                    if let Err(e) = self.knowledge.add_relation(
+                        Relation {
+                            source: source_id,
+                            relation: relation_type,
+                            target: target_id,
+                            properties: HashMap::new(),
+                            confidence: 0.9,
+                            created_at: chrono::Utc::now(),
+                        },
+                        agent_id,
+                    ) {
                         tracing::warn!(
                             "Failed to add relation '{}' -> '{}': {}",
                             triple.subject,
@@ -1243,6 +1252,11 @@ impl ProactiveMemoryStore {
                     }
                 }
             }
+        }
+
+        // Clean up knowledge graph entities and relations for this agent
+        if let Err(e) = self.knowledge.delete_by_agent(user_id) {
+            tracing::warn!("Failed to clean up knowledge graph for agent {user_id}: {e}");
         }
 
         Ok(count)
@@ -1684,7 +1698,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
         // Step 6: Store extracted relations in knowledge graph
         if !extraction.relations.is_empty() {
-            self.store_relations(&extraction.relations);
+            self.store_relations(&extraction.relations, user_id);
         }
 
         Ok(results)
@@ -2121,7 +2135,7 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
 
         // Store extracted relations in knowledge graph
         if !extraction_result.relations.is_empty() {
-            self.store_relations(&extraction_result.relations);
+            self.store_relations(&extraction_result.relations, user_id);
         }
 
         // Auto-consolidation: merge duplicates every 10 auto_memorize calls per agent
@@ -2635,7 +2649,7 @@ mod tests {
             object: "Acme Corp".to_string(),
             object_type: "organization".to_string(),
         }];
-        store.store_relations(&triples);
+        store.store_relations(&triples, "test-agent");
 
         // Query the knowledge graph
         let matches = substrate
@@ -2834,8 +2848,8 @@ mod tests {
         }];
 
         // Store twice
-        store.store_relations(&triples);
-        store.store_relations(&triples);
+        store.store_relations(&triples, "test-agent");
+        store.store_relations(&triples, "test-agent");
 
         // Should only have 1 relation (deduped)
         let matches = substrate

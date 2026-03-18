@@ -683,18 +683,18 @@
                           </div>
                         </template>
                         <!-- Memory hit indicator -->
-                        <template x-if="msg.role === 'agent' && !msg.thinking && !msg.streaming && msg.tools && msg.tools.length && memoryToolCount(msg.tools) > 0">
+                        <template x-if="msg.role === 'agent' && !msg.thinking && !msg.streaming && hasMemoryActivity(msg)">
                           <div class="memory-indicator" @click="msg._memExpanded = !msg._memExpanded" style="position:relative;display:inline-flex;align-items:center;gap:4px;padding:3px 8px;margin:4px 0;border-radius:12px;background:var(--surface);border:1px solid var(--border);cursor:pointer;font-size:12px;color:var(--text-secondary);transition:background 0.15s" @mouseenter="$el.style.background='var(--hover)'" @mouseleave="$el.style.background='var(--surface)'">
                             <span style="font-size:14px">&#x1F9E0;</span>
-                            <span x-text="memoryIndicatorText(msg.tools)"></span>
+                            <span x-text="memoryIndicatorForMsg(msg)"></span>
                             <span class="tool-expand-chevron" :style="msg._memExpanded ? 'transform:rotate(90deg)' : ''" style="transition:transform 0.15s;font-size:10px">&#9654;</span>
                             <template x-if="msg._memExpanded">
                               <div @click.stop style="position:absolute;z-index:10;top:100%;left:0;min-width:260px;max-width:400px;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.15);padding:8px 12px;margin-top:4px;font-size:12px">
-                                <template x-for="tool in memoryTools(msg.tools)" :key="tool.id">
+                                <template x-for="(item, idx) in memoryDetailItems(msg)" :key="idx">
                                   <div style="padding:4px 0;border-bottom:1px solid var(--border)">
                                     <div style="display:flex;align-items:center;gap:4px">
-                                      <span class="badge" :class="tool.name === 'memory_recall' ? 'badge-user' : 'badge-agent'" x-text="tool.name === 'memory_recall' ? t('memoryPage.recalled', 'recalled') : t('memoryPage.saved', 'saved')"></span>
-                                      <span class="text-dim" x-text="tool.input ? (typeof tool.input === 'string' ? tool.input.substring(0, 80) : JSON.stringify(tool.input).substring(0, 80)) : ''"></span>
+                                      <span class="badge" :class="item.type === 'recalled' ? 'badge-user' : 'badge-agent'" x-text="item.type === 'recalled' ? t('memoryPage.recalled', 'recalled') : t('memoryPage.saved', 'saved')"></span>
+                                      <span class="text-dim" x-text="item.content ? item.content.substring(0, 80) : ''"></span>
                                     </div>
                                   </div>
                                 </template>
@@ -4631,18 +4631,30 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               <template x-for="mem in memories" :key="mem.id">
                 <tr>
                   <td><input type="checkbox" :checked="selectedIds.indexOf(mem.id) !== -1" @change="toggleSelect(mem.id)"></td>
-                  <td x-text="mem.content" style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></td>
+                  <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+                    <template x-if="!mem._editing">
+                      <span x-text="mem.content" @dblclick="startEdit(mem)" title="Double-click to edit" style="cursor:text"></span>
+                    </template>
+                    <template x-if="mem._editing">
+                      <div style="display:flex;gap:4px;align-items:center">
+                        <input type="text" x-model="mem._editContent" class="form-input" style="flex:1;font-size:13px;padding:2px 6px" @keyup.enter="saveEdit(mem)" @keyup.escape="cancelEdit(mem)">
+                        <button @click="saveEdit(mem)" class="btn btn-sm btn-primary" title="Save">&#x2713;</button>
+                        <button @click="cancelEdit(mem)" class="btn btn-sm" title="Cancel">&#x2715;</button>
+                      </div>
+                    </template>
+                  </td>
                   <td><span class="badge" :class="'badge-' + mem.level" x-text="mem.level"></span></td>
                   <td x-text="mem.category || '—'" style="color:var(--text-secondary)"></td>
                   <td x-text="new Date(mem.created_at).toLocaleDateString()" style="white-space:nowrap"></td>
                   <td>
+                    <button @click="startEdit(mem)" class="btn btn-sm" title="Edit" x-show="!mem._editing">&#x270E;</button>
                     <button @click="viewHistory(mem.id)" class="btn btn-sm" title="History">&#x1f4dc;</button>
                     <button @click="deleteMemory(mem.id)" class="btn btn-sm btn-danger" title="Delete">&#x2715;</button>
                   </td>
                 </tr>
               </template>
               <tr x-show="memories.length === 0">
-                <td colspan="5" style="text-align:center;color:var(--text-secondary);padding:32px" data-i18n="memoryPage.noMemoriesFound">No memories found</td>
+                <td colspan="6" style="text-align:center;color:var(--text-secondary);padding:32px" data-i18n="memoryPage.noMemoriesFound">No memories found</td>
               </tr>
             </tbody>
           </table>

@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 9;
+const SCHEMA_VERSION: u32 = 10;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -45,6 +45,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 9 {
         migrate_v9(conn)?;
+    }
+
+    if current_version < 10 {
+        migrate_v10(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -350,6 +354,22 @@ fn migrate_v9(conn: &Connection) -> Result<(), rusqlite::Error> {
 
         INSERT OR IGNORE INTO migrations (version, applied_at, description)
         VALUES (9, datetime('now'), 'Add performance indexes for proactive memory queries');
+        ",
+    )?;
+    Ok(())
+}
+
+/// Version 10: Add agent_id to entities and relations for per-agent cleanup.
+fn migrate_v10(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        ALTER TABLE entities ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE relations ADD COLUMN agent_id TEXT NOT NULL DEFAULT '';
+        CREATE INDEX IF NOT EXISTS idx_entities_agent ON entities(agent_id);
+        CREATE INDEX IF NOT EXISTS idx_relations_agent ON relations(agent_id);
+
+        INSERT OR IGNORE INTO migrations (version, applied_at, description)
+        VALUES (10, datetime('now'), 'Add agent_id to entities and relations');
         ",
     )?;
     Ok(())
