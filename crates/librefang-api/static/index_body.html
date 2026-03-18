@@ -163,7 +163,7 @@
             </a>
             <a class="nav-item" :class="{ active: page === 'plugins' }" @click="navigate('plugins')" :aria-current="page === 'plugins' ? 'page' : false">
               <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M12 2v6m0 8v6M2 12h6m8 0h6"/><circle cx="12" cy="12" r="3"/></svg></span>
-              <span class="nav-label">Plugins</span>
+              <span class="nav-label" data-i18n="nav.plugins">Plugins</span>
             </a>
           </div>
         </template>
@@ -3285,27 +3285,27 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
         init() { this.loadPlugins(); this.loadRegistries(); }
       }">
         <div class="page-header">
-          <h2>Plugins</h2>
+          <h2 data-i18n="pluginsPage.title">Plugins</h2>
           <div style="display:flex;gap:8px">
-            <button class="btn btn-sm" @click="showScaffold=true">New Plugin</button>
-            <button class="btn btn-sm btn-primary" @click="showInstall=true">Install</button>
+            <button class="btn btn-sm" @click="showScaffold=true" data-i18n="pluginsPage.newPlugin">New Plugin</button>
+            <button class="btn btn-sm btn-primary" @click="showInstall=true" data-i18n="pluginsPage.install">Install</button>
           </div>
         </div>
         <div class="page-body">
           <!-- Tabs -->
           <div style="display:flex;gap:16px;margin-bottom:16px;border-bottom:1px solid var(--border)">
-            <button :class="tab==='installed'?'tab-active':''" @click="tab='installed'" style="padding:8px 16px;background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;color:var(--text-secondary)" :style="tab==='installed'?'border-color:var(--primary);color:var(--text-primary)':''">Installed</button>
-            <button :class="tab==='registry'?'tab-active':''" @click="tab='registry'" style="padding:8px 16px;background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;color:var(--text-secondary)" :style="tab==='registry'?'border-color:var(--primary);color:var(--text-primary)':''">Registry</button>
+            <button :class="tab==='installed'?'tab-active':''" @click="tab='installed'" style="padding:8px 16px;background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;color:var(--text-secondary)" :style="tab==='installed'?'border-color:var(--primary);color:var(--text-primary):'''" data-i18n="pluginsPage.installedTab">Installed</button>
+            <button :class="tab==='registry'?'tab-active':''" @click="tab='registry'" style="padding:8px 16px;background:none;border:none;cursor:pointer;border-bottom:2px solid transparent;color:var(--text-secondary)" :style="tab==='registry'?'border-color:var(--primary);color:var(--text-primary):'''" data-i18n="pluginsPage.registryTab">Registry</button>
           </div>
 
           <!-- Installed Tab -->
           <template x-if="tab==='installed'">
             <div>
-              <template x-if="loading"><div class="text-dim">Loading...</div></template>
-              <template x-if="!loading && plugins.length===0"><div class="empty-state"><h3>No plugins installed</h3><p>Install plugins from the Registry tab or use the Install button.</p></div></template>
+              <template x-if="loading"><div class="text-dim" data-i18n="pluginsPage.loading">Loading...</div></template>
+              <template x-if="!loading && plugins.length===0"><div class="empty-state"><h3 data-i18n="pluginsPage.noPlugins">No plugins installed</h3><p data-i18n="pluginsPage.noPluginsDesc">Install plugins from the Registry tab or use the Install button.</p></div></template>
               <template x-if="!loading && plugins.length>0">
                 <div class="table-wrap"><table>
-                  <thead><tr><th>Name</th><th>Version</th><th>Description</th><th>Hooks</th><th>Size</th><th>Actions</th></tr></thead>
+                  <thead><tr><th data-i18n="pluginsPage.name">Name</th><th data-i18n="pluginsPage.version">Version</th><th data-i18n="pluginsPage.description">Description</th><th data-i18n="pluginsPage.hooks">Hooks</th><th data-i18n="pluginsPage.size">Size</th><th data-i18n="pluginsPage.actions">Actions</th></tr></thead>
                   <tbody>
                     <template x-for="p in plugins" :key="p.name">
                       <tr>
@@ -3313,14 +3313,14 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                         <td><span class="badge" x-text="p.version"></span></td>
                         <td x-text="p.description||'—'" class="text-dim"></td>
                         <td>
-                          <span x-show="p.hooks?.ingest" class="badge badge-success" style="margin-right:4px">ingest</span>
-                          <span x-show="p.hooks?.after_turn" class="badge badge-success">after_turn</span>
-                          <span x-show="!p.hooks_valid" class="badge badge-danger">invalid</span>
+                          <span x-show="p.hooks?.ingest" class="badge badge-success" style="margin-right:4px" data-i18n="pluginsPage.ingest">ingest</span>
+                          <span x-show="p.hooks?.after_turn" class="badge badge-success" data-i18n="pluginsPage.afterTurn">after_turn</span>
+                          <span x-show="!p.hooks_valid" class="badge badge-danger" data-i18n="pluginsPage.invalid">invalid</span>
                         </td>
                         <td x-text="p.size_bytes?(p.size_bytes/1024).toFixed(1)+' KB':'—'" class="text-dim"></td>
                         <td style="display:flex;gap:4px">
-                          <button class="btn btn-xs" @click="installDeps(p.name)">Deps</button>
-                          <button class="btn btn-xs btn-danger" @click="removePlugin(p.name)">Remove</button>
+                          <button class="btn btn-xs" @click="installDeps(p.name)" data-i18n="pluginsPage.deps">Deps</button>
+                          <button class="btn btn-xs btn-danger" @click="removePlugin(p.name)" data-i18n="pluginsPage.remove">Remove</button>
                         </td>
                       </tr>
                     </template>
@@ -3333,8 +3333,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <!-- Registry Tab -->
           <template x-if="tab==='registry'">
             <div>
-              <template x-if="regLoading"><div class="text-dim">Loading registries...</div></template>
-              <template x-if="!regLoading && registries.length===0"><div class="empty-state"><h3>No registries configured</h3></div></template>
+              <template x-if="regLoading"><div class="text-dim" data-i18n="pluginsPage.loadingRegistries">Loading registries...</div></template>
+              <template x-if="!regLoading && registries.length===0"><div class="empty-state"><h3 data-i18n="pluginsPage.noRegistries">No registries configured</h3></div></template>
               <template x-for="reg in registries" :key="reg.github_repo">
                 <div style="margin-bottom:24px">
                   <h3 style="margin-bottom:4px" x-text="reg.name"></h3>
@@ -3348,15 +3348,15 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                         <div class="card" style="padding:16px">
                           <div style="display:flex;justify-content:space-between;align-items:center">
                             <strong x-text="p.name"></strong>
-                            <template x-if="p.installed"><span class="badge badge-success">Installed</span></template>
-                            <template x-if="!p.installed"><button class="btn btn-xs btn-primary" @click="registryInstall(p.name, reg.github_repo)">Install</button></template>
+                            <template x-if="p.installed"><span class="badge badge-success" data-i18n="pluginsPage.installed">Installed</span></template>
+                            <template x-if="!p.installed"><button class="btn btn-xs btn-primary" @click="registryInstall(p.name, reg.github_repo)" data-i18n="pluginsPage.install">Install</button></template>
                           </div>
                         </div>
                       </template>
                     </div>
                   </template>
                   <template x-if="!reg.plugins || reg.plugins.length===0">
-                    <div class="text-dim">No plugins available</div>
+                    <div class="text-dim" data-i18n="pluginsPage.noAvailable">No plugins available</div>
                   </template>
                 </div>
               </template>
@@ -3367,35 +3367,35 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <template x-if="showInstall">
             <div class="modal-overlay" @click.self="showInstall=false">
               <div class="modal" style="max-width:480px">
-                <h3>Install Plugin</h3>
+                <h3 data-i18n="pluginsPage.installTitle">Install Plugin</h3>
                 <div style="margin:12px 0">
-                  <label>Source</label>
+                  <label data-i18n="pluginsPage.source">Source</label>
                   <select x-model="installSource" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
-                    <option value="registry">Registry</option>
-                    <option value="local">Local Path</option>
-                    <option value="git">Git URL</option>
+                    <option value="registry" data-i18n="pluginsPage.sourceRegistry">Registry</option>
+                    <option value="local" data-i18n="pluginsPage.sourceLocal">Local Path</option>
+                    <option value="git" data-i18n="pluginsPage.sourceGit">Git URL</option>
                   </select>
                 </div>
                 <template x-if="installSource==='registry'">
                   <div style="margin:12px 0">
-                    <label>Plugin Name</label>
+                    <label data-i18n="pluginsPage.pluginName">Plugin Name</label>
                     <input x-model="installName" placeholder="e.g. echo-memory" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
-                    <label style="margin-top:8px;display:block">Registry (optional)</label>
-                    <input x-model="installRegistry" placeholder="owner/repo (default: official)" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
+                    <label style="margin-top:8px;display:block" data-i18n="pluginsPage.registryOptional">Registry (optional)</label>
+                    <input x-model="installRegistry" data-i18n-placeholder="pluginsPage.registryPlaceholder" placeholder="owner/repo (default: official)" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
                   </div>
                 </template>
                 <template x-if="installSource==='local'">
-                  <div style="margin:12px 0"><label>Path</label><input x-model="installPath" placeholder="/path/to/plugin" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)"></div>
+                  <div style="margin:12px 0"><label data-i18n="pluginsPage.path">Path</label><input x-model="installPath" placeholder="/path/to/plugin" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)"></div>
                 </template>
                 <template x-if="installSource==='git'">
                   <div style="margin:12px 0">
-                    <label>URL</label><input x-model="installUrl" placeholder="https://github.com/..." style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
-                    <label style="margin-top:8px;display:block">Branch (optional)</label><input x-model="installBranch" placeholder="main" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
+                    <label data-i18n="pluginsPage.url">URL</label><input x-model="installUrl" placeholder="https://github.com/..." style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
+                    <label style="margin-top:8px;display:block" data-i18n="pluginsPage.branch">Branch (optional)</label><input x-model="installBranch" placeholder="main" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)">
                   </div>
                 </template>
                 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
-                  <button class="btn btn-sm" @click="showInstall=false">Cancel</button>
-                  <button class="btn btn-sm btn-primary" @click="installPlugin()">Install</button>
+                  <button class="btn btn-sm" @click="showInstall=false" data-i18n="pluginsPage.cancel">Cancel</button>
+                  <button class="btn btn-sm btn-primary" @click="installPlugin()" data-i18n="pluginsPage.install">Install</button>
                 </div>
               </div>
             </div>
@@ -3405,12 +3405,12 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
           <template x-if="showScaffold">
             <div class="modal-overlay" @click.self="showScaffold=false">
               <div class="modal" style="max-width:480px">
-                <h3>Create New Plugin</h3>
-                <div style="margin:12px 0"><label>Name</label><input x-model="scaffoldName" placeholder="my-plugin" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)"></div>
-                <div style="margin:12px 0"><label>Description</label><input x-model="scaffoldDesc" placeholder="What does this plugin do?" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)"></div>
+                <h3 data-i18n="pluginsPage.scaffoldTitle">Create New Plugin</h3>
+                <div style="margin:12px 0"><label data-i18n="pluginsPage.name">Name</label><input x-model="scaffoldName" placeholder="my-plugin" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)"></div>
+                <div style="margin:12px 0"><label data-i18n="pluginsPage.description">Description</label><input x-model="scaffoldDesc" data-i18n-placeholder="pluginsPage.scaffoldDesc" placeholder="What does this plugin do?" style="width:100%;padding:6px;margin-top:4px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:6px;color:var(--text-primary)"></div>
                 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
-                  <button class="btn btn-sm" @click="showScaffold=false">Cancel</button>
-                  <button class="btn btn-sm btn-primary" @click="scaffoldPlugin()">Create</button>
+                  <button class="btn btn-sm" @click="showScaffold=false" data-i18n="pluginsPage.cancel">Cancel</button>
+                  <button class="btn btn-sm btn-primary" @click="scaffoldPlugin()" data-i18n="pluginsPage.create">Create</button>
                 </div>
               </div>
             </div>
