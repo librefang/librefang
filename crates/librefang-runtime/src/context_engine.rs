@@ -573,7 +573,7 @@ impl ContextEngine for ScriptableContextEngine {
             .iter()
             .map(|m| {
                 serde_json::json!({
-                    "role": serde_json::to_value(&m.role).unwrap_or_default(),
+                    "role": serde_json::to_value(m.role).unwrap_or_default(),
                     "content": m.content.text_content().chars().take(500).collect::<String>(),
                 })
             })
