@@ -179,11 +179,13 @@ pub async fn spawn_agent(
         ),
         Err(e) => {
             tracing::warn!("Spawn failed: {e}");
-            let t = ErrorTranslator::new(l);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": t.t("api-error-agent-spawn-failed")})),
-            )
+            let status = match &e {
+                librefang_kernel::error::KernelError::LibreFang(
+                    librefang_types::error::LibreFangError::AgentAlreadyExists(_),
+                ) => StatusCode::CONFLICT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, Json(serde_json::json!({"error": format!("{e}")})))
         }
     }
 }
