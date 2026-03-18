@@ -6586,6 +6586,31 @@ async fn cron_deliver_response(
     }
 }
 
+impl LibreFangKernel {
+    /// Mark all active Hands' cron jobs as due-now so the next scheduler tick fires them.
+    /// Called after a provider is first configured so Hands resume immediately.
+    pub fn trigger_all_hands(&self) {
+        let hand_agents: Vec<AgentId> = self
+            .hand_registry
+            .list_instances()
+            .into_iter()
+            .filter(|inst| inst.status == librefang_hands::HandStatus::Active)
+            .filter_map(|inst| inst.agent_id)
+            .collect();
+
+        for agent_id in &hand_agents {
+            self.cron_scheduler.mark_due_now_by_agent(*agent_id);
+        }
+
+        if !hand_agents.is_empty() {
+            info!(
+                count = hand_agents.len(),
+                "Marked active hands as due for immediate execution"
+            );
+        }
+    }
+}
+
 #[async_trait]
 impl KernelHandle for LibreFangKernel {
     async fn spawn_agent(
