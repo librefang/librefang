@@ -44,6 +44,25 @@ use tracing::{debug, info, warn};
 
 const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
+/// Cosine similarity between two f32 vectors. Returns 0.0 on dimension mismatch.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() || a.is_empty() {
+        return 0.0;
+    }
+    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom < f32::EPSILON {
+        0.0
+    } else {
+        dot / denom
+    }
+}
+
 /// The main LibreFang kernel — coordinates all subsystems.
 /// Stub LLM driver used when no providers are configured.
 /// Returns a helpful error so the dashboard still boots and users can configure providers.
@@ -233,6 +252,9 @@ pub struct LibreFangKernel {
     pub decision_traces: dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
     /// Command queue with lane-based concurrency control.
     pub command_queue: librefang_runtime::command_lane::CommandQueue,
+    /// Cached embeddings of hand descriptions for semantic routing.
+    /// Maps hand_id → embedding vector. Populated lazily on first routing call.
+    hand_desc_embeddings: tokio::sync::RwLock<Option<std::collections::HashMap<String, Vec<f32>>>>,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
 }
@@ -1166,6 +1188,7 @@ impl LibreFangKernel {
             hand_route_cooldowns: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
             command_queue,
+            hand_desc_embeddings: tokio::sync::RwLock::new(None),
             self_handle: OnceLock::new(),
         };
 
@@ -2323,31 +2346,44 @@ impl LibreFangKernel {
         kernel_handle: Option<Arc<dyn KernelHandle>>,
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
     ) -> KernelResult<AgentLoopResult> {
-        let hand_selection = router::auto_select_hand(message);
+        // ── Semantic scoring (optional) ──────────────────────────────────
+        // When an embedding driver is available, compute cosine similarity
+        // between the user message and cached hand description embeddings.
+        // This enables cross-lingual routing (e.g. Chinese input matching
+        // English hand descriptions) without hardcoding per-language keywords.
+        let semantic_scores = self.compute_hand_semantic_scores(message).await;
+        let semantic_ref = if semantic_scores.is_empty() {
+            None
+        } else {
+            Some(&semantic_scores)
+        };
+
+        let hand_selection = router::auto_select_hand(message, semantic_ref);
         let template_selection =
             router::auto_select_template(message, &self.config.home_dir.join("agents"));
 
         // ── Route decision trace ──
         info!(
             router = %entry.name,
-            hand_candidate = hand_selection.hand_id.unwrap_or("none"),
+            hand_candidate = hand_selection.hand_id.as_deref().unwrap_or("none"),
             hand_score = hand_selection.score,
             hand_reason = %hand_selection.reason,
             template_candidate = %template_selection.template,
             template_score = template_selection.score,
             template_reason = %template_selection.reason,
+            semantic_available = semantic_ref.is_some(),
             "Route decision: scoring complete"
         );
 
         // ── Compare hand vs template score and pick the best ──
         let hand_usable = hand_selection.hand_id.is_some()
-            && !self.is_hand_cooled_down(hand_selection.hand_id.unwrap())
-            && self.hand_requirements_met(hand_selection.hand_id.unwrap());
+            && !self.is_hand_cooled_down(hand_selection.hand_id.as_deref().unwrap())
+            && self.hand_requirements_met(hand_selection.hand_id.as_deref().unwrap());
 
         let prefer_hand = hand_usable && hand_selection.score >= template_selection.score;
 
         if prefer_hand {
-            let hand_id = hand_selection.hand_id.unwrap();
+            let hand_id = hand_selection.hand_id.as_deref().unwrap();
             info!(
                 router = %entry.name,
                 route_type = "hand",
@@ -2376,11 +2412,11 @@ impl LibreFangKernel {
                     self.record_hand_failure(hand_id, &entry.name, &err);
                 }
             }
-        } else if let Some(hand_id) = hand_selection.hand_id {
+        } else if let Some(ref hand_id) = hand_selection.hand_id {
             // Log why hand was skipped despite matching
             info!(
                 router = %entry.name,
-                hand = hand_id,
+                hand = %hand_id,
                 hand_score = hand_selection.score,
                 template = %template_selection.template,
                 template_score = template_selection.score,
@@ -2513,6 +2549,83 @@ impl LibreFangKernel {
                 }
             }
         });
+    }
+
+    /// Compute semantic similarity scores between a message and all hand descriptions.
+    ///
+    /// Uses the embedding driver to vectorize the message and computes cosine
+    /// similarity against cached hand description embeddings. Returns an empty
+    /// map if no embedding driver is configured (graceful degradation).
+    async fn compute_hand_semantic_scores(
+        &self,
+        message: &str,
+    ) -> std::collections::HashMap<String, f32> {
+        let driver = match &self.embedding_driver {
+            Some(d) => d,
+            None => return std::collections::HashMap::new(),
+        };
+
+        // Lazily build hand description embeddings on first call
+        {
+            let read_guard = self.hand_desc_embeddings.read().await;
+            if read_guard.is_none() {
+                drop(read_guard);
+                let mut write_guard = self.hand_desc_embeddings.write().await;
+                if write_guard.is_none() {
+                    let mut desc_map = std::collections::HashMap::new();
+                    let hands = librefang_hands::bundled::bundled_hands();
+                    let mut ids = Vec::new();
+                    let mut descriptions = Vec::new();
+                    for (id, toml_content, _) in &hands {
+                        if let Ok(def) =
+                            librefang_hands::bundled::parse_bundled(id, toml_content, "")
+                        {
+                            ids.push(def.id.clone());
+                            descriptions.push(def.description.clone());
+                        }
+                    }
+                    let desc_refs: Vec<&str> = descriptions.iter().map(|s| s.as_str()).collect();
+                    match driver.embed(&desc_refs).await {
+                        Ok(embeddings) => {
+                            for (id, emb) in ids.into_iter().zip(embeddings) {
+                                desc_map.insert(id, emb);
+                            }
+                            info!(
+                                hands = desc_map.len(),
+                                "Cached hand description embeddings for semantic routing"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to embed hand descriptions — semantic routing disabled");
+                        }
+                    }
+                    *write_guard = Some(desc_map);
+                }
+            }
+        }
+
+        // Embed the user message
+        let msg_embedding = match driver.embed_one(message).await {
+            Ok(emb) => emb,
+            Err(e) => {
+                debug!(error = %e, "Failed to embed message for semantic routing");
+                return std::collections::HashMap::new();
+            }
+        };
+
+        // Compute cosine similarity against each hand
+        let read_guard = self.hand_desc_embeddings.read().await;
+        let Some(ref desc_embeddings) = *read_guard else {
+            return std::collections::HashMap::new();
+        };
+
+        desc_embeddings
+            .iter()
+            .map(|(hand_id, desc_emb)| {
+                let sim = cosine_similarity(&msg_embedding, desc_emb);
+                (hand_id.clone(), sim)
+            })
+            .collect()
     }
 
     /// Check if a hand is in cooldown after a recent dispatch failure.
@@ -4061,6 +4174,7 @@ impl LibreFangKernel {
         // Invalidate the router manifest cache so newly installed/removed
         // agents are picked up on the next routing call.
         router::invalidate_manifest_cache();
+        router::invalidate_hand_route_cache();
     }
 
     /// Publish an event to the bus and evaluate triggers.

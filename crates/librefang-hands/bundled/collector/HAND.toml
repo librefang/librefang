@@ -5,6 +5,10 @@ category = "data"
 icon = "\U0001F50D"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
+[routing]
+aliases = ["monitor changes", "track updates", "collect intelligence", "osint", "change detection"]
+weak_aliases = ["watch", "signals", "continuous monitoring"]
+
 # ─── Configurable settings ───────────────────────────────────────────────────
 
 [[settings]]
