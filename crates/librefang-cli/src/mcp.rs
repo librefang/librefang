@@ -139,7 +139,7 @@ pub fn run_mcp_server(config: Option<std::path::PathBuf>) {
 fn create_backend(config: Option<std::path::PathBuf>) -> McpBackend {
     // Try daemon first
     if let Some(base_url) = super::find_daemon() {
-        let client = reqwest::blocking::Client::builder()
+        let client = crate::http_client::client_builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .expect("Failed to build HTTP client");
@@ -375,7 +375,7 @@ mod tests {
         // but we can test the protocol handling
         let backend = McpBackend::Daemon {
             base_url: "http://localhost:9999".to_string(),
-            client: reqwest::blocking::Client::new(),
+            client: crate::http_client::new_client(),
         };
         let resp = handle_message(&backend, &msg).unwrap();
         assert_eq!(resp["id"], 1);
@@ -391,7 +391,7 @@ mod tests {
         });
         let backend = McpBackend::Daemon {
             base_url: "http://localhost:9999".to_string(),
-            client: reqwest::blocking::Client::new(),
+            client: crate::http_client::new_client(),
         };
         let resp = handle_message(&backend, &msg);
         assert!(resp.is_none()); // No response for notifications
@@ -406,7 +406,7 @@ mod tests {
         });
         let backend = McpBackend::Daemon {
             base_url: "http://localhost:9999".to_string(),
-            client: reqwest::blocking::Client::new(),
+            client: crate::http_client::new_client(),
         };
         let resp = handle_message(&backend, &msg).unwrap();
         assert_eq!(resp["error"]["code"], -32601);

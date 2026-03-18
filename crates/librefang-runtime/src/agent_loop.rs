@@ -103,6 +103,24 @@ fn safe_trim_messages(messages: &mut Vec<Message>, agent_name: &str, user_messag
     }
 }
 
+/// Strip base64 data from image blocks in session messages that the LLM has
+/// already processed, replacing them with lightweight text placeholders.
+fn strip_processed_image_data(messages: &mut [Message]) {
+    for msg in messages.iter_mut() {
+        if let MessageContent::Blocks(blocks) = &mut msg.content {
+            for block in blocks.iter_mut() {
+                if let ContentBlock::Image { media_type, .. } = block {
+                    let placeholder = format!("[image ({media_type}) already processed]");
+                    *block = ContentBlock::Text {
+                        text: placeholder,
+                        provider_metadata: None,
+                    };
+                }
+            }
+        }
+    }
+}
+
 /// Strip a provider prefix from a model ID before sending to the API.
 ///
 /// Many models are stored as `provider/org/model` (e.g. `openrouter/google/gemini-2.5-flash`)
@@ -443,6 +461,7 @@ pub async fn run_agent_loop(
     let context_budget = ContextBudget::new(ctx_window);
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
+    let mut hallucination_retried = false;
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
@@ -496,6 +515,10 @@ pub async fn run_agent_loop(
         total_usage.output_tokens += response.usage.output_tokens;
         total_usage.cache_creation_input_tokens += response.usage.cache_creation_input_tokens;
         total_usage.cache_read_input_tokens += response.usage.cache_read_input_tokens;
+
+        // Strip image base64 from earlier messages (LLM already processed them)
+        strip_processed_image_data(&mut messages);
+        strip_processed_image_data(&mut session.messages);
 
         // Recover tool calls output as text by models that don't use the tool_calls API field
         // (e.g. Groq/Llama, DeepSeek emit `<function=name>{json}</function>` in text)
@@ -587,6 +610,30 @@ pub async fn run_agent_loop(
                         messages.push(Message::user("Please provide your response.".to_string()));
                         continue;
                     }
+                }
+
+                // Detect hallucinated actions: LLM claims completion without using tools.
+                // Only trigger when no tools have been executed in ANY iteration —
+                // if tools ran in earlier iterations, the text is a legitimate summary.
+                if !text.trim().is_empty()
+                    && response.tool_calls.is_empty()
+                    && !available_tools.is_empty()
+                    && !any_tools_executed
+                    && !hallucination_retried
+                    && looks_like_hallucinated_action(&text)
+                {
+                    hallucination_retried = true;
+                    warn!(
+                        agent = %manifest.name,
+                        iteration,
+                        "Detected hallucinated action — agent claimed action without tool calls, retrying"
+                    );
+                    messages.push(Message::assistant(&text));
+                    messages.push(Message::user(
+                        "[System: You described performing an action but did not actually call any tools. \
+                         Please use the provided tools to carry out the action rather than just describing it.]"
+                    ));
+                    continue;
                 }
 
                 // Guard against empty response — covers both iteration 0 and post-tool cycles
@@ -1443,6 +1490,7 @@ pub async fn run_agent_loop_streaming(
     let context_budget = ContextBudget::new(ctx_window);
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
+    let mut hallucination_retried = false;
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
@@ -1519,6 +1567,10 @@ pub async fn run_agent_loop_streaming(
         total_usage.output_tokens += response.usage.output_tokens;
         total_usage.cache_creation_input_tokens += response.usage.cache_creation_input_tokens;
         total_usage.cache_read_input_tokens += response.usage.cache_read_input_tokens;
+
+        // Strip image base64 from earlier messages (LLM already processed them)
+        strip_processed_image_data(&mut messages);
+        strip_processed_image_data(&mut session.messages);
 
         // Recover tool calls output as text (streaming path)
         let mut tools_recovered_from_text = false;
@@ -1607,6 +1659,30 @@ pub async fn run_agent_loop_streaming(
                         messages.push(Message::user("Please provide your response.".to_string()));
                         continue;
                     }
+                }
+
+                // Detect hallucinated actions: LLM claims completion without using tools.
+                // Only trigger when no tools have been executed in ANY iteration —
+                // if tools ran in earlier iterations, the text is a legitimate summary.
+                if !text.trim().is_empty()
+                    && response.tool_calls.is_empty()
+                    && !available_tools.is_empty()
+                    && !any_tools_executed
+                    && !hallucination_retried
+                    && looks_like_hallucinated_action(&text)
+                {
+                    hallucination_retried = true;
+                    warn!(
+                        agent = %manifest.name,
+                        iteration,
+                        "Detected hallucinated action (streaming) — agent claimed action without tool calls, retrying"
+                    );
+                    messages.push(Message::assistant(&text));
+                    messages.push(Message::user(
+                        "[System: You described performing an action but did not actually call any tools. \
+                         Please use the provided tools to carry out the action rather than just describing it.]"
+                    ));
+                    continue;
                 }
 
                 // Guard against empty response — covers both iteration 0 and post-tool cycles
@@ -2059,6 +2135,44 @@ pub async fn run_agent_loop_streaming(
     }
 
     Err(LibreFangError::MaxIterationsExceeded(max_iterations))
+}
+
+/// Detect when the LLM claims to have performed an action in text without
+/// actually calling any tools — a common hallucination pattern.
+fn looks_like_hallucinated_action(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    // Action verbs that imply tool usage
+    let action_phrases = [
+        "i've created",
+        "i've written",
+        "i've updated",
+        "i've saved",
+        "i've modified",
+        "i've deleted",
+        "i've added",
+        "i've removed",
+        "i've edited",
+        "i've fixed",
+        "i've changed",
+        "i've installed",
+        "i have created",
+        "i have written",
+        "i have updated",
+        "i have saved",
+        "i have modified",
+        "i have deleted",
+        "i have added",
+        "i have removed",
+        "file has been",
+        "changes have been",
+        "code has been",
+        "successfully created",
+        "successfully updated",
+        "successfully saved",
+        "successfully written",
+        "successfully modified",
+    ];
+    action_phrases.iter().any(|phrase| lower.contains(phrase))
 }
 
 /// Recover tool calls that LLMs output as plain text instead of the proper

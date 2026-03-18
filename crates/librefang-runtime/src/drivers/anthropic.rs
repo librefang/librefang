@@ -27,10 +27,10 @@ impl AnthropicDriver {
         Self {
             api_key: Zeroizing::new(api_key),
             base_url,
-            client: reqwest::Client::builder()
+            client: crate::http_client::client_builder()
                 .user_agent(crate::USER_AGENT)
                 .build()
-                .unwrap_or_default(),
+                .expect("HTTP client build"),
         }
     }
 }
@@ -492,8 +492,9 @@ impl LlmDriver for AnthropicDriver {
                                 input_json,
                             }) = blocks.get(block_idx)
                             {
-                                let input: serde_json::Value =
-                                    serde_json::from_str(input_json).unwrap_or_default();
+                                let input: serde_json::Value = ensure_object(
+                                    serde_json::from_str(input_json).unwrap_or_default(),
+                                );
                                 let _ = tx
                                     .send(StreamEvent::ToolUseEnd {
                                         id: id.clone(),
@@ -534,7 +535,10 @@ impl LlmDriver for AnthropicDriver {
                         });
                     }
                     ContentBlockAccum::Thinking(thinking) => {
-                        content.push(ContentBlock::Thinking { thinking });
+                        content.push(ContentBlock::Thinking {
+                            thinking,
+                            provider_metadata: None,
+                        });
                     }
                     ContentBlockAccum::ToolUse {
                         id,
@@ -542,7 +546,7 @@ impl LlmDriver for AnthropicDriver {
                         input_json,
                     } => {
                         let input: serde_json::Value =
-                            serde_json::from_str(&input_json).unwrap_or_default();
+                            ensure_object(serde_json::from_str(&input_json).unwrap_or_default());
                         content.push(ContentBlock::ToolUse {
                             id: id.clone(),
                             name: name.clone(),
@@ -570,6 +574,21 @@ impl LlmDriver for AnthropicDriver {
             status: 0,
             message: "Max retries exceeded".to_string(),
         })
+    }
+}
+
+/// Ensure a `serde_json::Value` is an object.  The Anthropic API requires the
+/// `input` field of `tool_use` blocks to be a JSON object (`{}`), never `null`.
+/// When a tool has no parameters the value may be `null` (e.g. from
+/// `Value::default()` or a missing field); this helper normalises it to `{}`.
+fn ensure_object(v: serde_json::Value) -> serde_json::Value {
+    match &v {
+        serde_json::Value::Object(_) => v,
+        serde_json::Value::Null => serde_json::json!({}),
+        other => {
+            warn!(value = ?other, "Tool input was not an object or null, replacing with empty object");
+            serde_json::json!({})
+        }
     }
 }
 
@@ -622,7 +641,7 @@ fn convert_message(msg: &Message) -> ApiMessage {
                     } => Some(ApiContentBlock::ToolUse {
                         id: id.clone(),
                         name: name.clone(),
-                        input: input.clone(),
+                        input: ensure_object(input.clone()),
                     }),
                     ContentBlock::ToolResult {
                         tool_use_id,
@@ -662,6 +681,7 @@ fn convert_response(api: ApiResponse) -> CompletionResponse {
                 });
             }
             ResponseContentBlock::ToolUse { id, name, input } => {
+                let input = ensure_object(input);
                 content.push(ContentBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),
@@ -671,7 +691,10 @@ fn convert_response(api: ApiResponse) -> CompletionResponse {
                 tool_calls.push(ToolCall { id, name, input });
             }
             ResponseContentBlock::Thinking { thinking } => {
-                content.push(ContentBlock::Thinking { thinking });
+                content.push(ContentBlock::Thinking {
+                    thinking,
+                    provider_metadata: None,
+                });
             }
         }
     }
@@ -751,5 +774,92 @@ mod tests {
         assert_eq!(arr[0]["type"], "text");
         assert_eq!(arr[0]["text"], "You are helpful.");
         assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn test_ensure_object_null_becomes_empty_object() {
+        let result = ensure_object(serde_json::Value::Null);
+        assert_eq!(result, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_ensure_object_preserves_existing_object() {
+        let input = serde_json::json!({"query": "rust lang"});
+        let result = ensure_object(input.clone());
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_ensure_object_non_object_becomes_empty_object() {
+        assert_eq!(
+            ensure_object(serde_json::json!("string")),
+            serde_json::json!({})
+        );
+        assert_eq!(ensure_object(serde_json::json!(42)), serde_json::json!({}));
+        assert_eq!(
+            ensure_object(serde_json::json!([1, 2, 3])),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn test_parameterless_tool_use_serializes_empty_object() {
+        let block = ApiContentBlock::ToolUse {
+            id: "tool_1".to_string(),
+            name: "get_time".to_string(),
+            input: ensure_object(serde_json::Value::Null),
+        };
+        let json = serde_json::to_value(&block).unwrap();
+        assert_eq!(json["input"], serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_convert_message_null_tool_use_input_becomes_empty_object() {
+        let msg = Message {
+            role: Role::Assistant,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                id: "tool_1".to_string(),
+                name: "get_time".to_string(),
+                input: serde_json::Value::Null,
+                provider_metadata: None,
+            }]),
+        };
+        let api_msg = convert_message(&msg);
+        match api_msg.content {
+            ApiContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 1);
+                let json = serde_json::to_value(&blocks[0]).unwrap();
+                assert_eq!(json["input"], serde_json::json!({}));
+            }
+            _ => panic!("Expected Blocks content"),
+        }
+    }
+
+    #[test]
+    fn test_convert_response_null_tool_input_becomes_empty_object() {
+        let api_response = ApiResponse {
+            content: vec![ResponseContentBlock::ToolUse {
+                id: "tool_1".to_string(),
+                name: "get_time".to_string(),
+                input: serde_json::Value::Null,
+            }],
+            stop_reason: "tool_use".to_string(),
+            usage: ApiUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+        };
+
+        let response = convert_response(api_response);
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].input, serde_json::json!({}));
+        match &response.content[0] {
+            ContentBlock::ToolUse { input, .. } => {
+                assert_eq!(*input, serde_json::json!({}));
+            }
+            _ => panic!("Expected ToolUse content block"),
+        }
     }
 }

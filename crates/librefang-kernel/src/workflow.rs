@@ -8,12 +8,13 @@
 //! - Loop until a condition is met
 //! - Store outputs in named variables for later reference
 //!
-//! Workflows are defined as Rust structs or loaded from JSON.
+//! Workflows are defined as Rust structs or loaded from JSON/YAML/TOML files.
 
 use chrono::{DateTime, Utc};
 use librefang_types::agent::AgentId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -783,6 +784,115 @@ impl Default for WorkflowEngine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ---------------------------------------------------------------------------
+// Auto-registration of workflow definition files from disk
+// ---------------------------------------------------------------------------
+
+/// Intermediate struct for deserializing workflow files where `id` and
+/// `created_at` are optional. When omitted the loader generates them
+/// automatically so users only need to supply `name`, `description`, and
+/// `steps`.
+#[derive(Debug, Clone, Deserialize)]
+struct WorkflowFile {
+    #[serde(default)]
+    id: Option<WorkflowId>,
+    name: String,
+    description: String,
+    steps: Vec<WorkflowStep>,
+    #[serde(default)]
+    created_at: Option<DateTime<Utc>>,
+}
+
+impl From<WorkflowFile> for Workflow {
+    fn from(f: WorkflowFile) -> Self {
+        Self {
+            id: f.id.unwrap_or_default(),
+            name: f.name,
+            description: f.description,
+            steps: f.steps,
+            created_at: f.created_at.unwrap_or_else(Utc::now),
+        }
+    }
+}
+
+/// Scan a directory for workflow definition files (`.yaml`, `.yml`, `.toml`)
+/// and return the parsed [`Workflow`] objects. Files that fail to parse are
+/// logged as warnings and skipped.
+pub fn load_workflow_definitions(dir: &Path) -> Vec<Workflow> {
+    let mut workflows = Vec::new();
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            // The directory not existing is expected on fresh installs — only
+            // warn when it exists but cannot be read.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(
+                    path = %dir.display(),
+                    error = %e,
+                    "Failed to read workflows directory"
+                );
+            }
+            return workflows;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if !matches!(ext.as_str(), "yaml" | "yml" | "toml") {
+            continue;
+        }
+
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Failed to read workflow file"
+                );
+                continue;
+            }
+        };
+
+        let parsed: Result<WorkflowFile, String> = match ext.as_str() {
+            "yaml" | "yml" => {
+                serde_yaml::from_str(&contents).map_err(|e| format!("YAML parse error: {e}"))
+            }
+            "toml" => toml::from_str(&contents).map_err(|e| format!("TOML parse error: {e}")),
+            _ => continue,
+        };
+
+        match parsed {
+            Ok(wf_file) => {
+                let wf: Workflow = wf_file.into();
+                debug!(
+                    name = %wf.name,
+                    id = %wf.id,
+                    path = %path.display(),
+                    "Parsed workflow definition from file"
+                );
+                workflows.push(wf);
+            }
+            Err(e) => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Skipping invalid workflow file"
+                );
+            }
+        }
+    }
+
+    workflows
 }
 
 #[cfg(test)]

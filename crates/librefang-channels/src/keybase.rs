@@ -64,7 +64,7 @@ impl KeybaseAdapter {
             username,
             paperkey: Zeroizing::new(paperkey),
             allowed_teams,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -90,7 +90,7 @@ impl KeybaseAdapter {
     #[allow(dead_code)]
     async fn list_conversations(
         &self,
-    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
         let payload = serde_json::json!({
             "method": "list",
             "params": {
@@ -122,7 +122,7 @@ impl KeybaseAdapter {
     async fn read_messages(
         &self,
         channel: &serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error + Send + Sync>> {
         let payload = serde_json::json!({
             "method": "read",
             "params": {
@@ -159,7 +159,7 @@ impl KeybaseAdapter {
         &self,
         channel: &serde_json::Value,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
         for chunk in chunks {
@@ -211,8 +211,10 @@ impl ChannelAdapter for KeybaseAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         info!("Keybase adapter starting for user {}", self.username);
 
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
@@ -432,7 +434,7 @@ impl ChannelAdapter for KeybaseAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(text) => text,
             _ => "(Unsupported content type)".to_string(),
@@ -456,12 +458,15 @@ impl ChannelAdapter for KeybaseAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Keybase does not expose a typing indicator via the JSON API
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

@@ -5,6 +5,7 @@
 
 mod bundled_agents;
 mod dotenv;
+mod http_client;
 pub mod i18n;
 mod launcher;
 mod mcp;
@@ -1653,7 +1654,7 @@ fn find_daemon_in_home(home_dir: &std::path::Path) -> Option<String> {
     let addr = info.listen_addr.replace("0.0.0.0", "127.0.0.1");
     let url = format!("http://{addr}/api/health");
 
-    let client = reqwest::blocking::Client::builder()
+    let client = crate::http_client::client_builder()
         .connect_timeout(std::time::Duration::from_secs(1))
         .timeout(std::time::Duration::from_secs(2))
         .build()
@@ -1681,7 +1682,7 @@ pub(crate) fn daemon_client() -> reqwest::blocking::Client {
 
 fn daemon_client_with_api_key(api_key: Option<&str>) -> reqwest::blocking::Client {
     let mut builder =
-        reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(120));
+        crate::http_client::client_builder().timeout(std::time::Duration::from_secs(120));
 
     if let Some(key) = api_key {
         let mut headers = reqwest::header::HeaderMap::new();
@@ -3176,7 +3177,7 @@ decay_rate = 0.05
             checks.push(serde_json::json!({"check": "cli_version", "status": "ok", "version": current_version}));
 
             // Try to fetch latest release from GitHub (best-effort, 3s timeout)
-            let version_client = reqwest::blocking::Client::builder()
+            let version_client = crate::http_client::client_builder()
                 .timeout(std::time::Duration::from_secs(3))
                 .build();
             if let Ok(client) = version_client {
@@ -5767,7 +5768,7 @@ pub(crate) fn test_api_key(provider: &str, env_var: &str) -> bool {
         Err(_) => return false,
     };
 
-    let client = match reqwest::blocking::Client::builder()
+    let client = match crate::http_client::client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
     {
@@ -8080,7 +8081,7 @@ fn fetch_latest_release_tag() -> Result<String, String> {
 }
 
 fn update_http_client() -> Result<reqwest::blocking::Client, String> {
-    reqwest::blocking::Client::builder()
+    crate::http_client::client_builder()
         .user_agent(format!("librefang-cli/{}", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(60))
         .build()

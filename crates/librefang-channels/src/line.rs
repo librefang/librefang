@@ -67,7 +67,7 @@ impl LineAdapter {
             channel_secret: Zeroizing::new(channel_secret),
             access_token: Zeroizing::new(access_token),
             webhook_port,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -114,7 +114,7 @@ impl LineAdapter {
     }
 
     /// Validate the channel access token by fetching the bot's own profile.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // Verify token by calling the bot info endpoint
         let resp = self
             .client
@@ -164,7 +164,7 @@ impl LineAdapter {
         &self,
         to: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
         for chunk in chunks {
@@ -202,7 +202,7 @@ impl LineAdapter {
         &self,
         reply_token: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chunks = split_message(text, MAX_MESSAGE_LEN);
         // LINE reply API allows up to 5 messages per reply
         let messages: Vec<serde_json::Value> = chunks
@@ -346,8 +346,10 @@ impl ChannelAdapter for LineAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let bot_name = self.validate().await?;
         info!("LINE adapter authenticated as {bot_name}");
@@ -385,7 +387,7 @@ impl ChannelAdapter for LineAdapter {
                                 channel_secret: secret.as_ref().clone(),
                                 access_token: Zeroizing::new(String::new()),
                                 webhook_port: 0,
-                                client: reqwest::Client::new(),
+                                client: crate::http_client::new_client(),
                                 account_id: None,
                                 shutdown_tx: Arc::new(watch::channel(false).0),
                                 shutdown_rx: watch::channel(false).1,
@@ -452,7 +454,7 @@ impl ChannelAdapter for LineAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_push_message(&user.platform_id, &text).await?;
@@ -499,12 +501,15 @@ impl ChannelAdapter for LineAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // LINE does not support typing indicators via REST API
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

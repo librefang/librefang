@@ -1,7 +1,7 @@
 //! Config hot-reload — diffs two `KernelConfig` instances and produces a `ReloadPlan`.
 //!
 //! **Hot-reload safe**: channels, skills, usage footer, web config, browser,
-//! approval policy, cron settings, webhook triggers, extensions.
+//! approval policy, cron settings, webhook triggers, extensions, tool policy.
 //!
 //! **No-op** (informational only): log_level, language, mode.
 //!
@@ -45,6 +45,8 @@ pub enum HotAction {
     ReloadProviderUrls,
     /// Default model changed — update in-place without restart.
     UpdateDefaultModel,
+    /// Tool policy changed — update tool filtering rules.
+    UpdateToolPolicy,
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +250,10 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
 
     if field_changed(&old.provider_urls, &new.provider_urls) {
         plan.hot_actions.push(HotAction::ReloadProviderUrls);
+    }
+
+    if field_changed(&old.tool_policy, &new.tool_policy) {
+        plan.hot_actions.push(HotAction::UpdateToolPolicy);
     }
 
     if field_changed(&old.provider_api_keys, &new.provider_api_keys) {
@@ -504,6 +510,20 @@ mod tests {
         let plan = build_reload_plan(&a, &b);
         assert!(!plan.restart_required);
         assert!(plan.hot_actions.contains(&HotAction::ReloadProviderUrls));
+    }
+
+    #[test]
+    fn test_tool_policy_hot_reload() {
+        use librefang_types::tool_policy::{PolicyEffect, ToolPolicyRule};
+        let a = default_cfg();
+        let mut b = default_cfg();
+        b.tool_policy.global_rules.push(ToolPolicyRule {
+            pattern: "shell_*".to_string(),
+            effect: PolicyEffect::Deny,
+        });
+        let plan = build_reload_plan(&a, &b);
+        assert!(!plan.restart_required);
+        assert!(plan.hot_actions.contains(&HotAction::UpdateToolPolicy));
     }
 
     // -----------------------------------------------------------------------

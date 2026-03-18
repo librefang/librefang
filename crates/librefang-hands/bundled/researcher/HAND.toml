@@ -5,6 +5,10 @@ category = "productivity"
 icon = "\U0001F9EA"
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
+[routing]
+aliases = ["deep research", "systematic review", "landscape analysis", "exhaustive investigation"]
+weak_aliases = ["research", "fact check", "cross reference"]
+
 # ─── Configurable settings ───────────────────────────────────────────────────
 
 [[settings]]

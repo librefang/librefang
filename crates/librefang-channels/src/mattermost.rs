@@ -57,7 +57,7 @@ impl MattermostAdapter {
             server_url: server_url.trim_end_matches('/').to_string(),
             token: Zeroizing::new(token),
             allowed_channels,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -71,7 +71,7 @@ impl MattermostAdapter {
     }
 
     /// Validate the token by calling `GET /api/v4/users/me`.
-    async fn validate_token(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate_token(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/v4/users/me", self.server_url);
         let resp = self
             .client
@@ -111,7 +111,7 @@ impl MattermostAdapter {
         &self,
         channel_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/api/v4/posts", self.server_url);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -246,8 +246,10 @@ impl ChannelAdapter for MattermostAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate token and get bot user ID
         let user_id = self.validate_token().await?;
         *self.bot_user_id.write().await = Some(user_id);
@@ -404,7 +406,7 @@ impl ChannelAdapter for MattermostAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let channel_id = &user.platform_id;
         match content {
             ChannelContent::Text(text) => {
@@ -418,7 +420,10 @@ impl ChannelAdapter for MattermostAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Mattermost supports typing indicators via the WebSocket, but since we
         // only hold a WebSocket reader in the spawn loop, we use the REST API
         // userTyping action via a POST to /api/v4/users/me/typing.
@@ -443,7 +448,7 @@ impl ChannelAdapter for MattermostAdapter {
         user: &ChannelUser,
         content: ChannelContent,
         thread_id: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let channel_id = &user.platform_id;
         let text = match content {
             ChannelContent::Text(t) => t,
@@ -478,7 +483,7 @@ impl ChannelAdapter for MattermostAdapter {
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

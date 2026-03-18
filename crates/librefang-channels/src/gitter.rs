@@ -51,7 +51,7 @@ impl GitterAdapter {
         Self {
             token: Zeroizing::new(token),
             room_id,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -64,7 +64,7 @@ impl GitterAdapter {
     }
 
     /// Validate token by fetching the authenticated user.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = "https://api.gitter.im/v1/user";
         let resp = self
             .client
@@ -89,7 +89,7 @@ impl GitterAdapter {
     }
 
     /// Fetch room info to resolve display name.
-    async fn get_room_name(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn get_room_name(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/{}", GITTER_API_URL, self.room_id);
         let resp = self
             .client
@@ -108,7 +108,10 @@ impl GitterAdapter {
     }
 
     /// Send a text message to the room via REST API.
-    async fn api_send_message(&self, text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    async fn api_send_message(
+        &self,
+        text: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/{}/chatMessages", GITTER_API_URL, self.room_id);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -166,8 +169,10 @@ impl ChannelAdapter for GitterAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         let own_username = self.validate().await?;
         let room_name = self.get_room_name().await.unwrap_or_default();
         info!("Gitter adapter authenticated as {own_username} in room {room_name}");
@@ -179,10 +184,10 @@ impl ChannelAdapter for GitterAdapter {
         let account_id = self.account_id.clone();
 
         tokio::spawn(async move {
-            let stream_client = reqwest::Client::builder()
+            let stream_client = crate::http_client::client_builder()
                 .timeout(Duration::from_secs(0)) // No timeout for streaming
                 .build()
-                .unwrap_or_default();
+                .expect("HTTP client build");
 
             let mut backoff = Duration::from_secs(1);
 
@@ -344,7 +349,7 @@ impl ChannelAdapter for GitterAdapter {
         &self,
         _user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let text = match content {
             ChannelContent::Text(t) => t,
             _ => "(Unsupported content type)".to_string(),
@@ -352,12 +357,15 @@ impl ChannelAdapter for GitterAdapter {
         self.api_send_message(&text).await
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Gitter does not have a typing indicator API.
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }

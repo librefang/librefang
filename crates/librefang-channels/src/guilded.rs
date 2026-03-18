@@ -57,7 +57,7 @@ impl GuildedAdapter {
         Self {
             bot_token: Zeroizing::new(bot_token),
             server_ids,
-            client: reqwest::Client::new(),
+            client: crate::http_client::new_client(),
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
@@ -70,7 +70,7 @@ impl GuildedAdapter {
     }
 
     /// Validate credentials by fetching the bot's own user info.
-    async fn validate(&self) -> Result<String, Box<dyn std::error::Error>> {
+    async fn validate(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/users/@me", GUILDED_API_BASE);
         let resp = self
             .client
@@ -93,7 +93,7 @@ impl GuildedAdapter {
         &self,
         channel_id: &str,
         text: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/channels/{}/messages", GUILDED_API_BASE, channel_id);
         let chunks = split_message(text, MAX_MESSAGE_LEN);
 
@@ -139,8 +139,10 @@ impl ChannelAdapter for GuildedAdapter {
 
     async fn start(
         &self,
-    ) -> Result<Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>, Box<dyn std::error::Error>>
-    {
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
         // Validate credentials
         let bot_id = self.validate().await?;
         info!("Guilded adapter authenticated as bot {bot_id}");
@@ -338,7 +340,7 @@ impl ChannelAdapter for GuildedAdapter {
         &self,
         user: &ChannelUser,
         content: ChannelContent,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         match content {
             ChannelContent::Text(text) => {
                 self.api_send_message(&user.platform_id, &text).await?;
@@ -351,12 +353,15 @@ impl ChannelAdapter for GuildedAdapter {
         Ok(())
     }
 
-    async fn send_typing(&self, _user: &ChannelUser) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_typing(
+        &self,
+        _user: &ChannelUser,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Guilded does not expose a public typing indicator API for bots
         Ok(())
     }
 
-    async fn stop(&self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
     }
