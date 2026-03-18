@@ -672,8 +672,8 @@ pub(crate) async fn stream_gemini_sse(
 
     // Thinking blocks come first (matches Anthropic convention).
     if !thinking_content.is_empty() {
-        let provider_metadata = thinking_thought_sig
-            .map(|sig| serde_json::json!({ "thought_signature": sig }));
+        let provider_metadata =
+            thinking_thought_sig.map(|sig| serde_json::json!({ "thought_signature": sig }));
         content.push(ContentBlock::Thinking {
             thinking: thinking_content,
             provider_metadata,
@@ -1023,8 +1023,8 @@ impl LlmDriver for GeminiDriver {
 
             // Thinking blocks come first (matches Anthropic convention).
             if !thinking_content.is_empty() {
-                let provider_metadata = thinking_thought_sig
-                    .map(|sig| serde_json::json!({ "thought_signature": sig }));
+                let provider_metadata =
+                    thinking_thought_sig.map(|sig| serde_json::json!({ "thought_signature": sig }));
                 content.push(ContentBlock::Thinking {
                     thinking: thinking_content,
                     provider_metadata,
