@@ -249,6 +249,20 @@
     "configureManually": "手动配置",
     "dismiss": "关闭"
   },
+  "provider": {
+    "bannerText": "尚未配置 AI 提供商 — 智能体已暂停运行",
+    "bannerAction": "配置提供商",
+    "tierFree": "免费 / 本地",
+    "tierRecommended": "推荐",
+    "tierOther": "其他提供商",
+    "getKey": "获取 API Key",
+    "ollamaDetected": "已检测到本机 Ollama",
+    "ollamaNotDetected": "未检测到 Ollama",
+    "ollamaActivate": "激活 Ollama",
+    "activateSuccess": "提供商已激活 — 智能体恢复运行中",
+    "setupTitle": "AI 提供商设置",
+    "setupDesc": "配置至少一个 AI 提供商以激活智能体。"
+  },
   "overview": {
     "connectionError": "连接错误",
     "stepsCompleted": "已完成 {count} / 5 步",
@@ -538,6 +552,7 @@
     "agentSpawn": "创建智能体",
     "unnamed": "未命名",
     "genericAgent": "智能体",
+    "waitingProvider": "等待 AI 配置",
     "fileBytes": "{count} 字节",
     "loadAgentsFailed": "无法加载智能体。守护进程是否正在运行？",
     "loadAgentsFailedShort": "无法加载智能体。",

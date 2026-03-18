@@ -249,6 +249,20 @@
     "configureManually": "Configure Manually",
     "dismiss": "Dismiss"
   },
+  "provider": {
+    "bannerText": "No AI provider configured — agents are paused.",
+    "bannerAction": "Configure Provider",
+    "tierFree": "Free / Local",
+    "tierRecommended": "Recommended",
+    "tierOther": "Other Providers",
+    "getKey": "Get API Key",
+    "ollamaDetected": "Ollama detected on this machine",
+    "ollamaNotDetected": "Ollama not detected",
+    "ollamaActivate": "Activate Ollama",
+    "activateSuccess": "Provider activated — agents resuming",
+    "setupTitle": "AI Provider Setup",
+    "setupDesc": "Configure at least one AI provider to activate your agents."
+  },
   "overview": {
     "connectionError": "Connection Error",
     "stepsCompleted": "{count} of 5 steps completed",
@@ -538,6 +552,7 @@
     "agentSpawn": "Agent Spawn",
     "unnamed": "Unnamed",
     "genericAgent": "agent",
+    "waitingProvider": "Waiting for AI provider",
     "fileBytes": "{count} bytes",
     "loadAgentsFailed": "Could not load agents. Is the daemon running?",
     "loadAgentsFailedShort": "Could not load agents.",
