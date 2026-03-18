@@ -252,7 +252,7 @@ fn attach_probe_result(
     entry: &mut serde_json::Value,
     probe: &librefang_runtime::provider_health::ProbeResult,
     provider_id: &str,
-    catalog: &std::sync::RwLock<librefang_types::model_catalog::ModelCatalog>,
+    catalog: &std::sync::RwLock<librefang_runtime::model_catalog::ModelCatalog>,
 ) {
     entry["is_local"] = serde_json::json!(true);
     entry["reachable"] = serde_json::json!(probe.reachable);
