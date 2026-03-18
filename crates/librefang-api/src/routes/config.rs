@@ -517,6 +517,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "session_ttl_hours": config.proactive_memory.session_ttl_hours,
         "confidence_decay_rate": config.proactive_memory.confidence_decay_rate,
         "duplicate_threshold": config.proactive_memory.duplicate_threshold,
+        "max_memories_per_agent": config.proactive_memory.max_memories_per_agent,
     });
 
     // ── Network (redact shared_secret) ──
@@ -1212,7 +1213,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "max_retrieve": "number", "extraction_threshold": "number",
         "extraction_model": "string", "extract_categories": "array",
         "session_ttl_hours": "number", "confidence_decay_rate": "number",
-        "duplicate_threshold": "number"
+        "duplicate_threshold": "number", "max_memories_per_agent": "number"
     }});
     sec!("web", { "fields": {
         "search_provider": { "type": "select", "options": ["brave", "tavily", "perplexity", "duck_duck_go", "auto"] },

@@ -2028,6 +2028,7 @@ max_retrieve = 5
 # session_ttl_hours = 24
 # duplicate_threshold = 0.85
 # confidence_decay_rate = 0.05
+# max_memories_per_agent = 1000
 "#
         );
         std::fs::write(&config_path, &default_config).unwrap_or_else(|e| {
@@ -3162,6 +3163,7 @@ max_retrieve = 5
 # session_ttl_hours = 24
 # duplicate_threshold = 0.85
 # confidence_decay_rate = 0.05
+# max_memories_per_agent = 1000
 "#
                 );
                 let _ = std::fs::create_dir_all(&librefang_dir);

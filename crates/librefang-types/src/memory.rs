@@ -147,6 +147,15 @@ pub struct ProactiveMemoryConfig {
     /// not accessed, following exponential decay: `conf * e^(-rate * days)`.
     /// Default: 0.01 (very slow — takes ~70 days to halve).
     pub confidence_decay_rate: f64,
+    /// Maximum number of memories allowed per agent. When adding new memories
+    /// would exceed this cap, the oldest/lowest-confidence memories are evicted
+    /// first. Default: 1000. Set to 0 to disable the cap.
+    #[serde(default = "default_max_memories_per_agent")]
+    pub max_memories_per_agent: usize,
+}
+
+fn default_max_memories_per_agent() -> usize {
+    1000
 }
 
 impl Default for ProactiveMemoryConfig {
@@ -166,6 +175,7 @@ impl Default for ProactiveMemoryConfig {
             session_ttl_hours: 24,
             duplicate_threshold: 0.5,
             confidence_decay_rate: 0.01,
+            max_memories_per_agent: 1000,
         }
     }
 }
@@ -363,7 +373,7 @@ pub fn text_similarity(a: &str, b: &str) -> f32 {
     let words_a: std::collections::HashSet<&str> = a.split_whitespace().collect();
     let words_b: std::collections::HashSet<&str> = b.split_whitespace().collect();
     if words_a.is_empty() && words_b.is_empty() {
-        return 1.0;
+        return 0.0;
     }
     let intersection = words_a.intersection(&words_b).count();
     let union = words_a.union(&words_b).count();

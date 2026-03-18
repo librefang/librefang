@@ -231,9 +231,13 @@ impl MemoryExtractor for LlmMemoryExtractor {
         messages: &[serde_json::Value],
     ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
         // Build a condensed version of the conversation for the LLM
+        // Skip system messages — only include user and assistant roles.
         let mut conversation_text = String::new();
         for msg in messages {
             let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+            if role == "system" {
+                continue;
+            }
             let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if !content.is_empty() {
                 conversation_text.push_str(&format!("{role}: {content}\n"));
@@ -358,18 +362,33 @@ impl MemoryExtractor for LlmMemoryExtractor {
     }
 }
 
+/// Strip markdown code blocks from LLM output.
+///
+/// Handles case-insensitive language tags (```json, ```JSON, ```Json, etc.),
+/// leading text before the code block, and extracts the content between the
+/// first ``` and last ```.
+fn strip_code_block(text: &str) -> &str {
+    let trimmed = text.trim();
+    // Find first ``` and last ```, extract content between them
+    if let Some(start) = trimmed.find("```") {
+        let after_start = &trimmed[start + 3..];
+        // Skip language tag (first line after ```)
+        let content_start = after_start.find('\n').map(|i| i + 1).unwrap_or(0);
+        let content = &after_start[content_start..];
+        if let Some(end) = content.rfind("```") {
+            return content[..end].trim();
+        }
+    }
+    trimmed
+}
+
 /// Parse the LLM's decision response into a MemoryAction.
 fn parse_decision_response(
     text: &str,
     existing_memories: &[MemoryFragment],
 ) -> librefang_types::error::LibreFangResult<MemoryAction> {
-    // Strip markdown code blocks
-    let json_str = text
-        .trim()
-        .strip_prefix("```json")
-        .or_else(|| text.trim().strip_prefix("```"))
-        .unwrap_or(text.trim());
-    let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+    // Strip markdown code blocks (case-insensitive, handles leading text)
+    let json_str = strip_code_block(text);
 
     let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
 
@@ -391,16 +410,11 @@ fn parse_decision_response(
                 }
             }
 
-            // If ID is invalid/missing, use the first existing memory
-            if let Some(first) = existing_memories.first() {
-                Ok(MemoryAction::Update {
-                    existing_id: first.id.to_string(),
-                })
-            } else {
-                Ok(MemoryAction::Add)
-            }
+            // If ID is invalid/missing, fall back to ADD rather than blindly
+            // updating the first candidate — let consolidation merge later.
+            Ok(MemoryAction::Add)
         }
-        _ => Ok(MemoryAction::Add),
+        _ => Ok(MemoryAction::Noop),
     }
 }
 
@@ -414,13 +428,8 @@ fn parse_llm_extraction_response(
 ) -> librefang_types::error::LibreFangResult<ExtractionResult> {
     use librefang_types::memory::RelationTriple;
 
-    // Strip markdown code blocks
-    let json_str = text
-        .trim()
-        .strip_prefix("```json")
-        .or_else(|| text.trim().strip_prefix("```"))
-        .unwrap_or(text.trim());
-    let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+    // Strip markdown code blocks (case-insensitive, handles leading text)
+    let json_str = strip_code_block(text);
 
     let parsed: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
 
@@ -651,9 +660,9 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_decision_response_invalid_defaults_to_add() {
+    fn test_parse_decision_response_invalid_defaults_to_noop() {
         let fragments = vec![];
         let result = parse_decision_response("garbage", &fragments).unwrap();
-        assert_eq!(result, MemoryAction::Add);
+        assert_eq!(result, MemoryAction::Noop);
     }
 }

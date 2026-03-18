@@ -218,6 +218,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route("/memory/search", axum::routing::get(routes::memory_search))
         .route("/memory/stats", axum::routing::get(routes::memory_stats))
         .route(
+            "/memory/cleanup",
+            axum::routing::post(routes::memory_cleanup),
+        )
+        .route(
             "/memory/items/{memory_id}",
             axum::routing::put(routes::memory_update).delete(routes::memory_delete),
         )

@@ -2,13 +2,12 @@
 
 use std::sync::Arc;
 
+use super::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use librefang_types::memory::ProactiveMemory;
-
-use super::AppState;
 
 // ---------------------------------------------------------------------------
 // Query / path helpers
@@ -28,6 +27,10 @@ fn default_limit() -> usize {
 #[derive(serde::Deserialize)]
 pub struct MemoryListQuery {
     pub category: Option<String>,
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default = "default_limit")]
+    pub limit: usize,
 }
 
 #[derive(serde::Deserialize)]
@@ -105,15 +108,17 @@ pub async fn memory_search(
 // GET /api/memory?category=...
 // ---------------------------------------------------------------------------
 
-/// List all proactive memories, optionally filtered by category.
+/// List all proactive memories, optionally filtered by category, with pagination.
 #[utoipa::path(
     get,
     path = "/api/memory",
     tag = "proactive-memory",
     params(
         ("category" = Option<String>, Query, description = "Optional category filter"),
+        ("offset" = Option<usize>, Query, description = "Pagination offset (default 0)"),
+        ("limit" = Option<usize>, Query, description = "Page size (default 10, max 100)"),
     ),
-    responses((status = 200, description = "Memory list", body = serde_json::Value))
+    responses((status = 200, description = "Paginated memory list", body = serde_json::Value))
 )]
 pub async fn memory_list(
     State(state): State<Arc<AppState>>,
@@ -124,12 +129,24 @@ pub async fn memory_list(
         Err(e) => return e,
     };
 
+    let limit = params.limit.min(100);
+    let offset = params.offset;
+
     // List across ALL agents so the dashboard shows all memories
     match store.list_all(params.category.as_deref()).await {
-        Ok(items) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "memories": items })),
-        ),
+        Ok(items) => {
+            let total = items.len();
+            let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "memories": page,
+                    "total": total,
+                    "offset": offset,
+                    "limit": limit,
+                })),
+            )
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -180,7 +197,7 @@ pub async fn memory_get_user(
     path = "/api/memory",
     tag = "proactive-memory",
     request_body = serde_json::Value,
-    responses((status = 200, description = "Memories added", body = serde_json::Value))
+    responses((status = 201, description = "Memories added", body = serde_json::Value))
 )]
 pub async fn memory_add(
     State(state): State<Arc<AppState>>,
@@ -200,7 +217,7 @@ pub async fn memory_add(
 
     match store.add(&body.messages, &effective_id).await {
         Ok(items) => (
-            StatusCode::OK,
+            StatusCode::CREATED,
             Json(serde_json::json!({ "added": items.len(), "memories": items })),
         ),
         Err(e) => (
@@ -232,6 +249,13 @@ pub async fn memory_update(
         Ok(s) => s,
         Err(e) => return e,
     };
+
+    if body.content.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Content must not be empty"})),
+        );
+    }
 
     // Look up the real agent_id that owns this memory so KV cleanup works correctly
     let real_agent_id = match store.find_agent_id_for_memory(&memory_id) {
@@ -569,14 +593,17 @@ pub async fn memory_history(
     };
 
     match store.history(&memory_id) {
-        Ok(history) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "memory_id": memory_id,
-                "versions": history,
-                "version_count": history.len(),
-            })),
-        ),
+        Ok(history) => {
+            let count = history.len();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "memory_id": memory_id,
+                    "versions": history,
+                    "version_count": count,
+                })),
+            )
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e.to_string()})),
@@ -611,6 +638,42 @@ pub async fn memory_consolidate(
             Json(serde_json::json!({
                 "consolidated": true,
                 "merged_count": merged,
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/memory/cleanup
+// ---------------------------------------------------------------------------
+
+/// Clean up expired session-level memories across all agents.
+///
+/// Deletes session memories older than `session_ttl_hours` (default 24).
+/// Only session-level memories are affected — user and agent memories are persistent.
+#[utoipa::path(
+    post,
+    path = "/api/memory/cleanup",
+    tag = "proactive-memory",
+    responses((status = 200, description = "Cleanup result", body = serde_json::Value))
+)]
+pub async fn memory_cleanup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let store = match get_pm_store(&state) {
+        Ok(s) => s,
+        Err(e) => return e,
+    };
+
+    match store.cleanup_expired() {
+        Ok(deleted) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "cleaned_up": true,
+                "deleted_count": deleted,
+                "session_ttl_hours": store.config().session_ttl_hours,
             })),
         ),
         Err(e) => (

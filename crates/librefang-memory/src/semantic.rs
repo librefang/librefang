@@ -508,6 +508,28 @@ impl SemanticStore {
         Ok(count as u64)
     }
 
+    /// Soft-delete session memories older than a given timestamp across ALL agents.
+    ///
+    /// Unlike `forget_older_than`, this is not scoped to a single agent — it cleans up
+    /// expired session memories globally, which is useful for periodic TTL enforcement.
+    pub fn forget_session_older_than_global(
+        &self,
+        scope: &str,
+        before: chrono::DateTime<Utc>,
+    ) -> LibreFangResult<u64> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let count = conn
+            .execute(
+                "UPDATE memories SET deleted = 1 WHERE scope = ?1 AND created_at < ?2 AND deleted = 0",
+                rusqlite::params![scope, before.to_rfc3339()],
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        Ok(count as u64)
+    }
+
     /// Count non-deleted memories for a specific agent, optionally filtered by scope.
     pub fn count(&self, agent_id: AgentId, scope: Option<&str>) -> LibreFangResult<u64> {
         let conn = self
@@ -529,6 +551,43 @@ impl SemanticStore {
         }
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         Ok(count as u64)
+    }
+
+    /// Return the IDs of the lowest-confidence memories for a given agent,
+    /// ordered by confidence ASC then created_at ASC (oldest first as tiebreaker).
+    /// Used by the per-agent memory cap to evict the weakest memories.
+    pub fn lowest_confidence(
+        &self,
+        agent_id: AgentId,
+        limit: usize,
+    ) -> LibreFangResult<Vec<MemoryId>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id FROM memories WHERE agent_id = ?1 AND deleted = 0 \
+                 ORDER BY confidence ASC, created_at ASC LIMIT ?2",
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![agent_id.0.to_string(), limit as i64],
+                |row| {
+                    let id_str: String = row.get(0)?;
+                    Ok(id_str)
+                },
+            )
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let id_str = row.map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            let uuid = uuid::Uuid::parse_str(&id_str)
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+            ids.push(MemoryId(uuid));
+        }
+        Ok(ids)
     }
 
     /// Count memories across ALL agents, optionally filtered by scope.

@@ -112,19 +112,15 @@ pub struct ProactiveMemoryStore {
     /// When absent, falls back to LIKE text matching.
     embedding: Option<Arc<dyn EmbeddingFn>>,
     /// Per-agent counters for auto-consolidation (runs every 10 auto_memorize calls per agent).
-    consolidation_counters: Mutex<HashMap<String, u32>>,
+    consolidation_counters: Arc<Mutex<HashMap<String, u32>>>,
     /// Timestamp of the last confidence decay run (at most once per hour).
-    last_decay_run: Mutex<Option<chrono::DateTime<Utc>>>,
+    last_decay_run: Arc<Mutex<Option<chrono::DateTime<Utc>>>>,
+    /// Timestamp of the last session TTL cleanup run (at most once per hour).
+    last_cleanup_run: Arc<Mutex<Option<chrono::DateTime<Utc>>>>,
 }
 
 impl Clone for ProactiveMemoryStore {
     fn clone(&self) -> Self {
-        let counters = self
-            .consolidation_counters
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-        let last_decay = self.last_decay_run.lock().map(|g| *g).unwrap_or(None);
         Self {
             substrate: self.substrate.clone(),
             structured: self.structured.clone(),
@@ -133,8 +129,9 @@ impl Clone for ProactiveMemoryStore {
             config: self.config.clone(),
             extractor: self.extractor.clone(),
             embedding: self.embedding.clone(),
-            consolidation_counters: Mutex::new(counters),
-            last_decay_run: Mutex::new(last_decay),
+            consolidation_counters: Arc::clone(&self.consolidation_counters),
+            last_decay_run: Arc::clone(&self.last_decay_run),
+            last_cleanup_run: Arc::clone(&self.last_cleanup_run),
         }
     }
 }
@@ -152,8 +149,9 @@ impl ProactiveMemoryStore {
             config,
             extractor: Arc::new(DefaultMemoryExtractor),
             embedding: None,
-            consolidation_counters: Mutex::new(HashMap::new()),
-            last_decay_run: Mutex::new(None),
+            consolidation_counters: Arc::new(Mutex::new(HashMap::new())),
+            last_decay_run: Arc::new(Mutex::new(None)),
+            last_cleanup_run: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -173,8 +171,9 @@ impl ProactiveMemoryStore {
             config,
             extractor,
             embedding: None,
-            consolidation_counters: Mutex::new(HashMap::new()),
-            last_decay_run: Mutex::new(None),
+            consolidation_counters: Arc::new(Mutex::new(HashMap::new())),
+            last_decay_run: Arc::new(Mutex::new(None)),
+            last_cleanup_run: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -239,13 +238,28 @@ impl ProactiveMemoryStore {
                 ))
             })
             .map_err(|e| LibreFangError::Memory(e.to_string()))?
-            .filter_map(|r| r.ok())
+            .filter_map(|r| match r {
+                Ok(row) => Some(row),
+                Err(e) => {
+                    tracing::warn!("Failed to read memory row during confidence decay: {}", e);
+                    None
+                }
+            })
             .collect();
 
         for (id, current_confidence, accessed_str, access_count) in &rows {
-            let accessed_at = chrono::DateTime::parse_from_rfc3339(accessed_str)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or(now);
+            let accessed_at = match chrono::DateTime::parse_from_rfc3339(accessed_str) {
+                Ok(dt) => dt.with_timezone(&Utc),
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to parse accessed_at '{}' for memory {}, skipping decay: {}",
+                        accessed_str,
+                        id,
+                        e
+                    );
+                    continue;
+                }
+            };
 
             let days_since_access = (now - accessed_at).num_seconds() as f64 / 86400.0;
             if days_since_access <= 0.0 {
@@ -281,26 +295,140 @@ impl ProactiveMemoryStore {
     /// Run confidence decay if at least one hour has elapsed since the last run.
     fn maybe_decay_confidence(&self) {
         let now = Utc::now();
-        let should_run = {
-            let guard = self
-                .last_decay_run
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            match *guard {
-                Some(last) => (now - last) >= chrono::Duration::hours(1),
-                None => true,
-            }
+        // Hold the lock for the entire check-and-update to avoid TOCTOU race
+        let mut guard = self
+            .last_decay_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let should_run = match *guard {
+            Some(last) => (now - last) >= chrono::Duration::hours(1),
+            None => true,
         };
 
         if should_run {
+            // Update timestamp before releasing the lock so concurrent callers won't
+            // also decide to run decay.
+            *guard = Some(now);
+            // Drop the lock before the potentially slow decay_confidence() call
+            drop(guard);
+
             if let Err(e) = self.decay_confidence() {
                 tracing::debug!("Confidence decay failed (non-fatal): {}", e);
             }
-            let mut guard = self
-                .last_decay_run
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+        }
+    }
+
+    /// Delete session-level memories older than `session_ttl_hours` across ALL agents.
+    ///
+    /// Only deletes "session" level memories — user and agent level memories are
+    /// persistent by nature and are not affected. Returns the count of deleted items.
+    ///
+    /// This is the global variant of `cleanup_expired_sessions` (which is per-agent).
+    pub fn cleanup_expired(&self) -> LibreFangResult<u64> {
+        let ttl_hours = self.config.session_ttl_hours;
+        if ttl_hours == 0 {
+            return Ok(0);
+        }
+
+        let cutoff = Utc::now() - chrono::Duration::hours(ttl_hours as i64);
+
+        // Soft-delete expired session memories in the semantic store (across all agents)
+        let count = self
+            .semantic
+            .forget_session_older_than_global(scopes::SESSION, cutoff)?;
+
+        // Also clean up expired session KV entries in the structured store.
+        // We query the semantic store for distinct agent_ids that had session memories,
+        // but since we already deleted them above, we scan KV entries directly.
+        let conn = self
+            .semantic
+            .conn()
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        // Collect distinct agent_ids that have any memories
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT agent_id FROM memories WHERE deleted = 0")
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let agent_ids: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| LibreFangError::Memory(e.to_string()))?
+            .filter_map(|r| r.ok())
+            .collect();
+        drop(stmt);
+        drop(conn);
+
+        // For each agent, clean up expired session KV entries
+        for aid_str in &agent_ids {
+            if let Ok(aid) = uuid::Uuid::parse_str(aid_str) {
+                let agent_id = AgentId(aid);
+                if let Ok(kv_pairs) = self.structured.list_kv(agent_id) {
+                    for (key, value) in kv_pairs {
+                        if !key.starts_with("memory:") {
+                            continue;
+                        }
+                        let level_str = value
+                            .get("level")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Session");
+                        if MemoryLevel::from(level_str) != MemoryLevel::Session {
+                            continue;
+                        }
+                        let created_at_str = value.get("created_at").and_then(|v| v.as_str());
+                        if let Some(ts) = created_at_str {
+                            if let Ok(created) = chrono::DateTime::parse_from_rfc3339(ts) {
+                                if created.with_timezone(&Utc) < cutoff {
+                                    if let Err(e) = self.structured.delete(agent_id, &key) {
+                                        tracing::warn!(
+                                            "Failed to delete expired session KV entry '{}': {}",
+                                            key,
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if count > 0 {
+            tracing::debug!(
+                "Session TTL cleanup: deleted {} expired session memories (ttl={}h)",
+                count,
+                ttl_hours
+            );
+        }
+
+        Ok(count)
+    }
+
+    /// Run session TTL cleanup if at least one hour has elapsed since the last run.
+    fn maybe_cleanup_expired(&self) {
+        let now = Utc::now();
+        // Hold the lock for the entire check-and-update to avoid TOCTOU race
+        let mut guard = self
+            .last_cleanup_run
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let should_run = match *guard {
+            Some(last) => (now - last) >= chrono::Duration::hours(1),
+            None => true,
+        };
+
+        if should_run {
+            // Update timestamp before releasing the lock so concurrent callers won't
+            // also decide to run cleanup.
             *guard = Some(now);
+            // Drop the lock before the potentially slow cleanup_expired() call
+            drop(guard);
+
+            if let Err(e) = self.cleanup_expired() {
+                tracing::debug!("Session TTL cleanup failed (non-fatal): {}", e);
+            }
         }
     }
 
@@ -356,6 +484,22 @@ impl ProactiveMemoryStore {
             let level = MemoryLevel::from(item.level.as_str());
             let scope = level.scope_str();
 
+            // Skip duplicates: check if a memory with very similar content already exists
+            let filter = Some(MemoryFilter::agent(aid));
+            let existing = self.semantic.recall(&item.content, 5, filter)?;
+            let is_duplicate = existing.iter().any(|frag| {
+                let sim =
+                    text_similarity(&item.content.to_lowercase(), &frag.content.to_lowercase());
+                sim > 0.9
+            });
+            if is_duplicate {
+                tracing::debug!(
+                    "Skipping duplicate import: {}",
+                    truncate_for_log(&item.content, 80)
+                );
+                continue;
+            }
+
             let mut metadata: HashMap<String, serde_json::Value> = if item.metadata.is_object() {
                 serde_json::from_value(item.metadata).unwrap_or_default()
             } else {
@@ -392,9 +536,16 @@ impl ProactiveMemoryStore {
             // Also store in KV for consistency
             let mem_item = MemoryItem::new(item.content, level);
             if let Ok(json) = serde_json::to_value(&mem_item) {
-                let _ = self
+                if let Err(e) = self
                     .structured
-                    .set(aid, &format!("memory:{}", mem_id), json);
+                    .set(aid, &format!("memory:{}", mem_id), json)
+                {
+                    tracing::warn!(
+                        "Failed to set KV entry for imported memory {}: {}",
+                        mem_id,
+                        e
+                    );
+                }
             }
 
             imported += 1;
@@ -539,9 +690,12 @@ impl ProactiveMemoryStore {
                 )?;
                 // Also store in KV using the semantic store's ID for consistency
                 if let Ok(json) = serde_json::to_value(item) {
-                    let _ = self
-                        .structured
-                        .set(agent_id, &format!("memory:{}", mem_id), json);
+                    if let Err(e) =
+                        self.structured
+                            .set(agent_id, &format!("memory:{}", mem_id), json)
+                    {
+                        tracing::warn!("Failed to set KV entry for new memory {}: {}", mem_id, e);
+                    }
                 }
                 tracing::debug!(
                     "Memory decision: ADD new: {}",
@@ -616,9 +770,16 @@ impl ProactiveMemoryStore {
                     .update_content(old_mid, &item.content, Some(metadata))?;
                 // Also update in KV so get()/list() reflect the change
                 if let Ok(json) = serde_json::to_value(item) {
-                    let _ = self
-                        .structured
-                        .set(agent_id, &format!("memory:{}", existing_id), json);
+                    if let Err(e) =
+                        self.structured
+                            .set(agent_id, &format!("memory:{}", existing_id), json)
+                    {
+                        tracing::warn!(
+                            "Failed to update KV entry for memory {}: {}",
+                            existing_id,
+                            e
+                        );
+                    }
                 }
 
                 if conflict.is_some() {
@@ -643,6 +804,52 @@ impl ProactiveMemoryStore {
                 }))
             }
         }
+    }
+
+    /// Evict the lowest-confidence memories for an agent if adding `new_count`
+    /// memories would exceed the configured `max_memories_per_agent` cap.
+    ///
+    /// Does nothing when the cap is 0 (disabled) or when there is still room.
+    fn evict_if_over_cap(&self, agent_id: AgentId, new_count: usize) -> LibreFangResult<()> {
+        let max = self.config.max_memories_per_agent;
+        if max == 0 {
+            return Ok(()); // cap disabled
+        }
+
+        let current = self.semantic.count(agent_id, None)? as usize;
+        let total_after = current + new_count;
+        if total_after <= max {
+            return Ok(()); // still within budget
+        }
+
+        let to_evict = total_after - max;
+        tracing::debug!(
+            agent_id = %agent_id,
+            current_count = current,
+            new_count = new_count,
+            max = max,
+            evicting = to_evict,
+            "Per-agent memory cap exceeded, evicting lowest-confidence memories"
+        );
+
+        let ids = self.semantic.lowest_confidence(agent_id, to_evict)?;
+        for id in &ids {
+            self.semantic.forget(*id)?;
+            // Also clean up the corresponding KV entry
+            if let Err(e) = self.structured.delete(agent_id, &format!("memory:{}", id)) {
+                tracing::debug!(
+                    "KV cleanup for evicted memory {} failed (non-fatal): {}",
+                    id,
+                    e
+                );
+            }
+        }
+        tracing::debug!(
+            agent_id = %agent_id,
+            evicted = ids.len(),
+            "Memory cap eviction complete"
+        );
+        Ok(())
     }
 
     /// Store extracted relation triples into the knowledge graph.
@@ -849,7 +1056,8 @@ impl ProactiveMemoryStore {
         let total = user_count + session_count + agent_count;
 
         // For category breakdown, use semantic recall with no agent filter
-        let all_frags = self.semantic.recall("", 500, None)?;
+        // Limit to 10000 to avoid unbounded queries; increase if needed
+        let all_frags = self.semantic.recall("", 10_000, None)?;
         let mut categories: HashMap<String, usize> = HashMap::new();
         for frag in &all_frags {
             if let Some(cat) = frag.metadata.get("category").and_then(|v| v.as_str()) {
@@ -874,7 +1082,8 @@ impl ProactiveMemoryStore {
     /// Used by the dashboard to show all memories without agent scoping.
     pub async fn list_all(&self, category: Option<&str>) -> LibreFangResult<Vec<MemoryItem>> {
         // Use semantic recall with no agent filter to get all memories
-        let results = self.semantic.recall("", 500, None)?;
+        // Limit to 10000 to avoid unbounded queries; increase if needed
+        let results = self.semantic.recall("", 10_000, None)?;
 
         let items: Vec<MemoryItem> = results
             .into_iter()
@@ -967,7 +1176,9 @@ impl ProactiveMemoryStore {
         if let Ok(kv_pairs) = self.structured.list_kv(agent_id) {
             for (key, _) in kv_pairs {
                 if key.starts_with("memory:") {
-                    let _ = self.structured.delete(agent_id, &key);
+                    if let Err(e) = self.structured.delete(agent_id, &key) {
+                        tracing::warn!("Failed to delete KV entry '{}': {}", key, e);
+                    }
                 }
             }
         }
@@ -994,7 +1205,13 @@ impl ProactiveMemoryStore {
                     .and_then(|v| v.as_str())
                     .unwrap_or("Session");
                 if MemoryLevel::from(level_str) == level {
-                    let _ = self.structured.delete(agent_id, &key);
+                    if let Err(e) = self.structured.delete(agent_id, &key) {
+                        tracing::warn!(
+                            "Failed to delete KV entry '{}' during clear_level: {}",
+                            key,
+                            e
+                        );
+                    }
                 }
             }
         }
@@ -1035,7 +1252,13 @@ impl ProactiveMemoryStore {
                 if let Some(ts) = created_at_str {
                     if let Ok(created) = chrono::DateTime::parse_from_rfc3339(ts) {
                         if created.with_timezone(&chrono::Utc) < cutoff {
-                            let _ = self.structured.delete(agent_id, &key);
+                            if let Err(e) = self.structured.delete(agent_id, &key) {
+                                tracing::warn!(
+                                    "Failed to delete expired session KV entry '{}': {}",
+                                    key,
+                                    e
+                                );
+                            }
                         }
                     }
                 }
@@ -1100,9 +1323,12 @@ impl ProactiveMemoryStore {
                         let mid = MemoryId(uuid);
                         if self.semantic.forget(mid).is_ok() {
                             // Also remove the KV entry
-                            let _ = self
+                            if let Err(e) = self
                                 .structured
-                                .delete(agent_id, &format!("memory:{}", item.id));
+                                .delete(agent_id, &format!("memory:{}", item.id))
+                            {
+                                tracing::warn!("Failed to delete KV entry during consolidation for memory {}: {}", item.id, e);
+                            }
                             merged_count += 1;
                         }
                     }
@@ -1304,9 +1530,10 @@ impl ProactiveMemory for ProactiveMemoryStore {
     ///
     /// Core flow:
     /// 1. Extract memories from messages using configured extractor
-    /// 2. For each extracted memory, search for similar existing memories
-    /// 3. Let extractor decide: ADD (new), UPDATE (replace old), or NOOP (skip)
-    /// 4. Execute the decision
+    /// 2. Enforce per-agent memory cap — evict lowest-confidence memories if needed
+    /// 3. For each extracted memory, search for similar existing memories
+    /// 4. Let extractor decide: ADD (new), UPDATE (replace old), or NOOP (skip)
+    /// 5. Execute the decision
     ///
     /// Returns the list of memories that were actually stored or updated.
     async fn add(
@@ -1334,6 +1561,9 @@ impl ProactiveMemory for ProactiveMemoryStore {
                 return Ok(Vec::new());
             }
 
+            // Enforce per-agent memory cap before inserting fallback memory
+            self.evict_if_over_cap(agent_id, 1)?;
+
             let mem_id = self.semantic.remember(
                 agent_id,
                 &content,
@@ -1345,14 +1575,25 @@ impl ProactiveMemory for ProactiveMemoryStore {
             let item = MemoryItem::new(content, MemoryLevel::Session);
             // Also store in KV using the semantic store's ID for consistency
             if let Ok(json) = serde_json::to_value(&item) {
-                let _ = self
+                if let Err(e) = self
                     .structured
-                    .set(agent_id, &format!("memory:{}", mem_id), json);
+                    .set(agent_id, &format!("memory:{}", mem_id), json)
+                {
+                    tracing::warn!(
+                        "Failed to set KV entry for fallback memory {}: {}",
+                        mem_id,
+                        e
+                    );
+                }
             }
             return Ok(vec![item]);
         }
 
-        // Step 2-4: For each extracted memory, decide and execute
+        // Step 2: Enforce per-agent memory cap before inserting new memories
+        let new_count = extraction.memories.len();
+        self.evict_if_over_cap(agent_id, new_count)?;
+
+        // Step 3-5: For each extracted memory, decide and execute
         let mut results = Vec::new();
         for item in &extraction.memories {
             let result = self.add_with_decision(agent_id, item).await?;
@@ -1361,7 +1602,7 @@ impl ProactiveMemory for ProactiveMemoryStore {
             }
         }
 
-        // Step 5: Store extracted relations in knowledge graph
+        // Step 6: Store extracted relations in knowledge graph
         if !extraction.relations.is_empty() {
             self.store_relations(&extraction.relations);
         }
@@ -1403,9 +1644,16 @@ impl ProactiveMemory for ProactiveMemoryStore {
         // Also store in KV using the semantic store's ID for consistency
         let item = MemoryItem::new(content, level);
         if let Ok(json) = serde_json::to_value(&item) {
-            let _ = self
+            if let Err(e) = self
                 .structured
-                .set(agent_id, &format!("memory:{}", mem_id), json);
+                .set(agent_id, &format!("memory:{}", mem_id), json)
+            {
+                tracing::warn!(
+                    "Failed to set KV entry for leveled memory {}: {}",
+                    mem_id,
+                    e
+                );
+            }
         }
 
         Ok(())
@@ -1432,9 +1680,16 @@ impl ProactiveMemory for ProactiveMemoryStore {
         let uuid = uuid::Uuid::parse_str(memory_id)
             .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
         let mid = librefang_types::memory::MemoryId(uuid);
+        let agent_id_parsed = Self::parse_agent_id(user_id)?;
 
-        // Check if the memory exists before deleting
-        if self.semantic.get_by_id(mid, false)?.is_none() {
+        // Check if the memory exists and belongs to this user before deleting
+        let frag = match self.semantic.get_by_id(mid, false)? {
+            Some(f) => f,
+            None => return Ok(false),
+        };
+
+        // Verify ownership: memory must belong to the requesting user
+        if frag.agent_id != agent_id_parsed {
             return Ok(false);
         }
 
@@ -1442,9 +1697,12 @@ impl ProactiveMemory for ProactiveMemoryStore {
 
         // Also clean up the KV store entry
         if let Ok(agent_id) = Self::parse_agent_id(user_id) {
-            let _ = self
+            if let Err(e) = self
                 .structured
-                .delete(agent_id, &format!("memory:{}", memory_id));
+                .delete(agent_id, &format!("memory:{}", memory_id))
+            {
+                tracing::warn!("Failed to delete KV entry for memory {}: {}", memory_id, e);
+            }
         }
 
         Ok(true)
@@ -1455,12 +1713,18 @@ impl ProactiveMemory for ProactiveMemoryStore {
         let uuid = uuid::Uuid::parse_str(memory_id)
             .map_err(|e| LibreFangError::Internal(format!("Invalid memory_id: {e}")))?;
         let mid = MemoryId(uuid);
+        let agent_id_parsed = Self::parse_agent_id(user_id)?;
 
         // Get old memory for version history
         let old_frag = match self.semantic.get_by_id(mid, false)? {
             Some(f) => f,
             None => return Ok(false),
         };
+
+        // Verify ownership: memory must belong to the requesting user
+        if old_frag.agent_id != agent_id_parsed {
+            return Ok(false);
+        }
 
         // Build metadata with version history
         let mut metadata = old_frag.metadata.clone();
@@ -1501,7 +1765,9 @@ impl ProactiveMemory for ProactiveMemoryStore {
                         serde_json::json!(chrono::Utc::now().to_rfc3339()),
                     );
                 }
-                let _ = self.structured.set(agent_id, &kv_key, kv_val);
+                if let Err(e) = self.structured.set(agent_id, &kv_key, kv_val) {
+                    tracing::warn!("Failed to update KV entry for memory {}: {}", memory_id, e);
+                }
             }
         }
 
@@ -1746,16 +2012,22 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         }
 
         // Auto-consolidation: merge duplicates every 10 auto_memorize calls per agent
-        let count = {
+        let should_consolidate = {
             let mut counters = self
                 .consolidation_counters
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let entry = counters.entry(user_id.to_string()).or_insert(0);
             *entry += 1;
-            *entry
+            if *entry >= 10 {
+                // Remove the entry to prevent unbounded HashMap growth
+                counters.remove(user_id);
+                true
+            } else {
+                false
+            }
         };
-        if count > 0 && count % 10 == 0 {
+        if should_consolidate {
             match self.consolidate(user_id).await {
                 Ok(merged) if merged > 0 => {
                     tracing::info!("Auto-consolidation: merged {} duplicate memories", merged);
@@ -1787,15 +2059,10 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         // Run confidence decay at most once per hour
         self.maybe_decay_confidence();
 
-        let agent_id = Self::parse_agent_id(user_id)?;
+        // Run session TTL cleanup at most once per hour
+        self.maybe_cleanup_expired();
 
-        // Cleanup expired session memories (lightweight, runs on each retrieve)
-        if self.config.session_ttl_hours > 0 {
-            let ttl = chrono::Duration::hours(self.config.session_ttl_hours as i64);
-            if let Err(e) = self.cleanup_expired_sessions(user_id, ttl) {
-                tracing::debug!("Session TTL cleanup failed (non-fatal): {}", e);
-            }
-        }
+        let agent_id = Self::parse_agent_id(user_id)?;
 
         // Create filter for this agent
         let filter = Some(MemoryFilter::agent(agent_id));
@@ -2330,8 +2597,8 @@ mod tests {
         let sim = text_similarity("rust programming language", "cooking italian food");
         assert!(sim < 0.2);
 
-        // Empty
-        assert!((text_similarity("", "") - 1.0).abs() < f32::EPSILON);
+        // Empty — no words to compare, so similarity is 0.0
+        assert!((text_similarity("", "")).abs() < f32::EPSILON);
     }
 
     #[test]

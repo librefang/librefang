@@ -278,7 +278,7 @@ fn proactive_item_to_fragment(
     agent_id: librefang_types::agent::AgentId,
 ) -> MemoryFragment {
     MemoryFragment {
-        id: MemoryId::new(),
+        id: MemoryId(uuid::Uuid::parse_str(&item.id).unwrap_or_else(|_| uuid::Uuid::new_v4())),
         agent_id,
         content: item.content,
         embedding: None,
@@ -404,23 +404,27 @@ pub async fn run_agent_loop(
     };
 
     // Proactive memory: auto-retrieve (cleanup runs inside auto_retrieve)
-    if let Some(ref pm_store_arc) = proactive_memory {
-        let user_id = session.agent_id.0.to_string();
+    // In stable_prefix_mode, skip proactive recall too to keep the prompt prefix stable for caching.
+    if !stable_prefix_mode {
+        if let Some(ref pm_store_arc) = proactive_memory {
+            let user_id = session.agent_id.0.to_string();
 
-        match pm_store_arc.auto_retrieve(&user_id, user_message).await {
-            Ok(pm_memories) if !pm_memories.is_empty() => {
-                debug!("Proactive memory retrieved {} items", pm_memories.len());
-                let pm_fragments: Vec<_> = pm_memories
-                    .into_iter()
-                    .map(|item| proactive_item_to_fragment(item, session.agent_id))
-                    .collect();
-                memories.extend(pm_fragments);
-            }
-            Ok(_) => {
-                debug!("No proactive memories retrieved");
-            }
-            Err(e) => {
-                warn!("Proactive memory auto_retrieve failed: {e}");
+            match pm_store_arc.auto_retrieve(&user_id, user_message).await {
+                Ok(pm_memories) if !pm_memories.is_empty() => {
+                    debug!("Proactive memory retrieved {} items", pm_memories.len());
+                    let pm_fragments: Vec<_> = pm_memories
+                        .into_iter()
+                        .map(|item| proactive_item_to_fragment(item, session.agent_id))
+                        .filter(|frag| !memories.iter().any(|m| m.content == frag.content))
+                        .collect();
+                    memories.extend(pm_fragments);
+                }
+                Ok(_) => {
+                    debug!("No proactive memories retrieved");
+                }
+                Err(e) => {
+                    warn!("Proactive memory auto_retrieve failed: {e}");
+                }
             }
         }
     }
@@ -1503,26 +1507,30 @@ pub async fn run_agent_loop_streaming(
     };
 
     // Proactive memory: auto-retrieve (cleanup runs inside auto_retrieve)
-    if let Some(ref pm_store_arc) = proactive_memory {
-        let user_id = session.agent_id.0.to_string();
+    // In stable_prefix_mode, skip proactive recall too to keep the prompt prefix stable for caching.
+    if !stable_prefix_mode {
+        if let Some(ref pm_store_arc) = proactive_memory {
+            let user_id = session.agent_id.0.to_string();
 
-        match pm_store_arc.auto_retrieve(&user_id, user_message).await {
-            Ok(pm_memories) if !pm_memories.is_empty() => {
-                debug!(
-                    "Proactive memory (streaming) retrieved {} items",
-                    pm_memories.len()
-                );
-                let pm_fragments: Vec<_> = pm_memories
-                    .into_iter()
-                    .map(|item| proactive_item_to_fragment(item, session.agent_id))
-                    .collect();
-                memories.extend(pm_fragments);
-            }
-            Ok(_) => {
-                debug!("No proactive memories retrieved (streaming)");
-            }
-            Err(e) => {
-                warn!("Proactive memory auto_retrieve failed (streaming): {e}");
+            match pm_store_arc.auto_retrieve(&user_id, user_message).await {
+                Ok(pm_memories) if !pm_memories.is_empty() => {
+                    debug!(
+                        "Proactive memory (streaming) retrieved {} items",
+                        pm_memories.len()
+                    );
+                    let pm_fragments: Vec<_> = pm_memories
+                        .into_iter()
+                        .map(|item| proactive_item_to_fragment(item, session.agent_id))
+                        .filter(|frag| !memories.iter().any(|m| m.content == frag.content))
+                        .collect();
+                    memories.extend(pm_fragments);
+                }
+                Ok(_) => {
+                    debug!("No proactive memories retrieved (streaming)");
+                }
+                Err(e) => {
+                    warn!("Proactive memory auto_retrieve failed (streaming): {e}");
+                }
             }
         }
     }

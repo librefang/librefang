@@ -230,6 +230,9 @@ use crate::types;
         routes::memory_duplicates,
         routes::memory_history,
         routes::memory_consolidate,
+        routes::memory_cleanup,
+        routes::memory_export_agent,
+        routes::memory_import_agent,
 
         // ── Audit / Logs ──
         routes::audit_recent,

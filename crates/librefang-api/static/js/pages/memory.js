@@ -10,13 +10,18 @@ function memoryPage() {
     showHistory: false,
     historyItems: [],
 
+    // Pagination
+    pageOffset: 0,
+    pageLimit: 20,
+    totalMemories: 0,
+
     // Agent filter state
     agents: [],
     selectedAgentId: '',
 
     // Manual memory creation form
     showAddForm: false,
-    addForm: { content: '', level: 'user' },
+    addForm: { content: '' },
     addingMemory: false,
 
     _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
@@ -70,13 +75,28 @@ function memoryPage() {
 
     get listEndpoint() {
       if (this.selectedAgentId) {
-        return '/api/memory/agents/' + encodeURIComponent(this.selectedAgentId) + '/search?q=&limit=50';
+        return '/api/memory/agents/' + encodeURIComponent(this.selectedAgentId) + '/search?q=&limit=' + this.pageLimit;
       }
-      return '/api/memory';
+      return '/api/memory?offset=' + this.pageOffset + '&limit=' + this.pageLimit;
+    },
+
+    get totalPages() {
+      return Math.max(1, Math.ceil(this.totalMemories / this.pageLimit));
+    },
+
+    get currentPage() {
+      return Math.floor(this.pageOffset / this.pageLimit) + 1;
     },
 
     onAgentFilterChange: function() {
+      this.pageOffset = 0;
       this.loadStats();
+      this.loadMemories();
+    },
+
+    goToPage: function(page) {
+      if (page < 1 || page > this.totalPages) return;
+      this.pageOffset = (page - 1) * this.pageLimit;
       this.loadMemories();
     },
 
@@ -95,9 +115,11 @@ function memoryPage() {
       self.searchQuery = '';
       LibreFangAPI.request('GET', this.listEndpoint).then(function(data) {
         self.memories = data.memories || [];
+        self.totalMemories = data.total || self.memories.length;
         self.loading = false;
       }).catch(function() {
         self.memories = [];
+        self.totalMemories = 0;
         self.loading = false;
       });
     },
@@ -105,6 +127,7 @@ function memoryPage() {
     searchMemories: function() {
       var self = this;
       if (!self.searchQuery.trim()) {
+        self.pageOffset = 0;
         self.loadMemories();
         return;
       }
@@ -112,9 +135,11 @@ function memoryPage() {
       var url = this.searchEndpoint + '?q=' + encodeURIComponent(self.searchQuery) + '&limit=50';
       LibreFangAPI.request('GET', url).then(function(data) {
         self.memories = data.memories || [];
+        self.totalMemories = self.memories.length;
         self.loading = false;
       }).catch(function() {
         self.memories = [];
+        self.totalMemories = 0;
         self.loading = false;
       });
     },
@@ -124,6 +149,7 @@ function memoryPage() {
       if (!confirm(this.t('memoryPage.confirmDelete', 'Delete this memory?'))) return;
       LibreFangAPI.request('DELETE', '/api/memory/items/' + id).then(function() {
         self.memories = self.memories.filter(function(m) { return m.id !== id; });
+        self.totalMemories = Math.max(0, self.totalMemories - 1);
         self.loadStats();
         LibreFangToast.success(self.t('memoryPage.memoryDeleted', 'Memory deleted'));
       }).catch(function() {
@@ -145,7 +171,7 @@ function memoryPage() {
     toggleAddForm: function() {
       this.showAddForm = !this.showAddForm;
       if (this.showAddForm) {
-        this.addForm = { content: '', level: 'user' };
+        this.addForm = { content: '' };
       }
     },
 
@@ -165,7 +191,7 @@ function memoryPage() {
       LibreFangAPI.request('POST', '/api/memory', body).then(function(data) {
         var count = data.added || 0;
         LibreFangToast.success(self.t('memoryPage.memoryAdded', '{count} memory/memories added', { count: count }));
-        self.addForm = { content: '', level: 'user' };
+        self.addForm = { content: '' };
         self.showAddForm = false;
         self.addingMemory = false;
         self.loadStats();

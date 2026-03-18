@@ -3770,6 +3770,14 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                     </div>
                     <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.duplicateThresholdDesc">Jaccard word overlap threshold for duplicate detection. Memories above this similarity are merged.</div>
                   </div>
+                  <!-- Max memories per agent -->
+                  <div class="detail-row" style="align-items:center">
+                    <span class="detail-label" data-i18n="settingsPage.maxMemoriesPerAgent">Max Memories Per Agent</span>
+                    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+                      <input class="form-input" type="number" style="width:120px" min="0" step="1" x-model.number="pmSettings.max_memories_per_agent">
+                    </div>
+                    <div class="text-xs text-dim" style="grid-column:1/-1;padding-left:2px" data-i18n="settingsPage.maxMemoriesPerAgentDesc">Maximum number of memories per agent. Lowest-confidence memories are evicted when exceeded. Set to 0 to disable.</div>
+                  </div>
                 </div>
                 <div style="margin-top:16px;display:flex;gap:8px;align-items:center">
                   <button class="btn btn-primary btn-sm" @click="saveProactiveMemory()" :disabled="pmSaving">
@@ -4586,14 +4594,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                 <label style="display:block;font-size:13px;font-weight:500;margin-bottom:4px;color:var(--text-secondary)" x-text="t('memoryPage.contentLabel', 'Content')">Content</label>
                 <input type="text" x-model="addForm.content" class="form-input" :placeholder="t('memoryPage.contentPlaceholder', 'Enter memory content...')" style="width:100%" @keyup.enter="addMemory()">
               </div>
-              <div style="min-width:120px">
-                <label style="display:block;font-size:13px;font-weight:500;margin-bottom:4px;color:var(--text-secondary)" x-text="t('memoryPage.levelLabel', 'Level')">Level</label>
-                <select x-model="addForm.level" class="form-input" style="width:100%">
-                  <option value="user">user</option>
-                  <option value="session">session</option>
-                  <option value="agent">agent</option>
-                </select>
-              </div>
+              <!-- Level is auto-determined by the extraction pipeline -->
               <button @click="addMemory()" class="btn btn-primary" :disabled="addingMemory" x-text="addingMemory ? t('memoryPage.saving', 'Saving...') : t('memoryPage.save', 'Save')">Save</button>
               <button @click="toggleAddForm()" class="btn btn-secondary" x-text="t('btn.cancel', 'Cancel')">Cancel</button>
             </div>
@@ -4630,6 +4631,16 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               </tr>
             </tbody>
           </table>
+        </div>
+
+        <!-- Pagination controls -->
+        <div x-show="totalPages > 1" style="display:flex;justify-content:center;align-items:center;gap:8px;margin:16px 0">
+          <button class="btn btn-sm btn-ghost" :disabled="currentPage <= 1" @click="goToPage(currentPage - 1)">&laquo;</button>
+          <template x-for="p in totalPages" :key="p">
+            <button class="btn btn-sm" :class="p === currentPage ? 'btn-primary' : 'btn-ghost'" @click="goToPage(p)" x-text="p" x-show="Math.abs(p - currentPage) <= 2 || p === 1 || p === totalPages"></button>
+          </template>
+          <button class="btn btn-sm btn-ghost" :disabled="currentPage >= totalPages" @click="goToPage(currentPage + 1)">&raquo;</button>
+          <span style="color:var(--text-secondary);font-size:13px;margin-left:8px" x-text="totalMemories + ' total'"></span>
         </div>
 
         <!-- History modal -->

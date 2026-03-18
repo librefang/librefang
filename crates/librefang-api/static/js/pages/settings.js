@@ -241,6 +241,7 @@ function settingsPage() {
       max_retrieve: 5,
       extraction_threshold: 0.7,
       extraction_model: '',
+      max_memories_per_agent: 1000,
       extract_categories: [],
       session_ttl_hours: 24,
       confidence_decay_rate: 0.01,
@@ -803,6 +804,7 @@ function settingsPage() {
           session_ttl_hours: pm.session_ttl_hours || 24,
           confidence_decay_rate: pm.confidence_decay_rate !== undefined ? pm.confidence_decay_rate : 0.01,
           duplicate_threshold: pm.duplicate_threshold !== undefined ? pm.duplicate_threshold : 0.5,
+          max_memories_per_agent: pm.max_memories_per_agent !== undefined ? pm.max_memories_per_agent : 1000,
         };
         this.pmCategoriesText = (this.pmSettings.extract_categories || []).join(', ');
         this.pmLoaded = true;
@@ -816,14 +818,27 @@ function settingsPage() {
       this.pmSaving = true;
       this.pmSaveStatus = '';
       try {
+        var mr = Number(this.pmSettings.max_retrieve);
+        var et = Number(this.pmSettings.extraction_threshold);
+        var dt = Number(this.pmSettings.duplicate_threshold);
+        var cd = Number(this.pmSettings.confidence_decay_rate);
+        var st = Number(this.pmSettings.session_ttl_hours);
+        var mma = Number(this.pmSettings.max_memories_per_agent);
+        if (isNaN(mr) || mr < 1 || mr > 100) { LibreFangToast.error('max_retrieve must be 1–100'); this.pmSaving = false; return; }
+        if (isNaN(et) || et < 0 || et > 1) { LibreFangToast.error('extraction_threshold must be 0–1'); this.pmSaving = false; return; }
+        if (isNaN(dt) || dt < 0 || dt > 1) { LibreFangToast.error('duplicate_threshold must be 0–1'); this.pmSaving = false; return; }
+        if (isNaN(cd) || cd < 0 || cd > 1) { LibreFangToast.error('confidence_decay_rate must be 0–1'); this.pmSaving = false; return; }
+        if (isNaN(st) || st < 1) { LibreFangToast.error('session_ttl_hours must be >= 1'); this.pmSaving = false; return; }
+        if (isNaN(mma) || mma < 0) { LibreFangToast.error('max_memories_per_agent must be >= 0'); this.pmSaving = false; return; }
         var fields = [
           { path: 'proactive_memory.auto_memorize', value: this.pmSettings.auto_memorize },
           { path: 'proactive_memory.auto_retrieve', value: this.pmSettings.auto_retrieve },
-          { path: 'proactive_memory.max_retrieve', value: this.pmSettings.max_retrieve },
-          { path: 'proactive_memory.extraction_threshold', value: this.pmSettings.extraction_threshold },
-          { path: 'proactive_memory.session_ttl_hours', value: this.pmSettings.session_ttl_hours },
-          { path: 'proactive_memory.confidence_decay_rate', value: this.pmSettings.confidence_decay_rate },
-          { path: 'proactive_memory.duplicate_threshold', value: this.pmSettings.duplicate_threshold },
+          { path: 'proactive_memory.max_retrieve', value: mr },
+          { path: 'proactive_memory.extraction_threshold', value: et },
+          { path: 'proactive_memory.session_ttl_hours', value: st },
+          { path: 'proactive_memory.confidence_decay_rate', value: cd },
+          { path: 'proactive_memory.duplicate_threshold', value: dt },
+          { path: 'proactive_memory.max_memories_per_agent', value: mma },
         ];
         // Only set extraction_model if non-empty, otherwise set to empty string to clear it
         fields.push({ path: 'proactive_memory.extraction_model', value: this.pmSettings.extraction_model || '' });
