@@ -148,25 +148,48 @@ pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResp
     let agents = state.kernel.registry.list();
     let base_url = format!("http://{}", state.kernel.config.api_listen);
 
-    if let Some(first) = agents.first() {
-        let card = librefang_runtime::a2a::build_agent_card(&first.manifest, &base_url);
-        (
-            StatusCode::OK,
-            Json(serde_json::to_value(&card).unwrap_or_default()),
-        )
+    // Use service-level A2A config for the well-known card when available.
+    let (service_name, service_description) = if let Some(ref a2a_cfg) = state.kernel.config.a2a {
+        let name = if a2a_cfg.name.is_empty() {
+            "LibreFang Agent OS".to_string()
+        } else {
+            a2a_cfg.name.clone()
+        };
+        (name, a2a_cfg.description.clone())
     } else {
-        let card = serde_json::json!({
-            "name": "librefang",
-            "description": "LibreFang Agent OS — no agents spawned yet",
-            "url": format!("{base_url}/a2a"),
-            "version": librefang_types::VERSION,
-            "capabilities": { "streaming": true },
-            "skills": [],
-            "defaultInputModes": ["text"],
-            "defaultOutputModes": ["text"],
-        });
-        (StatusCode::OK, Json(card))
-    }
+        (
+            "LibreFang Agent OS".to_string(),
+            String::new(),
+        )
+    };
+
+    // Aggregate skills from ALL agents.
+    let skills: Vec<librefang_runtime::a2a::AgentSkill> = agents
+        .iter()
+        .flat_map(|entry| {
+            librefang_runtime::a2a::build_agent_card(&entry.manifest, &base_url).skills
+        })
+        .collect();
+
+    let card = librefang_runtime::a2a::AgentCard {
+        name: service_name,
+        description: service_description,
+        url: format!("{base_url}/a2a"),
+        version: librefang_types::VERSION.to_string(),
+        capabilities: librefang_runtime::a2a::AgentCapabilities {
+            streaming: true,
+            push_notifications: false,
+            state_transition_history: true,
+        },
+        skills,
+        default_input_modes: vec!["text".to_string()],
+        default_output_modes: vec!["text".to_string()],
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(&card).unwrap_or_default()),
+    )
 }
 
 /// GET /a2a/agents — List all A2A agent cards.
