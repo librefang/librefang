@@ -87,13 +87,31 @@ impl SlackAdapter {
         channel_id: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.api_send_message_opts(channel_id, text, None).await
+    }
+
+    /// Send a message to a Slack channel, optionally as a thread reply.
+    ///
+    /// When `thread_ts` is `Some`, the `thread_ts` field is included in the
+    /// `chat.postMessage` payload so the message appears as a thread reply
+    /// rather than a top-level channel message.
+    async fn api_send_message_opts(
+        &self,
+        channel_id: &str,
+        text: &str,
+        thread_ts: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chunks = split_message(text, SLACK_MSG_LIMIT);
 
         for chunk in chunks {
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "channel": channel_id,
                 "text": chunk,
             });
+
+            if let Some(ts) = thread_ts {
+                body["thread_ts"] = serde_json::json!(ts);
+            }
 
             let resp: serde_json::Value = self
                 .client
@@ -314,6 +332,22 @@ impl ChannelAdapter for SlackAdapter {
                     .await?;
             }
         }
+        Ok(())
+    }
+
+    async fn send_in_thread(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+        thread_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let text = match content {
+            ChannelContent::Text(text) => text,
+            _ => "(Unsupported content type)".to_string(),
+        };
+
+        self.api_send_message_opts(&user.platform_id, &text, Some(thread_id))
+            .await?;
         Ok(())
     }
 
