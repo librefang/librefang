@@ -169,5 +169,6 @@ install() {
     # Temporarily add to PATH for init
     export PATH="$INSTALL_DIR:$PATH"
     exec "$INSTALL_DIR/librefang" init
+}
 
 install
