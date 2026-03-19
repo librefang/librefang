@@ -31,8 +31,7 @@ use std::time::{Duration, Instant};
 
 /// Global flag set by the Ctrl+C handler.
 static CTRLC_PRESSED: AtomicBool = AtomicBool::new(false);
-const INIT_DEFAULT_CONFIG_TEMPLATE: &str =
-    include_str!("../templates/init_default_config.toml");
+const INIT_DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../templates/init_default_config.toml");
 const PROVIDER_DEFAULT_MODELS_TEMPLATE: &str =
     include_str!("../templates/provider_default_models.toml");
 
