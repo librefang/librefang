@@ -1984,7 +1984,11 @@ fn detect_best_provider() -> (&'static str, &'static str, &'static str) {
     ui::hint(&i18n::t("hint-no-api-keys"));
     ui::hint(&i18n::t("hint-groq-free"));
     ui::hint(&i18n::t("hint-ollama-local"));
-    ("groq", "GROQ_API_KEY", "llama-3.3-70b-versatile")
+    (
+        "openrouter",
+        "OPENROUTER_API_KEY",
+        "stepfun/step-3.5-flash:free",
+    )
 }
 
 /// Static list of supported providers: (id, env_var, default_model, display_name).
@@ -2003,7 +2007,7 @@ fn provider_list() -> Vec<(&'static str, &'static str, &'static str, &'static st
         (
             "openrouter",
             "OPENROUTER_API_KEY",
-            "openrouter/google/gemini-2.5-flash",
+            "stepfun/step-3.5-flash:free",
             "OpenRouter",
         ),
     ]
@@ -2037,7 +2041,7 @@ fn write_config_if_missing(
 # See https://github.com/librefang/librefang for documentation
 
 # For Docker, change to "0.0.0.0:4545" or set LIBREFANG_LISTEN env var.
-api_listen = "127.0.0.1:4545"
+api_listen = "0.0.0.0:4545"
 
 [default_model]
 provider = "{provider}"
@@ -3174,7 +3178,7 @@ fn cmd_doctor(json: bool, repair: bool) {
 # See https://github.com/librefang/librefang for documentation
 
 # For Docker, change to "0.0.0.0:4545" or set LIBREFANG_LISTEN env var.
-api_listen = "127.0.0.1:4545"
+api_listen = "0.0.0.0:4545"
 
 [default_model]
 provider = "{provider}"
