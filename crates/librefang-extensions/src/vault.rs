@@ -107,13 +107,9 @@ impl CredentialVault {
                 }
                 Err(e) => {
                     warn!(
-                        "Could not store in OS keyring: {e}. Set {} env var instead.",
-                        VAULT_KEY_ENV
-                    );
-                    eprintln!(
-                        "Vault key (save this as {}): {}",
-                        VAULT_KEY_ENV,
-                        key_b64.as_str()
+                        "Could not store vault key in OS keyring: {e}. \
+                         Set {VAULT_KEY_ENV} env var manually. \
+                         Use `librefang vault init` interactively to retrieve the key.",
                     );
                 }
             }

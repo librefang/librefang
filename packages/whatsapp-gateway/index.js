@@ -58,7 +58,9 @@ function resolveAgentId() {
         res.on('data', (chunk) => (body += chunk));
         res.on('end', () => {
           try {
-            const agents = JSON.parse(body);
+            const parsed = JSON.parse(body);
+            // Handle both array and paginated { items: [...] } response formats
+            const agents = Array.isArray(parsed) ? parsed : (parsed.items || []);
             if (!Array.isArray(agents)) {
               return reject(new Error('Unexpected /api/agents response'));
             }
