@@ -1,2 +1,8 @@
+# Serve static files directly
+/install.sh  /install.sh
+/install.ps1  /install.ps1
+/install-manifest.json  /install-manifest.json
+
+# Redirect SPA routes
 /*
   Index: /index.html
