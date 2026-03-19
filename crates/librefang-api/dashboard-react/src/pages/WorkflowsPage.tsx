@@ -8,6 +8,7 @@ import {
   runWorkflow,
 } from "../api";
 import { WorkflowEditor } from "../components/WorkflowEditor";
+import { Layers, RefreshCw, Trash2 } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -50,7 +51,7 @@ export function WorkflowsPage() {
       <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
           <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
-            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" /></svg>
+            <Layers className="h-4 w-4" />
             {t("workflows.automation_hub")}
           </div>
           <h1 className="mt-2 text-3xl font-extrabold tracking-tight md:text-4xl">{t("workflows.title")}</h1>
@@ -61,7 +62,7 @@ export function WorkflowsPage() {
             {t("common.symbols.expand")} {t("overview.new_workflow")}
           </button>
           <button className="flex h-9 items-center gap-2 rounded-xl border border-border-subtle bg-surface px-4 text-sm font-bold text-text-dim hover:text-brand transition-all shadow-sm" onClick={() => void workflowsQuery.refetch()}>
-            <svg className={`h-3.5 w-3.5 ${workflowsQuery.isFetching ? "animate-spin" : ""}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+            <RefreshCw className={`h-3.5 w-3.5 ${workflowsQuery.isFetching ? "animate-spin" : ""}`} />
             {t("common.refresh")}
           </button>
         </div>
@@ -84,7 +85,7 @@ export function WorkflowsPage() {
                     </div>
                   </div>
                   <button onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }} className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-text-dim hover:text-error transition-all">
-                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2"><path d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                    <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
               </article>

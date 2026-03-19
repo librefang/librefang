@@ -1,11 +1,11 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listAgents, listSessions, switchAgentSession } from "../api";
+import { listAgents, listSessions } from "../api";
+import { MessageCircle, Send } from "lucide-react";
 
 export function ChatPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [selectedAgentId, setSelectedAgentId] = useState<string>("");
   const [message, setMessage] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -15,10 +15,10 @@ export function ChatPage() {
 
   const agents = agentsQuery.data ?? [];
   const sessions = sessionsQuery.data ?? [];
-  
-  const activeSession = selectedAgentId 
-    ? sessions.find(s => s.agent_id === selectedAgentId && s.active) || sessions.find(s => s.agent_id === selectedAgentId)
-    : sessions.find(s => s.active);
+
+  const activeSession = selectedAgentId
+    ? sessions.find(s => s.agent_id === selectedAgentId) || null
+    : sessions[0] || null;
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -32,7 +32,7 @@ export function ChatPage() {
     <div className="flex h-[calc(100vh-140px)] flex-col transition-colors duration-300">
       <header className="pb-6">
         <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
-          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" /></svg>
+          <MessageCircle className="h-4 w-4" />
           {t("chat.neural_terminal")}
         </div>
         <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
@@ -61,7 +61,7 @@ export function ChatPage() {
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center p-8">
                 <div className="h-16 w-16 rounded-full bg-brand/5 flex items-center justify-center text-brand mb-4">
-                  <svg className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="1.5"><path d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
+                  <MessageCircle className="h-8 w-8" />
                 </div>
                 <h3 className="text-lg font-black tracking-tight">{t("chat.select_agent")}</h3>
                 <p className="text-sm text-text-dim mt-1 max-w-xs font-medium">{t("chat.select_agent_desc")}</p>
@@ -78,7 +78,7 @@ export function ChatPage() {
           <div className={`p-4 border-t border-border-subtle bg-surface transition-opacity duration-300 ${!selectedAgentId ? 'opacity-30 pointer-events-none' : ''}`}>
             <form className="flex gap-3" onSubmit={(e) => e.preventDefault()}>
               <input type="text" value={message} onChange={(e) => setMessage(e.target.value)} placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")} className="flex-1 rounded-xl border border-border-subtle bg-surface px-4 py-3 text-sm focus:border-brand outline-none transition-all" />
-              <button type="submit" disabled={!message.trim() || !selectedAgentId} className="px-6 rounded-xl bg-brand text-white font-black text-sm shadow-lg hover:opacity-90 transition-all flex items-center justify-center gap-2">{t("chat.send")}<svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5"><path d="M5 12h14M12 5l7 7-7 7" /></svg></button>
+              <button type="submit" disabled={!message.trim() || !selectedAgentId} className="px-6 rounded-xl bg-brand text-white font-black text-sm shadow-lg hover:opacity-90 transition-all flex items-center justify-center gap-2">{t("chat.send")}<Send className="h-4 w-4" /></button>
             </form>
           </div>
         </main>

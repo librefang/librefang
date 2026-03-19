@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../lib/store";
+import { Zap } from "lucide-react";
 
 export function WizardPage() {
   const { t } = useTranslation();
@@ -14,7 +15,7 @@ export function WizardPage() {
     <div className={containerClass}>
       <div className="flex flex-col items-center mb-12">
         <div className="h-16 w-16 rounded-3xl bg-brand flex items-center justify-center text-white shadow-2xl shadow-brand/40 mb-6">
-          <svg className="h-10 w-10" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5"><path d="M13 10V3L4 14h7v7l9-11h-7z" /></svg>
+          <Zap className="h-10 w-10" />
         </div>
         <h1 className="text-4xl font-black tracking-tight mb-2">{t("wizard.welcome")}</h1>
         <p className="text-text-dim font-medium text-center">{t("overview.description")}</p>

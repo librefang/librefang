@@ -2,13 +2,24 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import i18n from "./i18n";
 
+interface Toast {
+  id: string;
+  message: string;
+  type: "success" | "error" | "info";
+}
+
 interface UIState {
   theme: "light" | "dark";
   language: string;
   isMobileMenuOpen: boolean;
+  isSidebarCollapsed: boolean;
+  toasts: Toast[];
   toggleTheme: () => void;
   setLanguage: (lang: string) => void;
   setMobileMenuOpen: (open: boolean) => void;
+  toggleSidebar: () => void;
+  addToast: (message: string, type?: "success" | "error" | "info") => void;
+  removeToast: (id: string) => void;
 }
 
 export const useUIStore = create<UIState>()(
@@ -17,6 +28,8 @@ export const useUIStore = create<UIState>()(
       theme: "dark",
       language: i18n.language || "en",
       isMobileMenuOpen: false,
+      isSidebarCollapsed: false,
+      toasts: [],
       toggleTheme: () =>
         set((state) => ({ theme: state.theme === "light" ? "dark" : "light" })),
       setLanguage: (lang) => {
@@ -24,6 +37,15 @@ export const useUIStore = create<UIState>()(
         set({ language: lang });
       },
       setMobileMenuOpen: (open) => set({ isMobileMenuOpen: open }),
+      toggleSidebar: () => set((state) => ({ isSidebarCollapsed: !state.isSidebarCollapsed })),
+      addToast: (message, type = "info") =>
+        set((state) => ({
+          toasts: [...state.toasts, { id: Date.now().toString(), message, type }],
+        })),
+      removeToast: (id) =>
+        set((state) => ({
+          toasts: state.toasts.filter((t) => t.id !== id),
+        })),
     }),
     {
       name: "librefang-ui-storage",

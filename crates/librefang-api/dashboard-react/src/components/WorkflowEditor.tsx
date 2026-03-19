@@ -14,6 +14,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useUIStore } from "../lib/store";
+import { ChevronLeft } from "lucide-react";
 
 interface WorkflowEditorProps {
   initialNodes?: Node[];
@@ -71,7 +72,7 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
       <header className="flex items-center justify-between border-b border-border-subtle bg-surface px-6 py-4 shadow-sm">
         <div className="flex items-center gap-4">
           <button onClick={onClose} className="p-2 rounded-xl hover:bg-surface-hover text-text-dim transition-all">
-            <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2.5"><path d="M15 19l-7-7 7-7" /></svg>
+            <ChevronLeft className="h-5 w-5" />
           </button>
           <div>
             <h2 className="text-lg font-black tracking-tight">{title || t("canvas.title")}</h2>
