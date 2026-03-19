@@ -47,5 +47,5 @@ You don't need Rust experience to contribute:
 
 - [GitHub](https://github.com/librefang/librefang)
 - [Discord](https://discord.gg/DzTYqAZZmc)
-- [Contributing Guide](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md)
+- [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)
 - [Good First Issues](https://github.com/librefang/librefang/labels/good%20first%20issue)
