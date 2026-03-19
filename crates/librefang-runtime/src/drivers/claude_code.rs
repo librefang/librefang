@@ -172,8 +172,8 @@ impl ClaudeCodeDriver {
                             ContentBlock::Image { media_type, data } => {
                                 // Create temp dir on first image
                                 if image_dir.is_none() {
-                                    let dir = PathBuf::from(format!(
-                                        "/tmp/librefang-images-{}",
+                                    let dir = std::env::temp_dir().join(format!(
+                                        "librefang-images-{}",
                                         uuid::Uuid::new_v4()
                                     ));
                                     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -360,16 +360,33 @@ impl LlmDriver for ClaudeCodeDriver {
             ))
         })?;
 
-        // Track the PID using the model name as label (best identifier available)
-        let pid_label = request.model.clone();
+        // Track the PID using model + UUID to avoid collisions on concurrent same-model requests
+        let pid_label = format!("{}:{}", request.model, uuid::Uuid::new_v4());
         if let Some(pid) = child.id() {
             self.active_pids.insert(pid_label.clone(), pid);
-            debug!(pid = pid, model = %pid_label, "Claude Code CLI subprocess started");
+            debug!(pid = pid, label = %pid_label, "Claude Code CLI subprocess started");
         }
 
-        // Read stdout/stderr before waiting (take ownership of pipes)
+        // Take ownership of pipes BEFORE waiting, then drain them
+        // concurrently in background tasks. This prevents the subprocess
+        // from blocking when pipe buffers fill up (deadlock).
         let child_stdout = child.stdout.take();
         let child_stderr = child.stderr.take();
+
+        let stdout_handle = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut out) = child_stdout {
+                let _ = out.read_to_end(&mut buf).await;
+            }
+            buf
+        });
+        let stderr_handle = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            if let Some(mut err) = child_stderr {
+                let _ = err.read_to_end(&mut buf).await;
+            }
+            buf
+        });
 
         // Wait with timeout
         let timeout_duration = std::time::Duration::from_secs(self.message_timeout_secs);
@@ -403,15 +420,9 @@ impl LlmDriver for ClaudeCodeDriver {
             }
         };
 
-        // Read captured output from pipes
-        let mut stdout_bytes = Vec::new();
-        let mut stderr_bytes = Vec::new();
-        if let Some(mut out) = child_stdout {
-            let _ = out.read_to_end(&mut stdout_bytes).await;
-        }
-        if let Some(mut err) = child_stderr {
-            let _ = err.read_to_end(&mut stderr_bytes).await;
-        };
+        // Collect output from background drain tasks
+        let stdout_bytes = stdout_handle.await.unwrap_or_default();
+        let stderr_bytes = stderr_handle.await.unwrap_or_default();
 
         if !status.success() {
             let stderr = String::from_utf8_lossy(&stderr_bytes).trim().to_string();
@@ -546,11 +557,11 @@ impl LlmDriver for ClaudeCodeDriver {
             ))
         })?;
 
-        // Track PID
-        let pid_label = format!("{}-stream", request.model);
+        // Track PID with unique key to avoid collisions on concurrent same-model requests
+        let pid_label = format!("{}-stream:{}", request.model, uuid::Uuid::new_v4());
         if let Some(pid) = child.id() {
             self.active_pids.insert(pid_label.clone(), pid);
-            debug!(pid = pid, model = %pid_label, "Claude Code CLI streaming subprocess started");
+            debug!(pid = pid, label = %pid_label, "Claude Code CLI streaming subprocess started");
         }
 
         let stdout = child.stdout.take().ok_or_else(|| {
@@ -558,6 +569,17 @@ impl LlmDriver for ClaudeCodeDriver {
             prepared.cleanup();
             LlmError::Http("No stdout from claude CLI".to_string())
         })?;
+
+        // Drain stderr in a background task to prevent deadlock
+        let child_stderr = child.stderr.take();
+        let stderr_handle = tokio::spawn(async move {
+            let mut buf = String::new();
+            if let Some(stderr) = child_stderr {
+                let mut reader = tokio::io::BufReader::new(stderr);
+                let _ = AsyncReadExt::read_to_string(&mut reader, &mut buf).await;
+            }
+            buf
+        });
 
         let reader = tokio::io::BufReader::new(stdout);
         let mut lines = reader.lines();
@@ -658,16 +680,10 @@ impl LlmDriver for ClaudeCodeDriver {
             .await
             .map_err(|e| LlmError::Http(format!("Claude CLI wait failed: {e}")))?;
 
+        let stderr_text = stderr_handle.await.unwrap_or_default();
+
         if !status.success() {
             let code = status.code().unwrap_or(1);
-            // Read stderr for diagnostic info
-            let stderr_text = if let Some(mut err) = child.stderr.take() {
-                let mut buf = Vec::new();
-                let _ = err.read_to_end(&mut buf).await;
-                String::from_utf8_lossy(&buf).trim().to_string()
-            } else {
-                String::new()
-            };
             warn!(
                 exit_code = code,
                 model = %pid_label,
@@ -678,13 +694,17 @@ impl LlmDriver for ClaudeCodeDriver {
                 status: code as u16,
                 message: format!(
                     "Claude Code CLI streaming exited with code {code}: {}",
-                    if stderr_text.is_empty() {
+                    if stderr_text.trim().is_empty() {
                         "no stderr"
                     } else {
-                        &stderr_text
+                        stderr_text.trim()
                     }
                 ),
             });
+        }
+
+        if !stderr_text.trim().is_empty() {
+            warn!(stderr = %stderr_text.trim(), "Claude CLI streaming stderr output");
         }
 
         let _ = tx
@@ -804,7 +824,8 @@ mod tests {
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
         assert!(prompt.text.contains("What is in this image?"));
-        assert!(prompt.text.contains("@/tmp/librefang-images-"));
+        assert!(prompt.text.contains("@"));
+        assert!(prompt.text.contains("librefang-images-"));
         assert!(prompt.text.contains(".png"));
         assert!(prompt.image_dir.is_some());
 
