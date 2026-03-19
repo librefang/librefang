@@ -324,6 +324,18 @@ impl LlmDriver for QwenCodeDriver {
             .take()
             .ok_or_else(|| LlmError::Http("No stdout from qwen CLI".to_string()))?;
 
+        // Drain stderr in a background task to prevent deadlock when the
+        // subprocess writes more than the OS pipe buffer can hold.
+        let stderr = child.stderr.take();
+        let stderr_handle = tokio::spawn(async move {
+            let mut buf = String::new();
+            if let Some(stderr) = stderr {
+                let mut reader = tokio::io::BufReader::new(stderr);
+                let _ = tokio::io::AsyncReadExt::read_to_string(&mut reader, &mut buf).await;
+            }
+            buf
+        });
+
         let reader = tokio::io::BufReader::new(stdout);
         let mut lines = reader.lines();
 
@@ -394,8 +406,36 @@ impl LlmDriver for QwenCodeDriver {
             .await
             .map_err(|e| LlmError::Http(format!("Qwen CLI wait failed: {e}")))?;
 
+        let stderr_output = stderr_handle.await.unwrap_or_default();
+
         if !status.success() {
-            warn!(code = ?status.code(), "Qwen CLI exited with error");
+            let code = status.code().unwrap_or(1);
+            let detail = if !stderr_output.trim().is_empty() {
+                stderr_output.trim().to_string()
+            } else if !full_text.is_empty() {
+                full_text.clone()
+            } else {
+                "unknown error".to_string()
+            };
+
+            let message = if detail.contains("not authenticated")
+                || detail.contains("auth")
+                || detail.contains("login")
+                || detail.contains("credentials")
+            {
+                format!("Qwen Code CLI is not authenticated. Run: qwen auth\nDetail: {detail}")
+            } else {
+                format!("Qwen Code CLI exited with code {code}: {detail}")
+            };
+
+            return Err(LlmError::Api {
+                status: code as u16,
+                message,
+            });
+        }
+
+        if !stderr_output.trim().is_empty() {
+            warn!(stderr = %stderr_output.trim(), "Qwen CLI stderr output");
         }
 
         let _ = tx
