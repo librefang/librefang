@@ -2,7 +2,21 @@ id = "trader"
 name = "Trading Hand"
 description = "Autonomous market intelligence and trading engine — multi-signal analysis, adversarial bull/bear reasoning, calibrated confidence scoring, strict risk management, and portfolio-level analytics"
 category = "data"
-icon = "\U0001F4C8"
+icon = "📈"
+
+# ─── Token & Performance Metadata ─────────────────────────────────────────────
+# This metadata helps users understand resource consumption before activation.
+
+[metadata]
+# How often the hand runs in continuous mode (60s loop when active)
+frequency = "continuous"
+# Relative token consumption: low, medium, high (based on typical usage)
+token_consumption = "high"
+# Whether this hand is included in default activation on first boot
+default_active = false
+# Warning shown when user tries to activate
+activation_warning = "Trading hand runs continuously and consumes tokens. Deactivate when not trading."
+
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
 [routing]

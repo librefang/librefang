@@ -2,7 +2,15 @@ id = "devops"
 name = "DevOps Hand"
 description = "Autonomous DevOps engineer — CI/CD management, infrastructure monitoring, deployment automation, and incident response"
 category = "development"
-icon = "\U0001F6E0"
+icon = "👷"
+
+# ─── Token & Performance Metadata ─────────────────────────────────────────────
+[metadata]
+frequency = "continuous"
+token_consumption = "high"
+default_active = false
+activation_warning = "DevOps hand runs continuously and monitors infrastructure, consuming tokens."
+
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
 [routing]

@@ -2,7 +2,15 @@ id = "predictor"
 name = "Predictor Hand"
 description = "Autonomous future predictor — collects signals, builds reasoning chains, makes calibrated predictions, and tracks accuracy"
 category = "data"
-icon = "\U0001F52E"
+icon = "🔮"
+
+# ─── Token & Performance Metadata ─────────────────────────────────────────────
+[metadata]
+frequency = "continuous"
+token_consumption = "high"
+default_active = false
+activation_warning = "Predictor hand runs continuously and generates predictions, consuming tokens."
+
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query"]
 
 [routing]

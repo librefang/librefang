@@ -2,7 +2,15 @@ id = "lead"
 name = "Lead Hand"
 description = "Autonomous lead generation — discovers, enriches, and delivers qualified leads on a schedule"
 category = "data"
-icon = "\U0001F4CA"
+icon = "📊"
+
+# ─── Token & Performance Metadata ─────────────────────────────────────────────
+[metadata]
+frequency = "continuous"
+token_consumption = "medium"
+default_active = false
+activation_warning = "Lead hand runs continuously and generates leads on schedule, consuming tokens."
+
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query"]
 
 [routing]

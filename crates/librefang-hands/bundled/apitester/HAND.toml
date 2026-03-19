@@ -2,7 +2,15 @@ id = "apitester"
 name = "API Tester Hand"
 description = "Autonomous API testing agent — endpoint discovery, request validation, load testing, and regression detection"
 category = "development"
-icon = "\U0001F50C"
+icon = "🔌"
+
+# ─── Token & Performance Metadata ─────────────────────────────────────────────
+[metadata]
+frequency = "continuous"
+token_consumption = "medium"
+default_active = false
+activation_warning = "API Tester hand runs continuously, consuming tokens. Use on-demand for specific tests."
+
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
 [routing]

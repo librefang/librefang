@@ -2,7 +2,15 @@ id = "browser"
 name = "Browser Hand"
 description = "Autonomous web browser — navigates sites, fills forms, clicks buttons, and completes multi-step web tasks with user approval for purchases"
 category = "productivity"
-icon = "\U0001F310"
+icon = "🌐"
+
+# ─── Token & Performance Metadata ─────────────────────────────────────────────
+[metadata]
+frequency = "continuous"
+token_consumption = "low"
+default_active = true
+# Note: Runs continuously but mainly consumes tokens when actively performing web tasks
+
 tools = [
     "browser_navigate", "browser_click", "browser_type",
     "browser_screenshot", "browser_read_page", "browser_close",

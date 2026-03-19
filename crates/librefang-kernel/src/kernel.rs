@@ -4588,17 +4588,17 @@ impl LibreFangKernel {
     /// Hands activated on first boot when no `hand_state.json` exists yet.
     /// These provide a useful out-of-the-box experience without requiring
     /// extra API keys or manual setup.
+    ///
+    /// Hands that are high-frequency (continuous loop) or task-specific
+    /// (trader, predictor, lead, devops, apitester) are NOT included by default
+    /// to avoid unexpected token consumption. Users can manually activate
+    /// them as needed.
     const DEFAULT_HANDS: &'static [&'static str] = &[
         "researcher",
         "browser",
         "collector",
         "analytics",
         "strategist",
-        "lead",
-        "predictor",
-        "trader",
-        "devops",
-        "apitester",
     ];
 
     pub async fn start_background_agents(self: &Arc<Self>) {
