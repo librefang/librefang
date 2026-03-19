@@ -15,7 +15,7 @@ import {
   Wrench, Search, CheckCircle2, ChevronRight, X,
   Download, Trash2, Star, Loader2, Sparkles, Package,
   Code, GitBranch, Globe, Cloud, Monitor, Bot, Database,
-  Briefcase, Shield, Terminal
+  Briefcase, Shield, Terminal, Calendar
 } from "lucide-react";
 
 type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
@@ -118,14 +118,23 @@ function MarketplaceSkillCard({ skill, onInstall, pendingId, onViewDetails, t }:
 
         {/* Stats */}
         <div className="flex items-center gap-4 mb-4 text-[10px] font-bold text-text-dim">
-          <span className="flex items-center gap-1">
-            <Star className="w-3 h-3 text-warning" />
-            {skill.stars}
-          </span>
-          <span className="flex items-center gap-1">
-            <Download className="w-3 h-3" />
-            {skill.downloads}
-          </span>
+          {skill.stars !== undefined ? (
+            <>
+              <span className="flex items-center gap-1">
+                <Star className="w-3 h-3 text-warning" />
+                {skill.stars}
+              </span>
+              <span className="flex items-center gap-1">
+                <Download className="w-3 h-3" />
+                {skill.downloads}
+              </span>
+            </>
+          ) : skill.updated_at ? (
+            <span className="flex items-center gap-1 text-text-dim">
+              <Calendar className="w-3 h-3" />
+              {new Date(skill.updated_at).toLocaleDateString()}
+            </span>
+          ) : null}
         </div>
 
         {/* Actions */}
@@ -192,14 +201,23 @@ function DetailsModal({ skill, onClose, onInstall, pendingId, t }: {
           </div>
 
           <div className="flex items-center gap-6 text-xs font-bold text-text-dim">
-            <span className="flex items-center gap-1">
-              <Star className="w-4 h-4 text-warning" />
-              {skill.stars} stars
-            </span>
-            <span className="flex items-center gap-1">
-              <Download className="w-4 h-4" />
-              {skill.downloads} downloads
-            </span>
+            {skill.stars !== undefined ? (
+              <>
+                <span className="flex items-center gap-1">
+                  <Star className="w-4 h-4 text-warning" />
+                  {skill.stars} stars
+                </span>
+                <span className="flex items-center gap-1">
+                  <Download className="w-4 h-4" />
+                  {skill.downloads} downloads
+                </span>
+              </>
+            ) : skill.updated_at ? (
+              <span className="flex items-center gap-1">
+                <Calendar className="w-4 h-4" />
+                {new Date(skill.updated_at).toLocaleDateString()}
+              </span>
+            ) : null}
           </div>
 
           {skill.tags && skill.tags.length > 0 && (

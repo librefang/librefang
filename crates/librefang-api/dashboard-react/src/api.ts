@@ -637,11 +637,13 @@ export interface ClawHubBrowseItem {
   name: string;
   description: string;
   version: string;
-  author: string;
-  stars: number;
-  downloads: number;
-  tags: string[];
+  author?: string;
+  stars?: number;
+  downloads?: number;
+  tags?: string[];
   icon_url?: string;
+  updated_at?: number;
+  score?: number;
 }
 
 export interface ClawHubBrowseResponse {
