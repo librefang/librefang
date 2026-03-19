@@ -16,10 +16,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - uses: actions/setup-node@v6
         with:
           node-version-file: 'web/.nvmrc'
           cache: 'pnpm'
+          cache-dependency-path: web/pnpm-lock.yaml
 
       - run: cd web && pnpm install --frozen-lockfile
 
