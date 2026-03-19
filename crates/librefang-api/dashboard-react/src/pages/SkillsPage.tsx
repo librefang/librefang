@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, type ClawHubBrowseItem } from "../api";
+import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, type ClawHubBrowseItem, type ClawHubSkillDetail } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -99,7 +99,7 @@ function MarketplaceSkillCard({ skill, onInstall, pendingId, onViewDetails, t }:
   t: (key: string) => string;
 }) {
   return (
-    <Card hover padding="none" className="flex flex-col overflow-hidden group">
+    <Card hover padding="none" className="flex flex-col overflow-hidden group cursor-pointer" onClick={() => onViewDetails(skill)}>
       <div className="h-1.5 bg-gradient-to-r from-brand via-brand/60 to-brand/30" />
       <div className="p-5 flex-1 flex flex-col">
         <div className="flex items-start justify-between gap-3 mb-4">
@@ -138,11 +138,7 @@ function MarketplaceSkillCard({ skill, onInstall, pendingId, onViewDetails, t }:
         </div>
 
         {/* Actions */}
-        <div className="flex gap-2 mt-auto">
-          <Button variant="ghost" size="sm" className="flex-1" onClick={() => onViewDetails(skill)}>
-            {t("common.details")}
-            <ChevronRight className="w-3 h-3" />
-          </Button>
+        <div className="flex gap-2 mt-auto" onClick={e => e.stopPropagation()}>
           {skill.is_installed ? (
             <Button variant="secondary" size="sm" className="flex-1" disabled>
               <CheckCircle2 className="w-3 h-3" />
@@ -153,7 +149,7 @@ function MarketplaceSkillCard({ skill, onInstall, pendingId, onViewDetails, t }:
               variant="primary"
               size="sm"
               className="flex-1"
-              onClick={() => onInstall(skill.slug)}
+              onClick={(e) => { e.stopPropagation(); onInstall(skill.slug); }}
               disabled={pendingId === skill.slug}
               leftIcon={pendingId === skill.slug ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
             >
@@ -311,6 +307,16 @@ export function SkillsPage() {
     staleTime: 60000,
     enabled: viewMode === "marketplace" && !!searchKeyword,
   });
+
+  // Get skill detail when viewing details
+  const detailQuery = useQuery({
+    queryKey: ["clawhub", "skill", detailsSkill?.slug],
+    queryFn: () => detailsSkill?.slug ? clawhubGetSkill(detailsSkill.slug) : Promise.resolve(null),
+    enabled: !!detailsSkill?.slug,
+  });
+
+  // Merge detail data with skill
+  const skillWithDetails = detailQuery.data ? { ...detailsSkill, ...detailQuery.data, is_installed: detailQuery.data.installed } : detailsSkill;
 
   const installedSkills = skillsQuery.data ?? [];
   const marketplaceSkills = searchQuery.data?.items ?? [];
@@ -517,7 +523,7 @@ export function SkillsPage() {
       {/* Details Modal */}
       {detailsSkill && (
         <DetailsModal
-          skill={detailsSkill}
+          skill={skillWithDetails}
           onClose={() => setDetailsSkill(null)}
           onInstall={() => handleInstall(detailsSkill.slug)}
           pendingId={installingId}
