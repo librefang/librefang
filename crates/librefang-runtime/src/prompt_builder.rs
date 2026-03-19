@@ -908,28 +908,28 @@ mod tests {
 
     #[test]
     fn test_channel_telegram() {
-        let section = build_channel_section("telegram");
+        let section = build_channel_section("telegram", None, None);
         assert!(section.contains("4096"));
         assert!(section.contains("Telegram"));
     }
 
     #[test]
     fn test_channel_discord() {
-        let section = build_channel_section("discord");
+        let section = build_channel_section("discord", None, None);
         assert!(section.contains("2000"));
         assert!(section.contains("Discord"));
     }
 
     #[test]
     fn test_channel_irc() {
-        let section = build_channel_section("irc");
+        let section = build_channel_section("irc", None, None);
         assert!(section.contains("512"));
         assert!(section.contains("plain text"));
     }
 
     #[test]
     fn test_channel_unknown_gets_default() {
-        let section = build_channel_section("smoke_signal");
+        let section = build_channel_section("smoke_signal", None, None);
         assert!(section.contains("4096"));
         assert!(section.contains("smoke_signal"));
     }

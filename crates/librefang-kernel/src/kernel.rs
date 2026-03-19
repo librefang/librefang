@@ -79,6 +79,10 @@ impl LlmDriver for StubDriver {
                 .to_string(),
         ))
     }
+
+    fn is_configured(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -262,8 +266,12 @@ pub struct LibreFangKernel {
     hand_desc_embeddings: tokio::sync::RwLock<Option<std::collections::HashMap<String, Vec<f32>>>>,
     /// Pluggable context engine for memory recall, assembly, and compaction.
     pub context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>>,
+    /// Runtime config passed to context-engine lifecycle hooks.
+    context_engine_config: librefang_runtime::context_engine::ContextEngineConfig,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
+    /// Whether we've already logged the "no provider" audit entry (prevents spam).
+    pub provider_unconfigured_logged: std::sync::atomic::AtomicBool,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -1149,26 +1157,21 @@ impl LibreFangKernel {
         );
 
         // Build the pluggable context engine from config
+        let context_engine_config = librefang_runtime::context_engine::ContextEngineConfig {
+            context_window_tokens: 200_000, // default, overridden per-agent at call time
+            stable_prefix_mode: config.stable_prefix_mode,
+            max_recall_results: 5,
+        };
         let context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>> = {
-            let ce_config = librefang_runtime::context_engine::ContextEngineConfig {
-                context_window_tokens: 200_000, // default, overridden per-agent at call time
-                stable_prefix_mode: config.stable_prefix_mode,
-                max_recall_results: 5,
-            };
             let emb_arc: Option<
                 Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>,
             > = embedding_driver.as_ref().map(Arc::clone);
             let engine = librefang_runtime::context_engine::build_context_engine(
                 &config.context_engine,
-                ce_config,
+                context_engine_config.clone(),
                 memory.clone(),
                 emb_arc,
             );
-            // TODO: Call engine.bootstrap(&ce_config).await here once Kernel::new
-            // is made async. Currently Kernel::new is synchronous so we cannot
-            // invoke the async bootstrap(). ScriptableContextEngine validates
-            // hook script paths in bootstrap — without this call, validation is
-            // deferred until the first hook invocation.
             Some(engine)
         };
 
@@ -1227,7 +1230,9 @@ impl LibreFangKernel {
             command_queue,
             hand_desc_embeddings: tokio::sync::RwLock::new(None),
             context_engine,
+            context_engine_config,
             self_handle: OnceLock::new(),
+            provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -1855,6 +1860,21 @@ impl LibreFangKernel {
                         .insert(agent_id, result.decision_traces.clone());
                 }
 
+                if result.provider_not_configured {
+                    if !self
+                        .provider_unconfigured_logged
+                        .swap(true, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        self.audit_log.record(
+                            agent_id.to_string(),
+                            librefang_runtime::audit::AuditAction::AgentMessage,
+                            "agent loop skipped",
+                            "No LLM provider configured — configure via dashboard settings",
+                        );
+                    }
+                    return Ok(result);
+                }
+
                 // SECURITY: Record successful message in audit trail
                 self.audit_log.record(
                     agent_id.to_string(),
@@ -2098,6 +2118,8 @@ impl LibreFangKernel {
                 },
                 user_name,
                 channel_type: None,
+                sender_user_id: None,
+                sender_display_name: None,
                 is_subagent: manifest
                     .metadata
                     .get("is_subagent")
@@ -2438,6 +2460,7 @@ impl LibreFangKernel {
             memories_saved: Vec::new(),
             memories_used: Vec::new(),
             memory_conflicts: Vec::new(),
+            provider_not_configured: false,
         })
     }
 
@@ -2503,6 +2526,7 @@ impl LibreFangKernel {
             memories_saved: Vec::new(),
             memories_used: Vec::new(),
             memory_conflicts: Vec::new(),
+            provider_not_configured: false,
         })
     }
 
@@ -2970,6 +2994,7 @@ impl LibreFangKernel {
             memories_saved: result.memories_saved,
             memories_used: result.memories_used,
             memory_conflicts: result.memory_conflicts,
+            provider_not_configured: result.provider_not_configured,
         }
     }
 
@@ -4561,22 +4586,17 @@ impl LibreFangKernel {
     /// Iterates the agent registry and starts background tasks for agents with
     /// `Continuous`, `Periodic`, or `Proactive` schedules.
     /// Hands activated on first boot when no `hand_state.json` exists yet.
-    /// These provide a useful out-of-the-box experience without requiring
-    /// extra API keys or manual setup.
+    /// By default, NO hands are activated to prevent unexpected token consumption.
+    /// Users can manually activate hands as needed using:
+    ///   librefang hand activate <hand-id>
+    ///
+    /// Hands are designed for specific tasks (trading, prediction, lead generation, etc.)
+    /// and should only be activated when the user explicitly needs them.
     const DEFAULT_HANDS: &'static [&'static str] = &[
-        "researcher",
-        "browser",
-        "collector",
-        "analytics",
-        "strategist",
-        "lead",
-        "predictor",
-        "trader",
-        "devops",
-        "apitester",
+        // Empty by default - all hands opt-in
     ];
 
-    pub fn start_background_agents(self: &Arc<Self>) {
+    pub async fn start_background_agents(self: &Arc<Self>) {
         // Restore previously active hands from persisted state
         let state_path = self.config.home_dir.join("hand_state.json");
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
@@ -4645,6 +4665,15 @@ impl LibreFangKernel {
                 }
             }
             self.persist_hand_state();
+        }
+
+        // Context-engine bootstrap is async; run it at daemon startup so hook
+        // script/path validation fails early instead of on first hook call.
+        if let Some(engine) = self.context_engine.as_deref() {
+            match engine.bootstrap(&self.context_engine_config).await {
+                Ok(()) => info!("Context engine bootstrap complete"),
+                Err(e) => warn!("Context engine bootstrap failed: {e}"),
+            }
         }
 
         // ── Startup API key health check ──────────────────────────────────
@@ -6555,6 +6584,31 @@ async fn cron_deliver_response(
                     }
                 }
             }
+        }
+    }
+}
+
+impl LibreFangKernel {
+    /// Mark all active Hands' cron jobs as due-now so the next scheduler tick fires them.
+    /// Called after a provider is first configured so Hands resume immediately.
+    pub fn trigger_all_hands(&self) {
+        let hand_agents: Vec<AgentId> = self
+            .hand_registry
+            .list_instances()
+            .into_iter()
+            .filter(|inst| inst.status == librefang_hands::HandStatus::Active)
+            .filter_map(|inst| inst.agent_id)
+            .collect();
+
+        for agent_id in &hand_agents {
+            self.cron_scheduler.mark_due_now_by_agent(*agent_id);
+        }
+
+        if !hand_agents.is_empty() {
+            info!(
+                count = hand_agents.len(),
+                "Marked active hands as due for immediate execution"
+            );
         }
     }
 }

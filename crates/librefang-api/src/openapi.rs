@@ -172,6 +172,8 @@ use crate::types;
         // ── Workflows / Triggers / Schedules / Cron ──
         routes::list_workflows,
         routes::create_workflow,
+        routes::update_workflow,
+        routes::delete_workflow,
         routes::run_workflow,
         routes::list_workflow_runs,
         routes::list_triggers,

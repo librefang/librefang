@@ -5,6 +5,96 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] - 2026-03-19
+
+### Fixed
+
+- Prevent provider appearing in multiple tier groups (#1190) (@SenZhangAI)
+- Resolve 17 compilation errors breaking CI (#1193) (@houko)
+
+## [0.6.1] - 2026-03-18
+
+### Added
+
+- Graceful degradation when no LLM provider configured (#1185) (@SenZhangAI)
+
+### Fixed
+
+- Remove markdown fence wrapper from dev.to articles (#1167) (@houko)
+- Resolve secret scanning alert for MongoDB example URI (#1168) (@houko)
+- Handle paginated response in agents list and chat resolver (#1169) (@houko)
+- Resolve agent names to UUIDs in message and kill commands (#1170) (@houko)
+- Return 409 Conflict when spawning duplicate agent (#1171) (@houko)
+- Parse model aliases from API response correctly (#1172) (@houko)
+- Include last_active in agent detail endpoint (#1173) (@houko)
+- Parse wrapped API responses in CLI table views (#1175) (@houko)
+- Resolve agent names in trigger, cron, and webhook commands (#1176) (@houko)
+- Complete dashboard i18n translation coverage (#1177) (@houko)
+- Webhook CLI commands use wrong API endpoints (#1178) (@houko)
+- A2A agent card uses service config instead of random agent (#1179) (@houko)
+- Budget PUT accepts GET response field names for read-modify-write (#1182) (@houko)
+- Models set sends wrong field name to config/set API (#1183) (@houko)
+- Cron create returns proper JSON instead of stringified blob (#1184) (@houko)
+- CLI cron list reads nested schedule/action fields (#1186) (@houko)
+- Triggers list returns wrapped object for consistency (#1187) (@houko)
+- Include system_prompt in GET /api/agents/:id response (#1188) (@houko)
+
+### Maintenance
+
+- Fix rustfmt in a2a_agent_card handler (#1181) (@houko)
+
+## [0.6.0] - 2026-03-18
+
+### Added
+
+- Add filtering, pagination and sorting to agent list endpoint (#399) (@houko)
+- Add HTTP proxy support for all outbound connections (#415) (@houko)
+- Auto-register local workflow definitions at daemon startup (#418) (@houko)
+- Add multimedia support for Telegram and Discord channels (#422) (@houko)
+- Add Telegram streaming output with progressive message updates (#423) (@houko)
+- Add NVIDIA NIM as dedicated LLM provider (#428) (@houko)
+- Add MQTT pub/sub channel adapter for IoT integration (#430) (@houko)
+- Add workflow trigger support to cron jobs (#431) (@houko)
+- Add hierarchical Goals system with REST API and dashboard UI (#434) (@houko)
+- Bundle Python and Node.js runtimes in Docker image (#334) (#436) (@houko)
+- Add Vertex AI driver with OAuth2 authentication (#448) (@houko)
+- Add GET /api/providers/:name endpoint (#1090) (@houko)
+- Add GET /api/workflows/:id endpoint (#1091) (@houko)
+- Add GET /api/channels/:name endpoint (#1092) (@houko)
+- Add GET /api/cron/jobs/:id endpoint (#1093) (@houko)
+- Add GET /api/mcp_servers/:name endpoint (#1094) (@houko)
+- Add PUT/DELETE /api/workflows/:id endpoints (#1095) (@houko)
+- Add DELETE /api/agents/:id/files/:filename endpoint (#1097) (@houko)
+- Add Workflow variant to CronAction for cron-triggered workflows (#1102) (@houko)
+- Propagate sender identity from channels to agent context (#1105) (@houko)
+- Auto-register local workflow definitions at daemon startup (fixes #382) (#1107) (@houko)
+- Implement mem0-style proactive memory system (#1111) (@houko)
+- Web search key rotation, data-driven hand routing, and health-aware LLM fallback (#1127) (@houko)
+- Improve context engine accuracy and resilience (#1146) (@houko)
+- Add context engine plugin management system (#1152) (@houko)
+- Support multiple custom plugin registries (#1154) (@houko)
+
+### Fixed
+
+- Extract thread_ts from Slack events for thread replies (#1099) (@houko)
+- Add mime_type to ChannelContent::Image for correct vision handling (#1100) (@houko)
+- Use SHA-256 for Nostr pubkey derivation instead of DefaultHasher (#1101) (@houko)
+- Prevent silent message dropping in Telegram dispatch (#1103) (@houko)
+- Handle thought chunks in Gemini streaming for thinking models (#1104) (@houko)
+- Don't break streaming bridge on intermediate ContentComplete (#1126) (@houko)
+- Fall back to bundled Mozilla CA roots when system certs unavailable (#1142) (@houko)
+- Upstream parity — 10 bug fixes from release comparison (#1143) (@houko)
+- Resolve clippy warnings, test failures, and add agent list validation (#1162) (@houko)
+
+### Documentation
+
+- Slim down README (#1124) (@houko)
+
+### Maintenance
+
+- Skip version bump PRs in changelog generation (#1123) (@houko)
+- Bump setup-python v5→v6 and create-pull-request v7→v8 (#1161) (@houko)
+
 ## [0.5.7] - 2026-03-18
 
 ### Added

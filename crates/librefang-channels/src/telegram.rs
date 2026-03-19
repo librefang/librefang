@@ -905,6 +905,7 @@ impl ChannelAdapter for TelegramAdapter {
 }
 
 /// Reason a Telegram update was not dispatched to an agent.
+#[derive(Debug)]
 enum DropReason {
     /// Intentional policy filter (e.g. allowed_users). Log at debug level.
     Filtered(String),

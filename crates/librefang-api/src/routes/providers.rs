@@ -744,6 +744,15 @@ pub async fn set_provider_key(
         false
     };
 
+    // Reset log-once flag so future provider removal gets logged again
+    state
+        .kernel
+        .provider_unconfigured_logged
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    // Trigger all active hands so they resume immediately
+    state.kernel.trigger_all_hands();
+
     let mut resp = serde_json::json!({"status": "saved", "provider": name});
     if switched {
         resp["switched_default"] = serde_json::json!(true);
@@ -1312,6 +1321,38 @@ pub async fn catalog_status() -> impl IntoResponse {
     Json(serde_json::json!({
         "last_sync": last_sync,
     }))
+}
+
+/// GET /api/providers/ollama/detect — Probe localhost for Ollama availability
+pub async fn detect_ollama() -> impl IntoResponse {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            return Json(serde_json::json!({ "available": false, "models": [] }));
+        }
+    };
+
+    match client.get("http://localhost:11434/api/tags").send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let body: serde_json::Value = resp.json().await.unwrap_or_else(|e| {
+                tracing::warn!("Ollama responded but JSON parse failed: {e}");
+                serde_json::Value::Null
+            });
+            let models: Vec<String> = body["models"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|m| m["name"].as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Json(serde_json::json!({ "available": true, "models": models }))
+        }
+        _ => Json(serde_json::json!({ "available": false, "models": [] })),
+    }
 }
 
 #[cfg(test)]

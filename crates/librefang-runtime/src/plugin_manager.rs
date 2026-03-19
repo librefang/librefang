@@ -828,8 +828,7 @@ mod tests {
         std::fs::create_dir_all(&plugin_dir).unwrap();
 
         // Test manifest parsing from scaffold content
-        let manifest_content = format!(
-            r#"name = "test-scaffold"
+        let manifest_content = r#"name = "test-scaffold"
 version = "0.1.0"
 description = "Test scaffold"
 author = ""
@@ -837,9 +836,8 @@ author = ""
 [hooks]
 ingest = "hooks/ingest.py"
 after_turn = "hooks/after_turn.py"
-"#
-        );
-        let manifest: PluginManifest = toml::from_str(&manifest_content).unwrap();
+"#;
+        let manifest: PluginManifest = toml::from_str(manifest_content).unwrap();
         assert_eq!(manifest.name, "test-scaffold");
         assert_eq!(manifest.version, "0.1.0");
         assert_eq!(manifest.hooks.ingest.as_deref(), Some("hooks/ingest.py"));

@@ -4,6 +4,7 @@ display_name = "OpenAI"
 api_key_env = "OPENAI_API_KEY"
 base_url = "https://api.openai.com/v1"
 key_required = true
+signup_url = "https://platform.openai.com/api-keys"
 
 [[models]]
 id = "gpt-4o"

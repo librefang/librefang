@@ -4,6 +4,7 @@ display_name = "Anthropic"
 api_key_env = "ANTHROPIC_API_KEY"
 base_url = "https://api.anthropic.com"
 key_required = true
+signup_url = "https://console.anthropic.com/settings/keys"
 
 [[models]]
 id = "claude-opus-4-6"

@@ -628,7 +628,11 @@ fn parse_discord_attachment(
     };
 
     if content_type.starts_with("image/") {
-        ChannelContent::Image { url, caption }
+        ChannelContent::Image {
+            url,
+            caption,
+            mime_type: Some(content_type.to_string()),
+        }
     } else if content_type.starts_with("video/") {
         // Discord does not provide duration in attachment metadata.
         ChannelContent::Video {
@@ -1021,7 +1025,7 @@ mod tests {
         })];
         let content = parse_discord_attachment(&attachments, "look at this");
         match content {
-            ChannelContent::Image { url, caption } => {
+            ChannelContent::Image { url, caption, .. } => {
                 assert_eq!(url, "https://cdn.discord.com/photo.png");
                 assert_eq!(caption.as_deref(), Some("look at this"));
             }
@@ -1113,7 +1117,7 @@ mod tests {
             .await
             .unwrap();
         match &msg.content {
-            ChannelContent::Image { url, caption } => {
+            ChannelContent::Image { url, caption, .. } => {
                 assert_eq!(url, "https://cdn.discord.com/screenshot.png");
                 assert_eq!(caption.as_deref(), Some("check this out"));
             }
