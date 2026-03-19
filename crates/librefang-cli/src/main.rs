@@ -33,6 +33,8 @@ use std::time::{Duration, Instant};
 static CTRLC_PRESSED: AtomicBool = AtomicBool::new(false);
 const INIT_DEFAULT_CONFIG_TEMPLATE: &str =
     include_str!("../templates/init_default_config.toml");
+const PROVIDER_DEFAULT_MODELS_TEMPLATE: &str =
+    include_str!("../templates/provider_default_models.toml");
 
 /// Install a Ctrl+C handler that force-exits the process.
 /// On Windows/MINGW, the default handler doesn't reliably interrupt blocking
@@ -1832,12 +1834,12 @@ fn cmd_init_quick(librefang_dir: &std::path::Path) {
 
     let (provider, api_key_env, model) = detect_best_provider();
 
-    write_config_if_missing(librefang_dir, provider, model, api_key_env);
+    write_config_if_missing(librefang_dir, &provider, &model, &api_key_env);
 
     ui::blank();
     ui::success(&i18n::t("init-quick-success"));
-    ui::kv(&i18n::t("label-provider"), provider);
-    ui::kv(&i18n::t("label-model"), model);
+    ui::kv(&i18n::t("label-provider"), &provider);
+    ui::kv(&i18n::t("label-model"), &model);
     ui::blank();
     ui::next_steps(&[&i18n::t("init-next-start"), &i18n::t("init-next-chat")]);
 }
@@ -1961,57 +1963,59 @@ fn launch_desktop_app(_librefang_dir: &std::path::Path) {
 }
 
 /// Auto-detect the best available provider.
-fn detect_best_provider() -> (&'static str, &'static str, &'static str) {
+fn detect_best_provider() -> (String, String, String) {
     let providers = provider_list();
 
-    for (p, env_var, m, display) in &providers {
-        if std::env::var(env_var).is_ok() {
+    for (p, env_var, display) in &providers {
+        if std::env::var(*env_var).is_ok() {
             ui::success(&i18n::t_args(
                 "detected-provider",
-                &[("display", display), ("env_var", env_var)],
+                &[("display", *display), ("env_var", *env_var)],
             ));
-            return (p, env_var, m);
+            return (
+                (*p).to_string(),
+                (*env_var).to_string(),
+                default_model_for_provider(*p),
+            );
         }
     }
     // Also check GOOGLE_API_KEY
     if std::env::var("GOOGLE_API_KEY").is_ok() {
         ui::success(&i18n::t("detected-gemini"));
-        return ("gemini", "GOOGLE_API_KEY", "gemini-2.5-flash");
+        return (
+            "gemini".to_string(),
+            "GOOGLE_API_KEY".to_string(),
+            default_model_for_provider("gemini"),
+        );
     }
     // Check if Ollama is running locally (no API key needed)
     if check_ollama_available() {
         ui::success(&i18n::t("detected-ollama"));
-        return ("ollama", "OLLAMA_API_KEY", "llama3.2");
+        return (
+            "ollama".to_string(),
+            "OLLAMA_API_KEY".to_string(),
+            default_model_for_provider("ollama"),
+        );
     }
     ui::hint(&i18n::t("hint-no-api-keys"));
     ui::hint(&i18n::t("hint-groq-free"));
     ui::hint(&i18n::t("hint-ollama-local"));
     (
-        "openrouter",
-        "OPENROUTER_API_KEY",
-        "stepfun/step-3.5-flash:free",
+        "openrouter".to_string(),
+        "OPENROUTER_API_KEY".to_string(),
+        default_model_for_provider("openrouter"),
     )
 }
 
-/// Static list of supported providers: (id, env_var, default_model, display_name).
-fn provider_list() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+/// Static list of supported providers: (id, env_var, display_name).
+fn provider_list() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
-        ("groq", "GROQ_API_KEY", "llama-3.3-70b-versatile", "Groq"),
-        ("gemini", "GEMINI_API_KEY", "gemini-2.5-flash", "Gemini"),
-        ("deepseek", "DEEPSEEK_API_KEY", "deepseek-chat", "DeepSeek"),
-        (
-            "anthropic",
-            "ANTHROPIC_API_KEY",
-            "claude-sonnet-4-20250514",
-            "Anthropic",
-        ),
-        ("openai", "OPENAI_API_KEY", "gpt-4o", "OpenAI"),
-        (
-            "openrouter",
-            "OPENROUTER_API_KEY",
-            "stepfun/step-3.5-flash:free",
-            "OpenRouter",
-        ),
+        ("groq", "GROQ_API_KEY", "Groq"),
+        ("gemini", "GEMINI_API_KEY", "Gemini"),
+        ("deepseek", "DEEPSEEK_API_KEY", "DeepSeek"),
+        ("anthropic", "ANTHROPIC_API_KEY", "Anthropic"),
+        ("openai", "OPENAI_API_KEY", "OpenAI"),
+        ("openrouter", "OPENROUTER_API_KEY", "OpenRouter"),
     ]
 }
 
@@ -2029,6 +2033,24 @@ fn render_init_default_config(provider: &str, model: &str, api_key_env: &str) ->
         .replace("{{provider}}", provider)
         .replace("{{model}}", model)
         .replace("{{api_key_env}}", api_key_env)
+}
+
+fn configured_default_model(provider: &str) -> Option<String> {
+    let parsed = toml::from_str::<toml::Value>(PROVIDER_DEFAULT_MODELS_TEMPLATE).ok()?;
+    parsed
+        .get("default_models")?
+        .get(provider)?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+fn default_model_for_provider(provider: &str) -> String {
+    configured_default_model(provider)
+        .or_else(|| {
+            let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+            catalog.default_model_for_provider(provider)
+        })
+        .unwrap_or_else(|| "local-model".to_string())
 }
 
 /// Write config.toml if it doesn't already exist.
@@ -3154,7 +3176,7 @@ fn cmd_doctor(json: bool, repair: bool) {
             let answer = prompt_input("    Create default config? [Y/n] ");
             if answer.is_empty() || answer.starts_with('y') || answer.starts_with('Y') {
                 let (provider, api_key_env, model) = detect_best_provider();
-                let default_config = render_init_default_config(provider, model, api_key_env);
+                let default_config = render_init_default_config(&provider, &model, &api_key_env);
                 let _ = std::fs::create_dir_all(&librefang_dir);
                 if std::fs::write(&config_path, default_config).is_ok() {
                     restrict_file_permissions(&config_path);
