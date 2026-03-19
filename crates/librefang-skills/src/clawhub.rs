@@ -254,9 +254,21 @@ impl ClawHubClient {
 
     /// Create a ClawHub client with a custom API URL.
     pub fn with_url(base_url: &str, cache_dir: PathBuf) -> Self {
+        // Check if we should skip TLS verification (for servers with expired certs)
+        let use_dangerous = std::env::var("LIBREFANG_DANGEROUSLY_SKIP_TLS_VERIFICATION")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
+
+        let builder = if use_dangerous {
+            tracing::warn!("TLS verification disabled - use only for testing!");
+            crate::http_client::dangerous_client_builder()
+        } else {
+            crate::http_client::client_builder()
+        };
+
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            client: crate::http_client::client_builder()
+            client: builder
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("HTTP client build"),
@@ -504,80 +516,65 @@ impl ClawHubClient {
         slug: &str,
         target_dir: &Path,
     ) -> Result<ClawHubInstallResult, SkillError> {
-        // Use /api/v1/download?slug=... endpoint
-        let url = format!("{}/download?slug={}", self.base_url, urlencoded(slug));
-
-        info!(slug, "Downloading skill from ClawHub");
-
-        // Use get_with_retry for the download — same 429/5xx handling as all
-        // other endpoints, with 5 attempts and exponential backoff.
-        let response = self.get_with_retry(&url, "ClawHub download").await?;
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| SkillError::Network(format!("Failed to read download body: {e}")))?;
-
-        // Step 1: SHA256 of downloaded content
-        let sha256 = {
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            hex::encode(hasher.finalize())
-        };
-        info!(slug, sha256 = %sha256, "Downloaded skill");
+        info!(slug, "Installing skill from ClawHub");
 
         // Create skill directory
         let skill_dir = target_dir.join(slug);
         std::fs::create_dir_all(&skill_dir)?;
 
-        // Detect content type and extract accordingly
-        let content_str = String::from_utf8_lossy(&bytes);
-        let is_skillmd = content_str.trim_start().starts_with("---");
+        // Files to try downloading
+        let files_to_try = [
+            "SKILL.md",
+            "package.json",
+            "skill.toml",
+            "skill.yaml",
+            "README.md",
+        ];
 
-        if is_skillmd {
-            std::fs::write(skill_dir.join("SKILL.md"), &*bytes)?;
-        } else if bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b {
-            // Zip archive — extract all files
-            let cursor = std::io::Cursor::new(&*bytes);
-            match zip::ZipArchive::new(cursor) {
-                Ok(mut archive) => {
-                    for i in 0..archive.len() {
-                        let mut file = match archive.by_index(i) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                warn!(index = i, error = %e, "Skipping zip entry");
-                                continue;
-                            }
-                        };
-                        let Some(enclosed_name) = file.enclosed_name() else {
-                            warn!("Skipping zip entry with unsafe path");
-                            continue;
-                        };
-                        let out_path = skill_dir.join(enclosed_name);
-                        if file.is_dir() {
-                            std::fs::create_dir_all(&out_path)?;
-                        } else {
-                            if let Some(parent) = out_path.parent() {
-                                std::fs::create_dir_all(parent)?;
-                            }
-                            let mut out_file = std::fs::File::create(&out_path)?;
-                            std::io::copy(&mut file, &mut out_file)?;
-                        }
-                    }
-                    info!(slug, entries = archive.len(), "Extracted skill zip");
-                }
-                Err(e) => {
-                    warn!(slug, error = %e, "Failed to read zip, saving raw");
-                    std::fs::write(skill_dir.join("skill.zip"), &*bytes)?;
+        let mut downloaded_any = false;
+        let mut main_bytes: Option<Vec<u8>> = None;
+        let mut main_filename = String::new();
+
+        // Download all available files
+        for filename in &files_to_try {
+            if let Ok(content) = self.get_file(slug, filename).await {
+                let bytes = content.into_bytes();
+                std::fs::write(skill_dir.join(filename), &bytes)?;
+                downloaded_any = true;
+                info!(slug, filename, "Downloaded file");
+
+                // Save first successful download for SHA256 calculation
+                if main_bytes.is_none() {
+                    main_bytes = Some(bytes.clone());
+                    main_filename = filename.to_string();
                 }
             }
-        } else {
-            std::fs::write(skill_dir.join("package.json"), &*bytes)?;
         }
+
+        if !downloaded_any {
+            return Err(SkillError::NotFound(format!(
+                "No downloadable content found for skill '{}'",
+                slug
+            )));
+        }
+
+        // Calculate SHA256 from first file
+        let bytes = main_bytes.unwrap();
+        let sha256 = {
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            hex::encode(hasher.finalize())
+        };
+        info!(slug, sha256 = %sha256, filename = %main_filename, "Downloaded skill");
 
         // Step 2-3: Detect format and convert
         let mut all_warnings = Vec::new();
         let mut tool_translations = Vec::new();
         let mut is_prompt_only = false;
+
+        // Check if we downloaded SKILL.md format
+        let content_str = String::from_utf8_lossy(&bytes);
+        let is_skillmd = content_str.trim_start().starts_with("---");
 
         let manifest = if is_skillmd || openclaw_compat::detect_skillmd(&skill_dir) {
             let converted = openclaw_compat::convert_skillmd(&skill_dir)?;

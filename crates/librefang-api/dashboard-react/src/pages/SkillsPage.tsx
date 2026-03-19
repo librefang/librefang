@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listSkills, installSkill, uninstallSkill, clawhubSearch, clawhubBrowse, clawhubInstall, type ClawHubBrowseItem, type ClawHubSkillDetail } from "../api";
+import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, type ClawHubBrowseItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -12,11 +12,13 @@ import { Input } from "../components/ui/Input";
 import { Pagination } from "../components/ui/Pagination";
 import { useUIStore } from "../lib/store";
 import {
-  Wrench, Search, CheckCircle2, XCircle, ChevronRight, X,
-  Download, Trash2, Star, Tag, Loader2, Sparkles, Package, BookOpen,
-  Code, GitBranch, Globe, Cloud, Monitor, Search as SearchIcon, Bot, Database,
-  Briefcase, MessageCircle, Film, FileText, Shield, Terminal, TrendingUp, DollarSign, Home, FileCode
+  Wrench, Search, CheckCircle2, ChevronRight, X,
+  Download, Trash2, Star, Loader2, Sparkles, Package,
+  Code, GitBranch, Globe, Cloud, Monitor, Bot, Database,
+  Briefcase, Shield, Terminal
 } from "lucide-react";
+
+type ClawHubSkillWithStatus = ClawHubBrowseItem & { is_installed?: boolean };
 
 const REFRESH_MS = 30000;
 const ITEMS_PER_PAGE = 6;
@@ -90,10 +92,10 @@ function InstalledSkillCard({ skill, onUninstall, t }: {
 
 // Marketplace Skill Card
 function MarketplaceSkillCard({ skill, onInstall, pendingId, onViewDetails, t }: {
-  skill: ClawHubBrowseItem;
+  skill: ClawHubSkillWithStatus;
   pendingId: string | null;
   onInstall: (slug: string) => void;
-  onViewDetails: (skill: ClawHubBrowseItem) => void;
+  onViewDetails: (skill: ClawHubSkillWithStatus) => void;
   t: (key: string) => string;
 }) {
   return (
@@ -157,7 +159,7 @@ function MarketplaceSkillCard({ skill, onInstall, pendingId, onViewDetails, t }:
 
 // Details Modal
 function DetailsModal({ skill, onClose, onInstall, pendingId, t }: {
-  skill: ClawHubBrowseItem;
+  skill: ClawHubSkillWithStatus;
   onClose: () => void;
   onInstall: () => void;
   pendingId: string | null;
@@ -267,13 +269,13 @@ export function SkillsPage() {
 
   // View state
   const [viewMode, setViewMode] = useState<ViewMode>("marketplace");
-  const [selectedCategory, setSelectedCategory] = useState<string>("coding");
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(categories[0]?.id || null);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
 
   // Actions
   const [uninstalling, setUninstalling] = useState<string | null>(null);
-  const [detailsSkill, setDetailsSkill] = useState<ClawHubBrowseItem | null>(null);
+  const [detailsSkill, setDetailsSkill] = useState<ClawHubSkillWithStatus | null>(null);
   const [installingId, setInstallingId] = useState<string | null>(null);
 
   // Get search keyword from category or use search input
@@ -349,12 +351,8 @@ export function SkillsPage() {
   };
 
   const handleInstall = (slug: string) => {
-    console.log("[Skills] Installing:", slug);
     setInstallingId(slug);
-    installMutation.mutate({ slug }, {
-      onSuccess: () => console.log("[Skills] Install success"),
-      onError: (err) => console.log("[Skills] Install error:", err)
-    });
+    installMutation.mutate({ slug });
   };
 
   const handleUninstall = (name: string) => {
@@ -398,7 +396,7 @@ export function SkillsPage() {
           </span>
         </button>
         <button
-          onClick={() => { setViewMode("marketplace"); setPage(1); }}
+          onClick={() => { setViewMode("marketplace"); setPage(1); setSelectedCategory(categories[0]?.id || null); }}
           className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
             viewMode === "marketplace" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
@@ -466,13 +464,13 @@ export function SkillsPage() {
         ) : isRateLimited ? (
           <EmptyState
             title={t("skills.rate_limited")}
-            subtitle={t("skills.rate_limited_desc")}
+            description={t("skills.rate_limited_desc")}
             icon={<Loader2 className="h-6 w-6 animate-spin" />}
           />
         ) : marketplaceError ? (
           <EmptyState
             title={t("skills.load_error")}
-            subtitle={marketplaceError.message || t("common.error")}
+            description={marketplaceError.message || t("common.error")}
             icon={<Search className="h-6 w-6" />}
           />
         ) : filteredMarketplace.length === 0 ? (

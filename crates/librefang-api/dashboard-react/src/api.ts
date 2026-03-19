@@ -681,8 +681,8 @@ export async function clawhubGetSkill(slug: string): Promise<ClawHubSkillDetail>
 }
 
 export async function clawhubInstall(slug: string, version?: string): Promise<ApiActionResponse> {
-  console.log("[API] clawhubInstall:", slug, version);
-  return post<ApiActionResponse>("/api/clawhub/install", { slug, version: version || "latest" }, 180000); // 3 min timeout for install
+  // Use default timeout for install - ClawHub can be slow
+  return post<ApiActionResponse>("/api/clawhub/install", { slug, version: version || "latest" });
 }
 
 export async function listWorkflows(): Promise<WorkflowItem[]> {

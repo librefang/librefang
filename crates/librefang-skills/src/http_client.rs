@@ -18,3 +18,11 @@ pub fn client_builder() -> ClientBuilder {
     .with_no_client_auth();
     ClientBuilder::new().use_preconfigured_tls(tls_config)
 }
+
+/// Create a client that skips TLS verification (dangerous!).
+/// Used when the remote server has expired certificates.
+pub fn dangerous_client_builder() -> ClientBuilder {
+    ClientBuilder::new()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+}
