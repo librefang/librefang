@@ -2,11 +2,11 @@ name: Lint & Build
 
 on:
   push:
-    branches: [main]
+    branches: [main,feature/*]
     paths:
       - 'web/**'
   pull_request:
-    branches: [main]
+    branches: [main,feature/*]
     paths:
       - 'web/**'
 
