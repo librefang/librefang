@@ -5,6 +5,9 @@ on:
   schedule:
     - cron: "17 * * * *"
 
+permissions:
+  contents: write
+
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: true
@@ -16,8 +19,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -25,15 +26,12 @@ jobs:
           python-version: "3.x"
 
       - name: Generate star history SVG
-        env:
-          GITHUB_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
-        run: python3 scripts/generate_star_history.py librefang/librefang public/assets/star-history.svg
+        run: python3 scripts/generate_star_history.py librefang/librefang web/public/assets/star-history.svg
 
       - name: Create PR with updated SVG
         id: cpr
         uses: peter-evans/create-pull-request@v8
         with:
-          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
           branch: chore/update-star-history
           commit-message: "docs: update star history"
           title: "docs: update star history"
@@ -41,6 +39,4 @@ jobs:
 
       - name: Auto-merge PR
         if: steps.cpr.outputs.pull-request-number
-        env:
-          GH_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
         run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch

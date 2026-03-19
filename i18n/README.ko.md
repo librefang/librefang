@@ -46,7 +46,10 @@ LibreFang은 **에이전트 운영체제**입니다 — Rust로 처음부터 구
 ## 빠른 시작
 
 ```bash
-# 설치
+# 설치 (Linux/macOS/WSL)
+curl -fsSL https://librefang.ai/install.sh | sh
+
+# 또는 Cargo로 설치
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
 # 초기화 (프로바이더 설정 안내)
@@ -141,7 +144,41 @@ xtask                 빌드 자동화
 
 **OpenAI 호환 API** — 드롭인 `/v1/chat/completions` 엔드포인트. 140+ REST/WS/SSE 엔드포인트. [API 레퍼런스](../docs/api-reference.md)
 
-**클라이언트 SDK** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — 스트리밍 지원 완전한 REST 클라이언트.
+**클라이언트 SDK** — 스트리밍 지원 완전한 REST 클라이언트.
+
+```javascript
+// JavaScript/TypeScript
+npm install @librefang/sdk
+const { LibreFang } = require("@librefang/sdk");
+const client = new LibreFang("http://localhost:4545");
+const agent = await client.agents.create({ template: "assistant" });
+const reply = await client.agents.message(agent.id, "Hello!");
+```
+
+```python
+# Python
+pip install librefang
+from librefang import Client
+client = Client("http://localhost:4545")
+agent = client.agents.create(template="assistant")
+reply = client.agents.message(agent["id"], "Hello!")
+```
+
+```rust
+// Rust
+cargo add librefang
+use librefang::LibreFang;
+let client = LibreFang::new("http://localhost:4545");
+let agent = client.agents().create(CreateAgentRequest { template: Some("assistant".into()), .. }).await?;
+```
+
+```go
+// Go
+go get github.com/librefang/librefang/sdk/go
+import "github.com/librefang/librefang/sdk/go"
+client := librefang.New("http://localhost:4545")
+agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"})
+```
 
 **MCP 지원** — MCP 클라이언트 및 서버 내장. IDE 연동, 커스텀 도구 확장, 에이전트 파이프라인 구성. [상세](../docs/providers.md)
 

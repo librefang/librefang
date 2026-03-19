@@ -4,8 +4,11 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - 'public/assets/contributors.svg'
+      - 'web/public/assets/contributors.svg'
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}
@@ -18,8 +21,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -27,15 +28,12 @@ jobs:
           python-version: "3.x"
 
       - name: Generate contributors SVG
-        env:
-          GITHUB_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
-        run: python3 scripts/generate_contributors.py librefang/librefang public/assets/contributors.svg
+        run: python3 scripts/generate_contributors.py librefang/librefang web/public/assets/contributors.svg
 
       - name: Create PR with updated SVG
         id: cpr
         uses: peter-evans/create-pull-request@v8
         with:
-          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
           branch: chore/update-contributors
           commit-message: "docs: update contributors"
           title: "docs: update contributors"
@@ -43,6 +41,4 @@ jobs:
 
       - name: Auto-merge PR
         if: steps.cpr.outputs.pull-request-number
-        env:
-          GH_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
         run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch
