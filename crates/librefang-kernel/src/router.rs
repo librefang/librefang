@@ -198,7 +198,13 @@ struct ManifestRouteCandidate {
 
 /// Cached hand route candidates built from bundled HAND.toml definitions.
 /// Invalidated alongside `MANIFEST_CACHE` on hot-reload.
-static HAND_ROUTE_CACHE: OnceLock<Mutex<Option<Vec<HandRouteCandidate>>>> = OnceLock::new();
+#[derive(Debug, Clone)]
+struct HandRouteCacheEntry {
+    home_dir: Option<String>,
+    candidates: Vec<HandRouteCandidate>,
+}
+
+static HAND_ROUTE_CACHE: OnceLock<Mutex<Option<HandRouteCacheEntry>>> = OnceLock::new();
 
 /// Invalidate the hand route cache (call alongside `invalidate_manifest_cache`).
 pub fn invalidate_hand_route_cache() {
@@ -210,49 +216,95 @@ pub fn invalidate_hand_route_cache() {
 }
 
 fn hand_route_candidates() -> Vec<HandRouteCandidate> {
+    let home_dir = dirs::home_dir();
+    let home_dir_key = home_dir
+        .as_ref()
+        .map(|path| path.to_string_lossy().to_string());
     let cache = HAND_ROUTE_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref cached) = *guard {
-        return cached.clone();
+        if cached.home_dir == home_dir_key {
+            return cached.candidates.clone();
+        }
     }
 
-    let candidates = build_hand_route_candidates();
-    *guard = Some(candidates.clone());
+    let candidates = build_hand_route_candidates(home_dir.as_deref());
+    *guard = Some(HandRouteCacheEntry {
+        home_dir: home_dir_key,
+        candidates: candidates.clone(),
+    });
     candidates
 }
 
-fn build_hand_route_candidates() -> Vec<HandRouteCandidate> {
-    let mut candidates = Vec::new();
+fn build_hand_route_candidates(home_dir: Option<&Path>) -> Vec<HandRouteCandidate> {
+    let mut candidates_by_id: HashMap<String, HandRouteCandidate> = HashMap::new();
 
-    // TODO: also scan ~/.librefang/hands/*/HAND.toml for user-installed hands
-    // once hand_route_candidates() receives the home_dir parameter.
     for (id, toml_content, _skill) in librefang_hands::bundled::bundled_hands() {
         let Ok(def) = librefang_hands::bundled::parse_bundled(id, toml_content, "") else {
             continue;
         };
+        let candidate = hand_route_candidate_from_definition(def);
+        candidates_by_id.insert(candidate.hand_id.clone(), candidate);
+    }
 
-        // Strong: explicit aliases + description-derived phrases
-        let mut strong = def.routing.aliases.clone();
-        strong.extend(description_phrases(&def.description));
+    if let Some(home_dir) = home_dir {
+        for candidate in load_user_hand_route_candidates(home_dir) {
+            candidates_by_id.insert(candidate.hand_id.clone(), candidate);
+        }
+    }
 
-        // Weak: explicit weak_aliases + id-derived tokens
-        let mut weak = def.routing.weak_aliases.clone();
-        weak.extend(
-            def.id
-                .to_lowercase()
-                .split(['-', '_'])
-                .filter(|token| token.len() >= 3 && !GENERIC_ENGLISH_WORDS.contains(token))
-                .map(str::to_string),
-        );
+    let mut candidates: Vec<HandRouteCandidate> = candidates_by_id.into_values().collect();
+    candidates.sort_by(|a, b| a.hand_id.cmp(&b.hand_id));
+    candidates
+}
 
-        candidates.push(HandRouteCandidate {
-            hand_id: def.id,
-            strong_phrases: dedupe(strong),
-            weak_phrases: dedupe(weak),
-        });
+fn load_user_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
+    let hands_dir = home_dir.join(".librefang").join("hands");
+    let Ok(entries) = fs::read_dir(&hands_dir) else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let hand_dir = entry.path();
+        if !hand_dir.is_dir() {
+            continue;
+        }
+        let hand_toml = hand_dir.join("HAND.toml");
+        let Ok(toml_content) = fs::read_to_string(&hand_toml) else {
+            continue;
+        };
+        let Ok(def) = librefang_hands::bundled::parse_bundled("custom", &toml_content, "") else {
+            continue;
+        };
+        candidates.push(hand_route_candidate_from_definition(def));
     }
 
     candidates
+}
+
+fn hand_route_candidate_from_definition(
+    def: librefang_hands::HandDefinition,
+) -> HandRouteCandidate {
+    // Strong: explicit aliases + description-derived phrases
+    let mut strong = def.routing.aliases.clone();
+    strong.extend(description_phrases(&def.description));
+
+    // Weak: explicit weak_aliases + id-derived tokens
+    let mut weak = def.routing.weak_aliases.clone();
+    weak.extend(
+        def.id
+            .to_lowercase()
+            .split(['-', '_'])
+            .filter(|token| token.len() >= 3 && !GENERIC_ENGLISH_WORDS.contains(token))
+            .map(str::to_string),
+    );
+
+    HandRouteCandidate {
+        hand_id: def.id,
+        strong_phrases: dedupe(strong),
+        weak_phrases: dedupe(weak),
+    }
 }
 
 const TEMPLATE_RULES: &[RouteRule] = &[
@@ -1138,6 +1190,42 @@ mod tests {
         auto_select_hand(msg, None)
     }
 
+    fn write_test_hand(home_dir: &Path, hand_id: &str, aliases: &[&str], weak_aliases: &[&str]) {
+        let hand_dir = home_dir.join(".librefang").join("hands").join(hand_id);
+        fs::create_dir_all(&hand_dir).unwrap();
+
+        let aliases_toml = aliases
+            .iter()
+            .map(|alias| format!("\"{alias}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let weak_aliases_toml = weak_aliases
+            .iter()
+            .map(|alias| format!("\"{alias}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let hand_toml = format!(
+            r#"
+id = "{hand_id}"
+name = "Test {hand_id}"
+description = "Custom hand for tests"
+category = "data"
+
+[routing]
+aliases = [{aliases_toml}]
+weak_aliases = [{weak_aliases_toml}]
+
+[agent]
+name = "{hand_id}-agent"
+description = "Test hand agent"
+system_prompt = "Test prompt"
+"#
+        );
+
+        fs::write(hand_dir.join("HAND.toml"), hand_toml).unwrap();
+    }
+
     #[test]
     fn test_auto_select_hand_prefers_browser_tasks() {
         let selection = hand("open website and navigate to the login page");
@@ -1515,6 +1603,48 @@ weak_aliases = ["changelog"]
         let r2 = hand("open website and fill form");
         assert_eq!(r1.hand_id, r2.hand_id);
         assert_eq!(r1.score, r2.score);
+    }
+
+    #[test]
+    fn test_build_hand_route_candidates_loads_user_installed_hands() {
+        let tmp = tempdir().unwrap();
+        write_test_hand(
+            tmp.path(),
+            "uptime-watcher",
+            &["uptime pulse monitor"],
+            &["uptime pulse"],
+        );
+
+        let candidates = build_hand_route_candidates(Some(tmp.path()));
+        let custom = candidates
+            .iter()
+            .find(|candidate| candidate.hand_id == "uptime-watcher")
+            .expect("user-installed hand should be loaded");
+
+        assert!(custom
+            .strong_phrases
+            .iter()
+            .any(|phrase| phrase == "uptime pulse monitor"));
+        assert!(custom
+            .weak_phrases
+            .iter()
+            .any(|phrase| phrase == "uptime pulse"));
+    }
+
+    #[test]
+    fn test_build_hand_route_candidates_ignores_invalid_user_hand_manifests() {
+        let tmp = tempdir().unwrap();
+        let hand_dir = tmp.path().join(".librefang").join("hands").join("broken");
+        fs::create_dir_all(&hand_dir).unwrap();
+        fs::write(hand_dir.join("HAND.toml"), "not = valid = toml").unwrap();
+
+        let candidates = build_hand_route_candidates(Some(tmp.path()));
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.hand_id != "broken"),
+            "invalid HAND.toml should be skipped"
+        );
     }
 
     #[test]
