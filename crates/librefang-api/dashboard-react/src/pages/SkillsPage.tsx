@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, type ClawHubBrowseItem, type ClawHubSkillDetail } from "../api";
+import { listSkills, uninstallSkill, clawhubSearch, clawhubInstall, clawhubGetSkill, type ClawHubBrowseItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -12,7 +12,7 @@ import { Input } from "../components/ui/Input";
 import { Pagination } from "../components/ui/Pagination";
 import { useUIStore } from "../lib/store";
 import {
-  Wrench, Search, CheckCircle2, ChevronRight, X,
+  Wrench, Search, CheckCircle2, X,
   Download, Trash2, Star, Loader2, Sparkles, Package,
   Code, GitBranch, Globe, Cloud, Monitor, Bot, Database,
   Briefcase, Shield, Terminal, Calendar
@@ -316,7 +316,9 @@ export function SkillsPage() {
   });
 
   // Merge detail data with skill
-  const skillWithDetails = detailQuery.data ? { ...detailsSkill, ...detailQuery.data, is_installed: detailQuery.data.installed } : detailsSkill;
+  const skillWithDetails = detailQuery.data && detailsSkill 
+    ? { ...detailsSkill, ...detailQuery.data, is_installed: detailQuery.data.is_installed } as ClawHubSkillWithStatus
+    : detailsSkill;
 
   const installedSkills = skillsQuery.data ?? [];
   const marketplaceSkills = searchQuery.data?.items ?? [];
@@ -521,7 +523,7 @@ export function SkillsPage() {
       )}
 
       {/* Details Modal */}
-      {detailsSkill && (
+      {detailsSkill && skillWithDetails && (
         <DetailsModal
           skill={skillWithDetails}
           onClose={() => setDetailsSkill(null)}
