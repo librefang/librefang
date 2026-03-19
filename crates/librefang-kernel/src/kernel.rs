@@ -39,7 +39,7 @@ use librefang_types::tool::ToolDefinition;
 use async_trait::async_trait;
 use librefang_channels::types::SenderContext;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
 
@@ -400,6 +400,51 @@ fn ensure_workspace(workspace: &Path) -> KernelResult<()> {
         serde_json::to_string_pretty(&meta).unwrap_or_default(),
     );
     Ok(())
+}
+
+fn safe_path_component(input: &str, fallback: &str) -> String {
+    let sanitized: String = input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    if sanitized.is_empty() {
+        fallback.to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn has_unsafe_relative_components(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+}
+
+fn resolve_workspace_dir(
+    workspaces_root: &Path,
+    requested: Option<PathBuf>,
+    agent_name: &str,
+    agent_id: AgentId,
+) -> KernelResult<PathBuf> {
+    std::fs::create_dir_all(workspaces_root).map_err(|e| {
+        KernelError::LibreFang(LibreFangError::Internal(format!(
+            "Failed to create workspaces root {}: {e}",
+            workspaces_root.display()
+        )))
+    })?;
+    let root = workspaces_root.to_path_buf();
+
+    if let Some(path) = requested {
+        if path.is_absolute() || has_unsafe_relative_components(&path) {
+            return Err(KernelError::LibreFang(LibreFangError::Internal(
+                "Invalid workspace path".to_string(),
+            )));
+        }
+        return Ok(root.join(path));
+    }
+
+    let fallback = agent_id.to_string();
+    let component = safe_path_component(agent_name, &fallback);
+    Ok(root.join(component))
 }
 
 /// Generate workspace identity files for an agent (SOUL.md, USER.md, TOOLS.md, MEMORY.md).
@@ -1278,11 +1323,12 @@ impl LibreFangKernel {
                     // Check if TOML on disk is newer/different — if so, update from file
                     let mut entry = entry;
                     let toml_path = entry.source_toml_path.clone().unwrap_or_else(|| {
+                        let safe_name = safe_path_component(&name, "agent");
                         kernel
                             .config
                             .home_dir
                             .join("agents")
-                            .join(&name)
+                            .join(safe_name)
                             .join("agent.toml")
                     });
                     if toml_path.exists() {
@@ -1572,10 +1618,13 @@ impl LibreFangKernel {
         apply_budget_defaults(&self.config.budget, &mut manifest.resources);
 
         // Create workspace directory for the agent (name-based, so SOUL.md survives recreation)
-        let workspace_dir = manifest
-            .workspace
-            .clone()
-            .unwrap_or_else(|| self.config.effective_workspaces_dir().join(&name));
+        let workspaces_root = self.config.effective_workspaces_dir();
+        let workspace_dir = resolve_workspace_dir(
+            &workspaces_root,
+            manifest.workspace.clone(),
+            &name,
+            agent_id,
+        )?;
         ensure_workspace(&workspace_dir)?;
         if manifest.generate_identity_files {
             generate_identity_files(&workspace_dir, &manifest);
@@ -2038,7 +2087,12 @@ impl LibreFangKernel {
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
-            let workspace_dir = self.config.effective_workspaces_dir().join(&manifest.name);
+            let workspace_dir = resolve_workspace_dir(
+                &self.config.effective_workspaces_dir(),
+                None,
+                &manifest.name,
+                agent_id,
+            )?;
             if let Err(e) = ensure_workspace(&workspace_dir) {
                 warn!(agent_id = %agent_id, "Failed to backfill workspace (streaming): {e}");
             } else {
@@ -3043,7 +3097,12 @@ impl LibreFangKernel {
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
-            let workspace_dir = self.config.effective_workspaces_dir().join(&manifest.name);
+            let workspace_dir = resolve_workspace_dir(
+                &self.config.effective_workspaces_dir(),
+                None,
+                &manifest.name,
+                agent_id,
+            )?;
             if let Err(e) = ensure_workspace(&workspace_dir) {
                 warn!(agent_id = %agent_id, "Failed to backfill workspace: {e}");
             } else {
@@ -4179,7 +4238,8 @@ impl LibreFangKernel {
         }
 
         // Spawn the agent
-        let hand_manifest_dir = self.config.home_dir.join("hands").join(&manifest.name);
+        let safe_hand_name = safe_path_component(&manifest.name, "hand");
+        let hand_manifest_dir = self.config.home_dir.join("hands").join(safe_hand_name);
         let hand_manifest_path = hand_manifest_dir.join("agent.toml");
         if !hand_manifest_path.exists() {
             if let Err(e) = std::fs::create_dir_all(&hand_manifest_dir) {
