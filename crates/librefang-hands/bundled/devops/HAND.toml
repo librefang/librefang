@@ -4,13 +4,6 @@ description = "Autonomous DevOps engineer — CI/CD management, infrastructure m
 category = "development"
 icon = "👷"
 
-# ─── Token & Performance Metadata ─────────────────────────────────────────────
-[metadata]
-frequency = "continuous"
-token_consumption = "high"
-default_active = false
-activation_warning = "DevOps hand runs continuously and monitors infrastructure, consuming tokens."
-
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
 [routing]
@@ -437,3 +430,11 @@ format = "number"
 label = "Deployments Managed"
 memory_key = "devops_hand_deployments_managed"
 format = "number"
+
+# ─── Token & Performance Metadata ─────────────────────────────────────────────
+
+[metadata]
+frequency = "continuous"
+token_consumption = "high"
+default_active = false
+activation_warning = "DevOps hand runs continuously and monitors infrastructure, consuming tokens."

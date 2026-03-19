@@ -3,14 +3,6 @@ name = "Analytics Hand"
 description = "Autonomous data analytics agent — data collection, analysis, visualization, dashboards, and automated reporting"
 category = "data"
 icon = "📈"
-
-# ─── Token & Performance Metadata ─────────────────────────────────────────────
-[metadata]
-frequency = "continuous"
-token_consumption = "high"
-default_active = true
-# Note: High consumption when actively analyzing data, lower when idle
-
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
 [routing]
@@ -446,3 +438,10 @@ format = "number"
 label = "Findings Reported"
 memory_key = "analytics_hand_findings_reported"
 format = "number"
+
+# ─── Token & Performance Metadata ─────────────────────────────────────────────
+[metadata]
+frequency = "continuous"
+token_consumption = "high"
+default_active = true
+# Note: High consumption when actively analyzing data, lower when idle

@@ -4,13 +4,6 @@ description = "Autonomous deep researcher — exhaustive investigation, cross-re
 category = "productivity"
 icon = "🧪"
 
-# ─── Token & Performance Metadata ─────────────────────────────────────────────
-[metadata]
-frequency = "continuous"
-token_consumption = "high"
-default_active = true
-# Note: Runs continuously but only consumes significant tokens when actively researching
-
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
 [routing]
@@ -407,3 +400,11 @@ format = "number"
 label = "Active Investigations"
 memory_key = "researcher_hand_active_investigations"
 format = "number"
+
+# ─── Token & Performance Metadata ─────────────────────────────────────────────
+
+[metadata]
+frequency = "continuous"
+token_consumption = "high"
+default_active = true
+activation_warning = "Researcher hand runs continuously and performs deep research, consuming tokens."
