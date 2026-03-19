@@ -81,15 +81,17 @@ jobs:
 
             if [ -n "$EXISTING" ]; then
               echo "Updating: $TITLE (id=$EXISTING)"
-              curl -s -X PUT "https://dev.to/api/articles/$EXISTING" \
+              RESP=$(curl -s -X PUT "https://dev.to/api/articles/$EXISTING" \
                 -H "api-key: $DEVTO_API_KEY" \
                 -H "Content-Type: application/json" \
-                -d "$PAYLOAD" | python3 -c "import json,sys;print(json.load(sys.stdin).get('url',''))" 2>/dev/null
+                -d "$PAYLOAD")
+              echo "$RESP" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('url',''))" 2>/dev/null || echo "Warning: failed to parse response for '$TITLE'"
             else
               echo "Creating: $TITLE"
-              curl -s -X POST "https://dev.to/api/articles" \
+              RESP=$(curl -s -X POST "https://dev.to/api/articles" \
                 -H "api-key: $DEVTO_API_KEY" \
                 -H "Content-Type: application/json" \
-                -d "$PAYLOAD" | python3 -c "import json,sys;print(json.load(sys.stdin).get('url',''))" 2>/dev/null
+                -d "$PAYLOAD")
+              echo "$RESP" | python3 -c "import json,sys;d=json.load(sys.stdin);print(d.get('url',''))" 2>/dev/null || echo "Warning: failed to parse response for '$TITLE'"
             fi
           done

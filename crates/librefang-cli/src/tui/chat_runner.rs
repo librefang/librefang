@@ -570,7 +570,10 @@ impl StandaloneChat {
     fn resolve_daemon_agent(&mut self, base_url: &str, agent_name: Option<&str>) {
         let client = crate::daemon_client();
         let body = crate::daemon_json(client.get(format!("{base_url}/api/agents")).send());
-        let agents = body.as_array();
+        let agents = body
+            .get("items")
+            .and_then(|v| v.as_array())
+            .or_else(|| body.as_array());
 
         // Try to find by name/id
         let found = match agent_name {

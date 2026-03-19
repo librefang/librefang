@@ -29,6 +29,9 @@ const MAX_EVENT_TEXT_LEN: usize = 4096;
 /// Maximum length of AgentTurn message.
 const MAX_TURN_MESSAGE_LEN: usize = 16_384;
 
+/// Maximum length of Workflow ID string.
+const MAX_WORKFLOW_ID_LEN: usize = 256;
+
 /// Minimum timeout for AgentTurn (seconds).
 const MIN_TIMEOUT_SECS: u64 = 10;
 
@@ -103,9 +106,6 @@ pub enum CronSchedule {
 // ---------------------------------------------------------------------------
 // CronAction
 // ---------------------------------------------------------------------------
-
-/// Maximum length of workflow_id field.
-const MAX_WORKFLOW_ID_LEN: usize = 256;
 
 /// What a scheduled job does when it fires.
 #[derive(Debug, Clone, Serialize, Deserialize)]

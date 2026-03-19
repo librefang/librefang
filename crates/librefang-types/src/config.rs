@@ -1900,12 +1900,22 @@ pub enum McpTransportEntry {
 pub struct A2aConfig {
     /// Whether A2A is enabled.
     pub enabled: bool,
+    /// Service-level display name for the well-known agent card.
+    #[serde(default = "default_a2a_name")]
+    pub name: String,
+    /// Service-level description for the well-known agent card.
+    #[serde(default)]
+    pub description: String,
     /// Path to serve A2A endpoints (default: "/a2a").
     #[serde(default = "default_a2a_path")]
     pub listen_path: String,
     /// External A2A agents to connect to.
     #[serde(default)]
     pub external_agents: Vec<ExternalAgent>,
+}
+
+fn default_a2a_name() -> String {
+    "LibreFang Agent OS".to_string()
 }
 
 fn default_a2a_path() -> String {

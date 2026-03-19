@@ -770,7 +770,8 @@ async fn test_trigger_crud() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let triggers: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let triggers = body["triggers"].as_array().unwrap();
     assert_eq!(triggers.len(), 1);
     assert_eq!(triggers[0]["agent_id"], agent_id);
     assert_eq!(triggers[0]["enabled"], true);
@@ -786,7 +787,8 @@ async fn test_trigger_crud() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let triggers: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let triggers = body["triggers"].as_array().unwrap();
     assert_eq!(triggers.len(), 1);
 
     // Delete trigger
@@ -804,7 +806,8 @@ async fn test_trigger_crud() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let triggers: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let triggers = body["triggers"].as_array().unwrap();
     assert_eq!(triggers.len(), 0);
 }
 

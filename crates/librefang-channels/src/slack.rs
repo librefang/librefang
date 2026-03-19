@@ -87,13 +87,31 @@ impl SlackAdapter {
         channel_id: &str,
         text: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.api_send_message_opts(channel_id, text, None).await
+    }
+
+    /// Send a message to a Slack channel, optionally as a thread reply.
+    ///
+    /// When `thread_ts` is `Some`, the `thread_ts` field is included in the
+    /// `chat.postMessage` payload so the message appears as a thread reply
+    /// rather than a top-level channel message.
+    async fn api_send_message_opts(
+        &self,
+        channel_id: &str,
+        text: &str,
+        thread_ts: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let chunks = split_message(text, SLACK_MSG_LIMIT);
 
         for chunk in chunks {
-            let body = serde_json::json!({
+            let mut body = serde_json::json!({
                 "channel": channel_id,
                 "text": chunk,
             });
+
+            if let Some(ts) = thread_ts {
+                body["thread_ts"] = serde_json::json!(ts);
+            }
 
             let resp: serde_json::Value = self
                 .client
@@ -317,6 +335,22 @@ impl ChannelAdapter for SlackAdapter {
         Ok(())
     }
 
+    async fn send_in_thread(
+        &self,
+        user: &ChannelUser,
+        content: ChannelContent,
+        thread_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let text = match content {
+            ChannelContent::Text(text) => text,
+            _ => "(Unsupported content type)".to_string(),
+        };
+
+        self.api_send_message_opts(&user.platform_id, &text, Some(thread_id))
+            .await?;
+        Ok(())
+    }
+
     async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _ = self.shutdown_tx.send(true);
         Ok(())
@@ -443,6 +477,13 @@ async fn parse_slack_event(
     // Slack channel prefixes: D = direct message, other channel types are group contexts.
     let is_group = !channel.starts_with('D');
 
+    // Extract thread_ts for threading context. Slack uses `thread_ts` to identify
+    // the parent message of a thread. For edited messages, check the inner message first.
+    let thread_id = msg_data["thread_ts"]
+        .as_str()
+        .or_else(|| event["thread_ts"].as_str())
+        .map(|s| s.to_string());
+
     Some(ChannelMessage {
         channel: ChannelType::Slack,
         platform_message_id: ts.to_string(),
@@ -457,7 +498,7 @@ async fn parse_slack_event(
         target_agent: None,
         timestamp,
         is_group,
-        thread_id: None,
+        thread_id,
         metadata,
     })
 }
@@ -683,6 +724,57 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("U456")
         );
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_event_thread_ts() {
+        let bot_id = Arc::new(RwLock::new(Some("B123".to_string())));
+        let event = serde_json::json!({
+            "type": "message",
+            "user": "U456",
+            "channel": "C789",
+            "text": "Thread reply",
+            "ts": "1700000001.000200",
+            "thread_ts": "1700000000.000100"
+        });
+
+        let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
+        assert_eq!(msg.thread_id, Some("1700000000.000100".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_event_no_thread_ts() {
+        let bot_id = Arc::new(RwLock::new(Some("B123".to_string())));
+        let event = serde_json::json!({
+            "type": "message",
+            "user": "U456",
+            "channel": "C789",
+            "text": "Top-level message",
+            "ts": "1700000000.000100"
+        });
+
+        let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
+        assert_eq!(msg.thread_id, None);
+    }
+
+    #[tokio::test]
+    async fn test_parse_slack_event_message_changed_thread_ts() {
+        let bot_id = Arc::new(RwLock::new(Some("B123".to_string())));
+        let event = serde_json::json!({
+            "type": "message",
+            "subtype": "message_changed",
+            "channel": "C789",
+            "message": {
+                "user": "U456",
+                "text": "Edited thread reply",
+                "ts": "1700000001.000200",
+                "thread_ts": "1700000000.000100"
+            },
+            "ts": "1700000002.000300"
+        });
+
+        let msg = parse_slack_event(&event, &bot_id, &[]).await.unwrap();
+        assert_eq!(msg.thread_id, Some("1700000000.000100".to_string()));
     }
 
     #[test]

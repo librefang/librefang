@@ -12,7 +12,7 @@ Deploy LibreFang on a GCP `e2-micro` VM with 30 GB persistent storage — **free
 ## Deploy
 
 ```bash
-cd infra/gcp
+cd deploy/gcp
 
 # Authenticate with GCP
 gcloud auth application-default login

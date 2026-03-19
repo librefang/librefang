@@ -34,13 +34,13 @@ cd librefang
 cargo install --path crates/librefang-cli
 ```
 
-### Option 2 : Installateur Shell (Linux / macOS, pour les futures versions)
+### Option 2 : Installateur Shell (Linux / macOS / WSL)
 
 ```bash
 curl -fsSL https://librefang.ai/install.sh | sh
 ```
 
-Utilisez cette méthode une fois que LibreFang commencera à publier des GitHub Releases. Le script installe le binaire CLI dans `~/.librefang/bin/`.
+Le script installe le binaire CLI dans `~/.librefang/bin/` et ajoute le répertoire à votre PATH.
 
 ### Option 3 : Installateur PowerShell (Windows, pour les futures versions)
 
@@ -328,7 +328,7 @@ Maintenant que LibreFang est en cours d'exécution :
 - **Changez de fournisseur LLM** : 20 fournisseurs supportés (Anthropic, OpenAI, Gemini, Groq, DeepSeek, xAI, Ollama, et plus). Surcharge du modèle par agent possible.
 - **Configurez des workflows** : Chaînez plusieurs agents ensemble. Utilisez `librefang workflow create` avec une définition de workflow TOML.
 - **Utilisez MCP** : Connectez-vous à des outils externes via le Model Context Protocol. Configurez dans `config.toml` sous `[[mcp_servers]]`.
-- **Migrez depuis OpenClaw** : Exécutez `librefang migrate --from openclaw`. Voir [MIGRATION.md](../MIGRATION.md).
+- **Migrez depuis OpenClaw** : Exécutez `librefang migrate --from openclaw`. Voir [MIGRATION.md](../docs/MIGRATION.md).
 - **Application de bureau** : Exécutez `cargo tauri dev` pour une expérience de bureau native avec icône dans la barre système.
 - **Lancez les diagnostics** : `librefang doctor` vérifie l'ensemble de votre configuration.
 

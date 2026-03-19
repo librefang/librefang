@@ -82,12 +82,12 @@ var LibreFangToast = (function() {
 
     var cancelBtn = document.createElement('button');
     cancelBtn.className = 'btn btn-ghost confirm-cancel';
-    cancelBtn.textContent = 'Cancel';
+    cancelBtn.textContent = typeof i18n !== 'undefined' ? i18n.t('confirm.cancel') : 'Cancel';
     actions.appendChild(cancelBtn);
 
     var okBtn = document.createElement('button');
     okBtn.className = 'btn btn-danger confirm-ok';
-    okBtn.textContent = 'Confirm';
+    okBtn.textContent = typeof i18n !== 'undefined' ? i18n.t('confirm.confirm') : 'Confirm';
     actions.appendChild(okBtn);
 
     modal.appendChild(actions);

@@ -249,6 +249,20 @@
     "configureManually": "手动配置",
     "dismiss": "关闭"
   },
+  "provider": {
+    "bannerText": "尚未配置 AI 提供商 — 智能体已暂停运行",
+    "bannerAction": "配置提供商",
+    "tierFree": "免费 / 本地",
+    "tierRecommended": "推荐",
+    "tierOther": "其他提供商",
+    "getKey": "获取 API Key",
+    "ollamaDetected": "已检测到本机 Ollama",
+    "ollamaNotDetected": "未检测到 Ollama",
+    "ollamaActivate": "激活 Ollama",
+    "activateSuccess": "提供商已激活 — 智能体恢复运行中",
+    "setupTitle": "AI 提供商设置",
+    "setupDesc": "配置至少一个 AI 提供商以激活智能体。"
+  },
   "overview": {
     "connectionError": "连接错误",
     "stepsCompleted": "已完成 {count} / 5 步",
@@ -538,6 +552,7 @@
     "agentSpawn": "创建智能体",
     "unnamed": "未命名",
     "genericAgent": "智能体",
+    "waitingProvider": "等待 AI 配置",
     "fileBytes": "{count} 字节",
     "loadAgentsFailed": "无法加载智能体。守护进程是否正在运行？",
     "loadAgentsFailedShort": "无法加载智能体。",
@@ -1810,5 +1825,46 @@
     "memoriesSaved": "条记忆已保存",
     "recalled": "已检索",
     "saved": "已保存"
+  },
+  "theme": {
+    "light": "浅色",
+    "system": "跟随系统",
+    "dark": "深色"
+  },
+  "sidebar": {
+    "shortcutHint": "Ctrl+K 智能体 | Ctrl+N 新建"
+  },
+  "agentChat2": {
+    "focusMode": "专注模式 (Ctrl+Shift+F)",
+    "switchModel": "切换模型 (Ctrl+M)",
+    "vision": "视觉",
+    "tools": "工具",
+    "agentSettings": "智能体设置",
+    "providerModelPlaceholder": "提供商/模型",
+    "doubleClickToEdit": "双击编辑"
+  },
+  "settingsPage2": {
+    "enabled": "启用",
+    "pmMasterToggleDesc": "主开关，控制整个主动记忆子系统。关闭后将不会存储或检索任何记忆。",
+    "pluginNamePlaceholder": "例如 echo-memory"
+  },
+  "agentsPage2": {
+    "modelPlaceholder": "例如 llama-3.3-70b-versatile"
+  },
+  "schedulerPage2": {
+    "deleteTrigger": "删除"
+  },
+  "analyticsPage2": {
+    "total": "总计"
+  },
+  "memoryPage2": {
+    "deleteSelected": "删除 {count} 条已选"
+  },
+  "confirm": {
+    "cancel": "取消",
+    "confirm": "确认"
+  },
+  "setupWizard2": {
+    "configure": "配置 {name}"
   }
 }
