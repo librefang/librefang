@@ -51,7 +51,7 @@ pub enum OutputFormat {
 }
 
 /// Per-channel behavior overrides.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ChannelOverrides {
     /// Model override (uses agent's default if None).
@@ -78,6 +78,49 @@ pub struct ChannelOverrides {
     pub usage_footer: Option<UsageFooterMode>,
     /// Typing indicator mode override.
     pub typing_mode: Option<TypingMode>,
+    /// Whether to send lifecycle emoji reactions (⏳🤔✅❌) on messages.
+    /// Defaults to true. Set to false to suppress automatic reactions (e.g. on Telegram).
+    #[serde(default = "default_true")]
+    pub lifecycle_reactions: bool,
+    /// Debounce window in milliseconds for batching rapid messages from the same sender.
+    /// When > 0, messages arriving within this window are merged into one dispatch.
+    /// Default: 3000 (3 seconds — batches rapid-fire messages into a single request).
+    #[serde(default = "default_debounce_ms")]
+    pub debounce_ms: u64,
+    /// Maximum debounce wait in milliseconds (safety cap).
+    /// Even if the user keeps typing, dispatch after this many ms from the first message.
+    /// Default: 30000 (30 seconds). Only relevant when debounce_ms > 0.
+    #[serde(default = "default_debounce_max_ms")]
+    pub debounce_max_ms: u64,
+}
+
+impl Default for ChannelOverrides {
+    fn default() -> Self {
+        Self {
+            model: None,
+            system_prompt: None,
+            dm_policy: DmPolicy::default(),
+            group_policy: GroupPolicy::default(),
+            group_trigger_patterns: vec![],
+            rate_limit_per_minute: 0,
+            rate_limit_per_user: 0,
+            threading: false,
+            output_format: None,
+            usage_footer: None,
+            typing_mode: None,
+            lifecycle_reactions: true,
+            debounce_ms: default_debounce_ms(),
+            debounce_max_ms: default_debounce_max_ms(),
+        }
+    }
+}
+
+fn default_debounce_ms() -> u64 {
+    3_000
+}
+
+fn default_debounce_max_ms() -> u64 {
+    30_000
 }
 
 /// Controls what usage info appears in response footers.

@@ -184,6 +184,22 @@ pub struct SenderContext {
     pub account_id: Option<String>,
 }
 
+/// A typing indicator event from a channel.
+///
+/// Channels that support presence detection (e.g. WhatsApp via Baileys `presence.update`,
+/// Matrix typing notifications, XMPP chat states) can emit these events to signal that
+/// a user is composing a message. The debouncer uses these to pause its flush timer —
+/// avoiding premature dispatch while the user is still typing.
+#[derive(Debug, Clone)]
+pub struct TypingEvent {
+    /// Which channel this came from.
+    pub channel: ChannelType,
+    /// Who is typing.
+    pub sender: ChannelUser,
+    /// `true` = user started typing, `false` = user stopped typing (or timed out).
+    pub is_typing: bool,
+}
+
 /// Agent lifecycle phase for UX indicators.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -368,6 +384,15 @@ pub trait ChannelAdapter: Send + Sync {
             }
         }
         self.send(user, ChannelContent::Text(text)).await
+    }
+
+    /// Subscribe to typing indicator events (optional — default returns None).
+    ///
+    /// Adapters that support presence detection (e.g. Telegram `ChatAction::Typing`,
+    /// WhatsApp `presence.update`) should return a receiver that emits [`TypingEvent`]s.
+    /// The bridge uses these to pause the debounce timer while the user is composing.
+    fn typing_events(&self) -> Option<mpsc::Receiver<TypingEvent>> {
+        None
     }
 
     /// Whether error messages should be suppressed (logged only) instead of
