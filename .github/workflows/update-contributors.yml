@@ -7,6 +7,9 @@ on:
       - 'web/public/assets/contributors.svg'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 concurrency:
   group: ${{ github.workflow }}
   cancel-in-progress: true

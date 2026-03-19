@@ -49,12 +49,6 @@ function MaterialIcon({ name, className = '' }) {
   return <Icon className={className} />
 }
 
-function Skeleton({ className = '' }) {
-  return (
-    <div className={`animate-pulse bg-gray-700 rounded ${className}`}></div>
-  )
-}
-
 function Header({ t }) {
   const currentLangName = languages.find(l => {
     const path = window.location.pathname
