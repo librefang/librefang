@@ -121,7 +121,7 @@ rand = "0.8"
 zeroize = { version = "1", features = ["derive"] }
 
 # JWT validation
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 
 # Rate limiting
 governor = "0.10.4"
