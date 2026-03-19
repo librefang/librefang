@@ -16,7 +16,7 @@ use crate::verify::{SkillVerifier, SkillWarning, WarningSeverity};
 use crate::SkillError;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use tracing::{debug, info, warn};
 
 // ---------------------------------------------------------------------------
@@ -446,6 +446,7 @@ impl ClawHubClient {
     /// Uses `GET /api/v1/skills/{slug}`.
     /// Response is `{ skill: {...}, latestVersion: {...}, owner: {...}, moderation: null }`.
     pub async fn get_skill(&self, slug: &str) -> Result<ClawHubSkillDetail, SkillError> {
+        validate_slug(slug)?;
         let url = format!("{}/skills/{}", self.base_url, urlencoded(slug));
 
         let response = self.get_with_retry(&url, "ClawHub skill detail").await?;
@@ -472,6 +473,7 @@ impl ClawHubClient {
     ///
     /// Uses `GET /api/v1/skills/{slug}/file?path=SKILL.md`.
     pub async fn get_file(&self, slug: &str, path: &str) -> Result<String, SkillError> {
+        validate_slug(slug)?;
         let url = format!(
             "{}/skills/{}/file?path={}",
             self.base_url,
@@ -504,6 +506,7 @@ impl ClawHubClient {
         slug: &str,
         target_dir: &Path,
     ) -> Result<ClawHubInstallResult, SkillError> {
+        validate_slug(slug)?;
         // Use /api/v1/download?slug=... endpoint
         let url = format!("{}/download?slug={}", self.base_url, urlencoded(slug));
 
@@ -526,7 +529,7 @@ impl ClawHubClient {
         info!(slug, sha256 = %sha256, "Downloaded skill");
 
         // Create skill directory
-        let skill_dir = target_dir.join(slug);
+        let skill_dir = resolve_skill_dir(target_dir, slug)?;
         std::fs::create_dir_all(&skill_dir)?;
 
         // Detect content type and extract accordingly
@@ -534,7 +537,8 @@ impl ClawHubClient {
         let is_skillmd = content_str.trim_start().starts_with("---");
 
         if is_skillmd {
-            std::fs::write(skill_dir.join("SKILL.md"), &*bytes)?;
+            let skill_md_path = resolve_skill_child_path(&skill_dir, Path::new("SKILL.md"))?;
+            std::fs::write(skill_md_path, &*bytes)?;
         } else if bytes.len() >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4b {
             // Zip archive — extract all files
             let cursor = std::io::Cursor::new(&*bytes);
@@ -552,7 +556,13 @@ impl ClawHubClient {
                             warn!("Skipping zip entry with unsafe path");
                             continue;
                         };
-                        let out_path = skill_dir.join(enclosed_name);
+                        let out_path = match resolve_skill_child_path(&skill_dir, &enclosed_name) {
+                            Ok(path) => path,
+                            Err(e) => {
+                                warn!(index = i, error = %e, "Skipping zip entry with unsafe path");
+                                continue;
+                            }
+                        };
                         if file.is_dir() {
                             std::fs::create_dir_all(&out_path)?;
                         } else {
@@ -567,11 +577,13 @@ impl ClawHubClient {
                 }
                 Err(e) => {
                     warn!(slug, error = %e, "Failed to read zip, saving raw");
-                    std::fs::write(skill_dir.join("skill.zip"), &*bytes)?;
+                    let zip_path = resolve_skill_child_path(&skill_dir, Path::new("skill.zip"))?;
+                    std::fs::write(zip_path, &*bytes)?;
                 }
             }
         } else {
-            std::fs::write(skill_dir.join("package.json"), &*bytes)?;
+            let package_path = resolve_skill_child_path(&skill_dir, Path::new("package.json"))?;
+            std::fs::write(package_path, &*bytes)?;
         }
 
         // Step 2-3: Detect format and convert
@@ -658,9 +670,55 @@ impl ClawHubClient {
 
     /// Check if a ClawHub skill is already installed locally.
     pub fn is_installed(&self, slug: &str, skills_dir: &Path) -> bool {
-        let skill_dir = skills_dir.join(slug);
-        skill_dir.join("skill.toml").exists()
+        if validate_slug(slug).is_err() {
+            return false;
+        }
+        let skill_dir = match resolve_skill_dir(skills_dir, slug) {
+            Ok(path) => path,
+            Err(_) => return false,
+        };
+        let manifest_path = match resolve_skill_child_path(&skill_dir, Path::new("skill.toml")) {
+            Ok(path) => path,
+            Err(_) => return false,
+        };
+        manifest_path.exists()
     }
+}
+
+fn validate_slug(slug: &str) -> Result<(), SkillError> {
+    if slug.is_empty()
+        || !slug
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(SkillError::InvalidManifest(format!(
+            "Invalid skill slug '{slug}'"
+        )));
+    }
+    Ok(())
+}
+
+fn resolve_skill_dir(target_dir: &Path, slug: &str) -> Result<PathBuf, SkillError> {
+    validate_slug(slug)?;
+    Ok(target_dir.join(slug))
+}
+
+fn resolve_skill_child_path(skill_dir: &Path, relative: &Path) -> Result<PathBuf, SkillError> {
+    if relative.is_absolute() {
+        return Err(SkillError::InvalidManifest(
+            "Absolute paths are not allowed in skill bundles".to_string(),
+        ));
+    }
+    if relative
+        .components()
+        .any(|c| !matches!(c, Component::Normal(_)))
+    {
+        return Err(SkillError::InvalidManifest(format!(
+            "Unsafe path component '{}'",
+            relative.display()
+        )));
+    }
+    Ok(skill_dir.join(relative))
 }
 
 /// RFC 3986 percent-encoding for query parameters.

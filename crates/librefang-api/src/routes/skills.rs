@@ -2115,6 +2115,20 @@ fn remove_mcp_server_config(config_path: &std::path::Path, name: &str) -> Result
     Ok(())
 }
 
+fn is_safe_component_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains("..")
+        && !name.contains('/')
+        && !name.contains('\\')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && std::path::Path::new(name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            == Some(name)
+}
+
 #[utoipa::path(
     post,
     path = "/api/skills/create",
@@ -2139,10 +2153,7 @@ pub async fn create_skill(
     };
 
     // Validate name (alphanumeric + hyphens only)
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
+    if !is_safe_component_name(&name) {
         return (
             StatusCode::BAD_REQUEST,
             Json(

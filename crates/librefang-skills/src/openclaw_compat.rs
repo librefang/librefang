@@ -12,7 +12,7 @@ use crate::{
 };
 use librefang_types::tool_compat;
 use serde::Deserialize;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use tracing::info;
 
 // ---------------------------------------------------------------------------
@@ -104,7 +104,9 @@ pub struct ConvertedSkillMd {
 
 /// Check if a directory contains a SKILL.md file.
 pub fn detect_skillmd(dir: &Path) -> bool {
-    dir.join("SKILL.md").exists()
+    safe_join(dir, "SKILL.md")
+        .map(|path| path.exists())
+        .unwrap_or(false)
 }
 
 /// Parse a SKILL.md file into frontmatter and Markdown body.
@@ -122,6 +124,12 @@ pub fn detect_skillmd(dir: &Path) -> bool {
 /// Instructions for the LLM...
 /// ```
 pub fn parse_skillmd(path: &Path) -> Result<(SkillMdFrontmatter, String), SkillError> {
+    if has_unsafe_path_components(path) {
+        return Err(SkillError::InvalidManifest(format!(
+            "Unsafe SKILL.md path: {}",
+            path.display()
+        )));
+    }
     let content = std::fs::read_to_string(path)?;
     parse_skillmd_str(&content)
 }
@@ -162,7 +170,9 @@ pub fn parse_skillmd_str(content: &str) -> Result<(SkillMdFrontmatter, String), 
 /// Most SKILL.md skills are prompt-only (no executable code). The Markdown body
 /// is stored as `prompt_context` and injected into the LLM's system prompt.
 pub fn convert_skillmd(dir: &Path) -> Result<ConvertedSkillMd, SkillError> {
-    let skillmd_path = dir.join("SKILL.md");
+    let skillmd_path = safe_join(dir, "SKILL.md").ok_or_else(|| {
+        SkillError::InvalidManifest(format!("Unsafe skill directory path: {}", dir.display()))
+    })?;
     let (frontmatter, body) = parse_skillmd(&skillmd_path)?;
 
     let skill_name = if frontmatter.name.is_empty() {
@@ -356,17 +366,29 @@ pub fn convert_skillmd_str(name_hint: &str, content: &str) -> Result<ConvertedSk
 
 /// Check if a directory contains a valid OpenClaw Node.js skill.
 pub fn detect_openclaw_skill(dir: &Path) -> bool {
-    dir.join("package.json").exists()
-        && (dir.join("index.ts").exists()
-            || dir.join("index.js").exists()
-            || dir.join("dist").join("index.js").exists())
+    let Some(package_json) = safe_join(dir, "package.json") else {
+        return false;
+    };
+    let Some(index_ts) = safe_join(dir, "index.ts") else {
+        return false;
+    };
+    let Some(index_js) = safe_join(dir, "index.js") else {
+        return false;
+    };
+    let Some(dist_index_js) = safe_join(dir, "dist/index.js") else {
+        return false;
+    };
+
+    package_json.exists() && (index_ts.exists() || index_js.exists() || dist_index_js.exists())
 }
 
 /// Convert an OpenClaw Node.js skill directory into an LibreFang SkillManifest.
 ///
 /// Reads package.json to extract name, version, description, and infers tool definitions.
 pub fn convert_openclaw_skill(dir: &Path) -> Result<SkillManifest, SkillError> {
-    let package_json_path = dir.join("package.json");
+    let package_json_path = safe_join(dir, "package.json").ok_or_else(|| {
+        SkillError::InvalidManifest(format!("Unsafe skill directory path: {}", dir.display()))
+    })?;
     let content = std::fs::read_to_string(&package_json_path)?;
     let pkg: serde_json::Value = serde_json::from_str(&content)
         .map_err(|e| SkillError::InvalidManifest(format!("Invalid package.json: {e}")))?;
@@ -380,11 +402,21 @@ pub fn convert_openclaw_skill(dir: &Path) -> Result<SkillManifest, SkillError> {
     let author = pkg["author"].as_str().unwrap_or("").to_string();
 
     // Determine entry point
-    let entry = if dir.join("dist").join("index.js").exists() {
+    let dist_index_js = safe_join(dir, "dist/index.js").ok_or_else(|| {
+        SkillError::InvalidManifest(format!("Unsafe skill directory path: {}", dir.display()))
+    })?;
+    let index_js = safe_join(dir, "index.js").ok_or_else(|| {
+        SkillError::InvalidManifest(format!("Unsafe skill directory path: {}", dir.display()))
+    })?;
+    let index_ts = safe_join(dir, "index.ts").ok_or_else(|| {
+        SkillError::InvalidManifest(format!("Unsafe skill directory path: {}", dir.display()))
+    })?;
+
+    let entry = if dist_index_js.exists() {
         "dist/index.js".to_string()
-    } else if dir.join("index.js").exists() {
+    } else if index_js.exists() {
         "index.js".to_string()
-    } else if dir.join("index.ts").exists() {
+    } else if index_ts.exists() {
         return Err(SkillError::RuntimeNotAvailable(
             "TypeScript skill needs to be compiled first. Run `npm run build` in the skill directory.".to_string()
         ));
@@ -465,14 +497,38 @@ fn extract_tools_from_openclaw_meta(meta: &serde_json::Value) -> Vec<SkillToolDe
 pub fn write_librefang_manifest(dir: &Path, manifest: &SkillManifest) -> Result<(), SkillError> {
     let toml_str = toml::to_string_pretty(manifest)
         .map_err(|e| SkillError::InvalidManifest(format!("TOML serialize: {e}")))?;
-    std::fs::write(dir.join("skill.toml"), toml_str)?;
+    let manifest_path = safe_join(dir, "skill.toml").ok_or_else(|| {
+        SkillError::InvalidManifest(format!("Unsafe skill directory path: {}", dir.display()))
+    })?;
+    std::fs::write(manifest_path, toml_str)?;
     Ok(())
 }
 
 /// Write the prompt context Markdown body alongside a skill.toml.
 pub fn write_prompt_context(dir: &Path, content: &str) -> Result<(), SkillError> {
-    std::fs::write(dir.join("prompt_context.md"), content)?;
+    let prompt_path = safe_join(dir, "prompt_context.md").ok_or_else(|| {
+        SkillError::InvalidManifest(format!("Unsafe skill directory path: {}", dir.display()))
+    })?;
+    std::fs::write(prompt_path, content)?;
     Ok(())
+}
+
+fn has_unsafe_path_components(path: &Path) -> bool {
+    path.components()
+        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+}
+
+fn safe_join(dir: &Path, relative: &str) -> Option<PathBuf> {
+    if has_unsafe_path_components(dir) {
+        return None;
+    }
+
+    let rel = Path::new(relative);
+    if rel.is_absolute() || rel.components().any(|c| !matches!(c, Component::Normal(_))) {
+        return None;
+    }
+
+    Some(dir.join(rel))
 }
 
 #[cfg(test)]
