@@ -102,7 +102,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Syntax-check shell installer
-        run: bash -n web/public/install.sh
+        run: |
+          sh -n web/public/install.sh
+          bash -n web/public/install.sh
+      - name: Run shell installer regression tests
+        run: sh scripts/tests/install_sh_test.sh
       - name: Parse PowerShell installer
         run: pwsh -NoProfile -Command "Get-Content web/public/install.ps1 | Out-Null"
 
