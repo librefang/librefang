@@ -326,7 +326,7 @@ Now that you have LibreFang running:
 - **Switch LLM providers**: 20 providers supported (Anthropic, OpenAI, Gemini, Groq, DeepSeek, xAI, Ollama, and more). Per-agent model overrides.
 - **Set up workflows**: Chain multiple agents together. Use `librefang workflow create` with a TOML workflow definition.
 - **Use MCP**: Connect to external tools via Model Context Protocol. Configure in `config.toml` under `[[mcp_servers]]`.
-- **Migrate from OpenClaw**: Run `librefang migrate --from openclaw`. See [MIGRATION.md](../MIGRATION.md).
+- **Migrate from OpenClaw**: Run `librefang migrate --from openclaw`. See [MIGRATION.md](MIGRATION.md).
 - **Desktop app**: Run `cargo tauri dev` for a native desktop experience with system tray.
 - **Run diagnostics**: `librefang doctor` checks your entire setup.
 

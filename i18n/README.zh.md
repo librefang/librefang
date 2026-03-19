@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://librefang.ai/">网站</a> &bull;
   <a href="https://docs.librefang.ai">文档</a> &bull;
-  <a href="../CONTRIBUTING.md">贡献</a> &bull;
+  <a href="../docs/CONTRIBUTING.md">贡献</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
@@ -37,7 +37,7 @@ LibreFang 是一个 **Agent 操作系统** — 用 Rust 从头构建的完整自
 
 传统智能体框架等待你的输入。LibreFang 运行**为你工作的智能体** — 按计划全天候运行，监控目标、生成线索、管理社交媒体，并向控制台报告。
 
-> LibreFang 是 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) 的社区分支，采用开放治理和合并优先的 PR 政策。详见 [GOVERNANCE.md](../GOVERNANCE.md)。
+> LibreFang 是 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) 的社区分支，采用开放治理和合并优先的 PR 政策。详见 [GOVERNANCE.md](../docs/GOVERNANCE.md)。
 
 <p align="center">
   <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang 控制台" />
@@ -77,7 +77,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 <details>
 <summary><strong>云部署</strong></summary>
 
-[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../infra/gcp/README.md)
+[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)
 
 </details>
 
@@ -167,7 +167,7 @@ cargo fmt --all -- --check                               # 格式化检查
 ## 链接
 
 - [文档](https://docs.librefang.ai) &bull; [API 参考](../docs/api-reference.md) &bull; [入门指南](../docs/getting-started.md) &bull; [故障排除](../docs/troubleshooting.md)
-- [贡献](../CONTRIBUTING.md) &bull; [治理](../GOVERNANCE.md) &bull; [安全](../SECURITY.md)
+- [贡献](../docs/CONTRIBUTING.md) &bull; [治理](../docs/GOVERNANCE.md) &bull; [安全](../docs/SECURITY.md)
 - 讨论: [问答](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [用例展示](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [功能投票](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [公告](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## 贡献者
@@ -178,7 +178,7 @@ cargo fmt --all -- --check                               # 格式化检查
 
 <p align="center">
   我们欢迎各种形式的贡献 — 代码、文档、翻译、Bug 报告。<br/>
-  查看 <a href="../CONTRIBUTING.md">贡献指南</a>，从一个 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> 开始吧！
+  查看 <a href="../docs/CONTRIBUTING.md">贡献指南</a>，从一个 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> 开始吧！
 </p>
 
 <p align="center">

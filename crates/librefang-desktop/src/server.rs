@@ -89,9 +89,9 @@ pub fn start_server() -> Result<ServerHandle, Box<dyn std::error::Error>> {
                 .expect("Failed to create tokio runtime for embedded server");
 
             rt.block_on(async move {
-                // start_background_agents() uses tokio::spawn, so it must
+                // start_background_agents() uses tokio::spawn/bootstrap async work, so it must
                 // run inside a tokio runtime context.
-                kernel_clone.start_background_agents();
+                kernel_clone.start_background_agents().await;
                 run_embedded_server(kernel_clone, std_listener, listen_addr, shutdown_rx).await;
             });
         })?;
