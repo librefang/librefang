@@ -20,7 +20,7 @@ Welcome to the LibreFang documentation. LibreFang is the open-source Agent Opera
 | [Architecture](architecture.md) | 12-crate structure, kernel boot, agent lifecycle, memory substrate |
 | [Agent Templates](agent-templates.md) | 30 pre-built agents across 4 performance tiers |
 | [Workflows](workflows.md) | Multi-agent pipelines with branching, fan-out, loops, and triggers |
-| [Security](security.md) | 16 defense-in-depth security systems |
+| [Security](security-architecture.md) | 16 defense-in-depth security systems |
 
 ## Integrations
 
@@ -48,9 +48,9 @@ Welcome to the LibreFang documentation. LibreFang is the open-source Agent Opera
 
 | Resource | Description |
 |----------|-------------|
-| [CONTRIBUTING.md](../CONTRIBUTING.md) | Development setup, code style, PR guidelines |
-| [MIGRATION.md](../MIGRATION.md) | Migrating from OpenClaw, LangChain, or AutoGPT |
-| [SECURITY.md](../SECURITY.md) | Security policy and vulnerability reporting |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development setup, code style, PR guidelines |
+| [MIGRATION.md](MIGRATION.md) | Migrating from OpenClaw, LangChain, or AutoGPT |
+| [SECURITY.md](SECURITY.md) | Security policy and vulnerability reporting |
 | [CHANGELOG.md](../CHANGELOG.md) | Release notes and version history |
 | [Discussions](https://github.com/librefang/librefang/discussions) | Questions, ideas, and show & tell |
 

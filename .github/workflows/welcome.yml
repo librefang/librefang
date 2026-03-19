@@ -31,7 +31,7 @@ jobs:
 
           A maintainer will take a look soon. In the meantime:
           - Check [Discussions](https://github.com/librefang/librefang/discussions) for Q&A
-          - Read our [Contributing Guide](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md) if you'd like to submit a fix
+          - Read our [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md) if you'd like to submit a fix
 
           We aim to respond within 7 days.
           MSG
@@ -51,7 +51,7 @@ jobs:
           - [ ] `cargo test --workspace` passes
           - [ ] `cargo clippy --workspace --all-targets -- -D warnings` is clean
 
-          We aim to provide initial feedback within 7 days. See [CONTRIBUTING.md](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md) for details.
+          We aim to provide initial feedback within 7 days. See [CONTRIBUTING.md](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md) for details.
           MSG
               )"
             fi

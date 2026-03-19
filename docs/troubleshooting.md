@@ -526,7 +526,7 @@ LibreFang can import OpenClaw configs: `librefang migrate --from openclaw`
 ### How do I report a bug or request a feature?
 
 - Bugs: Open an issue on GitHub
-- Security: See [SECURITY.md](../SECURITY.md) for responsible disclosure
+- Security: See [SECURITY.md](SECURITY.md) for responsible disclosure
 - Features: Open a GitHub discussion or PR
 
 ### What are the system requirements?
