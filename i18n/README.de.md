@@ -46,7 +46,10 @@ Herkömmliche Agenten-Frameworks warten auf Ihre Eingabe. LibreFang führt **Age
 ## Schnellstart
 
 ```bash
-# Installieren
+# Installieren (Linux/macOS/WSL)
+curl -fsSL https://librefang.ai/install.sh | sh
+
+# Oder per Cargo installieren
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
 # Initialisieren (führt durch die Provider-Einrichtung)

@@ -46,7 +46,10 @@ Los frameworks de agentes tradicionales esperan tu entrada. LibreFang ejecuta **
 ## Inicio Rápido
 
 ```bash
-# Instalar
+# Instalar (Linux/macOS/WSL)
+curl -fsSL https://librefang.ai/install.sh | sh
+
+# O instalar con Cargo
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
 # Inicializar (te guía en la configuración del proveedor)
