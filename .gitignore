@@ -8,6 +8,7 @@
 # Cloudflare Wrangler
 .wrangler/
 .serena
+.vite
 
 # Environment & secrets
 .env
