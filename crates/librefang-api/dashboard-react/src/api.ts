@@ -492,19 +492,32 @@ async function get<T>(path: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-async function post<T>(path: string, body: unknown): Promise<T> {
-  const response = await fetch(path, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...authHeader()
-    },
-    body: JSON.stringify(body)
-  });
-  if (!response.ok) {
-    throw await parseError(response);
+async function post<T>(path: string, body: unknown, timeout = 60000): Promise<T> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeader()
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+    if (!response.ok) {
+      throw await parseError(response);
+    }
+    return (await response.json()) as T;
+  } catch (error) {
+    clearTimeout(timeoutId);
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error("Request timeout - installation may take too long");
+    }
+    throw error;
   }
-  return (await response.json()) as T;
 }
 
 async function put<T>(path: string, body: unknown): Promise<T> {
@@ -597,6 +610,10 @@ export async function testChannel(channelName: string): Promise<ApiActionRespons
   return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/test`, {});
 }
 
+export async function configureChannel(channelName: string, config: Record<string, unknown>): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/channels/${encodeURIComponent(channelName)}/configure`, config);
+}
+
 export async function reloadChannels(): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/channels/reload", {});
 }
@@ -612,6 +629,60 @@ export async function installSkill(name: string): Promise<ApiActionResponse> {
 
 export async function uninstallSkill(name: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/skills/uninstall", { name });
+}
+
+// ClawHub types
+export interface ClawHubBrowseItem {
+  slug: string;
+  name: string;
+  description: string;
+  version: string;
+  author: string;
+  stars: number;
+  downloads: number;
+  tags: string[];
+  icon_url?: string;
+}
+
+export interface ClawHubBrowseResponse {
+  items: ClawHubBrowseItem[];
+  next_cursor?: string;
+}
+
+export interface ClawHubSkillDetail {
+  slug: string;
+  name: string;
+  description: string;
+  version: string;
+  author: string;
+  stars: number;
+  downloads: number;
+  tags: string[];
+  readme: string;
+  icon_url?: string;
+  is_installed?: boolean;
+}
+
+// ClawHub API
+export async function clawhubBrowse(sort?: string, limit?: number, cursor?: string): Promise<ClawHubBrowseResponse> {
+  const params = new URLSearchParams();
+  if (sort) params.set("sort", sort);
+  if (limit) params.set("limit", String(limit));
+  if (cursor) params.set("cursor", cursor);
+  return get<ClawHubBrowseResponse>(`/api/clawhub/browse?${params}`);
+}
+
+export async function clawhubSearch(query: string): Promise<ClawHubBrowseResponse> {
+  return get<ClawHubBrowseResponse>(`/api/clawhub/search?q=${encodeURIComponent(query)}`);
+}
+
+export async function clawhubGetSkill(slug: string): Promise<ClawHubSkillDetail> {
+  return get<ClawHubSkillDetail>(`/api/clawhub/skill/${encodeURIComponent(slug)}`);
+}
+
+export async function clawhubInstall(slug: string, version?: string): Promise<ApiActionResponse> {
+  console.log("[API] clawhubInstall:", slug, version);
+  return post<ApiActionResponse>("/api/clawhub/install", { slug, version: version || "latest" }, 180000); // 3 min timeout for install
 }
 
 export async function listWorkflows(): Promise<WorkflowItem[]> {
@@ -640,6 +711,20 @@ export async function runWorkflow(workflowId: string, input: string): Promise<Ap
 
 export async function deleteWorkflow(workflowId: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}`);
+}
+
+export async function updateWorkflow(workflowId: string, payload: {
+  name?: string;
+  description?: string;
+  steps?: Array<{
+    name: string;
+    agent_name?: string;
+    agent_id?: string;
+    prompt: string;
+    timeout_secs?: number;
+  }>;
+}): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}`, payload);
 }
 
 export async function listWorkflowRuns(workflowId: string): Promise<WorkflowRunItem[]> {

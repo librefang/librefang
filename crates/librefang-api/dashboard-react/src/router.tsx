@@ -71,6 +71,9 @@ const channelsRoute = createRoute({
 const chatRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/chat",
+  validateSearch: (search: Record<string, unknown>) => ({
+    agentId: search.agentId as string | undefined
+  }),
   component: ChatPage
 });
 

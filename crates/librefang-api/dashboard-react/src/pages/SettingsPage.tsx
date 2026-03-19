@@ -1,12 +1,12 @@
 import { useTranslation } from "react-i18next";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
-import { Globe, Sun, Moon, Settings } from "lucide-react";
+import { Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft } from "lucide-react";
 import { useUIStore } from "../lib/store";
 
 export function SettingsPage() {
   const { t } = useTranslation();
-  const { theme, toggleTheme, language, setLanguage } = useUIStore();
+  const { theme, toggleTheme, language, setLanguage, navLayout, setNavLayout } = useUIStore();
 
   const labelClass = "text-[10px] font-black uppercase tracking-widest text-text-dim mb-2 block";
 
@@ -60,6 +60,25 @@ export function SettingsPage() {
                 >
                   <Globe className="h-4 w-4" />
                   中文
+                </Button>
+              </div>
+            </div>
+            <div>
+              <span className={labelClass}>导航菜单布局</span>
+              <div className="flex gap-3">
+                <Button
+                  variant={navLayout === "grouped" ? "primary" : "secondary"}
+                  onClick={() => setNavLayout("grouped")}
+                >
+                  <PanelLeft className="h-4 w-4" />
+                  分组
+                </Button>
+                <Button
+                  variant={navLayout === "collapsible" ? "primary" : "secondary"}
+                  onClick={() => setNavLayout("collapsible")}
+                >
+                  <PanelLeftClose className="h-4 w-4" />
+                  二级菜单
                 </Button>
               </div>
             </div>

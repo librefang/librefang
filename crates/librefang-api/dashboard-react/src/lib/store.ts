@@ -13,11 +13,15 @@ interface UIState {
   language: string;
   isMobileMenuOpen: boolean;
   isSidebarCollapsed: boolean;
+  navLayout: "grouped" | "collapsible";
+  collapsedNavGroups: Record<string, boolean>;
   toasts: Toast[];
   toggleTheme: () => void;
   setLanguage: (lang: string) => void;
   setMobileMenuOpen: (open: boolean) => void;
   toggleSidebar: () => void;
+  setNavLayout: (layout: "grouped" | "collapsible") => void;
+  toggleNavGroup: (key: string) => void;
   addToast: (message: string, type?: "success" | "error" | "info") => void;
   removeToast: (id: string) => void;
 }
@@ -29,6 +33,8 @@ export const useUIStore = create<UIState>()(
       language: i18n.language || "en",
       isMobileMenuOpen: false,
       isSidebarCollapsed: false,
+      navLayout: "grouped",
+      collapsedNavGroups: {},
       toasts: [],
       toggleTheme: () =>
         set((state) => ({ theme: state.theme === "light" ? "dark" : "light" })),
@@ -38,6 +44,8 @@ export const useUIStore = create<UIState>()(
       },
       setMobileMenuOpen: (open) => set({ isMobileMenuOpen: open }),
       toggleSidebar: () => set((state) => ({ isSidebarCollapsed: !state.isSidebarCollapsed })),
+      setNavLayout: (layout) => set({ navLayout: layout }),
+      toggleNavGroup: (key) => set((state) => ({ collapsedNavGroups: { ...state.collapsedNavGroups, [key]: !state.collapsedNavGroups[key] } })),
       addToast: (message, type = "info") =>
         set((state) => ({
           toasts: [...state.toasts, { id: Date.now().toString(), message, type }],
@@ -49,7 +57,7 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: "librefang-ui-storage",
-      partialize: (state) => ({ theme: state.theme, language: state.language }),
+      partialize: (state) => ({ theme: state.theme, language: state.language, navLayout: state.navLayout }),
     }
   )
 );

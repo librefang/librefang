@@ -1,5 +1,5 @@
 import { Link, Outlet } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings } from "lucide-react";
 import { useUIStore } from "./lib/store";
@@ -7,18 +7,8 @@ import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalett
 
 export function App() {
   const { t } = useTranslation();
-  const { theme, toggleTheme, language, setLanguage, isMobileMenuOpen, setMobileMenuOpen, isSidebarCollapsed, toggleSidebar } = useUIStore();
+  const { theme, toggleTheme, language, setLanguage, isMobileMenuOpen, setMobileMenuOpen, isSidebarCollapsed, toggleSidebar, navLayout, collapsedNavGroups, toggleNavGroup } = useUIStore();
   const { isOpen: isPaletteOpen, setIsOpen: setPaletteOpen } = useCommandPalette();
-  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({
-    "core": false,
-    "automation": true,
-    "resources": true,
-    "system": true,
-  });
-
-  const toggleGroup = (label: string) => {
-    setCollapsedGroups(prev => ({ ...prev, [label]: !prev[label] }));
-  };
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -73,13 +63,12 @@ export function App() {
         { to: "/comms", label: t("nav.comms"), icon: Activity },
         { to: "/runtime", label: t("nav.runtime"), icon: Activity },
         { to: "/logs", label: t("nav.logs"), icon: FileText },
-        { to: "/settings", label: t("nav.settings"), icon: Settings },
       ],
     },
   ];
 
   return (
-    <div className="flex min-h-screen flex-col bg-main text-slate-900 dark:text-slate-100 lg:flex-row transition-colors duration-300">
+    <div className="flex h-screen flex-col bg-main text-slate-900 dark:text-slate-100 lg:flex-row transition-colors duration-300 overflow-hidden">
       {/* Sidebar Overlay (Mobile) */}
       {isMobileMenuOpen && (
         <div 
@@ -115,25 +104,11 @@ export function App() {
             >
               {isSidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
             </button>
-            <button
-              onClick={() => setLanguage(language === "en" ? "zh" : "en")}
-              className={`flex h-8 w-8 items-center justify-center rounded-lg border border-border-subtle bg-surface text-text-dim hover:text-brand transition-all shadow-sm ${isSidebarCollapsed ? "lg:hidden" : ""}`}
-              title={t("common.change_language")}
-            >
-              <Globe className="h-4 w-4" />
-            </button>
-            <button
-              onClick={toggleTheme}
-              className={`flex h-8 w-8 items-center justify-center rounded-lg border border-border-subtle bg-surface text-text-dim hover:text-brand transition-all shadow-sm ${isSidebarCollapsed ? "lg:hidden" : ""}`}
-              title={t("common.toggle_theme")}
-            >
-              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </button>
           </div>
         </div>
 
         {/* Navigation */}
-        <nav className="flex-1 overflow-y-auto overflow-x-hidden p-4 scrollbar-thin scrollbar-thumb-border-subtle scrollbar-track-transparent">
+        <nav className="overflow-y-auto overflow-x-hidden p-4 scrollbar-thin scrollbar-thumb-border-subtle scrollbar-track-transparent" style={{ maxHeight: "calc(100vh - 160px)" }}>
           {/* Search Button */}
           <button
             onClick={() => setPaletteOpen(true)}
@@ -145,30 +120,56 @@ export function App() {
             <kbd className="text-[10px] font-mono bg-main px-1.5 py-0.5 rounded">⌘K</kbd>
           </button>
 
-          <div className="flex flex-col gap-6 max-h-[calc(100vh-280px)] overflow-y-auto">
+          <div className="flex flex-col gap-6">
             {navGroups.map((group) => (
               <div key={group.key} className="flex flex-col gap-1">
-                <button
-                  onClick={() => toggleGroup(group.key)}
-                  className={`flex items-center justify-between px-3 text-[11px] font-bold uppercase tracking-[0.1em] text-text-dim/80 hover:text-brand transition-colors ${isSidebarCollapsed ? "lg:hidden" : ""}`}
-                >
-                  {group.label}
-                  <ChevronDown className={`h-3 w-3 transition-transform ${collapsedGroups[group.key] ? "-rotate-90" : ""}`} />
-                </button>
-                <div className={`mt-1 flex flex-col gap-0.5 ${collapsedGroups[group.key] ? "lg:hidden" : ""}`}>
-                  {group.items.map((item) => (
-                    <Link
-                      key={item.to}
-                      to={item.to as any}
-                      className={navBase}
-                      activeProps={{ className: `${navBase} ${navActive}` }}
-                      onClick={() => setMobileMenuOpen(false)}
+                {navLayout === "collapsible" ? (
+                  // 二级菜单布局 - 可折叠
+                  <>
+                    <button
+                      onClick={() => toggleNavGroup(group.key)}
+                      className={`flex items-center justify-between px-3 text-[11px] font-bold uppercase tracking-[0.1em] text-text-dim/80 hover:text-brand transition-colors ${isSidebarCollapsed ? "lg:hidden" : ""}`}
                     >
-                      {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
-                      <span className={`flex-1 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>{item.label}</span>
-                    </Link>
-                  ))}
-                </div>
+                      {group.label}
+                      <ChevronDown className={`h-3 w-3 transition-transform ${collapsedNavGroups[group.key] ? "-rotate-90" : ""}`} />
+                    </button>
+                    <div className={`mt-1 flex flex-col gap-0.5 ${collapsedNavGroups[group.key] ? "lg:hidden" : ""}`}>
+                      {group.items.map((item) => (
+                        <Link
+                          key={item.to}
+                          to={item.to as any}
+                          className={navBase}
+                          activeProps={{ className: `${navBase} ${navActive}` }}
+                          onClick={() => setMobileMenuOpen(false)}
+                        >
+                          {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
+                          <span className={`flex-1 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>{item.label}</span>
+                        </Link>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  // 分组布局 - 全部显示
+                  <>
+                    <h3 className={`px-3 text-[11px] font-bold uppercase tracking-[0.1em] text-text-dim/80 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>
+                      {group.label}
+                    </h3>
+                    <div className="mt-1 flex flex-col gap-0.5">
+                      {group.items.map((item) => (
+                        <Link
+                          key={item.to}
+                          to={item.to as any}
+                          className={navBase}
+                          activeProps={{ className: `${navBase} ${navActive}` }}
+                          onClick={() => setMobileMenuOpen(false)}
+                        >
+                          {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
+                          <span className={`flex-1 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>{item.label}</span>
+                        </Link>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
             ))}
           </div>
@@ -188,13 +189,17 @@ export function App() {
 
       {/* Main Content Area */}
       <div className="flex flex-1 flex-col overflow-hidden">
-        {/* Top Header (Mobile Only) */}
-        <header className="flex h-16 items-center justify-between border-b border-border-subtle bg-surface/80 px-6 backdrop-blur-xl lg:hidden">
+        {/* Top Header */}
+        <header className="flex h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface/80 px-6 backdrop-blur-xl">
           <div className="flex items-center gap-3">
-            <div className="h-6 w-6 rounded-md bg-brand/20 ring-1 ring-brand/40" />
-            <strong className="text-sm font-bold">LibreFang</strong>
           </div>
           <div className="flex items-center gap-2">
+            <Link
+              to="/settings"
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-border-subtle bg-surface text-text-dim hover:text-brand transition-all shadow-sm"
+            >
+              <Settings className="h-4 w-4" />
+            </Link>
             <button
               onClick={() => setLanguage(language === "en" ? "zh" : "en")}
               className="flex h-8 w-8 items-center justify-center rounded-lg border border-border-subtle bg-surface text-text-dim hover:text-brand transition-all shadow-sm"
@@ -209,7 +214,7 @@ export function App() {
             </button>
             <button
               onClick={() => setMobileMenuOpen(true)}
-              className="rounded-md border border-border-subtle bg-surface p-2 text-text-dim hover:text-brand shadow-sm"
+              className="rounded-md border border-border-subtle bg-surface p-2 text-text-dim hover:text-brand shadow-sm lg:hidden"
             >
               <Menu className="h-5 w-5" />
             </button>

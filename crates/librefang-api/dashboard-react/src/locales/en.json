@@ -9,10 +9,10 @@
   "common": {
     "refresh": "Refresh", "status": "Status", "daemon_online": "Daemon Online", "infrastructure": "Infrastructure",
     "toggle_theme": "Toggle theme", "change_language": "Change language", "delete": "Delete", "cancel": "Cancel",
-    "save": "Save", "edit": "Edit", "confirm": "Confirm", "loading": "Loading...", "search": "Search",
+    "save": "Save", "saving": "Saving...", "edit": "Edit", "confirm": "Confirm", "loading": "Loading...", "search": "Search",
     "actions": "Actions", "clear": "Clear", "load": "Load", "active": "Active", "idle": "Idle", "running": "Running",
     "online": "Online", "offline": "Offline", "setup": "Setup", "ok": "OK", "config": "Config", "interact": "Interact",
-    "never": "Never", "unknown": "Unknown", "no_data": "No data", "resume": "Resume", "close": "Close",
+    "never": "Never", "unknown": "Unknown", "no_data": "No data", "resume": "Resume", "close": "Close", "yes": "Yes", "no": "No", "details": "Details",
     "kernel_runtime": "Kernel Runtime", "run_now": "Run Now", "view_all": "View All", "created": "Created",
     "check": "Check", "label": "Label", "local": "Local", "properties": "Properties", "success": "Success", "type": "Type",
     "symbols": { "separator": ":", "arrow": "→", "none": "-", "slash": "/", "expand": "+", "collapse": "−" },
@@ -37,39 +37,72 @@
   },
   "providers": {
     "title": "Providers", "subtitle": "Manage LLM API connections and health.",
-    "configured_count": "{{configured}} / {{total}} Configured", "models": "Models", "latency": "Latency", "test_connection": "Test Connection", "analyzing": "Analyzing..."
+    "configured_count": "{{configured}} / {{total}} Configured", "models": "Models", "latency": "Latency", "test_connection": "Test Connection", "analyzing": "Analyzing...",
+    "reachable": "Reachable", "unreachable": "Unreachable", "not_checked": "Not checked",
+    "configured": "Configured", "unconfigured": "Unconfigured", "online": "Online", "offline": "Offline", "require_config": "Requires Setup",
+    "no_configured": "No configured providers", "no_unconfigured": "No unconfigured providers",
+    "no_results": "No matching providers", "name": "Name", "test": "Test", "batch_test": "Batch Test",
+    "select_all": "Select All", "health": "Health", "key_required": "Key Required", "details": "Details",
+    "last_test": "Last Test", "error": "Error", "open_settings": "Open Settings",
+    "filter_all": "All", "filter_reachable": "Reachable", "filter_unreachable": "Unreachable",
+    "results": "results", "config": "Configure", "config_hint": "Configuration coming soon"
   },
   "channels": {
     "title": "Channels", "subtitle": "Messaging adapters and integration gateways.",
-    "configured_count": "{{count}} Active Connectors", "setup_adapter": "Setup Adapter", "no_channels": "No channels discovered."
+    "configured_count": "{{count}} Active Connectors", "setup_adapter": "Setup Adapter", "no_channels": "No channels discovered.",
+    "configure": "Configure Channel", "config_key": "Key", "config_value": "Value",
+    "configured": "Configured", "unconfigured": "Unconfigured", "config": "Configure",
+    "name": "Name", "category": "Category", "difficulty": "Difficulty", "setup_time": "Setup Time",
+    "setup_type": "Setup Type", "setup_steps": "Setup Steps", "required_fields": "Required Fields",
+    "has_token": "Has Token", "no_token": "No Token", "no_fields_required": "No fields required",
+    "update_config": "Update Config", "select_all": "Select All", "results": "results",
+    "no_results": "No matching channels", "no_configured": "No configured channels", "no_unconfigured": "No unconfigured channels"
   },
   "skills": {
     "title": "Skills", "subtitle": "Atomic capabilities that extend agent reasoning.",
-    "tools": "Tools", "author": "Author", "uninstall": "Uninstall", "no_skills": "No skills available."
+    "tools": "Tools", "author": "Author", "uninstall": "Uninstall", "no_skills": "No skills available.",
+    "uninstall_confirm_title": "Uninstall Skill", "uninstall_confirm": "Are you sure you want to uninstall \"{{name}}\"? This action cannot be undone.",
+    "installed": "Installed", "marketplace": "Marketplace", "install": "Install", "installing": "Installing...",
+    "installed_count": "{{count}} Installed",
+    "sort_trending": "Trending", "sort_downloads": "Downloads", "sort_stars": "Stars", "sort_updated": "Updated", "sort_rating": "Rating",
+    "no_results": "No skills found", "rate_limited": "Rate Limited", "rate_limited_desc": "ClawHub API rate limit exceeded. Please try again later.", "load_error": "Failed to load",
+    "search_placeholder": "Search skills (e.g. python, web, ai...)"
   },
   "hands": {
     "title": "Hands", "subtitle": "Autonomous capability packages.",
-    "available": "Available Hands", "instances": "Active Instances", "telemetry": "Telemetry", "activate": "Activate",
+    "available": "Available Hands", "instances": "Active Instances", "telemetry": "Telemetry", "activate": "Activate", "deactivate": "Deactivate",
     "orchestration": "Capability Orchestration", "ready_hands": "Ready Hands", "ready_description": "Ready to be deployed to an agent.",
-    "activate_failed": "Activation Failed"
+    "active_instances_desc": "Currently running Hands instances.", "activate_failed": "Activation Failed"
   },
   "analytics": {
     "title": "Analytics", "subtitle": "Usage statistics and performance telemetry.",
     "intelligence": "System Intelligence", "compute": "Compute Usage", "compute_desc": "Resources consumed by providers.",
     "runtime": "Runtime Status", "runtime_desc": "Core system execution metrics.",
     "active_agents": "Active Agents", "configured_channels": "Configured Channels", "available_skills": "Available Skills", "health_checks": "Health Checks",
-    "advanced": "Advanced Metrics", "advanced_desc": "Detailed analysis coming soon."
+    "advanced": "Advanced Metrics", "advanced_desc": "Detailed analysis coming soon.",
+    "usage_summary": "Usage Overview", "usage_summary_desc": "API call consumption statistics.",
+    "total_requests": "Total Requests", "total_tokens": "Total Tokens", "total_cost": "Total Cost", "avg_latency": "Avg Latency",
+    "usage_by_agent": "Usage by Agent", "usage_by_agent_desc": "Consumption ranking by agent."
   },
   "memory": {
     "title": "Memory", "subtitle": "Persistent vector storage for agent context.",
-    "cognitive_layer": "Cognitive Layer", "objects_stored": "{{count}} Objects Stored"
+    "cognitive_layer": "Cognitive Layer", "objects_stored": "{{count}} Objects Stored",
+    "add_memory": "Add Memory", "edit_memory": "Edit Memory", "content": "Content", "content_placeholder": "Enter memory content...",
+    "level": "Level", "agent_id": "Agent ID", "agent_optional": "Optional",
+    "episodic": "Episodic", "semantic": "Semantic", "working": "Working",
+    "total_memories": "Total Memories", "importance": "Importance",
+    "cleanup": "Cleanup", "decay": "Decay", "add": "Add",
+    "filter_all": "All", "showing": "Showing {{count}} / {{total}}",
+    "no_memories": "No memories yet", "created": "Created"
   },
   "comms": {
     "bus": "Communication Bus", "subtitle": "Real-time message traffic and connectivity.",
-    "active_channels": "Active Channels", "active_channels_description": "Connectivity status of adapters.",
+    "active_channels": "Channels", "active_channels_description": "Connectivity status of adapters.",
     "unconfigured": "Unconfigured", "health_description": "Sub-system checks.", "awaiting_telemetry": "Awaiting telemetry...",
     "topology": "Network Topology", "topology_description": "High-performance event bus coordination.",
-    "no_channels": "No communication channels discovered."
+    "no_channels": "No communication channels discovered.",
+    "total_channels": "Total Channels", "connected": "Connected", "events_today": "Events Today", "uptime": "Uptime",
+    "events": "Events", "events_desc": "Real-time message events.", "connections": "Connections"
   },
   "workflows": {
     "title": "Workflows", "subtitle": "Automation hub.", "all_workflows": "All Workflows", "run_workflow": "Run Workflow",
@@ -113,11 +146,13 @@
   },
   "runtime": {
     "title": "Runtime", "subtitle": "Engine status and resource management.", "kernel": "Kernel Execution Environment",
-    "environment": "Environment", "engine_version": "Engine Version", "system_uptime": "System Uptime"
+    "environment": "Environment", "engine_version": "Engine Version", "system_uptime": "System Uptime",
+    "engine": "Engine Info", "git_hash": "Git Commit", "build_time": "Build Time",
+    "system": "System Status", "queue": "Task Queue", "pending_tasks": "Pending", "running_tasks": "Running", "completed_today": "Completed Today", "active_agents": "Active Agents", "status": "Status"
   },
   "logs": {
     "title": "Logs", "subtitle": "Real-time diagnostic events.", "export_json": "Export JSON",
-    "timestamp": "Timestamp", "module": "Module", "message": "Message"
+    "timestamp": "Timestamp", "module": "Module", "message": "Message", "all_modules": "All Modules"
   },
   "settings": {
     "title": "Settings", "subtitle": "System parameters.", "appearance": "Appearance",

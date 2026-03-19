@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
+import { useSearch } from "@tanstack/react-router";
 import { listAgents, sendAgentMessage, loadAgentSession } from "../api";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
@@ -276,7 +277,9 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear }: { agentN
 export function ChatPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const [selectedAgentId, setSelectedAgentId] = useState("");
+  const search = useSearch({ from: "/chat" });
+  const initialAgentId = search?.agentId || "";
+  const [selectedAgentId, setSelectedAgentId] = useState(initialAgentId);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });

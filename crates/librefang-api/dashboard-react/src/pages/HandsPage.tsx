@@ -112,6 +112,31 @@ export function HandsPage() {
                 ))}
               </div>
             </Card>
+
+            {/* 活跃实例 */}
+            <Card padding="lg">
+              <h2 className="text-lg font-black tracking-tight mb-1">{t("hands.instances")}</h2>
+              <p className="mb-6 text-xs text-text-dim">{t("hands.active_instances_desc")}</p>
+              {instances.length === 0 ? (
+                <div className="py-8 text-center text-text-dim text-sm">{t("common.no_data")}</div>
+              ) : (
+                <div className="space-y-3">
+                  {instances.map((inst, idx) => (
+                    <div key={inst.id || idx} className="p-4 rounded-xl bg-success/5 border border-success/20">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <p className="text-sm font-black">{inst.hand_id}</p>
+                          <p className="text-xs text-text-dim">ID: {inst.id}</p>
+                        </div>
+                        <Button variant="secondary" size="sm" onClick={() => handleDeactivate(inst.id)}>
+                          {t("hands.deactivate")}
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
           </div>
         </>
       )}

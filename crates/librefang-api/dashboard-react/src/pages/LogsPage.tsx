@@ -1,10 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { loadDashboardSnapshot } from "../api";
+import { listAuditRecent } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
-import { FileText } from "lucide-react";
+import { Input } from "../components/ui/Input";
+import { FileText, Search, Download } from "lucide-react";
 
 const REFRESH_MS = 5000;
 
@@ -17,15 +19,29 @@ const LOG_LEVELS = {
 
 export function LogsPage() {
   const { t } = useTranslation();
-  const snapshotQuery = useQuery({ queryKey: ["dashboard", "snapshot", "logs"], queryFn: loadDashboardSnapshot, refetchInterval: REFRESH_MS });
+  const [limit, setLimit] = useState(100);
+  const auditQuery = useQuery({ queryKey: ["audit", "recent", limit], queryFn: () => listAuditRecent(limit), refetchInterval: REFRESH_MS });
 
-  const logs = [
-    { level: "info", time: "2026-03-18 10:07:22", module: "api", message: "Daemon started on port 4545" },
-    { level: "info", time: "2026-03-18 10:07:23", module: "kernel", message: "Loaded 5 skill providers" },
-    { level: "warn", time: "2026-03-18 10:08:05", module: "wire", message: "Retrying connection to Discord" },
-    { level: "info", time: "2026-03-18 10:09:12", module: "runtime", message: "Agent 'Research-1' session created" },
-    { level: "error", time: "2026-03-18 10:10:45", module: "openai", message: "API quota exceeded for model gpt-4o" },
-  ];
+  const logs = auditQuery.data?.events ?? [];
+  const modules = Array.from(new Set(logs.map(l => l.source).filter(Boolean))) as string[];
+  const [search, setSearch] = useState("");
+  const [moduleFilter, setModuleFilter] = useState<string | null>(null);
+
+  const filteredLogs = logs.filter(l => {
+    const matchesSearch = !search || (l.message || "").toLowerCase().includes(search.toLowerCase());
+    const matchesModule = !moduleFilter || l.source === moduleFilter;
+    return matchesSearch && matchesModule;
+  });
+
+  const handleExport = () => {
+    const blob = new Blob([JSON.stringify(logs, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `audit-log-${new Date().toISOString().split("T")[0]}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -33,32 +49,62 @@ export function LogsPage() {
         badge={t("common.status")}
         title={t("logs.title")}
         subtitle={t("logs.subtitle")}
-        isFetching={snapshotQuery.isFetching}
-        onRefresh={() => void snapshotQuery.refetch()}
+        isFetching={auditQuery.isFetching}
+        onRefresh={() => void auditQuery.refetch()}
         icon={<FileText className="h-4 w-4" />}
         actions={
-          <Button variant="secondary" size="sm">
+          <Button variant="secondary" size="sm" onClick={handleExport}>
+            <Download className="h-3.5 w-3.5 mr-1" />
             {t("logs.export_json")}
           </Button>
         }
       />
 
       <Card padding="none" className="flex-1 overflow-hidden">
+        {/* 搜索和筛选 */}
+        <div className="bg-main border-b border-border-subtle px-6 py-3 flex items-center gap-4">
+          <div className="flex-1">
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t("common.search")}
+              leftIcon={<Search className="h-4 w-4" />}
+              className="!py-1.5"
+            />
+          </div>
+          <select
+            value={moduleFilter || ""}
+            onChange={(e) => setModuleFilter(e.target.value || null)}
+            className="rounded-lg border border-border-subtle bg-surface px-3 py-1.5 text-xs font-medium focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
+          >
+            <option value="">{t("logs.all_modules")}</option>
+            {modules.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </div>
+
         <div className="bg-main border-b border-border-subtle px-6 py-3 flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-text-dim/60">
           <div className="flex gap-12"><span>{t("logs.timestamp")}</span><span>{t("logs.module")}</span><span>{t("logs.message")}</span></div>
         </div>
         <div className="p-4 font-mono text-xs space-y-1 max-h-[60vh] overflow-y-auto">
-          {logs.map((l, i) => {
-            const levelStyle = LOG_LEVELS[l.level as keyof typeof LOG_LEVELS] || LOG_LEVELS.info;
-            return (
-              <div key={i} className="flex gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-center">
-                <span className="text-text-dim/40 shrink-0 w-16">{l.time.split(' ')[1]}</span>
-                <span className={`px-1.5 py-0.5 rounded text-[10px] font-black uppercase shrink-0 ${levelStyle.bg} ${levelStyle.color}`}>{l.level}</span>
-                <span className="text-brand font-bold shrink-0 w-20">[{l.module}]</span>
-                <span className="text-slate-700 dark:text-slate-300 truncate">{l.message}</span>
-              </div>
-            );
-          })}
+          {auditQuery.isLoading ? (
+            <div className="text-center py-8 text-text-dim">{t("common.loading")}</div>
+          ) : filteredLogs.length === 0 ? (
+            <div className="text-center py-8 text-text-dim">{t("common.no_data")}</div>
+          ) : (
+            filteredLogs.map((l, i) => {
+              const level = (l.event_type || "info").toLowerCase();
+              const levelStyle = LOG_LEVELS[level as keyof typeof LOG_LEVELS] || LOG_LEVELS.info;
+              const time = l.timestamp ? new Date(l.timestamp).toLocaleString() : "-";
+              return (
+                <div key={l.id || i} className="flex gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-center">
+                  <span className="text-text-dim/40 shrink-0 w-24">{time.split(' ')[1] || "-"}</span>
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-black uppercase shrink-0 ${levelStyle.bg} ${levelStyle.color}`}>{level}</span>
+                  <span className="text-brand font-bold shrink-0 w-24">[{l.source || "-"}]</span>
+                  <span className="text-slate-700 dark:text-slate-300 truncate">{l.message || "-"}</span>
+                </div>
+              );
+            })
+          )}
         </div>
       </Card>
     </div>
