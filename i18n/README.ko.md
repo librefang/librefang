@@ -46,7 +46,10 @@ LibreFang은 **에이전트 운영체제**입니다 — Rust로 처음부터 구
 ## 빠른 시작
 
 ```bash
-# 설치
+# 설치 (Linux/macOS/WSL)
+curl -fsSL https://librefang.ai/install.sh | sh
+
+# 또는 Cargo로 설치
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
 # 초기화 (프로바이더 설정 안내)

@@ -4586,19 +4586,14 @@ impl LibreFangKernel {
     /// Iterates the agent registry and starts background tasks for agents with
     /// `Continuous`, `Periodic`, or `Proactive` schedules.
     /// Hands activated on first boot when no `hand_state.json` exists yet.
-    /// These provide a useful out-of-the-box experience without requiring
-    /// extra API keys or manual setup.
+    /// By default, NO hands are activated to prevent unexpected token consumption.
+    /// Users can manually activate hands as needed using:
+    ///   librefang hand activate <hand-id>
+    ///
+    /// Hands are designed for specific tasks (trading, prediction, lead generation, etc.)
+    /// and should only be activated when the user explicitly needs them.
     const DEFAULT_HANDS: &'static [&'static str] = &[
-        "researcher",
-        "browser",
-        "collector",
-        "analytics",
-        "strategist",
-        "lead",
-        "predictor",
-        "trader",
-        "devops",
-        "apitester",
+        // Empty by default - all hands opt-in
     ];
 
     pub async fn start_background_agents(self: &Arc<Self>) {

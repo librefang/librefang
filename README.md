@@ -46,7 +46,10 @@ Traditional agent frameworks wait for you to type something. LibreFang runs **ag
 ## Quick Start
 
 ```bash
-# Install
+# Install (Linux/macOS/WSL)
+curl -fsSL https://librefang.ai/install.sh | sh
+
+# Or install via Cargo
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
 # Initialize (walks you through provider setup)

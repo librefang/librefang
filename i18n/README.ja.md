@@ -46,7 +46,10 @@ LibreFang は **エージェントオペレーティングシステム** — Rus
 ## クイックスタート
 
 ```bash
-# インストール
+# インストール (Linux/macOS/WSL)
+curl -fsSL https://librefang.ai/install.sh | sh
+
+# または Cargo でインストール
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
 # 初期化（プロバイダー設定をガイド）

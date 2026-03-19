@@ -46,7 +46,10 @@ LibreFang 是一个 **Agent 操作系统** — 用 Rust 从头构建的完整自
 ## 快速开始
 
 ```bash
-# 安装
+# 安装 (Linux/macOS/WSL)
+curl -fsSL https://librefang.ai/install.sh | sh
+
+# 或通过 Cargo 安装
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
 # 初始化（引导你完成服务商配置）
