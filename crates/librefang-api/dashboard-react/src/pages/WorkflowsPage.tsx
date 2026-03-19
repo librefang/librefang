@@ -2,13 +2,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
+  createWorkflow,
   deleteWorkflow,
   listWorkflowRuns,
   listWorkflows,
   runWorkflow,
 } from "../api";
 import { WorkflowEditor } from "../components/WorkflowEditor";
-import { Layers, RefreshCw, Trash2 } from "lucide-react";
+import { workflowTemplates, type WorkflowTemplate } from "../data/workflowTemplates";
+import { Layers, RefreshCw, Trash2, FilePlus, Sparkles } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -16,8 +18,54 @@ export function WorkflowsPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [isEditing, setIsEditing] = useState(false);
+  const [showTemplates, setShowTemplates] = useState(false);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>("");
   const [runInput, setRunInput] = useState("");
+  const [initialData, setInitialData] = useState<{ nodes: any[]; edges: any[] } | undefined>();
+
+  const workflowsQuery = useQuery({ queryKey: ["workflows", "list"], queryFn: listWorkflows, refetchInterval: REFRESH_MS });
+  const runsQuery = useQuery({ queryKey: ["workflows", "runs", selectedWorkflowId], queryFn: () => listWorkflowRuns(selectedWorkflowId), enabled: Boolean(selectedWorkflowId) });
+
+  const runMutation = useMutation({ mutationFn: ({ workflowId, input }: any) => runWorkflow(workflowId, input) });
+  const deleteMutation = useMutation({ mutationFn: deleteWorkflow });
+  const createMutation = useMutation({ mutationFn: createWorkflow });
+
+  const workflows = useMemo(() => [...(workflowsQuery.data ?? [])].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")), [workflowsQuery.data]);
+
+  const handleRun = async () => {
+    if (!selectedWorkflowId) return;
+    try {
+      await runMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
+      await runsQuery.refetch();
+    } catch { /* ignore */ }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!window.confirm(t("common.confirm"))) return;
+    try { await deleteMutation.mutateAsync(id); await queryClient.invalidateQueries({ queryKey: ["workflows"] }); } catch { /* ignore */ }
+  };
+
+  const handleUseTemplate = async (template: WorkflowTemplate) => {
+    try {
+      await createMutation.mutateAsync({
+        name: t(template.name),
+        description: t(template.description),
+        steps: template.steps?.map((s: { name: string; prompt: string }) => ({ name: s.name, prompt: s.prompt })) ?? []
+      });
+      await queryClient.invalidateQueries({ queryKey: ["workflows"] });
+      setShowTemplates(false);
+    } catch { /* ignore */ }
+  };
+
+  const handleNewWorkflow = (template?: WorkflowTemplate) => {
+    setInitialData(template ? { nodes: template.nodes, edges: template.edges } : undefined);
+    setShowTemplates(false);
+    setIsEditing(true);
+  };
+
+  if (isEditing) {
+    return <WorkflowEditor initialNodes={initialData?.nodes} initialEdges={initialData?.edges} onClose={() => { setIsEditing(false); setInitialData(undefined); }} onSave={() => { setIsEditing(false); setInitialData(undefined); }} />;
+  }
   const [runResult, setRunResult] = useState<string>("");
 
   const workflowsQuery = useQuery({ queryKey: ["workflows", "list"], queryFn: listWorkflows, refetchInterval: REFRESH_MS });
