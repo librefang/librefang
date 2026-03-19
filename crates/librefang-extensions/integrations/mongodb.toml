@@ -13,7 +13,7 @@ args = ["-y", "@mongodb-js/mongodb-mcp-server"]
 [[required_env]]
 name = "MONGODB_URI"
 label = "MongoDB Connection URI"
-help = "A full MongoDB connection string (e.g., mongodb+srv://user:password@cluster.mongodb.net/dbname)"
+help = "A full MongoDB connection string (e.g., mongodb+srv://<user>:<password>@<cluster>.mongodb.net/<dbname>)"
 is_secret = true
 get_url = ""
 

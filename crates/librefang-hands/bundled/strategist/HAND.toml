@@ -2,7 +2,8 @@ id = "strategist"
 name = "Strategist Hand"
 description = "Autonomous strategy analyst — market research, competitive analysis, business planning, and strategic recommendations"
 category = "productivity"
-icon = "\U0001F3AF"
+icon = "🎯"
+
 tools = ["shell_exec", "file_read", "file_write", "file_list", "web_fetch", "web_search", "memory_store", "memory_recall", "schedule_create", "schedule_list", "schedule_delete", "knowledge_add_entity", "knowledge_add_relation", "knowledge_query", "event_publish"]
 
 [routing]
@@ -334,3 +335,11 @@ format = "number"
 label = "Data Sources Consulted"
 memory_key = "strategist_hand_data_sources"
 format = "number"
+
+# ─── Token & Performance Metadata ─────────────────────────────────────────────
+
+[metadata]
+frequency = "continuous"
+token_consumption = "medium"
+default_active = true
+activation_warning = "Strategist hand runs continuously and performs strategic analysis, consuming tokens."
