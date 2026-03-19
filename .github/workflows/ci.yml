@@ -108,7 +108,7 @@ jobs:
       - name: Run shell installer regression tests
         run: sh scripts/tests/install_sh_test.sh
       - name: Parse PowerShell installer
-        run: pwsh -NoProfile -Command "[void][System.Management.Automation.Language.Parser]::ParseFile('web/public/install.ps1',[ref]`$null,[ref]`$null)"
+        run: pwsh -NoProfile -Command '$tokens=$null; $errors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("web/public/install.ps1",[ref]$tokens,[ref]$errors); if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }'
 
   # ── Rust compilation check (single platform sufficient) ──────────────────────────────────
   check:
