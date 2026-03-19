@@ -248,7 +248,7 @@ pub enum LoopPhase {
 pub type PhaseCallback = Arc<dyn Fn(LoopPhase) + Send + Sync>;
 
 /// Result of an agent loop execution.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AgentLoopResult {
     /// The final text response from the agent.
     pub response: String,
@@ -274,6 +274,10 @@ pub struct AgentLoopResult {
     /// Detected memory conflicts where new info contradicts existing memories.
     /// Empty when no conflicts were detected.
     pub memory_conflicts: Vec<librefang_types::memory::MemoryConflict>,
+    /// True when the agent loop was skipped because no LLM provider is configured.
+    /// Distinct from `silent` (agent chose not to reply) — this means the system
+    /// couldn't run the agent at all.
+    pub provider_not_configured: bool,
 }
 
 /// Check if stable_prefix_mode is enabled via manifest metadata.
@@ -376,6 +380,17 @@ pub async fn run_agent_loop(
     context_engine: Option<&dyn ContextEngine>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting agent loop");
+
+    // Skip agent loop if no LLM provider is configured (StubDriver).
+    // Return Ok (not Err) — this is a valid state, not a runtime error.
+    if !driver.is_configured() {
+        info!(agent = %manifest.name, "Skipping agent loop — no LLM provider configured");
+        return Ok(AgentLoopResult {
+            silent: true,
+            provider_not_configured: true,
+            ..Default::default()
+        });
+    }
 
     // Extract hand-allowed env vars from manifest metadata (set by kernel for hand settings)
     let hand_allowed_env: Vec<String> = manifest
@@ -728,6 +743,7 @@ pub async fn run_agent_loop(
                         memories_saved: Vec::new(),
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
+                        provider_not_configured: false,
                     });
                 }
 
@@ -924,6 +940,7 @@ pub async fn run_agent_loop(
                     memories_saved,
                     memories_used,
                     memory_conflicts,
+                    provider_not_configured: false,
                 });
             }
             StopReason::ToolUse => {
@@ -1241,6 +1258,7 @@ pub async fn run_agent_loop(
                         memories_saved,
                         memories_used,
                         memory_conflicts,
+                        provider_not_configured: false,
                     });
                 }
                 // Model hit token limit — add partial response and continue
@@ -1535,6 +1553,16 @@ pub async fn run_agent_loop_streaming(
     context_engine: Option<&dyn ContextEngine>,
 ) -> LibreFangResult<AgentLoopResult> {
     info!(agent = %manifest.name, "Starting streaming agent loop");
+
+    // Skip streaming agent loop if no LLM provider is configured.
+    if !driver.is_configured() {
+        info!(agent = %manifest.name, "Skipping streaming agent loop — no LLM provider configured");
+        return Ok(AgentLoopResult {
+            silent: true,
+            provider_not_configured: true,
+            ..Default::default()
+        });
+    }
 
     // Extract hand-allowed env vars from manifest metadata (set by kernel for hand settings)
     let hand_allowed_env: Vec<String> = manifest
@@ -1910,6 +1938,7 @@ pub async fn run_agent_loop_streaming(
                         memories_saved: Vec::new(),
                         memories_used: memories_used.clone(),
                         memory_conflicts: Vec::new(),
+                        provider_not_configured: false,
                     });
                 }
 
@@ -2105,6 +2134,7 @@ pub async fn run_agent_loop_streaming(
                     memories_saved,
                     memories_used,
                     memory_conflicts,
+                    provider_not_configured: false,
                 });
             }
             StopReason::ToolUse => {
@@ -2428,6 +2458,7 @@ pub async fn run_agent_loop_streaming(
                         memories_saved,
                         memories_used,
                         memory_conflicts,
+                        provider_not_configured: false,
                     });
                 }
                 let text = response.text();

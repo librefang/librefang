@@ -169,6 +169,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::get(routes::serve_upload),
         )
         .route("/channels", axum::routing::get(routes::list_channels))
+        .route("/channels/{name}", axum::routing::get(routes::get_channel))
         .route(
             "/channels/{name}/configure",
             axum::routing::post(routes::configure_channel).delete(routes::remove_channel),
@@ -307,7 +308,12 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/workflows",
             axum::routing::get(routes::list_workflows).post(routes::create_workflow),
         )
-        .route("/workflows/{id}", axum::routing::get(routes::get_workflow))
+        .route(
+            "/workflows/{id}",
+            axum::routing::get(routes::get_workflow)
+                .put(routes::update_workflow)
+                .delete(routes::delete_workflow),
+        )
         .route(
             "/workflows/{id}/run",
             axum::routing::post(routes::run_workflow),
@@ -507,6 +513,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route(
             "/catalog/status",
             axum::routing::get(routes::catalog_status),
+        )
+        .route(
+            "/providers/ollama/detect",
+            axum::routing::get(routes::detect_ollama),
         )
         .route(
             "/providers/github-copilot/oauth/start",
@@ -941,7 +951,7 @@ pub async fn run_daemon(
 
     let kernel = Arc::new(kernel);
     kernel.set_self_handle();
-    kernel.start_background_agents();
+    kernel.start_background_agents().await;
 
     // Config file hot-reload watcher (polls every 30 seconds)
     {

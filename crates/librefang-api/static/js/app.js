@@ -110,6 +110,8 @@ document.addEventListener('alpine:init', function() {
     focusMode: localStorage.getItem('librefang-focus') === 'true',
     showOnboarding: false,
     showAuthPrompt: false,
+    providerMissing: false,
+    providerBannerDismissed: false,
 
     toggleFocusMode() {
       this.focusMode = !this.focusMode;
@@ -198,6 +200,21 @@ document.addEventListener('alpine:init', function() {
     clearApiKey() {
       LibreFangAPI.setAuthToken('');
       localStorage.removeItem('librefang-api-key');
+    },
+
+    async checkProviderStatus() {
+      try {
+        var providers = await LibreFangAPI.get('/api/providers');
+        var hasConfigured = providers.some(function(p) {
+          return p.auth_status === 'configured' || p.auth_status === 'not_required';
+        });
+        this.providerMissing = !hasConfigured;
+        if (hasConfigured) this.providerBannerDismissed = false;
+      } catch(e) { /* ignore */ }
+    },
+
+    dismissProviderBanner() {
+      this.providerBannerDismissed = true;
     }
   });
 });
@@ -293,6 +310,7 @@ function app() {
       // Initial data load
       this.pollStatus();
       Alpine.store('app').checkOnboarding();
+      Alpine.store('app').checkProviderStatus();
       Alpine.store('app').checkAuth();
       setInterval(function() { self.pollStatus(); }, 5000);
     },

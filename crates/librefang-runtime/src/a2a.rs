@@ -740,6 +740,8 @@ mod tests {
 
         let config = A2aConfig {
             enabled: true,
+            name: "LibreFang Agent OS".to_string(),
+            description: "Test description".to_string(),
             listen_path: "/a2a".to_string(),
             external_agents: vec![ExternalAgent {
                 name: "other-agent".to_string(),

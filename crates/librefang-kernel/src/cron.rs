@@ -370,6 +370,19 @@ impl CronScheduler {
         due
     }
 
+    /// Mark all enabled cron jobs for a given agent as due immediately.
+    /// The next `due_jobs()` tick will pick them up.
+    /// Called when a provider is configured so Hands resume without waiting.
+    pub fn mark_due_now_by_agent(&self, agent_id: AgentId) {
+        let now = Utc::now();
+        for mut entry in self.jobs.iter_mut() {
+            let meta = entry.value_mut();
+            if meta.job.agent_id == agent_id && meta.job.enabled {
+                meta.job.next_run = Some(now);
+            }
+        }
+    }
+
     // -- Outcome recording --------------------------------------------------
 
     /// Record a successful execution for a job.

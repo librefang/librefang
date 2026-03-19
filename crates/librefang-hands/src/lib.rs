@@ -346,6 +346,26 @@ pub struct HandDefinition {
     /// Bundled skill content (populated at load time, not in TOML).
     #[serde(skip)]
     pub skill_content: Option<String>,
+    /// Token consumption and activation metadata.
+    #[serde(default)]
+    pub metadata: Option<HandMetadata>,
+}
+
+/// Token consumption and activation metadata for user awareness.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HandMetadata {
+    /// How often the hand runs: continuous, periodic, on_demand
+    #[serde(default)]
+    pub frequency: String,
+    /// Relative token consumption: low, medium, high
+    #[serde(default)]
+    pub token_consumption: String,
+    /// Whether this hand is included in default activation
+    #[serde(default)]
+    pub default_active: bool,
+    /// Warning message shown when activating
+    #[serde(default)]
+    pub activation_warning: String,
 }
 
 /// Routing keywords for deterministic hand selection.

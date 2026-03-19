@@ -156,7 +156,7 @@ function schedulerPage() {
       this.trigLoadError = '';
       try {
         var data = await LibreFangAPI.get('/api/triggers');
-        this.triggers = Array.isArray(data) ? data : [];
+        this.triggers = Array.isArray(data) ? data : (data && data.triggers ? data.triggers : []);
       } catch(e) {
         this.triggers = [];
         this.trigLoadError = e.message || this.t('schedulerPage.loadTriggersError', 'Could not load triggers.');

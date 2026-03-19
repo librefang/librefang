@@ -11,7 +11,7 @@ use dashmap::DashMap;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
-use librefang_types::i18n::{self, ErrorTranslator};
+use librefang_types::i18n::ErrorTranslator;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 
@@ -180,9 +180,17 @@ pub async fn spawn_agent(
         Err(e) => {
             tracing::warn!("Spawn failed: {e}");
             let t = ErrorTranslator::new(l);
+            let status = match &e {
+                librefang_kernel::error::KernelError::LibreFang(
+                    librefang_types::error::LibreFangError::AgentAlreadyExists(_),
+                ) => StatusCode::CONFLICT,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": t.t("api-error-agent-spawn-failed")})),
+                status,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-agent-error", &[("error", &e.to_string())])}),
+                ),
             )
         }
     }
@@ -196,17 +204,23 @@ pub async fn spawn_agent(
 const BULK_LIMIT: usize = 50;
 
 /// Validate that a bulk request array is non-empty and within the limit.
-fn validate_bulk_size(len: usize) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+fn validate_bulk_size(
+    len: usize,
+    lang: &'static str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let t = ErrorTranslator::new(lang);
     if len == 0 {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Array must not be empty"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-array-empty")})),
         ));
     }
     if len > BULK_LIMIT {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("Too many items (max {})", BULK_LIMIT)})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-agent-array-too-large", &[("max", &BULK_LIMIT.to_string())])}),
+            ),
         ));
     }
     Ok(())
@@ -224,16 +238,18 @@ fn validate_bulk_size(len: usize) -> Result<(), (StatusCode, Json<serde_json::Va
 )]
 pub async fn bulk_create_agents(
     State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<BulkCreateRequest>,
 ) -> impl IntoResponse {
-    if let Err(resp) = validate_bulk_size(req.agents.len()) {
+    let l = super::resolve_lang(lang.as_ref());
+    if let Err(resp) = validate_bulk_size(req.agents.len(), l) {
         return resp;
     }
 
     let mut results: Vec<BulkCreateResult> = Vec::with_capacity(req.agents.len());
 
     for (index, spawn_req) in req.agents.iter().enumerate() {
-        match resolve_manifest(&state, spawn_req, i18n::DEFAULT_LANGUAGE).await {
+        match resolve_manifest(&state, spawn_req, l).await {
             Err(e) => {
                 results.push(BulkCreateResult {
                     index,
@@ -256,12 +272,16 @@ pub async fn bulk_create_agents(
                         });
                     }
                     Err(e) => {
+                        let t = ErrorTranslator::new(l);
                         results.push(BulkCreateResult {
                             index,
                             success: false,
                             agent_id: None,
                             name: None,
-                            error: Some(format!("Spawn failed: {e}")),
+                            error: Some(t.t_args(
+                                "api-error-agent-clone-spawn-failed",
+                                &[("error", &e.to_string())],
+                            )),
                         });
                     }
                 }
@@ -295,9 +315,12 @@ pub async fn bulk_create_agents(
 )]
 pub async fn bulk_delete_agents(
     State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<BulkAgentIdsRequest>,
 ) -> impl IntoResponse {
-    if let Err(resp) = validate_bulk_size(req.agent_ids.len()) {
+    let l = super::resolve_lang(lang.as_ref());
+    let t = ErrorTranslator::new(l);
+    if let Err(resp) = validate_bulk_size(req.agent_ids.len(), l) {
         return resp;
     }
 
@@ -311,7 +334,7 @@ pub async fn bulk_delete_agents(
                     agent_id: id_str.clone(),
                     success: false,
                     message: None,
-                    error: Some("Invalid agent ID".into()),
+                    error: Some(t.t("api-error-agent-invalid-id")),
                 });
                 continue;
             }
@@ -330,7 +353,7 @@ pub async fn bulk_delete_agents(
                     agent_id: id_str.clone(),
                     success: false,
                     message: None,
-                    error: Some(format!("{e}")),
+                    error: Some(t.t_args("api-error-generic", &[("error", &e.to_string())])),
                 });
             }
         }
@@ -362,11 +385,14 @@ pub async fn bulk_delete_agents(
 )]
 pub async fn bulk_start_agents(
     State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<BulkAgentIdsRequest>,
 ) -> impl IntoResponse {
     use librefang_types::agent::AgentMode;
 
-    if let Err(resp) = validate_bulk_size(req.agent_ids.len()) {
+    let l = super::resolve_lang(lang.as_ref());
+    let t = ErrorTranslator::new(l);
+    if let Err(resp) = validate_bulk_size(req.agent_ids.len(), l) {
         return resp;
     }
 
@@ -380,7 +406,7 @@ pub async fn bulk_start_agents(
                     agent_id: id_str.clone(),
                     success: false,
                     message: None,
-                    error: Some("Invalid agent ID".into()),
+                    error: Some(t.t("api-error-agent-invalid-id")),
                 });
                 continue;
             }
@@ -399,7 +425,7 @@ pub async fn bulk_start_agents(
                     agent_id: id_str.clone(),
                     success: false,
                     message: None,
-                    error: Some("Agent not found".into()),
+                    error: Some(t.t("api-error-agent-not-found")),
                 });
             }
         }
@@ -431,9 +457,12 @@ pub async fn bulk_start_agents(
 )]
 pub async fn bulk_stop_agents(
     State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<BulkAgentIdsRequest>,
 ) -> impl IntoResponse {
-    if let Err(resp) = validate_bulk_size(req.agent_ids.len()) {
+    let l = super::resolve_lang(lang.as_ref());
+    let t = ErrorTranslator::new(l);
+    if let Err(resp) = validate_bulk_size(req.agent_ids.len(), l) {
         return resp;
     }
 
@@ -447,7 +476,7 @@ pub async fn bulk_stop_agents(
                     agent_id: id_str.clone(),
                     success: false,
                     message: None,
-                    error: Some("Invalid agent ID".into()),
+                    error: Some(t.t("api-error-agent-invalid-id")),
                 });
                 continue;
             }
@@ -471,7 +500,7 @@ pub async fn bulk_stop_agents(
                     agent_id: id_str.clone(),
                     success: false,
                     message: None,
-                    error: Some(format!("{e}")),
+                    error: Some(t.t_args("api-error-generic", &[("error", &e.to_string())])),
                 });
             }
         }
@@ -576,6 +605,7 @@ fn enrich_agent_json(
 )]
 pub async fn list_agents(
     State(state): State<Arc<AppState>>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<AgentListQuery>,
 ) -> impl IntoResponse {
     let catalog = state.kernel.model_catalog.read().ok();
@@ -600,7 +630,25 @@ pub async fn list_agents(
     let total = agents.len();
 
     // -- Sorting --
+    const VALID_SORT_FIELDS: &[&str] = &["name", "created_at", "last_active", "state"];
     let sort_field = params.sort.as_deref().unwrap_or("name");
+    if !VALID_SORT_FIELDS.contains(&sort_field) {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        let msg = t.t_args(
+            "api-error-agent-invalid-sort",
+            &[
+                ("field", sort_field),
+                ("valid", &format!("{:?}", VALID_SORT_FIELDS)),
+            ],
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": msg
+            })),
+        )
+            .into_response();
+    }
     let descending = params
         .order
         .as_deref()
@@ -623,8 +671,9 @@ pub async fn list_agents(
 
     // -- Pagination --
     let offset = params.offset.unwrap_or(0);
-    let agents: Vec<librefang_types::agent::AgentEntry> = if let Some(limit) = params.limit {
-        agents.into_iter().skip(offset).take(limit).collect()
+    let limit = params.limit.map(|l| l.min(100));
+    let agents: Vec<librefang_types::agent::AgentEntry> = if let Some(lim) = limit {
+        agents.into_iter().skip(offset).take(lim).collect()
     } else {
         agents.into_iter().skip(offset).collect()
     };
@@ -638,8 +687,9 @@ pub async fn list_agents(
         items,
         total,
         offset,
-        limit: params.limit,
+        limit,
     })
+    .into_response()
 }
 
 /// Resolve uploaded file attachments into ContentBlock::Image blocks.
@@ -822,13 +872,15 @@ fn mime_from_url(url: &str) -> Option<String> {
 pub async fn send_message(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<MessageRequest>,
 ) -> impl IntoResponse {
     // Pre-translate error messages before the `.await` point below.
     // `ErrorTranslator` wraps a `FluentBundle` which is `!Send`, so it must
     // not be held across an await boundary (axum requires `Send` futures).
+    let l = super::resolve_lang(lang.as_ref());
     let (err_invalid_id, err_too_large, err_not_found) = {
-        let t = ErrorTranslator::new(i18n::DEFAULT_LANGUAGE);
+        let t = ErrorTranslator::new(l);
         (
             t.t("api-error-agent-invalid-id"),
             t.t("api-error-message-too-large"),
@@ -933,10 +985,12 @@ pub async fn send_message(
             } else {
                 StatusCode::INTERNAL_SERVER_ERROR
             };
-            (
-                status,
-                Json(serde_json::json!({"error": format!("Message delivery failed: {e}")})),
-            )
+            (status, {
+                let t = ErrorTranslator::new(l);
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-message-delivery-failed", &[("reason", &e.to_string())])}),
+                )
+            })
         }
     }
 }
@@ -954,13 +1008,15 @@ pub async fn send_message(
 pub async fn get_agent_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -970,7 +1026,7 @@ pub async fn get_agent_session(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
     };
@@ -1141,7 +1197,7 @@ pub async fn get_agent_session(
             tracing::warn!("Session load failed for agent {id}: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Session load failed"})),
+                Json(serde_json::json!({"error": t.t("api-error-session-load-failed")})),
             )
         }
     }
@@ -1161,13 +1217,15 @@ pub async fn get_agent_session(
 pub async fn kill_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -1181,7 +1239,7 @@ pub async fn kill_agent(
             tracing::warn!("kill_agent failed for {id}: {e}");
             (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found or already terminated"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found-or-terminated")})),
             )
         }
     }
@@ -1201,14 +1259,16 @@ pub async fn kill_agent(
 pub async fn set_agent_mode(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<SetModeRequest>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -1224,7 +1284,7 @@ pub async fn set_agent_mode(
         ),
         Err(_) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         ),
     }
 }
@@ -1247,13 +1307,15 @@ pub async fn set_agent_mode(
 pub async fn get_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -1263,7 +1325,7 @@ pub async fn get_agent(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
     };
@@ -1277,6 +1339,7 @@ pub async fn get_agent(
             "mode": entry.mode,
             "profile": entry.manifest.profile,
             "created_at": entry.created_at.to_rfc3339(),
+            "last_active": entry.last_active.to_rfc3339(),
             "session_id": entry.session_id.0.to_string(),
             "model": {
                 "provider": entry.manifest.model.provider,
@@ -1286,6 +1349,7 @@ pub async fn get_agent(
                 "tools": entry.manifest.capabilities.tools,
                 "network": entry.manifest.capabilities.network,
             },
+            "system_prompt": entry.manifest.model.system_prompt,
             "description": entry.manifest.description,
             "tags": entry.manifest.tags,
             "identity": {
@@ -1318,18 +1382,29 @@ pub async fn get_agent(
 pub async fn send_message_stream(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<MessageRequest>,
 ) -> axum::response::Response {
     use axum::response::sse::{Event, Sse};
     use futures::stream;
     use librefang_runtime::llm_driver::StreamEvent;
 
+    let (err_too_large, err_invalid_id, err_not_found, err_streaming_failed) = {
+        let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+        (
+            t.t("api-error-message-too-large"),
+            t.t("api-error-agent-invalid-id"),
+            t.t("api-error-agent-not-found"),
+            t.t("api-error-message-streaming-failed"),
+        )
+    };
+
     // SECURITY: Reject oversized messages to prevent OOM / LLM token abuse.
     const MAX_MESSAGE_SIZE: usize = 64 * 1024; // 64KB
     if req.message.len() > MAX_MESSAGE_SIZE {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
+            Json(serde_json::json!({"error": err_too_large})),
         )
             .into_response();
     }
@@ -1339,7 +1414,7 @@ pub async fn send_message_stream(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": err_invalid_id})),
             )
                 .into_response();
         }
@@ -1348,7 +1423,7 @@ pub async fn send_message_stream(
     if state.kernel.registry.get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
+            Json(serde_json::json!({"error": err_not_found})),
         )
             .into_response();
     }
@@ -1364,7 +1439,7 @@ pub async fn send_message_stream(
                 tracing::warn!("Streaming message failed for agent {id}: {e}");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": "Streaming message failed"})),
+                    Json(serde_json::json!({"error": err_streaming_failed})),
                 )
                     .into_response();
             }
@@ -1426,13 +1501,15 @@ pub async fn send_message_stream(
 pub async fn list_agent_sessions(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -1443,7 +1520,9 @@ pub async fn list_agent_sessions(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -1462,14 +1541,16 @@ pub async fn list_agent_sessions(
 pub async fn create_agent_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -1478,7 +1559,9 @@ pub async fn create_agent_session(
         Ok(session) => (StatusCode::OK, Json(session)),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -1499,13 +1582,15 @@ pub async fn create_agent_session(
 pub async fn switch_agent_session(
     State(state): State<Arc<AppState>>,
     Path((id, session_id_str)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -1514,7 +1599,7 @@ pub async fn switch_agent_session(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid session ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-session-invalid-id")})),
             )
         }
     };
@@ -1525,7 +1610,9 @@ pub async fn switch_agent_session(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -1545,13 +1632,15 @@ pub async fn switch_agent_session(
 pub async fn reset_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -1562,7 +1651,9 @@ pub async fn reset_session(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -1580,20 +1671,22 @@ pub async fn reset_session(
 pub async fn clear_agent_history(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
     if state.kernel.registry.get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
     match state.kernel.clear_agent_history(agent_id) {
@@ -1603,7 +1696,9 @@ pub async fn clear_agent_history(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -1621,13 +1716,19 @@ pub async fn clear_agent_history(
 pub async fn compact_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let l = super::resolve_lang(lang.as_ref());
+    let err_invalid_id = {
+        let t = ErrorTranslator::new(l);
+        t.t("api-error-agent-invalid-id")
+    };
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": err_invalid_id})),
             )
         }
     };
@@ -1636,10 +1737,15 @@ pub async fn compact_session(
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": msg})),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
-        ),
+        Err(e) => {
+            let t = ErrorTranslator::new(l);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                ),
+            )
+        }
     }
 }
 
@@ -1656,13 +1762,15 @@ pub async fn compact_session(
 pub async fn stop_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -1677,7 +1785,9 @@ pub async fn stop_agent(
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -1695,14 +1805,16 @@ pub async fn stop_agent(
 pub async fn set_model(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -1711,7 +1823,7 @@ pub async fn set_model(
         _ => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Missing 'model' field"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-missing-model")})),
             )
         }
     };
@@ -1744,7 +1856,9 @@ pub async fn set_model(
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -1765,13 +1879,15 @@ pub async fn set_model(
 pub async fn get_agent_traces(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -1780,7 +1896,7 @@ pub async fn get_agent_traces(
     if state.kernel.registry.get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
 
@@ -1810,13 +1926,15 @@ pub async fn get_agent_traces(
 pub async fn get_agent_tools(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -1825,7 +1943,7 @@ pub async fn get_agent_tools(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             )
         }
     };
@@ -1853,14 +1971,16 @@ pub async fn get_agent_tools(
 pub async fn set_agent_tools(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -1884,7 +2004,7 @@ pub async fn set_agent_tools(
     if allowlist.is_none() && blocklist.is_none() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Provide 'tool_allowlist' and/or 'tool_blocklist'"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-missing-tools")})),
         );
     }
 
@@ -1895,7 +2015,9 @@ pub async fn set_agent_tools(
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -1915,13 +2037,15 @@ pub async fn set_agent_tools(
 pub async fn get_agent_skills(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -1930,7 +2054,7 @@ pub async fn get_agent_skills(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             )
         }
     };
@@ -1965,14 +2089,16 @@ pub async fn get_agent_skills(
 pub async fn set_agent_skills(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -1991,7 +2117,9 @@ pub async fn set_agent_skills(
         ),
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -2009,13 +2137,15 @@ pub async fn set_agent_skills(
 pub async fn get_agent_mcp_servers(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -2024,7 +2154,7 @@ pub async fn get_agent_mcp_servers(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             )
         }
     };
@@ -2078,14 +2208,16 @@ pub async fn get_agent_mcp_servers(
 pub async fn set_agent_mcp_servers(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             )
         }
     };
@@ -2107,7 +2239,9 @@ pub async fn set_agent_mcp_servers(
         ),
         Err(e) => (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("{e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
         ),
     }
 }
@@ -2130,14 +2264,16 @@ pub async fn set_agent_mcp_servers(
 pub async fn update_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<AgentUpdateRequest>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -2145,7 +2281,7 @@ pub async fn update_agent(
     if state.kernel.registry.get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
 
@@ -2155,7 +2291,9 @@ pub async fn update_agent(
         Err(e) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("Invalid manifest: {e}")})),
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-agent-invalid-manifest", &[("error", &e.to_string())])}),
+                ),
             );
         }
     };
@@ -2184,14 +2322,16 @@ pub async fn update_agent(
 pub async fn patch_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -2199,7 +2339,7 @@ pub async fn patch_agent(
     if state.kernel.registry.get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
 
@@ -2212,7 +2352,9 @@ pub async fn patch_agent(
         {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("{e}")})),
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                ),
             );
         }
     }
@@ -2224,7 +2366,9 @@ pub async fn patch_agent(
         {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("{e}")})),
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                ),
             );
         }
     }
@@ -2236,7 +2380,9 @@ pub async fn patch_agent(
         {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("{e}")})),
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                ),
             );
         }
     }
@@ -2248,7 +2394,9 @@ pub async fn patch_agent(
         {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("{e}")})),
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                ),
             );
         }
     }
@@ -2267,7 +2415,7 @@ pub async fn patch_agent(
     } else {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "Agent vanished during update"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-vanished")})),
         )
     }
 }
@@ -2304,14 +2452,16 @@ pub struct UpdateIdentityRequest {
 pub async fn update_agent_identity(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<UpdateIdentityRequest>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -2321,7 +2471,7 @@ pub async fn update_agent_identity(
         if !color.is_empty() && !color.starts_with('#') {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Color must be a hex code starting with '#'"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-color-invalid")})),
             );
         }
     }
@@ -2335,7 +2485,7 @@ pub async fn update_agent_identity(
         {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Avatar URL must be http/https or data URI"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-avatar-invalid")})),
             );
         }
     }
@@ -2364,7 +2514,7 @@ pub async fn update_agent_identity(
         }
         Err(_) => (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         ),
     }
 }
@@ -2407,14 +2557,16 @@ pub struct PatchAgentConfigRequest {
 pub async fn patch_agent_config(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<PatchAgentConfigRequest>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -2429,7 +2581,7 @@ pub async fn patch_agent_config(
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Json(
-                    serde_json::json!({"error": format!("Name exceeds max length ({MAX_NAME_LEN} chars)")}),
+                    serde_json::json!({"error": t.t_args("api-error-agent-name-too-long", &[("max", &MAX_NAME_LEN.to_string())])}),
                 ),
             );
         }
@@ -2439,7 +2591,7 @@ pub async fn patch_agent_config(
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Json(
-                    serde_json::json!({"error": format!("Description exceeds max length ({MAX_DESC_LEN} chars)")}),
+                    serde_json::json!({"error": t.t_args("api-error-agent-desc-too-long", &[("max", &MAX_DESC_LEN.to_string())])}),
                 ),
             );
         }
@@ -2449,7 +2601,7 @@ pub async fn patch_agent_config(
             return (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 Json(
-                    serde_json::json!({"error": format!("System prompt exceeds max length ({MAX_PROMPT_LEN} chars)")}),
+                    serde_json::json!({"error": t.t_args("api-error-agent-prompt-too-long", &[("max", &MAX_PROMPT_LEN.to_string())])}),
                 ),
             );
         }
@@ -2460,7 +2612,7 @@ pub async fn patch_agent_config(
         if !color.is_empty() && !color.starts_with('#') {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Color must be a hex code starting with '#'"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-color-invalid")})),
             );
         }
     }
@@ -2474,7 +2626,7 @@ pub async fn patch_agent_config(
         {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Avatar URL must be http/https or data URI"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-avatar-invalid")})),
             );
         }
     }
@@ -2489,7 +2641,9 @@ pub async fn patch_agent_config(
             {
                 return (
                     StatusCode::CONFLICT,
-                    Json(serde_json::json!({"error": format!("{e}")})),
+                    Json(
+                        serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                    ),
                 );
             }
         }
@@ -2505,7 +2659,7 @@ pub async fn patch_agent_config(
         {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
     }
@@ -2520,7 +2674,7 @@ pub async fn patch_agent_config(
         {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
     }
@@ -2557,7 +2711,7 @@ pub async fn patch_agent_config(
         {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
     }
@@ -2583,7 +2737,7 @@ pub async fn patch_agent_config(
                     {
                         return (
                             StatusCode::NOT_FOUND,
-                            Json(serde_json::json!({"error": "Agent not found"})),
+                            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
                         );
                     }
                 } else {
@@ -2591,7 +2745,9 @@ pub async fn patch_agent_config(
                     if let Err(e) = state.kernel.set_agent_model(agent_id, new_model, None) {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({"error": format!("{e}")})),
+                            Json(
+                                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                            ),
                         );
                     }
                 }
@@ -2600,7 +2756,9 @@ pub async fn patch_agent_config(
                 if let Err(e) = state.kernel.set_agent_model(agent_id, new_model, None) {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(serde_json::json!({"error": format!("{e}")})),
+                        Json(
+                            serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+                        ),
                     );
                 }
             }
@@ -2617,7 +2775,7 @@ pub async fn patch_agent_config(
         {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
     }
@@ -2695,14 +2853,16 @@ fn skill_assignment_mode(manifest: &librefang_types::agent::AgentManifest) -> &'
 pub async fn clone_agent(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<CloneAgentRequest>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -2710,14 +2870,16 @@ pub async fn clone_agent(
     if req.new_name.len() > 256 {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "Name exceeds max length (256 chars)"})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-agent-name-too-long", &[("max", "256")])}),
+            ),
         );
     }
 
     if req.new_name.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "new_name cannot be empty"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-name-empty")})),
         );
     }
 
@@ -2726,7 +2888,7 @@ pub async fn clone_agent(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
     };
@@ -2745,7 +2907,9 @@ pub async fn clone_agent(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("Clone spawn failed: {e}")})),
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-agent-clone-failed", &[("error", &e.to_string())])}),
+                ),
             );
         }
     };
@@ -2816,13 +2980,15 @@ const KNOWN_IDENTITY_FILES: &[&str] = &[
 pub async fn list_agent_files(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -2832,7 +2998,7 @@ pub async fn list_agent_files(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
     };
@@ -2842,7 +3008,7 @@ pub async fn list_agent_files(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent has no workspace"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-no-workspace")})),
             );
         }
     };
@@ -2882,13 +3048,15 @@ pub async fn list_agent_files(
 pub async fn get_agent_file(
     State(state): State<Arc<AppState>>,
     Path((id, filename)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -2897,7 +3065,7 @@ pub async fn get_agent_file(
     if !KNOWN_IDENTITY_FILES.contains(&filename.as_str()) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "File not in whitelist"})),
+            Json(serde_json::json!({"error": t.t("api-error-file-not-in-whitelist")})),
         );
     }
 
@@ -2906,7 +3074,7 @@ pub async fn get_agent_file(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
     };
@@ -2916,7 +3084,7 @@ pub async fn get_agent_file(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent has no workspace"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-no-workspace")})),
             );
         }
     };
@@ -2928,7 +3096,7 @@ pub async fn get_agent_file(
         Err(_) => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "File not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
             );
         }
     };
@@ -2937,14 +3105,14 @@ pub async fn get_agent_file(
         Err(_) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Workspace path error"})),
+                Json(serde_json::json!({"error": t.t("api-error-file-workspace-error")})),
             );
         }
     };
     if !canonical.starts_with(&ws_canonical) {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Path traversal denied"})),
+            Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
         );
     }
 
@@ -2953,7 +3121,7 @@ pub async fn get_agent_file(
         Err(_) => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "File not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
             );
         }
     };
@@ -2992,14 +3160,16 @@ pub struct SetAgentFileRequest {
 pub async fn set_agent_file(
     State(state): State<Arc<AppState>>,
     Path((id, filename)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Json(req): Json<SetAgentFileRequest>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -3008,7 +3178,7 @@ pub async fn set_agent_file(
     if !KNOWN_IDENTITY_FILES.contains(&filename.as_str()) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "File not in whitelist"})),
+            Json(serde_json::json!({"error": t.t("api-error-file-not-in-whitelist")})),
         );
     }
 
@@ -3017,7 +3187,7 @@ pub async fn set_agent_file(
     if req.content.len() > MAX_FILE_SIZE {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "File content too large (max 32KB)"})),
+            Json(serde_json::json!({"error": t.t("api-error-file-too-large")})),
         );
     }
 
@@ -3026,7 +3196,7 @@ pub async fn set_agent_file(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
     };
@@ -3036,7 +3206,7 @@ pub async fn set_agent_file(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent has no workspace"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-no-workspace")})),
             );
         }
     };
@@ -3047,7 +3217,7 @@ pub async fn set_agent_file(
         Err(_) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Workspace path error"})),
+                Json(serde_json::json!({"error": t.t("api-error-file-workspace-error")})),
             );
         }
     };
@@ -3069,7 +3239,7 @@ pub async fn set_agent_file(
     if !check_path.starts_with(&ws_canonical) {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Path traversal denied"})),
+            Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
         );
     }
 
@@ -3078,7 +3248,9 @@ pub async fn set_agent_file(
     if let Err(e) = std::fs::write(&tmp_path, &req.content) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Write failed: {e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-file-write-failed", &[("error", &e.to_string())])}),
+            ),
         );
     }
     if let Err(e) = std::fs::rename(&tmp_path, &file_path) {
@@ -3087,7 +3259,9 @@ pub async fn set_agent_file(
         }
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Rename failed: {e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-file-rename-failed", &[("error", &e.to_string())])}),
+            ),
         );
     }
 
@@ -3119,13 +3293,15 @@ pub async fn set_agent_file(
 pub async fn delete_agent_file(
     State(state): State<Arc<AppState>>,
     Path((id, filename)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -3134,7 +3310,7 @@ pub async fn delete_agent_file(
     if !KNOWN_IDENTITY_FILES.contains(&filename.as_str()) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "File not in whitelist"})),
+            Json(serde_json::json!({"error": t.t("api-error-file-not-in-whitelist")})),
         );
     }
 
@@ -3144,14 +3320,14 @@ pub async fn delete_agent_file(
             None => {
                 return (
                     StatusCode::NOT_FOUND,
-                    Json(serde_json::json!({"error": "Agent has no workspace"})),
+                    Json(serde_json::json!({"error": t.t("api-error-agent-no-workspace")})),
                 );
             }
         },
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
     };
@@ -3163,7 +3339,7 @@ pub async fn delete_agent_file(
         Err(_) => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "File not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-file-not-found")})),
             );
         }
     };
@@ -3172,21 +3348,23 @@ pub async fn delete_agent_file(
         Err(_) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": "Workspace path error"})),
+                Json(serde_json::json!({"error": t.t("api-error-file-workspace-error")})),
             );
         }
     };
     if !canonical.starts_with(&ws_canonical) {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Path traversal denied"})),
+            Json(serde_json::json!({"error": t.t("api-error-file-path-traversal")})),
         );
     }
 
     if let Err(e) = std::fs::remove_file(&canonical) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Delete failed: {e}")})),
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-file-delete-failed", &[("error", &e.to_string())])}),
+            ),
         );
     }
 
@@ -3255,16 +3433,36 @@ fn is_allowed_content_type(ct: &str) -> bool {
 pub async fn upload_file(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    let l = super::resolve_lang(lang.as_ref());
+    let (
+        err_invalid_id,
+        err_unsupported_type,
+        err_too_large_upload,
+        err_empty_body,
+        err_upload_dir_failed,
+        err_upload_save_failed,
+    ) = {
+        let t = ErrorTranslator::new(l);
+        (
+            t.t("api-error-agent-invalid-id"),
+            t.t("api-error-file-unsupported-type"),
+            t.t_args("api-error-file-too-large", &[("max", "10MB")]),
+            t.t("api-error-file-empty-body"),
+            t.t("api-error-file-upload-dir-failed"),
+            t.t("api-error-file-save-failed"),
+        )
+    };
     // Validate agent ID format
     let _agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": err_invalid_id})),
             );
         }
     };
@@ -3279,9 +3477,7 @@ pub async fn upload_file(
     if !is_allowed_content_type(&content_type) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(
-                serde_json::json!({"error": "Unsupported content type. Allowed: image/*, text/*, audio/*, application/pdf"}),
-            ),
+            Json(serde_json::json!({"error": err_unsupported_type})),
         );
     }
 
@@ -3296,16 +3492,14 @@ pub async fn upload_file(
     if body.len() > MAX_UPLOAD_SIZE {
         return (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(
-                serde_json::json!({"error": format!("File too large (max {} MB)", MAX_UPLOAD_SIZE / (1024 * 1024))}),
-            ),
+            Json(serde_json::json!({"error": err_too_large_upload})),
         );
     }
 
     if body.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Empty file body"})),
+            Json(serde_json::json!({"error": err_empty_body})),
         );
     }
 
@@ -3316,7 +3510,7 @@ pub async fn upload_file(
         tracing::warn!("Failed to create upload dir: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "Failed to create upload directory"})),
+            Json(serde_json::json!({"error": err_upload_dir_failed})),
         );
     }
 
@@ -3325,7 +3519,7 @@ pub async fn upload_file(
         tracing::warn!("Failed to write upload: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": "Failed to save file"})),
+            Json(serde_json::json!({"error": err_upload_save_failed})),
         );
     }
 
@@ -3460,8 +3654,10 @@ pub async fn serve_upload(Path(file_id): Path<String>) -> impl IntoResponse {
 pub async fn get_agent_deliveries(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
@@ -3471,7 +3667,7 @@ pub async fn get_agent_deliveries(
                 None => {
                     return (
                         StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({"error": "Agent not found"})),
+                        Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
                     );
                 }
             }
@@ -3610,13 +3806,15 @@ mod tests {
 pub async fn agent_metrics(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -3626,7 +3824,7 @@ pub async fn agent_metrics(
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Agent not found"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
             );
         }
     };
@@ -3721,14 +3919,16 @@ pub async fn agent_metrics(
 pub async fn agent_logs(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     let agent_id: AgentId = match id.parse() {
         Ok(id) => id,
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "Invalid agent ID"})),
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
             );
         }
     };
@@ -3737,7 +3937,7 @@ pub async fn agent_logs(
     if state.kernel.registry.get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Agent not found"})),
+            Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
 
@@ -3856,7 +4056,8 @@ mod monitoring_tests {
         let agent_id = spawn_monitoring_test_agent(&state, "metrics-shape");
 
         let (status, body) =
-            json_response(agent_metrics(State(state), Path(agent_id.to_string())).await).await;
+            json_response(agent_metrics(State(state), Path(agent_id.to_string()), None).await)
+                .await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["agent_id"], agent_id.to_string());
@@ -3869,9 +4070,10 @@ mod monitoring_tests {
     async fn test_agent_metrics_returns_not_found_for_unknown_agent() {
         let (state, _tmp) = monitoring_test_app_state();
 
-        let (status, body) =
-            json_response(agent_metrics(State(state), Path(AgentId::new().to_string())).await)
-                .await;
+        let (status, body) = json_response(
+            agent_metrics(State(state), Path(AgentId::new().to_string()), None).await,
+        )
+        .await;
 
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert_eq!(body["error"], "Agent not found");
@@ -3900,7 +4102,8 @@ mod monitoring_tests {
         params.insert("level".to_string(), "custom_error".to_string());
 
         let (status, body) =
-            json_response(agent_logs(State(state), Path(agent_id_str), Query(params)).await).await;
+            json_response(agent_logs(State(state), Path(agent_id_str), None, Query(params)).await)
+                .await;
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["count"], 1);

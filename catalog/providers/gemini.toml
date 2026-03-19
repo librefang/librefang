@@ -4,6 +4,7 @@ display_name = "Google Gemini"
 api_key_env = "GEMINI_API_KEY"
 base_url = "https://generativelanguage.googleapis.com"
 key_required = true
+signup_url = "https://aistudio.google.com/apikey"
 
 [[models]]
 id = "gemini-3.1-pro-preview"

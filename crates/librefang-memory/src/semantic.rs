@@ -491,14 +491,12 @@ impl SemanticStore {
             .prepare("SELECT embedding FROM memories WHERE id = ?1 AND deleted = 0")
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         for id in ids {
-            if let Ok(bytes) = stmt.query_row(rusqlite::params![*id], |row| {
+            if let Ok(Some(b)) = stmt.query_row(rusqlite::params![*id], |row| {
                 let b: Option<Vec<u8>> = row.get(0)?;
                 Ok(b)
             }) {
-                if let Some(b) = bytes {
-                    if !b.is_empty() {
-                        map.insert(id.to_string(), embedding_from_bytes(&b));
-                    }
+                if !b.is_empty() {
+                    map.insert(id.to_string(), embedding_from_bytes(&b));
                 }
             }
         }
@@ -912,14 +910,12 @@ impl VectorStore for SqliteVectorStore {
             .prepare("SELECT embedding FROM memories WHERE id = ?1 AND deleted = 0")
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
         for id in ids {
-            if let Ok(bytes) = stmt.query_row(rusqlite::params![*id], |row| {
+            if let Ok(Some(b)) = stmt.query_row(rusqlite::params![*id], |row| {
                 let b: Option<Vec<u8>> = row.get(0)?;
                 Ok(b)
             }) {
-                if let Some(b) = bytes {
-                    if !b.is_empty() {
-                        map.insert(id.to_string(), embedding_from_bytes(&b));
-                    }
+                if !b.is_empty() {
+                    map.insert(id.to_string(), embedding_from_bytes(&b));
                 }
             }
         }

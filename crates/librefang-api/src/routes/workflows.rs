@@ -193,6 +193,179 @@ pub async fn get_workflow(
     }
 }
 
+/// PUT /api/workflows/:id — Update an existing workflow.
+#[utoipa::path(
+    put,
+    path = "/api/workflows/{id}",
+    tag = "workflows",
+    params(("id" = String, Path, description = "Workflow ID")),
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Workflow updated", body = serde_json::Value),
+        (status = 400, description = "Invalid workflow definition"),
+        (status = 404, description = "Workflow not found")
+    )
+)]
+pub async fn update_workflow(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let workflow_id = WorkflowId(match id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid workflow ID"})),
+            );
+        }
+    });
+
+    // Fetch existing workflow to preserve created_at
+    let existing = match state.kernel.workflows.get_workflow(workflow_id).await {
+        Some(w) => w,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Workflow not found"})),
+            );
+        }
+    };
+
+    let name = req["name"]
+        .as_str()
+        .map(String::from)
+        .unwrap_or(existing.name.clone());
+    let description = req["description"]
+        .as_str()
+        .map(String::from)
+        .unwrap_or(existing.description.clone());
+
+    // If steps are provided, parse them; otherwise keep existing steps
+    let steps = if let Some(steps_json) = req["steps"].as_array() {
+        let mut parsed_steps = Vec::new();
+        for s in steps_json {
+            let step_name = s["name"].as_str().unwrap_or("step").to_string();
+            let agent = if let Some(aid) = s["agent_id"].as_str() {
+                StepAgent::ById {
+                    id: aid.to_string(),
+                }
+            } else if let Some(aname) = s["agent_name"].as_str() {
+                StepAgent::ByName {
+                    name: aname.to_string(),
+                }
+            } else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(
+                        serde_json::json!({"error": format!("Step '{}' needs 'agent_id' or 'agent_name'", step_name)}),
+                    ),
+                );
+            };
+
+            let mode = match s["mode"].as_str().unwrap_or("sequential") {
+                "fan_out" => StepMode::FanOut,
+                "collect" => StepMode::Collect,
+                "conditional" => StepMode::Conditional {
+                    condition: s["condition"].as_str().unwrap_or("").to_string(),
+                },
+                "loop" => StepMode::Loop {
+                    max_iterations: s["max_iterations"].as_u64().unwrap_or(5) as u32,
+                    until: s["until"].as_str().unwrap_or("").to_string(),
+                },
+                _ => StepMode::Sequential,
+            };
+
+            let error_mode = match s["error_mode"].as_str().unwrap_or("fail") {
+                "skip" => ErrorMode::Skip,
+                "retry" => ErrorMode::Retry {
+                    max_retries: s["max_retries"].as_u64().unwrap_or(3) as u32,
+                },
+                _ => ErrorMode::Fail,
+            };
+
+            parsed_steps.push(WorkflowStep {
+                name: step_name,
+                agent,
+                prompt_template: s["prompt"].as_str().unwrap_or("{{input}}").to_string(),
+                mode,
+                timeout_secs: s["timeout_secs"].as_u64().unwrap_or(120),
+                error_mode,
+                output_var: s["output_var"].as_str().map(String::from),
+            });
+        }
+        parsed_steps
+    } else {
+        existing.steps.clone()
+    };
+
+    let updated = Workflow {
+        id: workflow_id,
+        name,
+        description,
+        steps,
+        created_at: existing.created_at,
+    };
+
+    if !state
+        .kernel
+        .workflows
+        .update_workflow(workflow_id, updated)
+        .await
+    {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Workflow not found"})),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "updated",
+            "workflow_id": id,
+        })),
+    )
+}
+
+/// DELETE /api/workflows/:id — Remove a workflow.
+#[utoipa::path(
+    delete,
+    path = "/api/workflows/{id}",
+    tag = "workflows",
+    params(("id" = String, Path, description = "Workflow ID")),
+    responses(
+        (status = 200, description = "Workflow deleted"),
+        (status = 404, description = "Workflow not found")
+    )
+)]
+pub async fn delete_workflow(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let workflow_id = WorkflowId(match id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid workflow ID"})),
+            );
+        }
+    });
+
+    if state.kernel.workflows.remove_workflow(workflow_id).await {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "removed", "workflow_id": id})),
+        )
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "Workflow not found"})),
+        )
+    }
+}
+
 /// POST /api/workflows/:id/run — Execute a workflow.
 #[utoipa::path(post, path = "/api/workflows/{id}/run", tag = "workflows", params(("id" = String, Path, description = "Workflow ID")), responses((status = 200, description = "Workflow run started", body = serde_json::Value)))]
 pub async fn run_workflow(
@@ -347,7 +520,7 @@ pub async fn create_trigger(
     path = "/api/triggers",
     tag = "workflows",
     responses(
-        (status = 200, description = "List triggers", body = Vec<serde_json::Value>)
+        (status = 200, description = "List triggers", body = serde_json::Value)
     )
 )]
 pub async fn list_triggers(
@@ -374,7 +547,8 @@ pub async fn list_triggers(
             })
         })
         .collect();
-    Json(list)
+    let total = list.len();
+    Json(serde_json::json!({"triggers": list, "total": total}))
 }
 
 /// DELETE /api/triggers/:id — Remove a trigger.
@@ -898,10 +1072,13 @@ pub async fn create_cron_job(
 ) -> impl IntoResponse {
     let agent_id = body["agent_id"].as_str().unwrap_or("");
     match state.kernel.cron_create(agent_id, body.clone()).await {
-        Ok(result) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({"result": result})),
-        ),
+        Ok(result) => {
+            // cron_create returns a JSON string — parse it so the response
+            // is a proper JSON object instead of a stringified blob.
+            let parsed: serde_json::Value =
+                serde_json::from_str(&result).unwrap_or(serde_json::json!({"id": result}));
+            (StatusCode::CREATED, Json(parsed))
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": e})),

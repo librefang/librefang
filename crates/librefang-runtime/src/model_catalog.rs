@@ -203,6 +203,7 @@ impl ModelCatalog {
                 key_required: true,
                 auth_status: AuthStatus::Missing,
                 model_count: 0,
+                signup_url: None,
             });
             // Re-detect auth for the newly added provider
             self.detect_auth();

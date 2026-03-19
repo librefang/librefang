@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://librefang.ai/">ウェブサイト</a> &bull;
   <a href="https://docs.librefang.ai">ドキュメント</a> &bull;
-  <a href="../CONTRIBUTING.md">コントリビュート</a> &bull;
+  <a href="../docs/CONTRIBUTING.md">コントリビュート</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
@@ -37,7 +37,7 @@ LibreFang は **エージェントオペレーティングシステム** — Rus
 
 従来のエージェントフレームワークは入力を待ちます。LibreFang は**あなたのために働くエージェント**を実行します — スケジュールに従い、24時間365日、ターゲットの監視、リード生成、ソーシャルメディア管理、ダッシュボードへのレポートを行います。
 
-> LibreFang は [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) のコミュニティフォークで、オープンガバナンスとマージファーストの PR ポリシーを採用しています。詳細は [GOVERNANCE.md](../GOVERNANCE.md) を参照。
+> LibreFang は [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) のコミュニティフォークで、オープンガバナンスとマージファーストの PR ポリシーを採用しています。詳細は [GOVERNANCE.md](../docs/GOVERNANCE.md) を参照。
 
 <p align="center">
   <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang ダッシュボード" />
@@ -77,7 +77,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 <details>
 <summary><strong>クラウドデプロイ</strong></summary>
 
-[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../infra/gcp/README.md)
+[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)
 
 </details>
 
@@ -167,7 +167,7 @@ cargo fmt --all -- --check                               # フォーマットチ
 ## リンク
 
 - [ドキュメント](https://docs.librefang.ai) &bull; [API リファレンス](../docs/api-reference.md) &bull; [入門ガイド](../docs/getting-started.md) &bull; [トラブルシューティング](../docs/troubleshooting.md)
-- [コントリビュート](../CONTRIBUTING.md) &bull; [ガバナンス](../GOVERNANCE.md) &bull; [セキュリティ](../SECURITY.md)
+- [コントリビュート](../docs/CONTRIBUTING.md) &bull; [ガバナンス](../docs/GOVERNANCE.md) &bull; [セキュリティ](../docs/SECURITY.md)
 - ディスカッション: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [ユースケース](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [機能投票](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [お知らせ](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## コントリビューター
@@ -178,7 +178,7 @@ cargo fmt --all -- --check                               # フォーマットチ
 
 <p align="center">
   コード、ドキュメント、翻訳、バグ報告など、あらゆる形の貢献を歓迎します。<br/>
-  <a href="../CONTRIBUTING.md">コントリビュートガイド</a>を確認して、<a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> から始めましょう！
+  <a href="../docs/CONTRIBUTING.md">コントリビュートガイド</a>を確認して、<a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> から始めましょう！
 </p>
 
 <p align="center">

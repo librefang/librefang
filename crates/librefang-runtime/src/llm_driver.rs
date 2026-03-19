@@ -164,6 +164,12 @@ pub trait LlmDriver: Send + Sync {
             .await;
         Ok(response)
     }
+
+    /// Whether this driver has a working provider configuration.
+    /// Returns false only for StubDriver; all real drivers return true.
+    fn is_configured(&self) -> bool {
+        true
+    }
 }
 
 /// Configuration for creating an LLM driver.
