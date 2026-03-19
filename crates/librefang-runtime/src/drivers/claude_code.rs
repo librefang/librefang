@@ -172,10 +172,8 @@ impl ClaudeCodeDriver {
                             ContentBlock::Image { media_type, data } => {
                                 // Create temp dir on first image
                                 if image_dir.is_none() {
-                                    let dir = std::env::temp_dir().join(format!(
-                                        "librefang-images-{}",
-                                        uuid::Uuid::new_v4()
-                                    ));
+                                    let dir = std::env::temp_dir()
+                                        .join(format!("librefang-images-{}", uuid::Uuid::new_v4()));
                                     if let Err(e) = std::fs::create_dir_all(&dir) {
                                         warn!(error = %e, "Failed to create image temp dir");
                                         continue;
