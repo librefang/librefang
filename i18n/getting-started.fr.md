@@ -34,13 +34,13 @@ cd librefang
 cargo install --path crates/librefang-cli
 ```
 
-### Option 2 : Installateur Shell (Linux / macOS, pour les futures versions)
+### Option 2 : Installateur Shell (Linux / macOS / WSL)
 
 ```bash
 curl -fsSL https://librefang.ai/install.sh | sh
 ```
 
-Utilisez cette méthode une fois que LibreFang commencera à publier des GitHub Releases. Le script installe le binaire CLI dans `~/.librefang/bin/`.
+Le script installe le binaire CLI dans `~/.librefang/bin/` et ajoute le répertoire à votre PATH.
 
 ### Option 3 : Installateur PowerShell (Windows, pour les futures versions)
 

@@ -5,6 +5,32 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-03-19
+
+### Added
+
+- Auto-initialize vault during librefang init (#1206) (@houko)
+- Add token consumption metadata and reduce default hands (#1215) (@houko)
+
+### Fixed
+
+- Decrypt encrypted webhook payloads (#1208) (@TechWizard9999)
+- Bootstrap context engine during startup (#1209) (@TechWizard9999)
+- Support target ids in channel test (#1210) (@TechWizard9999)
+- Make shell installer POSIX-compatible for Linux (#1226) (@houko)
+
+### Documentation
+
+- Update contributors (#1214) (@houko)
+
+### Maintenance
+
+- Tidy repo structure (#1211) (@houko)
+
+### Other
+
+- Clean skills (#1212) (@houko)
+
 ## [0.6.2] - 2026-03-19
 
 ### Fixed
