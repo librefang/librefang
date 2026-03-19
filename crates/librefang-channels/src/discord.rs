@@ -650,6 +650,7 @@ fn parse_discord_attachment(
         }
         ChannelContent::Voice {
             url,
+            caption: None,
             duration_seconds: 0,
         }
     } else {

@@ -248,6 +248,7 @@ impl TelegramAdapter {
         &self,
         chat_id: i64,
         voice_url: &str,
+        caption: Option<&str>,
         thread_id: Option<i64>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}/bot{}/sendVoice", self.api_base_url, self.token.as_str());
@@ -255,6 +256,10 @@ impl TelegramAdapter {
             "chat_id": chat_id,
             "voice": voice_url,
         });
+        if let Some(cap) = caption {
+            body["caption"] = serde_json::Value::String(cap.to_string());
+            body["parse_mode"] = serde_json::Value::String("HTML".to_string());
+        }
         if let Some(tid) = thread_id {
             body["message_thread_id"] = serde_json::json!(tid);
         }
@@ -522,8 +527,9 @@ impl TelegramAdapter {
                 self.api_send_document_upload(chat_id, data, &filename, &mime_type, thread_id)
                     .await?;
             }
-            ChannelContent::Voice { url, .. } => {
-                self.api_send_voice(chat_id, &url, thread_id).await?;
+            ChannelContent::Voice { url, caption, .. } => {
+                self.api_send_voice(chat_id, &url, caption.as_deref(), thread_id)
+                    .await?;
             }
             ChannelContent::Video { url, caption, .. } => {
                 self.api_send_video(chat_id, &url, caption.as_deref(), thread_id)
@@ -1107,9 +1113,11 @@ async fn parse_telegram_update(
     } else if message.get("voice").is_some() {
         let file_id = message["voice"]["file_id"].as_str().unwrap_or("");
         let duration = message["voice"]["duration"].as_u64().unwrap_or(0) as u32;
+        let caption = message["caption"].as_str().map(String::from);
         match telegram_get_file_url(token, client, file_id, api_base_url).await {
             Some(url) => ChannelContent::Voice {
                 url,
+                caption,
                 duration_seconds: duration,
             },
             None => ChannelContent::Text(format!("[Voice message, {duration}s]")),

@@ -747,9 +747,13 @@ async fn dispatch_message(
         }
         ChannelContent::Voice {
             ref url,
+            ref caption,
             duration_seconds,
-        } => {
-            format!("[User sent a voice message ({duration_seconds}s): {url}]")
+        } => match caption {
+            Some(c) => {
+                format!("[User sent a voice message ({duration_seconds}s): {url}]\nCaption: {c}")
+            }
+            None => format!("[User sent a voice message ({duration_seconds}s): {url}]"),
         }
         ChannelContent::Video {
             ref url,

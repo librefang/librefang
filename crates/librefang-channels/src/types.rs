@@ -65,6 +65,7 @@ pub enum ChannelContent {
     },
     Voice {
         url: String,
+        caption: Option<String>,
         duration_seconds: u32,
     },
     Video {
