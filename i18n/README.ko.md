@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://librefang.ai/">웹사이트</a> &bull;
   <a href="https://docs.librefang.ai">문서</a> &bull;
-  <a href="../CONTRIBUTING.md">기여</a> &bull;
+  <a href="../docs/CONTRIBUTING.md">기여</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
@@ -37,7 +37,7 @@ LibreFang은 **에이전트 운영체제**입니다 — Rust로 처음부터 구
 
 기존 에이전트 프레임워크는 입력을 기다립니다. LibreFang은 **당신을 위해 일하는 에이전트**를 실행합니다 — 스케줄에 따라 24/7, 타겟 모니터링, 리드 생성, 소셜 미디어 관리, 대시보드 보고를 수행합니다.
 
-> LibreFang은 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang)의 커뮤니티 포크로, 오픈 거버넌스와 머지 우선 PR 정책을 채택합니다. 자세한 내용은 [GOVERNANCE.md](../GOVERNANCE.md)를 참조하세요.
+> LibreFang은 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang)의 커뮤니티 포크로, 오픈 거버넌스와 머지 우선 PR 정책을 채택합니다. 자세한 내용은 [GOVERNANCE.md](../docs/GOVERNANCE.md)를 참조하세요.
 
 <p align="center">
   <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang 대시보드" />
@@ -46,7 +46,10 @@ LibreFang은 **에이전트 운영체제**입니다 — Rust로 처음부터 구
 ## 빠른 시작
 
 ```bash
-# 설치
+# 설치 (Linux/macOS/WSL)
+curl -fsSL https://librefang.ai/install.sh | sh
+
+# 또는 Cargo로 설치
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
 # 초기화 (프로바이더 설정 안내)
@@ -77,7 +80,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 <details>
 <summary><strong>클라우드 배포</strong></summary>
 
-[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../infra/gcp/README.md)
+[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)
 
 </details>
 
@@ -141,7 +144,41 @@ xtask                 빌드 자동화
 
 **OpenAI 호환 API** — 드롭인 `/v1/chat/completions` 엔드포인트. 140+ REST/WS/SSE 엔드포인트. [API 레퍼런스](../docs/api-reference.md)
 
-**클라이언트 SDK** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — 스트리밍 지원 완전한 REST 클라이언트.
+**클라이언트 SDK** — 스트리밍 지원 완전한 REST 클라이언트.
+
+```javascript
+// JavaScript/TypeScript
+npm install @librefang/sdk
+const { LibreFang } = require("@librefang/sdk");
+const client = new LibreFang("http://localhost:4545");
+const agent = await client.agents.create({ template: "assistant" });
+const reply = await client.agents.message(agent.id, "Hello!");
+```
+
+```python
+# Python
+pip install librefang
+from librefang import Client
+client = Client("http://localhost:4545")
+agent = client.agents.create(template="assistant")
+reply = client.agents.message(agent["id"], "Hello!")
+```
+
+```rust
+// Rust
+cargo add librefang
+use librefang::LibreFang;
+let client = LibreFang::new("http://localhost:4545");
+let agent = client.agents().create(CreateAgentRequest { template: Some("assistant".into()), .. }).await?;
+```
+
+```go
+// Go
+go get github.com/librefang/librefang/sdk/go
+import "github.com/librefang/librefang/sdk/go"
+client := librefang.New("http://localhost:4545")
+agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"})
+```
 
 **MCP 지원** — MCP 클라이언트 및 서버 내장. IDE 연동, 커스텀 도구 확장, 에이전트 파이프라인 구성. [상세](../docs/providers.md)
 
@@ -167,7 +204,7 @@ cargo fmt --all -- --check                               # 포맷 체크
 ## 링크
 
 - [문서](https://docs.librefang.ai) &bull; [API 레퍼런스](../docs/api-reference.md) &bull; [시작 가이드](../docs/getting-started.md) &bull; [문제 해결](../docs/troubleshooting.md)
-- [기여](../CONTRIBUTING.md) &bull; [거버넌스](../GOVERNANCE.md) &bull; [보안](../SECURITY.md)
+- [기여](../docs/CONTRIBUTING.md) &bull; [거버넌스](../docs/GOVERNANCE.md) &bull; [보안](../docs/SECURITY.md)
 - 토론: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [유스케이스](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [기능 투표](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [공지](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## 기여자
@@ -178,7 +215,7 @@ cargo fmt --all -- --check                               # 포맷 체크
 
 <p align="center">
   코드, 문서, 번역, 버그 리포트 등 모든 형태의 기여를 환영합니다.<br/>
-  <a href="../CONTRIBUTING.md">기여 가이드</a>를 확인하고 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a>부터 시작해 보세요!
+  <a href="../docs/CONTRIBUTING.md">기여 가이드</a>를 확인하고 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a>부터 시작해 보세요!
 </p>
 
 <p align="center">
