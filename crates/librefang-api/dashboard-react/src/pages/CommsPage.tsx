@@ -3,6 +3,8 @@ import { useTranslation } from "react-i18next";
 import { listChannels, loadDashboardSnapshot } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
+import { Card } from "../components/ui/Card";
+import { Badge } from "../components/ui/Badge";
 
 const REFRESH_MS = 30000;
 
@@ -43,7 +45,7 @@ export function CommsPage() {
       ) : (
         <>
           <div className="grid gap-6 lg:grid-cols-2">
-            <section className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5">
+            <Card padding="lg">
               <h2 className="text-lg font-black tracking-tight mb-1">{t("comms.active_channels")}</h2>
               <p className="mb-6 text-xs text-text-dim font-medium">{t("comms.active_channels_description")}</p>
 
@@ -54,16 +56,16 @@ export function CommsPage() {
                       <div className={`h-2 w-2 rounded-full ${c.configured ? 'bg-success shadow-[0_0_8px_var(--success-color)]' : 'bg-text-dim/30'}`} />
                       <span className="text-sm font-bold">{c.display_name || c.name}</span>
                     </div>
-                    <span className={`text-[10px] font-black uppercase tracking-widest ${c.configured ? 'text-success' : 'text-text-dim'}`}>
+                    <Badge variant={c.configured ? "success" : "default"}>
                       {c.configured ? t("common.online") : t("comms.unconfigured")}
-                    </span>
+                    </Badge>
                   </div>
                 ))}
                 {channels.length === 0 && <p className="text-xs text-text-dim italic py-4 text-center">{t("comms.no_channels")}</p>}
               </div>
-            </section>
+            </Card>
 
-            <section className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5">
+            <Card padding="lg">
               <h2 className="text-lg font-black tracking-tight mb-1">{t("overview.system_status")}</h2>
               <p className="mb-6 text-xs text-text-dim font-medium">{t("comms.health_description")}</p>
 
@@ -71,13 +73,13 @@ export function CommsPage() {
                 {snapshot?.health.checks?.map((check, i) => (
                   <div key={i} className="flex items-center justify-between p-3 rounded-xl bg-main/40 border border-border-subtle/50">
                     <span className="text-sm font-bold">{check.name}</span>
-                    <div className={`px-2 py-0.5 rounded-lg border text-[10px] font-black uppercase tracking-widest ${check.status === 'ok' ? 'border-success/20 bg-success/10 text-success' : 'border-error/20 bg-error/10 text-error'}`}>
+                    <Badge variant={check.status === 'ok' ? "success" : "error"}>
                       {check.status === 'ok' ? t("common.ok") : t("common.error")}
-                    </div>
+                    </Badge>
                   </div>
                 )) ?? <p className="text-xs text-text-dim italic py-4 text-center">{t("comms.awaiting_telemetry")}</p>}
               </div>
-            </section>
+            </Card>
           </div>
 
           <div className="rounded-2xl bg-brand-muted border border-brand/5 p-8 shadow-sm">

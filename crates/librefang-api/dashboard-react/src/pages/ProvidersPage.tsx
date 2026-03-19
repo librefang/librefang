@@ -5,6 +5,9 @@ import { listProviders, testProvider } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
+import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { Server } from "lucide-react";
 
@@ -61,17 +64,19 @@ export function ProvidersPage() {
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {providers.map((p) => (
-            <article key={p.id} className="group flex flex-col rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5 hover:border-brand/30 transition-all">
+            <Card key={p.id} hover padding="lg" className="flex flex-col">
               <div className="mb-5 flex items-start justify-between gap-3">
                 <div className="min-w-0"><h2 className="m-0 text-lg font-black truncate">{p.display_name || p.id}</h2><p className="text-[10px] font-black uppercase text-text-dim/60 mt-0.5">{p.id}</p></div>
-                <span className={`rounded-lg border px-2 py-0.5 text-[10px] font-black uppercase ${p.auth_status === 'configured' ? 'border-success/20 bg-success/10 text-success' : 'border-border-subtle bg-main text-text-dim'}`}>{p.auth_status === 'configured' ? t("common.active") : t("common.setup")}</span>
+                <Badge variant={p.auth_status === 'configured' ? 'success' : 'default'}>
+                  {p.auth_status === 'configured' ? t("common.active") : t("common.setup")}
+                </Badge>
               </div>
               <div className="grid grid-cols-2 gap-4 mb-6">
                 <div className="p-3 rounded-xl bg-main/40"><p className="text-[10px] font-black text-text-dim/60 uppercase mb-1">{t("providers.models")}</p><p className="text-xl font-black">{p.model_count || 0}</p></div>
                 <div className="p-3 rounded-xl bg-main/40"><p className="text-[10px] font-black text-text-dim/60 uppercase mb-1">{t("providers.latency")}</p><p className="text-xl font-black">{p.latency_ms ? `${p.latency_ms}ms` : "-"}</p></div>
               </div>
-              <button className="w-full rounded-xl border border-border-subtle bg-surface py-2 text-xs font-black text-text-dim hover:text-brand transition-all" onClick={() => handleTest(p.id)} disabled={pendingId === p.id}>{pendingId === p.id ? t("providers.analyzing") : t("providers.test_connection")}</button>
-            </article>
+              <Button variant="secondary" className="w-full" onClick={() => handleTest(p.id)} disabled={pendingId === p.id}>{pendingId === p.id ? t("providers.analyzing") : t("providers.test_connection")}</Button>
+            </Card>
           ))}
         </div>
       )}

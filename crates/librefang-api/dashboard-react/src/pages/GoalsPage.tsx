@@ -5,6 +5,9 @@ import { createGoal, listAgents, listGoals, type GoalItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
+import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { Shield } from "lucide-react";
 
@@ -65,12 +68,6 @@ export function GoalsPage() {
 
   const inputClass = "rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-all";
 
-  const statusColors: Record<string, string> = {
-    pending: "border-text-dim/30 bg-text-dim/10 text-text-dim",
-    in_progress: "border-warning/30 bg-warning/10 text-warning",
-    completed: "border-success/30 bg-success/10 text-success",
-  };
-
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
       <PageHeader
@@ -93,24 +90,26 @@ export function GoalsPage() {
         <>
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             {[{ label: t("goals.total"), value: stats.total, color: "text-brand" }, { label: t("goals.pending"), value: stats.pending, color: "text-text-dim" }, { label: t("goals.in_progress"), value: stats.inProgress, color: "text-warning" }, { label: t("goals.completed"), value: stats.completed, color: "text-success" }].map((s, i) => (
-              <article key={i} className="rounded-2xl border border-border-subtle bg-surface p-5 shadow-sm hover:border-brand/30 transition-all">
+              <Card key={i} hover padding="md">
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{s.label}</span>
                 <div className="mt-1 flex items-baseline gap-2"><strong className={`text-3xl font-black tracking-tight ${s.color}`}>{s.value}</strong></div>
-              </article>
+              </Card>
             ))}
           </div>
 
           <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
-            <aside className="h-fit rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5">
+            <Card padding="lg">
               <h2 className="text-lg font-black tracking-tight">{t("goals.create_goal")}</h2>
               <form className="mt-6 flex flex-col gap-4" onSubmit={handleCreate}>
                 <input value={createDraft.title} onChange={e => setCreateDraft({...createDraft, title: e.target.value})} placeholder={t("goals.goal_title_placeholder")} className={inputClass} />
                 <textarea value={createDraft.description} onChange={e => setCreateDraft({...createDraft, description: e.target.value})} placeholder={t("goals.goal_desc_placeholder")} className={`${inputClass} resize-none`} rows={3} />
-                <button type="submit" disabled={createMutation.isPending || !createDraft.title.trim()} className="mt-2 rounded-xl bg-brand py-3 text-sm font-bold text-white shadow-lg hover:opacity-90 disabled:opacity-50 transition-all">{createMutation.isPending ? t("common.loading") : t("goals.create_goal")}</button>
+                <Button type="submit" variant="primary" disabled={createMutation.isPending || !createDraft.title.trim()} className="mt-2">
+                  {createMutation.isPending ? t("common.loading") : t("goals.create_goal")}
+                </Button>
               </form>
-            </aside>
+            </Card>
 
-            <article className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5">
+            <Card padding="lg">
               <h2 className="text-lg font-black tracking-tight mb-1">{t("goals.goal_tree")}</h2>
               <div className="space-y-2 mt-6">
                 {rows.map(r => (
@@ -118,12 +117,14 @@ export function GoalsPage() {
                     <div className="flex items-center gap-3">
                       {r.hasChildren && <button onClick={() => setExpandedById({...expandedById, [r.goal.id]: !expandedById[r.goal.id]})} className="text-text-dim font-bold hover:text-brand transition-colors">{expandedById[r.goal.id] ? "−" : "+"}</button>}
                       <span className="text-sm font-black">{r.goal.title}</span>
-                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-lg border uppercase ${statusColors[r.goal.status] || statusColors.pending}`}>{r.goal.status}</span>
+                      <Badge variant={r.goal.status === "completed" ? "success" : r.goal.status === "in_progress" ? "warning" : "default"}>
+                        {r.goal.status}
+                      </Badge>
                     </div>
                   </div>
                 ))}
               </div>
-            </article>
+            </Card>
           </div>
         </>
       )}

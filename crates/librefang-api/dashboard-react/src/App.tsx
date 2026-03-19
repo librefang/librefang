@@ -1,7 +1,7 @@
 import { Link, Outlet } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings } from "lucide-react";
+import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 
@@ -9,6 +9,16 @@ export function App() {
   const { t } = useTranslation();
   const { theme, toggleTheme, language, setLanguage, isMobileMenuOpen, setMobileMenuOpen, isSidebarCollapsed, toggleSidebar } = useUIStore();
   const { isOpen: isPaletteOpen, setIsOpen: setPaletteOpen } = useCommandPalette();
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({
+    "core": false,
+    "automation": true,
+    "resources": true,
+    "system": true,
+  });
+
+  const toggleGroup = (label: string) => {
+    setCollapsedGroups(prev => ({ ...prev, [label]: !prev[label] }));
+  };
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -25,6 +35,7 @@ export function App() {
 
   const navGroups = [
     {
+      key: "core",
       label: t("nav.core"),
       items: [
         { to: "/overview", label: t("nav.overview"), icon: Home },
@@ -35,6 +46,7 @@ export function App() {
       ],
     },
     {
+      key: "automation",
       label: t("nav.automation"),
       items: [
         { to: "/scheduler", label: t("nav.scheduler"), icon: Calendar },
@@ -42,6 +54,7 @@ export function App() {
       ],
     },
     {
+      key: "resources",
       label: t("nav.resources"),
       items: [
         { to: "/agents", label: t("nav.agents"), icon: Users },
@@ -52,6 +65,7 @@ export function App() {
       ],
     },
     {
+      key: "system",
       label: t("nav.system"),
       items: [
         { to: "/analytics", label: t("nav.analytics"), icon: BarChart3 },
@@ -131,13 +145,17 @@ export function App() {
             <kbd className="text-[10px] font-mono bg-main px-1.5 py-0.5 rounded">⌘K</kbd>
           </button>
 
-          <div className="flex flex-col gap-6">
+          <div className="flex flex-col gap-6 max-h-[calc(100vh-280px)] overflow-y-auto">
             {navGroups.map((group) => (
-              <div key={group.label} className="flex flex-col gap-1">
-                <h3 className={`px-3 text-[11px] font-bold uppercase tracking-[0.1em] text-text-dim/80 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>
+              <div key={group.key} className="flex flex-col gap-1">
+                <button
+                  onClick={() => toggleGroup(group.key)}
+                  className={`flex items-center justify-between px-3 text-[11px] font-bold uppercase tracking-[0.1em] text-text-dim/80 hover:text-brand transition-colors ${isSidebarCollapsed ? "lg:hidden" : ""}`}
+                >
                   {group.label}
-                </h3>
-                <div className="mt-1 flex flex-col gap-0.5">
+                  <ChevronDown className={`h-3 w-3 transition-transform ${collapsedGroups[group.key] ? "-rotate-90" : ""}`} />
+                </button>
+                <div className={`mt-1 flex flex-col gap-0.5 ${collapsedGroups[group.key] ? "lg:hidden" : ""}`}>
                   {group.items.map((item) => (
                     <Link
                       key={item.to}

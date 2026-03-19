@@ -5,6 +5,9 @@ import { approveApproval, listApprovals } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
+import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { CheckCircle } from "lucide-react";
 
@@ -56,18 +59,18 @@ export function ApprovalsPage() {
       ) : (
         <div className="grid gap-4">
           {approvals.map((a) => (
-            <article key={a.id} className="group rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm transition-all hover:border-brand/30">
+            <Card key={a.id} hover padding="lg">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
                 <div className="min-w-0 flex-1">
-                  <span className="px-2 py-0.5 rounded-lg bg-warning/10 border border-warning/20 text-[10px] font-black text-warning uppercase tracking-widest">{t("approvals.pending_review")}</span>
+                  <Badge variant="warning">{t("approvals.pending_review")}</Badge>
                   <p className="mt-4 text-sm font-medium leading-relaxed">{a.action_summary || a.description || t("common.actions")}</p>
                 </div>
                 <div className="flex gap-3 shrink-0">
-                  <button onClick={() => handleDecision(a.id, "reject")} disabled={pendingId === a.id} className="px-6 py-2.5 rounded-xl border border-error/20 bg-error/5 text-error text-xs font-black hover:bg-error/10 disabled:opacity-50">{t("approvals.reject")}</button>
-                  <button onClick={() => handleDecision(a.id, "approve")} disabled={pendingId === a.id} className="px-8 py-2.5 rounded-xl bg-success text-white text-xs font-black shadow-lg shadow-success/20 hover:opacity-90 disabled:opacity-50">{t("approvals.approve")}</button>
+                  <Button variant="danger" onClick={() => handleDecision(a.id, "reject")} disabled={pendingId === a.id}>{t("approvals.reject")}</Button>
+                  <Button variant="success" onClick={() => handleDecision(a.id, "approve")} disabled={pendingId === a.id}>{t("approvals.approve")}</Button>
                 </div>
               </div>
-            </article>
+            </Card>
           ))}
         </div>
       )}

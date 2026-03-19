@@ -4,6 +4,9 @@ import { listSkills } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
+import { Badge } from "../components/ui/Badge";
 import { Bell } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -37,18 +40,18 @@ export function SkillsPage() {
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {skills.map(s => (
-            <article key={s.name} className="group rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm hover:border-brand/30 transition-all">
+            <Card key={s.name} hover padding="lg">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-lg font-black truncate">{s.name}</h2>
-                <span className="px-2 py-0.5 rounded-lg bg-brand/10 border border-brand/20 text-[9px] font-black text-brand uppercase">{s.version || "1.0.0"}</span>
+                <Badge variant="brand">{s.version || "1.0.0"}</Badge>
               </div>
               <p className="text-xs text-text-dim line-clamp-2 italic mb-6">{s.description || "-"}</p>
               <div className="flex justify-between items-center text-[10px] font-bold text-text-dim uppercase mb-6">
                 <span>{t("skills.author")}: {s.author || t("common.unknown")}</span>
                 <span>{t("skills.tools")}: {s.tools_count || 0}</span>
               </div>
-              <button className="w-full rounded-xl border border-border-subtle bg-surface py-2 text-xs font-black text-text-dim hover:text-error transition-all">{t("skills.uninstall")}</button>
-            </article>
+              <Button variant="ghost" className="w-full">{t("skills.uninstall")}</Button>
+            </Card>
           ))}
         </div>
       )}

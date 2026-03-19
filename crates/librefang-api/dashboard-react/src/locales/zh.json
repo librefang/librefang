@@ -73,7 +73,36 @@
   "workflows": {
     "title": "工作流", "subtitle": "自动化枢纽。", "all_workflows": "所有工作流", "run_workflow": "运行工作流",
     "select_workflow": "选择工作流", "recent_runs": "最近运行记录", "no_runs": "暂无运行记录",
-    "select_workflow_hint": "请选择一个工作流以查看记录", "steps_count": "{{count}} 步", "automation_hub": "自动化枢纽"
+    "select_workflow_hint": "请选择一个工作流以查看记录", "steps_count": "{{count}} 步", "automation_hub": "自动化枢纽",
+    "templates": "模板", "use_template": "使用模板", "create_blank": "创建空白工作流",
+    "template_details": {
+      "daily_summary": "每日总结", "daily_summary_desc": "自动汇总每日活动",
+      "news_digest": "新闻摘要", "news_digest_desc": "获取并总结最新新闻",
+      "system_health": "系统健康检查", "system_health_desc": "监控系统状态并发送告警",
+      "multi_agent": "多智能体协作", "multi_agent_desc": "协调多个智能体完成复杂任务"
+    },
+    "nodes": {
+      "daily": "每日触发", "daily_desc": "每天午夜执行",
+      "summarizer": "总结器", "summarizer_desc": "创建每日总结",
+      "notify": "通知", "notify_desc": "发送通知",
+      "complete": "完成", "complete_desc": "工作流完成",
+      "scheduled": "定时执行", "scheduled_desc": "按计划运行",
+      "fetch": "获取数据", "fetch_desc": "获取外部数据",
+      "analyze": "分析", "analyze_desc": "分析处理",
+      "deliver": "发送结果", "deliver_desc": "发送结果",
+      "done": "已完成", "done_desc": "已完成",
+      "trigger": "触发器", "trigger_desc": "启动工作流",
+      "check": "检查", "check_desc": "检查状态",
+      "healthy": "条件判断", "healthy_desc": "检查健康状态",
+      "alert": "告警", "alert_desc": "发送告警",
+      "ok": "正常", "ok_desc": "一切正常",
+      "input": "Webhook", "input_desc": "接收输入",
+      "parallel": "并行执行", "parallel_desc": "并行运行",
+      "researcher": "研究员", "researcher_desc": "收集信息",
+      "writer": "写作者", "writer_desc": "创建内容",
+      "coordinator": "协调器", "coordinator_desc": "合并结果",
+      "response": "响应", "response_desc": "发送响应"
+    }
   },
   "scheduler": {
     "title": "调度器", "subtitle": "管理 Cron 任务和定期任务。", "create_job": "创建调度", "create_job_desc": "定义新的任务序列。",

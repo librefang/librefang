@@ -10,6 +10,8 @@ import {
 } from "../api";
 import { WorkflowEditor } from "../components/WorkflowEditor";
 import { workflowTemplates, type WorkflowTemplate } from "../data/workflowTemplates";
+import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
 import { Layers, RefreshCw, Trash2, FilePlus, Sparkles } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -66,33 +68,6 @@ export function WorkflowsPage() {
   if (isEditing) {
     return <WorkflowEditor initialNodes={initialData?.nodes} initialEdges={initialData?.edges} onClose={() => { setIsEditing(false); setInitialData(undefined); }} onSave={() => { setIsEditing(false); setInitialData(undefined); }} />;
   }
-  const [runResult, setRunResult] = useState<string>("");
-
-  const workflowsQuery = useQuery({ queryKey: ["workflows", "list"], queryFn: listWorkflows, refetchInterval: REFRESH_MS });
-  const runsQuery = useQuery({ queryKey: ["workflows", "runs", selectedWorkflowId], queryFn: () => listWorkflowRuns(selectedWorkflowId), enabled: Boolean(selectedWorkflowId) });
-
-  const runMutation = useMutation({ mutationFn: ({ workflowId, input }: any) => runWorkflow(workflowId, input) });
-  const deleteMutation = useMutation({ mutationFn: deleteWorkflow });
-
-  const workflows = useMemo(() => [...(workflowsQuery.data ?? [])].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")), [workflowsQuery.data]);
-
-  const handleRun = async () => {
-    if (!selectedWorkflowId) return;
-    try {
-      const result = await runMutation.mutateAsync({ workflowId: selectedWorkflowId, input: runInput });
-      setRunResult(typeof result.message === "string" ? result.message : JSON.stringify(result));
-      await runsQuery.refetch();
-    } catch (err: any) { setRunResult(`Error: ${err.message}`); }
-  };
-
-  const handleDelete = async (id: string) => {
-    if (!window.confirm(t("common.confirm"))) return;
-    try { await deleteMutation.mutateAsync(id); await queryClient.invalidateQueries({ queryKey: ["workflows"] }); } catch {}
-  };
-
-  if (isEditing) {
-    return <WorkflowEditor onClose={() => setIsEditing(false)} onSave={() => setIsEditing(false)} />;
-  }
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -106,22 +81,59 @@ export function WorkflowsPage() {
           <p className="mt-1 text-text-dim font-medium">{t("workflows.subtitle")}</p>
         </div>
         <div className="flex gap-3">
-          <button onClick={() => setIsEditing(true)} className="px-6 py-2 rounded-xl bg-brand text-white text-sm font-black shadow-lg shadow-brand/20 hover:opacity-90 transition-all">
-            {t("common.symbols.expand")} {t("overview.new_workflow")}
-          </button>
-          <button className="flex h-9 items-center gap-2 rounded-xl border border-border-subtle bg-surface px-4 text-sm font-bold text-text-dim hover:text-brand transition-all shadow-sm" onClick={() => void workflowsQuery.refetch()}>
+          <div className="relative">
+            <Button variant="primary" onClick={() => setShowTemplates(!showTemplates)}>
+              <FilePlus className="h-4 w-4" />
+              {t("common.symbols.expand")} {t("overview.new_workflow")}
+            </Button>
+            {showTemplates && (
+              <div className="absolute top-full mt-2 left-0 w-64 rounded-xl border border-border-subtle bg-surface shadow-xl z-50 overflow-hidden">
+                <div className="p-3 border-b border-border-subtle">
+                  <button onClick={() => handleNewWorkflow()} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-main transition-colors text-left">
+                    <div className="h-6 w-6 rounded-md bg-brand/20 flex items-center justify-center text-brand">
+                      <FilePlus className="h-3.5 w-3.5" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold">{t("workflows.create_blank")}</p>
+                      <p className="text-[10px] text-text-dim">{t("workflows.use_template")}</p>
+                    </div>
+                  </button>
+                </div>
+                <div className="p-2 max-h-64 overflow-y-auto">
+                  {workflowTemplates.map(template => (
+                    <button key={template.id} onClick={() => handleNewWorkflow(template)} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-main transition-colors text-left mb-1">
+                      <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-brand/20 to-brand/5 flex items-center justify-center text-lg">
+                        {template.icon}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-bold truncate">{t(template.name)}</p>
+                        <p className="text-[10px] text-text-dim truncate">{t(template.description)}</p>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                <div className="p-2 border-t border-border-subtle">
+                  <button onClick={() => handleUseTemplate(workflowTemplates[0])} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-brand/10 text-brand transition-colors text-left">
+                    <Sparkles className="h-3.5 w-3.5" />
+                    <span className="text-xs font-bold">{t("workflows.use_template")}</span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+          <Button variant="secondary" onClick={() => void workflowsQuery.refetch()}>
             <RefreshCw className={`h-3.5 w-3.5 ${workflowsQuery.isFetching ? "animate-spin" : ""}`} />
             {t("common.refresh")}
-          </button>
+          </Button>
         </div>
       </header>
 
       <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
-        <div className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm">
+        <Card padding="lg">
           <h2 className="text-lg font-black tracking-tight mb-6">{t("workflows.all_workflows")}</h2>
           <div className="grid gap-3 sm:grid-cols-2">
             {workflows.map(wf => (
-              <article key={wf.id} onClick={() => setSelectedWorkflowId(wf.id)} className={`group cursor-pointer rounded-xl border p-4 transition-all ${selectedWorkflowId === wf.id ? 'border-brand bg-brand/5 shadow-sm' : 'border-border-subtle bg-main/40 hover:border-brand/30'}`}>
+              <Card key={wf.id} hover padding="sm" className={`cursor-pointer ${selectedWorkflowId === wf.id ? 'border-brand' : ''}`} onClick={() => setSelectedWorkflowId(wf.id)}>
                 <div className="flex justify-between items-start">
                   <div className="min-w-0 flex-1">
                     <h3 className="text-sm font-black truncate group-hover:text-brand transition-colors">{wf.name}</h3>
@@ -136,27 +148,27 @@ export function WorkflowsPage() {
                     <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
-              </article>
+              </Card>
             ))}
           </div>
-        </div>
+        </Card>
 
-        <aside className="flex flex-col gap-6">
-          <div className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm">
+        <div className="flex flex-col gap-6">
+          <Card padding="lg">
             <h3 className="text-xs font-black uppercase tracking-widest text-text-dim mb-4">{t("workflows.run_workflow")}</h3>
             <select value={selectedWorkflowId} onChange={(e) => setSelectedWorkflowId(e.target.value)} className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm mb-3 outline-none focus:border-brand">
               <option value="">{t("workflows.select_workflow")}</option>
               {workflows.map(wf => <option key={wf.id} value={wf.id}>{wf.name}</option>)}
             </select>
             <textarea value={runInput} onChange={e => setRunInput(e.target.value)} placeholder={t("chat.transmit_command")} rows={3} className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm mb-4 outline-none focus:border-brand resize-none" />
-            <button disabled={!selectedWorkflowId || runMutation.isPending} onClick={handleRun} className="w-full py-2.5 rounded-xl bg-success text-white text-xs font-black shadow-lg shadow-success/20 hover:opacity-90 transition-all disabled:opacity-30">{t("scheduler.run_now")}</button>
-          </div>
+            <Button variant="primary" className="w-full bg-success border-success hover:bg-success/90" disabled={!selectedWorkflowId || runMutation.isPending} onClick={handleRun}>{t("scheduler.run_now")}</Button>
+          </Card>
 
-          <div className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm">
+          <Card padding="lg">
             <h3 className="text-xs font-black uppercase tracking-widest text-text-dim mb-4">{t("workflows.recent_runs")}</h3>
             <p className="text-[10px] text-text-dim italic text-center py-8">{selectedWorkflowId ? t("workflows.no_runs") : t("workflows.select_workflow_hint")}</p>
-          </div>
-        </aside>
+          </Card>
+        </div>
       </div>
     </div>
   );

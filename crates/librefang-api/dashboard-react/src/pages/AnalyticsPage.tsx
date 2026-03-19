@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { loadDashboardSnapshot } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
+import { Card } from "../components/ui/Card";
 import { BarChart3 } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -31,7 +32,7 @@ export function AnalyticsPage() {
       ) : (
         <>
           <div className="grid gap-6 md:grid-cols-2">
-            <section className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm">
+            <Card padding="lg">
               <h2 className="text-lg font-black tracking-tight mb-1">{t("analytics.compute")}</h2>
               <p className="mb-6 text-xs text-text-dim font-medium">{t("analytics.compute_desc")}</p>
               <div className="space-y-4">
@@ -45,8 +46,8 @@ export function AnalyticsPage() {
                   <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
                 )}
               </div>
-            </section>
-            <section className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm">
+            </Card>
+            <Card padding="lg">
               <h2 className="text-lg font-black tracking-tight mb-1">{t("analytics.runtime")}</h2>
               <p className="mb-6 text-xs text-text-dim font-medium">{t("analytics.runtime_desc")}</p>
               <div className="grid grid-cols-2 gap-4">
@@ -54,7 +55,7 @@ export function AnalyticsPage() {
                   <div key={i} className="p-4 rounded-xl bg-main border border-border-subtle/50"><p className="text-[10px] font-black text-text-dim uppercase mb-1">{s.l}</p><p className="text-2xl font-black">{s.v}</p></div>
                 ))}
               </div>
-            </section>
+            </Card>
           </div>
 
           <div className="rounded-2xl border border-dashed border-border-subtle p-12 text-center bg-surface/30">

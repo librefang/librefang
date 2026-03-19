@@ -4,6 +4,8 @@ import { listMemories } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Card } from "../components/ui/Card";
+import { Badge } from "../components/ui/Badge";
 import { Database } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -41,13 +43,13 @@ export function MemoryPage() {
       ) : (
         <div className="grid gap-4">
           {memories.map((m) => (
-            <article key={m.id} className="group rounded-2xl border border-border-subtle bg-surface p-5 shadow-sm transition-all hover:border-brand/30">
+            <Card key={m.id} hover padding="md">
               <div className="flex items-center gap-2 mb-1">
                 <h2 className="text-sm font-black truncate">{m.id}</h2>
-                <span className="rounded-lg bg-brand/10 border border-brand/10 px-2 py-0.5 text-[9px] font-black text-brand uppercase">{m.level || "Vector"}</span>
+                <Badge variant="brand">{m.level || "Vector"}</Badge>
               </div>
               <p className="text-xs text-text-dim line-clamp-2 leading-relaxed">{m.content || t("common.no_data")}</p>
-            </article>
+            </Card>
           ))}
         </div>
       )}

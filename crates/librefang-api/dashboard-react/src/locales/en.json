@@ -74,7 +74,36 @@
   "workflows": {
     "title": "Workflows", "subtitle": "Automation hub.", "all_workflows": "All Workflows", "run_workflow": "Run Workflow",
     "select_workflow": "Select workflow", "recent_runs": "Recent Runs", "no_runs": "No runs yet",
-    "select_workflow_hint": "Select a workflow to view runs", "steps_count": "{{count}} steps", "automation_hub": "Automation Hub"
+    "select_workflow_hint": "Select a workflow to view runs", "steps_count": "{{count}} steps", "automation_hub": "Automation Hub",
+    "templates": "Templates", "use_template": "Use Template", "create_blank": "Create Blank",
+    "template_details": {
+      "daily_summary": "Daily Summary", "daily_summary_desc": "Automatically summarize daily activities",
+      "news_digest": "News Digest", "news_digest_desc": "Fetch and summarize latest news",
+      "system_health": "System Health", "system_health_desc": "Monitor system status and send alerts",
+      "multi_agent": "Multi-Agent", "multi_agent_desc": "Coordinate multiple agents for complex tasks"
+    },
+    "nodes": {
+      "daily": "Daily Trigger", "daily_desc": "Runs at midnight daily",
+      "summarizer": "Summarizer", "summarizer_desc": "Creates daily summaries",
+      "notify": "Notify", "notify_desc": "Sends notifications",
+      "complete": "Complete", "complete_desc": "Workflow complete",
+      "scheduled": "Scheduled", "scheduled_desc": "Runs on schedule",
+      "fetch": "Fetch", "fetch_desc": "Fetch external data",
+      "analyze": "Analyze", "analyze_desc": "Analyze and process",
+      "deliver": "Deliver", "deliver_desc": "Send results",
+      "done": "Done", "done_desc": "Finished",
+      "trigger": "Trigger", "trigger_desc": "Start workflow",
+      "check": "Check", "check_desc": "Check status",
+      "healthy": "Condition", "healthy_desc": "Check health",
+      "alert": "Alert", "alert_desc": "Send alert",
+      "ok": "OK", "ok_desc": "All good",
+      "input": "Webhook", "input_desc": "Receive input",
+      "parallel": "Parallel", "parallel_desc": "Run in parallel",
+      "researcher": "Researcher", "researcher_desc": "Gather information",
+      "writer": "Writer", "writer_desc": "Create content",
+      "coordinator": "Coordinator", "coordinator_desc": "Merge results",
+      "response": "Response", "response_desc": "Send response"
+    }
   },
   "scheduler": {
     "title": "Scheduler", "subtitle": "Cron jobs and tasks.", "create_job": "Create Schedule", "create_job_desc": "Define new task sequence.",

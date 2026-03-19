@@ -2,6 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { loadDashboardSnapshot } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
+import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
 import { FileText } from "lucide-react";
 
 const REFRESH_MS = 5000;
@@ -35,13 +37,13 @@ export function LogsPage() {
         onRefresh={() => void snapshotQuery.refetch()}
         icon={<FileText className="h-4 w-4" />}
         actions={
-          <button className="rounded-xl border border-border-subtle bg-surface px-4 py-2 text-xs font-bold text-text-dim hover:text-brand transition-all shadow-sm">
+          <Button variant="secondary" size="sm">
             {t("logs.export_json")}
-          </button>
+          </Button>
         }
       />
 
-      <section className="flex-1 rounded-2xl border border-border-subtle bg-surface shadow-sm overflow-hidden">
+      <Card padding="none" className="flex-1 overflow-hidden">
         <div className="bg-main border-b border-border-subtle px-6 py-3 flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-text-dim/60">
           <div className="flex gap-12"><span>{t("logs.timestamp")}</span><span>{t("logs.module")}</span><span>{t("logs.message")}</span></div>
         </div>
@@ -58,7 +60,7 @@ export function LogsPage() {
             );
           })}
         </div>
-      </section>
+      </Card>
     </div>
   );
 }

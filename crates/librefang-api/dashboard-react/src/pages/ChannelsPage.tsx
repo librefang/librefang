@@ -4,6 +4,9 @@ import { listChannels } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
+import { Badge } from "../components/ui/Badge";
 import { Network } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -43,16 +46,16 @@ export function ChannelsPage() {
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {channels.map(c => (
-            <article key={c.name} className="group rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm hover:border-brand/30 transition-all">
+            <Card key={c.name} hover padding="lg">
               <div className="flex items-center justify-between mb-4">
                 <h2 className="text-lg font-black truncate">{c.display_name || c.name}</h2>
-                <span className={`px-2 py-0.5 rounded-lg border text-[9px] font-black uppercase ${c.configured ? 'border-success/20 bg-success/10 text-success' : 'border-border-subtle bg-main text-text-dim'}`}>
+                <Badge variant={c.configured ? "success" : "default"}>
                   {c.configured ? t("common.online") : t("common.setup")}
-                </span>
+                </Badge>
               </div>
               <p className="text-xs text-text-dim line-clamp-2 italic mb-6">{c.description || "-"}</p>
-              <button className="w-full rounded-xl border border-border-subtle bg-surface py-2 text-xs font-black text-text-dim hover:text-brand transition-all">{t("channels.setup_adapter")}</button>
-            </article>
+              <Button variant="secondary" className="w-full">{t("channels.setup_adapter")}</Button>
+            </Card>
           ))}
         </div>
       )}

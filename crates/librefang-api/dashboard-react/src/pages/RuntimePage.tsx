@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { loadDashboardSnapshot } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
+import { Card } from "../components/ui/Card";
 import { Activity } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -29,7 +30,7 @@ export function RuntimePage() {
         </div>
       ) : (
         <div className="grid gap-6 md:grid-cols-2">
-          <section className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm">
+          <Card padding="lg">
             <h2 className="text-lg font-black tracking-tight mb-6">{t("runtime.environment")}</h2>
             <div className="space-y-4">
               <div className="flex justify-between items-center py-2 border-b border-border-subtle/30">
@@ -41,7 +42,7 @@ export function RuntimePage() {
                 <span className="text-sm font-black">{snapshot?.status.uptime_seconds || "-"}s</span>
               </div>
             </div>
-          </section>
+          </Card>
         </div>
       )}
     </div>

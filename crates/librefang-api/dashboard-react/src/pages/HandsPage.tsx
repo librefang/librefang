@@ -5,6 +5,8 @@ import { activateHand, deactivateHand, listActiveHands, listHands } from "../api
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
 import { useUIStore } from "../lib/store";
 import { Hand } from "lucide-react";
 
@@ -81,15 +83,15 @@ export function HandsPage() {
               { label: t("hands.ready_hands"), value: hands.filter(h => h.requirements_met).length },
               { label: t("common.running"), value: activeHandIds.size },
             ].map((stat, i) => (
-              <article key={i} className="rounded-2xl border border-border-subtle bg-surface p-5 shadow-sm hover:border-brand/30 transition-all">
+              <Card key={i} hover padding="md">
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim">{stat.label}</span>
                 <strong className="mt-2 block text-3xl font-black tracking-tight">{stat.value}</strong>
-              </article>
+              </Card>
             ))}
           </div>
 
           <div className="grid gap-6 xl:grid-cols-2">
-            <article className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm">
+            <Card padding="lg">
               <h2 className="text-lg font-black tracking-tight mb-1">{t("hands.available")}</h2>
               <p className="mb-6 text-xs text-text-dim">{t("hands.ready_description")}</p>
               <div className="space-y-3">
@@ -97,18 +99,19 @@ export function HandsPage() {
                   <div key={h.id} className="p-4 rounded-xl bg-main/40 border border-border-subtle hover:border-brand/30 transition-all">
                     <div className="flex justify-between items-start">
                       <div><p className="text-sm font-black">{h.name || h.id}</p><p className="text-xs text-text-dim italic">{h.description || "-"}</p></div>
-                      <button
-                        className="rounded-lg bg-brand px-4 py-1.5 text-xs font-bold text-white shadow-lg hover:opacity-90 disabled:opacity-50 transition-all"
+                      <Button
+                        variant="primary"
+                        size="sm"
                         onClick={() => handleActivate(h.id)}
                         disabled={pendingActivateId === h.id}
                       >
                         {pendingActivateId === h.id ? t("common.loading") : t("hands.activate")}
-                      </button>
+                      </Button>
                     </div>
                   </div>
                 ))}
               </div>
-            </article>
+            </Card>
           </div>
         </>
       )}

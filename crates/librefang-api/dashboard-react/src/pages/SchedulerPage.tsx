@@ -8,6 +8,10 @@ import {
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton, ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Card } from "../components/ui/Card";
+import { Input } from "../components/ui/Input";
+import { Select } from "../components/ui/Select";
+import { Button } from "../components/ui/Button";
 import { useUIStore } from "../lib/store";
 import { Clock } from "lucide-react";
 
@@ -54,7 +58,6 @@ export function SchedulerPage() {
     }
   };
 
-  const inputClass = "rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-all";
   const isLoading = schedulesQuery.isLoading || triggersQuery.isLoading || cronJobsQuery.isLoading;
 
   return (
@@ -77,19 +80,26 @@ export function SchedulerPage() {
         </div>
       ) : (
         <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
-          <aside className="h-fit rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm ring-1 ring-black/5 dark:ring-white/5 hover:border-brand/30 transition-all">
+          <Card padding="lg" hover className="h-fit">
             <h2 className="text-lg font-black tracking-tight">{t("scheduler.create_job")}</h2>
             <p className="mb-6 text-xs text-text-dim font-medium">{t("scheduler.create_job_desc")}</p>
             <form className="flex flex-col gap-4" onSubmit={handleCreateSchedule}>
-              <div><label className="text-[10px] font-black uppercase text-text-dim px-1">{t("scheduler.job_name")}</label><input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("scheduler.job_name_placeholder")} className={`w-full ${inputClass}`} /></div>
-              <div><label className="text-[10px] font-black uppercase text-text-dim px-1">{t("scheduler.cron_exp")}</label><input value={cron} onChange={(e) => setCron(e.target.value)} placeholder={t("scheduler.cron_exp_placeholder")} className={`w-full ${inputClass}`} /></div>
-              <div><label className="text-[10px] font-black uppercase text-text-dim px-1">{t("scheduler.target_agent")}</label><select value={agentId} onChange={(e) => setAgentId(e.target.value)} className={`w-full ${inputClass}`}><option value="">{t("scheduler.select_agent")}</option>{agentsQuery.data?.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}</select></div>
-              <button type="submit" disabled={createScheduleMutation.isPending || !name.trim()} className="mt-2 rounded-xl bg-brand py-3 text-sm font-bold text-white shadow-lg hover:opacity-90 disabled:opacity-50 transition-all">{createScheduleMutation.isPending ? t("common.loading") : t("common.save")}</button>
+              <Input label={t("scheduler.job_name")} value={name} onChange={(e) => setName(e.target.value)} placeholder={t("scheduler.job_name_placeholder")} />
+              <Input label={t("scheduler.cron_exp")} value={cron} onChange={(e) => setCron(e.target.value)} placeholder={t("scheduler.cron_exp_placeholder")} />
+              <Select
+                label={t("scheduler.target_agent")}
+                value={agentId}
+                onChange={(e) => setAgentId(e.target.value)}
+                options={[{ value: "", label: t("scheduler.select_agent") }, ...(agentsQuery.data?.map(a => ({ value: a.id, label: a.name })) ?? [])]}
+              />
+              <Button type="submit" variant="primary" disabled={createScheduleMutation.isPending || !name.trim()} className="mt-2">
+                {createScheduleMutation.isPending ? t("common.loading") : t("common.save")}
+              </Button>
             </form>
-          </aside>
+          </Card>
 
           <div className="flex flex-col gap-6">
-            <section className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm hover:border-brand/30 transition-all">
+            <Card padding="lg" hover>
               <h2 className="text-lg font-black tracking-tight mb-1">{t("scheduler.active_schedules")}</h2>
               {schedules.length === 0 ? (
                 <EmptyState
@@ -99,40 +109,41 @@ export function SchedulerPage() {
               ) : (
                 <div className="grid gap-3 mt-6">
                   {schedules.map((s) => (
-                    <article key={s.id} className="group rounded-xl border border-border-subtle bg-main/40 p-4 transition-all hover:border-brand/30">
+                    <Card key={s.id} hover padding="sm">
                       <div className="flex items-start justify-between">
                         <div><p className="text-sm font-black">{s.name || s.id}</p><p className="text-[10px] font-bold text-brand uppercase mt-1">CRON: <span className="text-text-dim">{s.cron || "-"}</span></p></div>
-                        <button
+                        <Button
+                          variant="secondary"
+                          size="sm"
                           onClick={() => handleRunSchedule(s.id)}
                           disabled={runScheduleMutation.isPending}
-                          className="rounded-lg border border-brand/20 bg-brand/10 px-3 py-1.5 text-[10px] font-bold text-brand hover:bg-brand/20 transition-all shadow-sm disabled:opacity-50"
                         >
                           {runScheduleMutation.isPending ? t("common.loading") : t("scheduler.run_now")}
-                        </button>
+                        </Button>
                       </div>
-                    </article>
+                    </Card>
                   ))}
                 </div>
               )}
-            </section>
+            </Card>
 
             <div className="grid gap-6 md:grid-cols-2">
-              <section className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm hover:border-brand/30 transition-all">
+              <Card padding="lg" hover>
                 <h2 className="text-lg font-black tracking-tight mb-1">{t("scheduler.event_triggers")}</h2>
-                {(triggersQuery.data ?? []).length === 0 ? (
+                {(!triggersQuery.data || !Array.isArray(triggersQuery.data) || triggersQuery.data.length === 0) ? (
                   <p className="text-xs text-text-dim italic mt-4">{t("common.no_data")}</p>
                 ) : (
-                  <div className="grid gap-3 mt-4">{(triggersQuery.data ?? []).map(t_ => (<article key={t_.id} className="rounded-xl border border-border-subtle bg-main/40 p-3"><p className="text-xs font-black truncate">{t_.id}</p></article>))}</div>
+                  <div className="grid gap-3 mt-4">{triggersQuery.data.map(t_ => (<Card key={t_.id} padding="sm"><p className="text-xs font-black truncate">{t_.id}</p></Card>))}</div>
                 )}
-              </section>
-              <section className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm hover:border-brand/30 transition-all">
+              </Card>
+              <Card padding="lg" hover>
                 <h2 className="text-lg font-black tracking-tight mb-1">{t("scheduler.system_cron")}</h2>
-                {(cronJobsQuery.data ?? []).length === 0 ? (
+                {(!cronJobsQuery.data || !Array.isArray(cronJobsQuery.data) || cronJobsQuery.data.length === 0) ? (
                   <p className="text-xs text-text-dim italic mt-4">{t("common.no_data")}</p>
                 ) : (
-                  <div className="grid gap-3 mt-4">{(cronJobsQuery.data ?? []).map((j, i) => (<article key={i} className="rounded-xl border border-border-subtle bg-main/40 p-3"><p className="text-xs font-black truncate">{j.name || j.id}</p></article>))}</div>
+                  <div className="grid gap-3 mt-4">{cronJobsQuery.data.map((j, i) => (<Card key={i} padding="sm"><p className="text-xs font-black truncate">{j.name || j.id}</p></Card>))}</div>
                 )}
-              </section>
+              </Card>
             </div>
           </div>
         </div>

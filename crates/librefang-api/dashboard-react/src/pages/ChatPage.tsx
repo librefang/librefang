@@ -1,85 +1,421 @@
-import { useQuery } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { listAgents, listSessions } from "../api";
-import { MessageCircle, Send } from "lucide-react";
+import { listAgents, sendAgentMessage, loadAgentSession } from "../api";
+import { Button } from "../components/ui/Button";
+import { Card } from "../components/ui/Card";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight } from "lucide-react";
+
+interface ChatMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  timestamp: Date;
+  isStreaming?: boolean;
+  error?: string;
+  tokens?: { input?: number; output?: number };
+}
+
+// 流式打字机效果
+function Typewriter({ text, speed = 15 }: { text: string; speed?: number }) {
+  const [displayed, setDisplayed] = useState("");
+
+  useEffect(() => {
+    if (!text) { setDisplayed(""); return; }
+    if (text.length <= displayed.length) { setDisplayed(text); return; }
+
+    const interval = setInterval(() => {
+      setDisplayed(prev => {
+        if (prev.length >= text.length) {
+          clearInterval(interval);
+          return text;
+        }
+        return text.slice(0, prev.length + 2);
+      });
+    }, speed);
+
+    return () => clearInterval(interval);
+  }, [text, speed]);
+
+  return <span>{displayed}</span>;
+}
+
+// 聊天消息管理 - 包含历史加载和发送
+function useChatMessages(agentId: string | null) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+
+  // 加载历史记录
+  useEffect(() => {
+    if (!agentId) return;
+    loadAgentSession(agentId)
+      .then(session => {
+        if (session.messages?.length) {
+          const historical: ChatMessage[] = session.messages.map((msg, idx) => ({
+            id: `hist-${idx}`,
+            role: msg.role === "user" ? "user" : "assistant",
+            content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
+            timestamp: new Date(),
+          }));
+          setMessages(historical);
+        }
+      })
+      .catch(() => {});
+  }, [agentId]);
+
+  // 发送消息并实现流式输出
+  const sendMessage = useCallback(async (content: string) => {
+    if (!agentId || !content.trim()) return;
+
+    const userMsg: ChatMessage = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      content: content.trim(),
+      timestamp: new Date(),
+    };
+
+    const botMsg: ChatMessage = {
+      id: `bot-${Date.now()}`,
+      role: "assistant",
+      content: "",
+      timestamp: new Date(),
+      isStreaming: true,
+    };
+
+    setMessages(prev => [...prev, userMsg, botMsg]);
+    setIsLoading(true);
+
+    try {
+      const response = await sendAgentMessage(agentId, content);
+      const fullContent = response.response || "";
+      let currentLength = 0;
+
+      const streamInterval = setInterval(() => {
+        if (currentLength < fullContent.length) {
+          currentLength += Math.min(3, fullContent.length - currentLength);
+          setMessages(prev => prev.map(m =>
+            m.id === botMsg.id ? { ...m, content: fullContent.slice(0, currentLength) } : m
+          ));
+        } else {
+          clearInterval(streamInterval);
+          setMessages(prev => prev.map(m =>
+            m.id === botMsg.id
+              ? { ...m, isStreaming: false, tokens: { output: response.output_tokens, input: response.input_tokens } }
+              : m
+          ));
+          setIsLoading(false);
+        }
+      }, 20);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "Unknown error";
+      setMessages(prev => prev.map(m =>
+        m.id === botMsg.id ? { ...m, isStreaming: false, error: errorMsg } : m
+      ));
+      setIsLoading(false);
+    }
+  }, [agentId]);
+
+  const clearHistory = useCallback(() => setMessages([]), []);
+
+  return { messages, isLoading, sendMessage, clearHistory };
+}
+
+// 消息气泡组件
+function MessageBubble({ message }: { message: ChatMessage }) {
+  const isUser = message.role === "user";
+
+  if (message.role === "system") {
+    return (
+      <div className="flex justify-center py-6">
+        <div className="flex items-center gap-4">
+          <div className="h-px w-16 bg-gradient-to-r from-transparent to-border-subtle" />
+          <span className="text-[10px] font-medium text-text-dim/40 tracking-[0.2em] uppercase">{message.content}</span>
+          <div className="h-px w-16 bg-gradient-to-l from-transparent to-border-subtle" />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`flex ${isUser ? "justify-start" : "justify-end"} animate-fade-in-up`}>
+      <div className={`flex flex-col max-w-[75%] ${isUser ? "items-start" : "items-end"}`}>
+        {/* 头像 + 名字 */}
+        <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-start" : "self-end"}`}>
+          <div className={`h-7 w-7 rounded-lg flex items-center justify-center ${
+            isUser ? "bg-gradient-to-br from-brand to-accent text-white shadow-md" : "bg-surface border border-border-subtle"
+          }`}>
+            {isUser ? <User className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5 text-brand" />}
+          </div>
+          <span className={`text-[11px] font-bold uppercase tracking-wider ${isUser ? "text-brand" : "text-text-dim"}`}>
+            {isUser ? "You" : "Bot"}
+          </span>
+        </div>
+
+        {/* 消息内容 */}
+        <div className={`relative px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm transition-all ${
+          isUser
+            ? "bg-gradient-to-br from-brand to-brand/90 text-white rounded-tl-md"
+            : message.error
+              ? "bg-error/10 border border-error/20 text-error rounded-tr-md"
+              : "bg-surface border border-border-subtle rounded-tr-md"
+        }`}>
+          {message.isStreaming ? (
+            <div className="flex items-center gap-1">
+              <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+              <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+              <span className="w-1.5 h-1.5 bg-brand/60 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+            </div>
+          ) : message.error ? (
+            <div className="flex items-start gap-2">
+              <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+              <span>{message.error}</span>
+            </div>
+          ) : (
+            <Typewriter text={message.content} speed={10} />
+          )}
+        </div>
+
+        {/* 元信息 */}
+        <div className="flex items-center gap-2 mt-1.5 text-[10px] text-text-dim/50">
+          <span>{message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+          {message.tokens?.output && !message.isStreaming && (
+            <span className="px-1.5 py-0.5 rounded bg-brand/10 text-brand/70 font-mono text-[9px]">
+              {message.tokens.output} tokens
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 输入框 - 带快捷键提示
+function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string }) {
+  const [message, setMessage] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (message.trim() && !disabled) {
+      onSend(message);
+      setMessage("");
+    }
+  };
+
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.style.height = "auto";
+      textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 150) + "px";
+    }
+  }, [message]);
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-2">
+      <div className="flex gap-3 items-end">
+        <div className="flex-1">
+          <textarea
+            ref={textareaRef}
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey && !e.metaKey) {
+                e.preventDefault();
+                handleSubmit(e);
+              }
+            }}
+            placeholder={placeholder}
+            disabled={disabled}
+            rows={1}
+            className="w-full min-h-[52px] max-h-[150px] rounded-xl border border-border-subtle bg-surface px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/50"
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={!message.trim() || disabled}
+          className="group relative px-5 py-3 rounded-xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          <Send className="h-4 w-4" />
+          <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+            Enter 发送 · ⌘+↵ 换行
+          </span>
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// 连接状态栏
+function ConnectionBar({ agentName, isLoading, messageCount, onClear }: { agentName: string; isLoading: boolean; messageCount: number; onClear: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <div className="px-4 py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface/80 to-transparent flex items-center justify-between backdrop-blur-sm">
+      <div className="flex items-center gap-3">
+        <div className="relative">
+          <Wifi className="h-3.5 w-3.5 text-success" />
+          <span className="absolute inset-0 rounded-full bg-success/30 animate-ping" />
+        </div>
+        <span className="text-xs font-semibold text-success uppercase tracking-wide">{t("chat.secure_link")}</span>
+        <span className="text-text-dim/30">•</span>
+        <span className="text-xs font-medium text-text-dim">{agentName}</span>
+        {isLoading && (
+          <span className="ml-2 px-2 py-0.5 rounded-full bg-brand/10 text-brand text-[10px] font-medium animate-pulse">
+            生成中...
+          </span>
+        )}
+      </div>
+      {messageCount > 0 && (
+        <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
+          <X className="h-3 w-3" />
+          清空对话
+        </button>
+      )}
+    </div>
+  );
+}
 
 export function ChatPage() {
   const { t } = useTranslation();
-  const [selectedAgentId, setSelectedAgentId] = useState<string>("");
-  const [message, setMessage] = useState("");
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
+  const [selectedAgentId, setSelectedAgentId] = useState("");
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents });
-  const sessionsQuery = useQuery({ queryKey: ["sessions", "list", "chat"], queryFn: listSessions });
+  const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
+  const { messages, isLoading, sendMessage, clearHistory } = useChatMessages(selectedAgentId || null);
 
   const agents = agentsQuery.data ?? [];
-  const sessions = sessionsQuery.data ?? [];
-
-  const activeSession = selectedAgentId
-    ? sessions.find(s => s.agent_id === selectedAgentId) || null
-    : sessions[0] || null;
-
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [selectedAgentId, activeSession]);
-
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
+  useEffect(() => {
+    if (!selectedAgentId && agents.length > 0) setSelectedAgentId(agents[0].id);
+  }, [agents, selectedAgentId]);
+
+  // 滚动到最新消息
+  useEffect(() => {
+    if (messages.length > 0) {
+      setTimeout(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      }, 100);
+    }
+  }, [messages]);
+
   return (
-    <div className="flex h-[calc(100vh-140px)] flex-col transition-colors duration-300">
-      <header className="pb-6">
-        <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
-          <MessageCircle className="h-4 w-4" />
-          {t("chat.neural_terminal")}
+    <div className="flex h-[calc(100vh-140px)] flex-col">
+      {/* 头部 */}
+      <header className="pb-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <Sparkles className="h-5 w-5 text-brand" />
+              <span className="absolute inset-0 bg-brand/30 animate-ping" />
+            </div>
+            <span className="text-brand font-bold uppercase tracking-widest text-[10px]">{t("chat.neural_terminal")}</span>
+          </div>
+          <button
+            onClick={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
+            className="p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-all"
+          >
+            <RefreshCw className={`h-4 w-4 ${agentsQuery.isFetching ? "animate-spin" : ""}`} />
+          </button>
         </div>
         <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
       </header>
 
-      <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl relative ring-1 ring-black/5 dark:ring-white/5">
+      {/* 主内容区 */}
+      <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
+        {/* 左侧 Agent 列表 */}
         <aside className="w-64 flex-shrink-0 border-r border-border-subtle bg-main/30 backdrop-blur-md flex flex-col">
           <div className="p-4 border-b border-border-subtle">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
           </div>
-          <div className="flex-1 overflow-y-auto p-2 space-y-1 scrollbar-thin">
-            {agents.map((agent) => (
-              <button key={agent.id} onClick={() => setSelectedAgentId(agent.id)} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all text-left group ${selectedAgentId === agent.id ? "bg-brand text-white shadow-lg" : "hover:bg-surface-hover text-slate-700 dark:text-slate-300"}`}>
-                <div className={`h-8 w-8 rounded-lg flex items-center justify-center font-black text-xs shrink-0 ${selectedAgentId === agent.id ? "bg-white/20" : "bg-brand/10 text-brand group-hover:bg-brand group-hover:text-white"}`}>{agent.name.charAt(0)}</div>
-                <div className="min-w-0 flex-1">
-                  <p className="text-xs font-black truncate">{agent.name}</p>
-                  <p className={`text-[9px] font-bold uppercase tracking-tight truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>{agent.model_name || t("common.unknown")}</p>
-                </div>
-              </button>
-            ))}
+          <div className="flex-1 overflow-y-auto p-3 space-y-2">
+            {agents.length === 0 ? (
+              <div className="p-4 text-center text-text-dim text-sm">{t("common.no_data")}</div>
+            ) : (
+              agents.map(agent => (
+                <button
+                  key={agent.id}
+                  onClick={() => setSelectedAgentId(agent.id)}
+                  className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all text-left group ${
+                    selectedAgentId === agent.id
+                      ? "bg-brand text-white shadow-lg shadow-brand/20"
+                      : "hover:bg-surface-hover"
+                  }`}
+                >
+                  <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
+                    selectedAgentId === agent.id ? "bg-white/20" : "bg-gradient-to-br from-brand/20 to-accent/20 text-brand group-hover:from-brand group-hover:to-brand"
+                  }`}>
+                    {agent.name.charAt(0).toUpperCase()}
+                    {agent.state === "running" && (
+                      <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />
+                    )}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-bold truncate">{agent.name}</p>
+                    <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
+                      {agent.model_name || t("common.unknown")}
+                    </p>
+                  </div>
+                  <ArrowRight className={`h-4 w-4 transition-transform ${selectedAgentId === agent.id ? "rotate-90" : "opacity-0 group-hover:opacity-100"}`} />
+                </button>
+              ))
+            )}
           </div>
         </aside>
 
+        {/* 右侧聊天区域 */}
         <main className="flex-1 flex flex-col overflow-hidden bg-main/10 relative">
-          <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
+          {/* 背景装饰 */}
+          <div className="absolute inset-0 pointer-events-none opacity-30">
+            <div className="absolute top-0 left-0 w-64 h-64 bg-brand/5 rounded-full blur-3xl" />
+            <div className="absolute bottom-0 right-0 w-48 h-48 bg-accent/5 rounded-full blur-3xl" />
+          </div>
+
+          {selectedAgentId && (
+            <ConnectionBar
+              agentName={selectedAgent?.name || ""}
+              isLoading={isLoading}
+              messageCount={messages.length}
+              onClear={clearHistory}
+            />
+          )}
+
+          {/* 消息区域 */}
+          <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
             {!selectedAgentId ? (
-              <div className="h-full flex flex-col items-center justify-center text-center p-8">
-                <div className="h-16 w-16 rounded-full bg-brand/5 flex items-center justify-center text-brand mb-4">
-                  <MessageCircle className="h-8 w-8" />
+              <div className="h-full flex flex-col items-center justify-center text-center relative">
+                <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-main/50" />
+                <div className="relative">
+                  <div className="w-24 h-24 rounded-3xl bg-gradient-to-br from-brand/20 to-accent/20 flex items-center justify-center mb-6 ring-4 ring-brand/10">
+                    <MessageCircle className="h-12 w-12 text-brand" />
+                  </div>
+                  <div className="absolute inset-0 rounded-3xl bg-brand/10 animate-pulse" />
                 </div>
-                <h3 className="text-lg font-black tracking-tight">{t("chat.select_agent")}</h3>
-                <p className="text-sm text-text-dim mt-1 max-w-xs font-medium">{t("chat.select_agent_desc")}</p>
+                <h3 className="text-2xl font-black mb-2">{t("chat.select_agent")}</h3>
+                <p className="text-sm text-text-dim max-w-xs">{t("chat.select_agent_desc")}</p>
+              </div>
+            ) : messages.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center text-center">
+                <div className="w-20 h-20 rounded-2xl bg-gradient-to-br from-brand/10 to-accent/10 flex items-center justify-center mb-4 ring-2 ring-brand/10">
+                  <Bot className="h-10 w-10 text-brand" />
+                </div>
+                <h3 className="text-xl font-black">{selectedAgent?.name}</h3>
+                <p className="text-sm text-text-dim mt-2">{t("chat.welcome_system")}</p>
               </div>
             ) : (
-              <div className="flex flex-col gap-6">
-                <div className="flex justify-center"><span className="px-3 py-1 rounded-full bg-surface border border-border-subtle text-[9px] font-black text-text-dim uppercase tracking-[0.2em] shadow-sm">{activeSession ? `${t("chat.secure_link")}: ${activeSession.session_id.slice(0, 8)}` : `${t("chat.standby")}: ${selectedAgent?.name}`}</span></div>
-                <div className="flex justify-start"><div className="max-w-[85%] flex gap-3 items-end"><div className="h-6 w-6 rounded bg-brand/10 flex items-center justify-center text-brand text-[10px] font-black shrink-0">A</div><div className="rounded-2xl rounded-bl-sm bg-surface-hover border border-border-subtle p-4 shadow-sm"><p className="text-[10px] font-black text-brand uppercase tracking-widest mb-1">{selectedAgent?.name}</p><p className="text-sm leading-relaxed font-medium">{t("chat.welcome_system")}</p></div></div></div>
-                <div className="flex justify-center py-8"><div className="h-[1px] w-12 bg-border-subtle" /><p className="mx-4 text-[9px] font-black text-text-dim/30 uppercase tracking-[0.3em]">{t("chat.end_history")}</p><div className="h-[1px] w-12 bg-border-subtle" /></div>
+              <div className="space-y-6">
+                {messages.map(msg => <MessageBubble key={msg.id} message={msg} />)}
+                <div ref={messagesEndRef} />
               </div>
             )}
           </div>
 
-          <div className={`p-4 border-t border-border-subtle bg-surface transition-opacity duration-300 ${!selectedAgentId ? 'opacity-30 pointer-events-none' : ''}`}>
-            <form className="flex gap-3" onSubmit={(e) => e.preventDefault()}>
-              <input type="text" value={message} onChange={(e) => setMessage(e.target.value)} placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")} className="flex-1 rounded-xl border border-border-subtle bg-surface px-4 py-3 text-sm focus:border-brand outline-none transition-all" />
-              <button type="submit" disabled={!message.trim() || !selectedAgentId} className="px-6 rounded-xl bg-brand text-white font-black text-sm shadow-lg hover:opacity-90 transition-all flex items-center justify-center gap-2">{t("chat.send")}<Send className="h-4 w-4" /></button>
-            </form>
+          {/* 输入区域 */}
+          <div className={`p-4 border-t border-border-subtle bg-surface/90 backdrop-blur-md transition-all ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
+            <ChatInput
+              onSend={sendMessage}
+              disabled={isLoading}
+              placeholder={selectedAgentId ? t("chat.input_placeholder_with_agent", { name: selectedAgent?.name }) : t("chat.transmit_command")}
+            />
           </div>
         </main>
       </div>

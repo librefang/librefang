@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useUIStore } from "../lib/store";
+import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
 import { Zap } from "lucide-react";
 
 export function WizardPage() {
@@ -9,7 +11,6 @@ export function WizardPage() {
   const [step, setStep] = useState(1);
 
   const containerClass = "max-w-2xl mx-auto py-12 px-6 transition-colors duration-300";
-  const cardClass = "rounded-3xl border border-border-subtle bg-surface p-8 shadow-xl ring-1 ring-black/5 dark:ring-white/5";
 
   return (
     <div className={containerClass}>
@@ -21,7 +22,7 @@ export function WizardPage() {
         <p className="text-text-dim font-medium text-center">{t("overview.description")}</p>
       </div>
 
-      <div className={cardClass}>
+      <Card padding="lg" className="rounded-3xl">
         <div className="flex justify-between items-center mb-8">
           {[1, 2, 3].map((s) => (
             <div key={s} className="flex items-center gap-2">
@@ -40,21 +41,21 @@ export function WizardPage() {
         )}
 
         <div className="mt-12 flex justify-between">
-          <button 
+          <Button
+            variant="secondary"
             disabled={step === 1}
             onClick={() => setStep(s => s - 1)}
-            className="px-6 py-2.5 rounded-xl border border-border-subtle font-bold text-text-dim hover:text-slate-900 dark:hover:text-white disabled:opacity-30"
           >
             {t("common.cancel")}
-          </button>
-          <button 
+          </Button>
+          <Button
+            variant="primary"
             onClick={() => step < 3 ? setStep(s => s + 1) : null}
-            className="px-10 py-2.5 rounded-xl bg-brand text-white font-black shadow-lg shadow-brand/20 hover:opacity-90"
           >
             {t("common.actions")}
-          </button>
+          </Button>
         </div>
-      </div>
+      </Card>
     </div>
   );
 }

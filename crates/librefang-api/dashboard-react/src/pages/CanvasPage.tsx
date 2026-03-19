@@ -15,6 +15,8 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { listAgents, type AgentItem } from "../api";
+import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
 import { useUIStore } from "../lib/store";
 
 const STORAGE_KEY = "librefang-canvas-draft";
@@ -87,16 +89,16 @@ export function CanvasPage() {
           <p className="text-text-dim font-medium">{t("canvas.subtitle")}</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={() => window.confirm(t("canvas.clear_confirm")) && setNodes([])} className="rounded-xl border border-border-subtle bg-surface px-4 py-2 text-sm font-bold text-text-dim">{t("common.clear")}</button>
-          <button className="rounded-xl bg-brand px-6 py-2 text-sm font-bold text-white">{t("canvas.save_workflow")}</button>
+          <Button variant="secondary" onClick={() => window.confirm(t("canvas.clear_confirm")) && setNodes([])}>{t("common.clear")}</Button>
+          <Button variant="primary">{t("canvas.save_workflow")}</Button>
         </div>
       </header>
 
       <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface">
-        <aside className="w-64 border-r border-border-subtle bg-main/30 p-4 overflow-y-auto">
+        <Card padding="md" className="w-64 border-r border-border-subtle bg-main/30 overflow-y-auto rounded-none">
           <h3 className="text-[10px] font-black uppercase text-text-dim/60 mb-4">{t("canvas.node_library")}</h3>
           <div className="space-y-6">
-            <section>
+            <div>
               <p className="text-[10px] font-bold text-brand uppercase mb-2">{t("canvas.triggers")}</p>
               <div className="grid gap-2">
                 {nodeTypesConfig.slice(0, 5).map(n => (
@@ -106,9 +108,9 @@ export function CanvasPage() {
                   </button>
                 ))}
               </div>
-            </section>
+            </div>
           </div>
-        </aside>
+        </Card>
         <main className="flex-1">
           <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={(p) => setEdges(e => addEdge(p, e))} nodeTypes={{ custom: CustomNode }} colorMode={theme}>
             <Background color={theme === "dark" ? "#333" : "#ccc"} />

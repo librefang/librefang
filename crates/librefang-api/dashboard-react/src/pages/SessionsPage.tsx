@@ -5,6 +5,9 @@ import { deleteSession, listAgents, listSessions, switchAgentSession } from "../
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Card } from "../components/ui/Card";
+import { Button } from "../components/ui/Button";
+import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { Clock } from "lucide-react";
 
@@ -72,26 +75,26 @@ export function SessionsPage() {
       ) : (
         <div className="grid gap-4">
           {sessions.map((s) => (
-            <article key={s.session_id} className="group rounded-2xl border border-border-subtle bg-surface p-5 shadow-sm transition-all hover:border-brand/30">
+            <Card key={s.session_id} hover padding="md">
               <div className="flex items-center justify-between gap-4">
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-3 mb-1">
                     <h2 className="text-sm font-black truncate">{s.session_id.slice(0, 12)}...</h2>
-                    <span className={`px-2 py-0.5 rounded-lg border text-[9px] font-black uppercase tracking-widest ${s.active ? 'border-success/20 bg-success/10 text-success' : 'border-border-subtle bg-main text-text-dim'}`}>
+                    <Badge variant={s.active ? "success" : "default"}>
                       {s.active ? t("common.active") : t("common.idle")}
-                    </span>
+                    </Badge>
                   </div>
                   <div className="flex items-center gap-1.5 mt-2 text-[10px] font-bold text-text-dim uppercase tracking-wider">
                     <Clock className="h-3 w-3" />
                     {t("sessions.last_activity")}: <span className="text-slate-700 dark:text-slate-200">{new Date(s.created_at || "").toLocaleTimeString()}</span>
                   </div>
                 </div>
-                <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                  {!s.active && <button onClick={() => handleSwitch(s.agent_id!, s.session_id)} disabled={pendingId === s.session_id} className="px-4 py-1.5 rounded-lg border border-brand/20 bg-brand/5 text-brand text-[10px] font-black uppercase hover:bg-brand/10 disabled:opacity-50">{t("common.resume")}</button>}
-                  <button onClick={() => handleDelete(s.session_id)} disabled={pendingId === s.session_id} className="px-4 py-1.5 rounded-lg border border-error/20 bg-error/5 text-error text-[10px] font-black uppercase hover:bg-error/10 disabled:opacity-50">{t("common.close")}</button>
+                <div className="flex gap-2">
+                  {!s.active && <Button variant="secondary" size="sm" onClick={() => handleSwitch(s.agent_id!, s.session_id)} disabled={pendingId === s.session_id}>{t("common.resume")}</Button>}
+                  <Button variant="danger" size="sm" onClick={() => handleDelete(s.session_id)} disabled={pendingId === s.session_id}>{t("common.close")}</Button>
                 </div>
               </div>
-            </article>
+            </Card>
           ))}
         </div>
       )}

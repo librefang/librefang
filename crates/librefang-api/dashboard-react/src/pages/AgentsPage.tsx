@@ -5,16 +5,21 @@ import { listAgents } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
+import { Card } from "../components/ui/Card";
+import { Input } from "../components/ui/Input";
+import { Button } from "../components/ui/Button";
+import { Badge } from "../components/ui/Badge";
+import { Avatar } from "../components/ui/Avatar";
 import { Search, Users } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
-function statusClass(status?: string): string {
+function getStatusVariant(status?: string) {
   const value = (status ?? "").toLowerCase();
-  if (value === "running") return "border-success/20 bg-success/10 text-success";
-  if (value === "idle") return "border-warning/20 bg-warning/10 text-warning";
-  if (value === "error") return "border-error/20 bg-error/10 text-error";
-  return "border-border-subtle bg-surface-hover text-text-dim";
+  if (value === "running") return "success";
+  if (value === "idle") return "warning";
+  if (value === "error") return "error";
+  return "default";
 }
 
 export function AgentsPage() {
@@ -44,18 +49,12 @@ export function AgentsPage() {
         icon={<Users className="h-4 w-4" />}
       />
 
-      <div className="relative">
-        <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none text-text-dim">
-          <Search className="h-4 w-4" />
-        </div>
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={t("common.search")}
-          className="w-full pl-11 pr-4 py-3 rounded-2xl border border-border-subtle bg-surface shadow-sm focus:ring-2 focus:ring-brand/20 focus:border-brand outline-none transition-all font-medium"
-        />
-      </div>
+      <Input
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+        placeholder={t("common.search")}
+        leftIcon={<Search className="h-4 w-4" />}
+      />
 
       {agentsQuery.isLoading ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -76,20 +75,18 @@ export function AgentsPage() {
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {filteredAgents.map((agent) => (
-            <article key={agent.id} className="group rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm transition-all hover:border-brand/30 ring-1 ring-black/5 dark:ring-white/5">
+            <Card key={agent.id} hover padding="lg">
               <div className="flex items-start justify-between gap-4 mb-6">
                 <div className="flex items-center gap-4 min-w-0">
-                  <div className="h-12 w-12 rounded-2xl bg-brand/10 flex items-center justify-center text-brand text-xl font-black shrink-0 shadow-inner">
-                    {agent.name.charAt(0)}
-                  </div>
+                  <Avatar fallback={agent.name} size="lg" />
                   <div className="min-w-0">
                     <h2 className="text-lg font-black tracking-tight truncate group-hover:text-brand transition-colors">{agent.name}</h2>
                     <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 truncate">{agent.id}</p>
                   </div>
                 </div>
-                <span className={`shrink-0 rounded-lg border px-2 py-0.5 text-[10px] font-black uppercase tracking-widest ${statusClass(agent.state)}`}>
+                <Badge variant={getStatusVariant(agent.state)}>
                   {agent.state ? t(`common.${agent.state.toLowerCase()}`, { defaultValue: agent.state }) : t("common.idle")}
-                </span>
+                </Badge>
               </div>
 
               <div className="space-y-3 mb-6">
@@ -108,14 +105,14 @@ export function AgentsPage() {
               </div>
 
               <div className="pt-4 border-t border-border-subtle/30 flex gap-2">
-                <button className="flex-1 rounded-xl border border-border-subtle bg-surface py-2 text-[10px] font-black uppercase tracking-widest text-text-dim hover:text-brand hover:border-brand/30 transition-all shadow-sm">
+                <Button variant="secondary" size="sm" className="flex-1">
                   {t("common.config")}
-                </button>
-                <button className="flex-1 rounded-xl bg-brand/5 border border-brand/10 py-2 text-[10px] font-black uppercase tracking-widest text-brand hover:bg-brand/10 transition-all shadow-sm">
+                </Button>
+                <Button variant="primary" size="sm" className="flex-1">
                   {t("common.interact")}
-                </button>
+                </Button>
               </div>
-            </article>
+            </Card>
           ))}
         </div>
       )}
