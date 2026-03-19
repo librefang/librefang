@@ -108,7 +108,7 @@ jobs:
       - name: Run shell installer regression tests
         run: sh scripts/tests/install_sh_test.sh
       - name: Parse PowerShell installer
-        run: pwsh -NoProfile -Command "Get-Content web/public/install.ps1 | Out-Null"
+        run: pwsh -NoProfile -Command "[void][System.Management.Automation.Language.Parser]::ParseFile('web/public/install.ps1',[ref]`$null,[ref]`$null)"
 
   # ── Rust compilation check (single platform sufficient) ──────────────────────────────────
   check:
