@@ -157,7 +157,7 @@ fluent = "0.17"
 unic-langid = "0.9"
 
 # MQTT client
-rumqttc = "0.24"
+rumqttc = "0.25"
 
 # Testing
 tokio-test = "0.4"
