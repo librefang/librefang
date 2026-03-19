@@ -29,11 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Update star history (#1228) (@houko)
 - Add SDK usage examples to all README files (#1229) (@houko)
-- Update star history (#1231) (@houko)
-- Update star history (#1232) (@houko)
-- Update star history (#1235) (@houko)
-- Update contributors (#1240) (@app/github-actions)
-- Update star history (#1242) (@app/github-actions)
 
 ### Maintenance
 
