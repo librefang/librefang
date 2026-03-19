@@ -1110,6 +1110,25 @@ async fn parse_telegram_update(
             Some(url) => ChannelContent::File { url, filename },
             None => ChannelContent::Text(format!("[Document received: {filename}]")),
         }
+    } else if message.get("audio").is_some() {
+        // Audio files (mp3, etc.) — treat as voice for transcription
+        let file_id = message["audio"]["file_id"].as_str().unwrap_or("");
+        let duration = message["audio"]["duration"].as_u64().unwrap_or(0) as u32;
+        let caption = message["caption"].as_str().map(String::from);
+        match telegram_get_file_url(token, client, file_id, api_base_url).await {
+            Some(url) => ChannelContent::Voice {
+                url,
+                caption,
+                duration_seconds: duration,
+            },
+            None => ChannelContent::Text(format!(
+                "[Audio received, {duration}s{}]",
+                caption
+                    .as_deref()
+                    .map(|c| format!(": {c}"))
+                    .unwrap_or_default()
+            )),
+        }
     } else if message.get("voice").is_some() {
         let file_id = message["voice"]["file_id"].as_str().unwrap_or("");
         let duration = message["voice"]["duration"].as_u64().unwrap_or(0) as u32;
@@ -1676,6 +1695,47 @@ mod tests {
                 assert_eq!(*duration_seconds, 15);
             }
             other => panic!("Expected Text or Voice for voice message, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_parse_telegram_audio_with_caption() {
+        let update = serde_json::json!({
+            "update_id": 303,
+            "message": {
+                "message_id": 63,
+                "from": { "id": 123, "first_name": "Alice" },
+                "chat": { "id": 123, "type": "private" },
+                "date": 1700000000,
+                "audio": {
+                    "file_id": "audio_id",
+                    "file_unique_id": "e",
+                    "duration": 120,
+                    "title": "recording.mp3"
+                },
+                "caption": "riassumi"
+            }
+        });
+
+        let client = test_client();
+        let msg = parse_telegram_update(&update, &[], "fake:token", &client, DEFAULT_API_URL, None)
+            .await
+            .unwrap();
+        match &msg.content {
+            ChannelContent::Text(t) => {
+                // Fallback when file URL can't be resolved
+                assert!(t.contains("Audio received"));
+                assert!(t.contains("riassumi"));
+            }
+            ChannelContent::Voice {
+                caption,
+                duration_seconds,
+                ..
+            } => {
+                assert_eq!(*duration_seconds, 120);
+                assert_eq!(caption.as_deref(), Some("riassumi"));
+            }
+            other => panic!("Expected Text or Voice for audio message, got {other:?}"),
         }
     }
 
