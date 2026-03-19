@@ -99,9 +99,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Syntax-check shell installer
-        run: bash -n scripts/install.sh
+        run: bash -n web/public/install.sh
       - name: Parse PowerShell installer
-        run: pwsh -NoProfile -Command "Get-Content scripts/install.ps1 | Out-Null"
+        run: pwsh -NoProfile -Command "Get-Content web/public/install.ps1 | Out-Null"
 
   # ── Rust compilation check (single platform sufficient) ──────────────────────────────────
   check:
