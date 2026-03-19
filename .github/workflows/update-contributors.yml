@@ -1,10 +1,13 @@
-name: Update Contributors
+name: Update Contributors & Star History
 
 on:
   push:
     branches: [main]
     paths-ignore:
       - 'web/public/assets/contributors.svg'
+      - 'web/public/assets/star-history.svg'
+  schedule:
+    - cron: "0 * * * *"  # Hourly
   workflow_dispatch:
 
 permissions:
@@ -17,7 +20,7 @@ concurrency:
 
 jobs:
   update:
-    name: Refresh contributors
+    name: Refresh contributors and star history
     if: github.repository == 'librefang/librefang'
     runs-on: ubuntu-latest
     steps:
@@ -31,13 +34,16 @@ jobs:
       - name: Generate contributors SVG
         run: python3 scripts/generate_contributors.py librefang/librefang web/public/assets/contributors.svg
 
-      - name: Create PR with updated SVG
+      - name: Generate star history SVG
+        run: python3 scripts/generate_star_history.py librefang/librefang web/public/assets/star-history.svg
+
+      - name: Create PR with updated SVGs
         id: cpr
         uses: peter-evans/create-pull-request@v8
         with:
-          branch: chore/update-contributors
-          commit-message: "docs: update contributors"
-          title: "docs: update contributors"
+          branch: chore/update-contributors-star-history
+          commit-message: "docs: update contributors and star history"
+          title: "docs: update contributors and star history"
           delete-branch: true
 
       - name: Auto-merge PR
