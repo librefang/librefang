@@ -1,0 +1,13 @@
+# LibreFang Agent OS configuration
+# See https://github.com/librefang/librefang for documentation
+
+api_listen = "0.0.0.0:4545"
+
+[default_model]
+provider = "{{provider}}"
+model = "{{model}}"
+{{api_key_line}}
+
+[memory]
+decay_rate = 0.05
+{{routing_section}}

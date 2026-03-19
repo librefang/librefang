@@ -31,6 +31,8 @@ use std::time::{Duration, Instant};
 
 /// Global flag set by the Ctrl+C handler.
 static CTRLC_PRESSED: AtomicBool = AtomicBool::new(false);
+const INIT_DEFAULT_CONFIG_TEMPLATE: &str =
+    include_str!("../templates/init_default_config.toml");
 
 /// Install a Ctrl+C handler that force-exits the process.
 /// On Windows/MINGW, the default handler doesn't reliably interrupt blocking
@@ -2022,6 +2024,13 @@ fn check_ollama_available() -> bool {
     .is_ok()
 }
 
+fn render_init_default_config(provider: &str, model: &str, api_key_env: &str) -> String {
+    INIT_DEFAULT_CONFIG_TEMPLATE
+        .replace("{{provider}}", provider)
+        .replace("{{model}}", model)
+        .replace("{{api_key_env}}", api_key_env)
+}
+
 /// Write config.toml if it doesn't already exist.
 fn write_config_if_missing(
     librefang_dir: &std::path::Path,
@@ -2036,35 +2045,7 @@ fn write_config_if_missing(
             &[("path", &config_path.display().to_string())],
         ));
     } else {
-        let default_config = format!(
-            r#"# LibreFang Agent OS configuration
-# See https://github.com/librefang/librefang for documentation
-
-# For Docker, change to "0.0.0.0:4545" or set LIBREFANG_LISTEN env var.
-api_listen = "0.0.0.0:4545"
-
-[default_model]
-provider = "{provider}"
-model = "{model}"
-api_key_env = "{api_key_env}"
-
-[memory]
-decay_rate = 0.05
-
-# Proactive memory (mem0-style auto-memorize / auto-retrieve)
-[proactive_memory]
-enabled = true
-auto_memorize = true
-auto_retrieve = true
-max_retrieve = 10
-# extraction_model = ""  # defaults to your default_model
-# extraction_threshold = 0.7
-# session_ttl_hours = 24
-# duplicate_threshold = 0.5
-# confidence_decay_rate = 0.01
-# max_memories_per_agent = 1000
-"#
-        );
+        let default_config = render_init_default_config(provider, model, api_key_env);
         std::fs::write(&config_path, &default_config).unwrap_or_else(|e| {
             ui::error_with_fix(&i18n::t("error-write-config"), &e.to_string());
             std::process::exit(1);
@@ -3173,35 +3154,7 @@ fn cmd_doctor(json: bool, repair: bool) {
             let answer = prompt_input("    Create default config? [Y/n] ");
             if answer.is_empty() || answer.starts_with('y') || answer.starts_with('Y') {
                 let (provider, api_key_env, model) = detect_best_provider();
-                let default_config = format!(
-                    r#"# LibreFang Agent OS configuration
-# See https://github.com/librefang/librefang for documentation
-
-# For Docker, change to "0.0.0.0:4545" or set LIBREFANG_LISTEN env var.
-api_listen = "0.0.0.0:4545"
-
-[default_model]
-provider = "{provider}"
-model = "{model}"
-api_key_env = "{api_key_env}"
-
-[memory]
-decay_rate = 0.05
-
-# Proactive memory (mem0-style auto-memorize / auto-retrieve)
-[proactive_memory]
-enabled = true
-auto_memorize = true
-auto_retrieve = true
-max_retrieve = 10
-# extraction_model = ""  # defaults to your default_model
-# extraction_threshold = 0.7
-# session_ttl_hours = 24
-# duplicate_threshold = 0.5
-# confidence_decay_rate = 0.01
-# max_memories_per_agent = 1000
-"#
-                );
+                let default_config = render_init_default_config(provider, model, api_key_env);
                 let _ = std::fs::create_dir_all(&librefang_dir);
                 if std::fs::write(&config_path, default_config).is_ok() {
                     restrict_file_permissions(&config_path);

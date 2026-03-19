@@ -16,6 +16,9 @@ use crate::tui::theme;
 use librefang_runtime::model_catalog::ModelCatalog;
 use librefang_types::model_catalog::ModelTier;
 
+const INIT_WIZARD_CONFIG_TEMPLATE: &str =
+    include_str!("../../../templates/init_wizard_config.toml");
+
 // ── Provider metadata ──────────────────────────────────────────────────────
 
 struct ProviderInfo {
@@ -580,6 +583,19 @@ fn tier_label(tier: ModelTier) -> &'static str {
     }
 }
 
+fn render_init_wizard_config(
+    provider: &str,
+    model: &str,
+    api_key_line: &str,
+    routing_section: &str,
+) -> String {
+    INIT_WIZARD_CONFIG_TEMPLATE
+        .replace("{{provider}}", provider)
+        .replace("{{model}}", model)
+        .replace("{{api_key_line}}", api_key_line)
+        .replace("{{routing_section}}", routing_section)
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────
 
 pub fn run() -> InitResult {
@@ -1120,22 +1136,7 @@ complex_threshold = 500
         format!("api_key_env = \"{}\"", p.env_var)
     };
 
-    let config = format!(
-        r#"# LibreFang Agent OS configuration
-# See https://github.com/librefang/librefang for documentation
-
-api_listen = "0.0.0.0:4545"
-
-[default_model]
-provider = "{provider}"
-model = "{model}"
-{api_key_line}
-
-[memory]
-decay_rate = 0.05
-{routing_section}"#,
-        provider = p.name,
-    );
+    let config = render_init_wizard_config(p.name, model, &api_key_line, &routing_section);
 
     match std::fs::write(&config_path, &config) {
         Ok(()) => {
