@@ -1082,6 +1082,26 @@ fn upsert_provider_url(
     provider: &str,
     url: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid config path '{}'", config_path.display()),
+        )
+        .into());
+    }
+    if config_path.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsafe config path '{}'", config_path.display()),
+        )
+        .into());
+    }
+
     let content = if config_path.exists() {
         std::fs::read_to_string(config_path)?
     } else {
