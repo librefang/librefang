@@ -211,11 +211,16 @@ async function startConnection() {
       }
 
       for (const msg of messages) {
-        if (msg.key.fromMe) {
-          log('info', `Skipping own message ${msg.key.id}`);
+        if (msg.key.remoteJid === 'status@broadcast') continue;
+
+        const remoteJid = msg.key.remoteJid || '';
+        const isGroup = remoteJid.endsWith('@g.us');
+
+        // In groups, skip own messages; in DMs, allow self-chat (Notes to Self)
+        if (msg.key.fromMe && isGroup) {
+          log('info', `Skipping own message in group ${msg.key.id}`);
           continue;
         }
-        if (msg.key.remoteJid === 'status@broadcast') continue;
 
         // --- Deduplication: skip already-processed messages ---
         const msgId = msg.key.id;
@@ -223,9 +228,6 @@ async function startConnection() {
           log('info', `Skipping duplicate message ${msgId}`);
           continue;
         }
-
-        const remoteJid = msg.key.remoteJid || '';
-        const isGroup = remoteJid.endsWith('@g.us');
 
         // In groups, the actual sender is in msg.key.participant;
         // in DMs, the sender is remoteJid itself.
@@ -238,6 +240,7 @@ async function startConnection() {
           msg.message?.extendedTextMessage?.text ||
           msg.message?.imageMessage?.caption ||
           msg.message?.videoMessage?.caption ||
+          msg.message?.documentWithCaptionMessage?.message?.documentMessage?.caption ||
           '';
 
         // vCard / contact message support
@@ -270,9 +273,6 @@ async function startConnection() {
           continue;
         }
 
-        // Mark as processed BEFORE forwarding (prevents re-processing on decrypt retry)
-        markProcessed(msgId);
-
         const phone = '+' + sender.replace(/@.*$/, '');
         const pushName = msg.pushName || phone;
 
@@ -304,9 +304,11 @@ async function startConnection() {
 
         // Enqueue per-sender to serialize LibreFang calls per contact
         enqueueSender(sender, () =>
-          handleIncoming(text, phone, pushName, replyJid, isGroup, remoteJid, wasMentioned).catch((err) => {
-            log('error', `Handle failed for ${pushName}: ${err.message}`);
-          })
+          handleIncoming(text, phone, pushName, replyJid, isGroup, remoteJid, wasMentioned)
+            .then(() => markProcessed(msgId))
+            .catch((err) => {
+              log('error', `Handle failed for ${pushName}: ${err.message}`);
+            })
         );
       }
     }
