@@ -126,6 +126,40 @@ pub async fn run_python_agent(
     context: &serde_json::Value,
     config: &PythonConfig,
 ) -> Result<PythonResult, PythonError> {
+    let input = serde_json::json!({
+        "type": "message",
+        "agent_id": agent_id,
+        "message": message,
+        "context": context,
+    });
+    let input_line = serde_json::to_string(&input).map_err(|e| PythonError::Io(e.to_string()))?;
+
+    run_python_with_stdin(script_path, agent_id, message, &input_line, config).await
+}
+
+/// Run a Python script with a raw JSON payload written directly to stdin.
+///
+/// This is used for hook-style scripts where the runtime should avoid wrapping
+/// payloads in the agent `{\"type\":\"message\", ...}` envelope.
+pub async fn run_python_json(
+    script_path: &str,
+    input: &serde_json::Value,
+    config: &PythonConfig,
+) -> Result<PythonResult, PythonError> {
+    let input_line = serde_json::to_string(input).map_err(|e| PythonError::Io(e.to_string()))?;
+    let agent_id = input.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+    let message = input.get("message").and_then(|v| v.as_str()).unwrap_or("");
+
+    run_python_with_stdin(script_path, agent_id, message, &input_line, config).await
+}
+
+async fn run_python_with_stdin(
+    script_path: &str,
+    agent_id: &str,
+    message: &str,
+    input_line: &str,
+    config: &PythonConfig,
+) -> Result<PythonResult, PythonError> {
     // SECURITY: Validate script path (no traversal, must be .py)
     validate_script_path(script_path)?;
 
@@ -135,15 +169,6 @@ pub async fn run_python_agent(
     }
 
     debug!("Running Python agent: {script_path}");
-
-    // Build the input JSON
-    let input = serde_json::json!({
-        "type": "message",
-        "agent_id": agent_id,
-        "message": message,
-        "context": context,
-    });
-    let input_line = serde_json::to_string(&input).map_err(|e| PythonError::Io(e.to_string()))?;
 
     // Spawn the Python process
     let mut cmd = Command::new(&config.interpreter);
@@ -421,5 +446,46 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Err(PythonError::ScriptNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_run_python_json_writes_raw_payload() {
+        let config = PythonConfig::default();
+        if std::process::Command::new(&config.interpreter)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            eprintln!("Skipping: python interpreter unavailable");
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let script_path = tmp.path().join("echo_payload.py");
+        std::fs::write(
+            &script_path,
+            r#"import json
+import sys
+
+payload = json.loads(sys.stdin.read())
+print(json.dumps({"type": payload.get("type"), "message": payload.get("message")}))
+"#,
+        )
+        .unwrap();
+
+        let input = serde_json::json!({
+            "type": "ingest",
+            "agent_id": "agent-123",
+            "message": "hello",
+        });
+        let result = run_python_json(script_path.to_str().unwrap(), &input, &config)
+            .await
+            .unwrap();
+        let output: serde_json::Value = serde_json::from_str(&result.response).unwrap();
+
+        assert_eq!(output["type"], "ingest");
+        assert_eq!(output["message"], "hello");
     }
 }
