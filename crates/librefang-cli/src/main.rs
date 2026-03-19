@@ -1974,7 +1974,7 @@ fn detect_best_provider() -> (String, String, String) {
             return (
                 (*p).to_string(),
                 (*env_var).to_string(),
-                default_model_for_provider(*p),
+                default_model_for_provider(p),
             );
         }
     }
