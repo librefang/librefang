@@ -124,7 +124,7 @@ pub fn detect_skillmd(dir: &Path) -> bool {
 /// Instructions for the LLM...
 /// ```
 pub fn parse_skillmd(path: &Path) -> Result<(SkillMdFrontmatter, String), SkillError> {
-    if has_unsafe_path_components(path) {
+    if has_parent_dir_component(path) {
         return Err(SkillError::InvalidManifest(format!(
             "Unsafe SKILL.md path: {}",
             path.display()
@@ -513,13 +513,14 @@ pub fn write_prompt_context(dir: &Path, content: &str) -> Result<(), SkillError>
     Ok(())
 }
 
-fn has_unsafe_path_components(path: &Path) -> bool {
-    path.components()
-        .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+fn has_parent_dir_component(path: &Path) -> bool {
+    path.components().any(|c| matches!(c, Component::ParentDir))
 }
 
 fn safe_join(dir: &Path, relative: &str) -> Option<PathBuf> {
-    if has_unsafe_path_components(dir) {
+    // Allow absolute base paths (including Windows drive prefixes),
+    // but reject traversal segments.
+    if has_parent_dir_component(dir) {
         return None;
     }
 
@@ -762,5 +763,19 @@ metadata:
         let content = "---\ndescription: No name field\n---\n# Body";
         let converted = convert_skillmd_str("my-hint", content).unwrap();
         assert_eq!(converted.manifest.skill.name, "my-hint");
+    }
+
+    #[test]
+    fn test_has_parent_dir_component() {
+        assert!(has_parent_dir_component(Path::new("../skills/foo")));
+        assert!(!has_parent_dir_component(Path::new("skills/foo")));
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn test_windows_absolute_path_not_rejected() {
+        assert!(!has_parent_dir_component(Path::new(
+            r"C:\Users\alice\AppData\Local\Temp\skill"
+        )));
     }
 }
