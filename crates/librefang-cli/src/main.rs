@@ -1782,6 +1782,9 @@ fn cmd_init(quick: bool) {
     // Install bundled agent templates (skips existing ones to preserve user edits)
     bundled_agents::install_bundled_agents(&librefang_dir.join("agents"));
 
+    // Initialize vault if not already initialized
+    init_vault_if_missing(&librefang_dir);
+
     if quick {
         cmd_init_quick(&librefang_dir);
     } else if !std::io::IsTerminal::is_terminal(&std::io::stdin())
@@ -1792,6 +1795,20 @@ fn cmd_init(quick: bool) {
         cmd_init_quick(&librefang_dir);
     } else {
         cmd_init_interactive(&librefang_dir);
+    }
+}
+
+/// Initialize vault if it doesn't exist yet (silent no-op if already initialized).
+fn init_vault_if_missing(librefang_dir: &std::path::Path) {
+    let vault_path = librefang_dir.join("vault.enc");
+    if vault_path.exists() {
+        return; // Already initialized
+    }
+
+    let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+    if let Err(e) = vault.init() {
+        // Silently skip vault init on failure - it's optional
+        tracing::debug!("vault init skipped: {e}");
     }
 }
 
