@@ -924,9 +924,30 @@ pub async fn send_message(
     }
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+
+    // Build sender context from gateway-provided fields (if any).
+    let sender_ctx =
+        req.sender_name
+            .as_ref()
+            .map(|name| librefang_channels::types::SenderContext {
+                channel: req
+                    .channel_type
+                    .clone()
+                    .unwrap_or_else(|| "api".to_string()),
+                user_id: req.sender_id.clone().unwrap_or_default(),
+                display_name: name.clone(),
+                is_group: false,
+                thread_id: None,
+            });
+
     match state
         .kernel
-        .send_message_with_handle(agent_id, &req.message, Some(kernel_handle))
+        .send_message_with_handle_and_sender(
+            agent_id,
+            &req.message,
+            Some(kernel_handle),
+            sender_ctx.as_ref(),
+        )
         .await
     {
         Ok(result) => {
