@@ -8,7 +8,8 @@ import {
   Cpu, Search, RefreshCw, Check, X, Eye, Wrench, Zap, AlertCircle
 } from "lucide-react";
 
-const TIERS = ["all", "basic", "fast", "smart", "balanced", "standard", "advanced", "frontier", "enterprise"] as const;
+// Dynamic tiers from data - fallback list
+const DEFAULT_TIERS = ["all", "frontier", "smart", "balanced", "fast", "local"] as const;
 const REFRESH_MS = 60000;
 const PAGE_SIZE = 50;
 
@@ -27,6 +28,11 @@ export function ModelsPage() {
 
   const providers = useMemo(() => {
     const set = new Set(allModels.map(m => m.provider));
+    return ["all", ...Array.from(set).sort()];
+  }, [allModels]);
+
+  const tiers = useMemo(() => {
+    const set = new Set(allModels.map(m => m.tier).filter(Boolean));
     return ["all", ...Array.from(set).sort()];
   }, [allModels]);
 
@@ -56,6 +62,7 @@ export function ModelsPage() {
       case "advanced": return "bg-purple-50 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400";
       case "frontier": return "bg-rose-50 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400";
       case "enterprise": return "bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400";
+      case "local": return "bg-orange-50 text-orange-600 dark:bg-orange-900/30 dark:text-orange-400";
       default: return "bg-main text-text-dim";
     }
   };
@@ -118,8 +125,8 @@ export function ModelsPage() {
           {providers.map(p => <option key={p} value={p}>{p === "all" ? t("models.all_providers") : p}</option>)}
         </select>
 
-        <div className="flex gap-0.5 rounded-xl border border-border-subtle bg-surface p-0.5">
-          {TIERS.map(tier => (
+        <div className="flex gap-0.5 rounded-xl border border-border-subtle bg-surface p-0.5 flex-wrap">
+          {tiers.map(tier => (
             <button key={tier} onClick={() => setTierFilter(tier)}
               className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${
                 tierFilter === tier ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
