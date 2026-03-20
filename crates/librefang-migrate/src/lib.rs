@@ -4,6 +4,7 @@
 //! from OpenClaw and other frameworks.
 
 pub mod openclaw;
+pub mod openfang;
 pub mod report;
 
 use std::path::PathBuf;
@@ -17,6 +18,8 @@ pub enum MigrateSource {
     LangChain,
     /// AutoGPT (future).
     AutoGpt,
+    /// OpenFang (same format, community fork).
+    OpenFang,
 }
 
 impl std::fmt::Display for MigrateSource {
@@ -25,6 +28,7 @@ impl std::fmt::Display for MigrateSource {
             Self::OpenClaw => write!(f, "OpenClaw"),
             Self::LangChain => write!(f, "LangChain"),
             Self::AutoGpt => write!(f, "AutoGPT"),
+            Self::OpenFang => write!(f, "OpenFang"),
         }
     }
 }
@@ -52,6 +56,7 @@ pub fn run_migration(options: &MigrateOptions) -> Result<report::MigrationReport
         MigrateSource::AutoGpt => Err(MigrateError::UnsupportedSource(
             "AutoGPT migration is not yet supported. Coming soon!".to_string(),
         )),
+        MigrateSource::OpenFang => openfang::migrate(options),
     }
 }
 
