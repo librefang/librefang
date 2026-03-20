@@ -45,25 +45,6 @@ use tracing::{debug, info, warn};
 
 const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
-/// Cosine similarity between two f32 vectors. Returns 0.0 on dimension mismatch.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
-    for i in 0..a.len() {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    let denom = na.sqrt() * nb.sqrt();
-    if denom < f32::EPSILON {
-        0.0
-    } else {
-        dot / denom
-    }
-}
-
 /// The main LibreFang kernel — coordinates all subsystems.
 /// Stub LLM driver used when no providers are configured.
 /// Returns a helpful error so the dashboard still boots and users can configure providers.
@@ -2795,55 +2776,6 @@ Reply with ONLY the agent name, nothing else."#;
         let id = self.spawn_agent(manifest)?;
         info!(agent = %name, id = %id, "Spawned specialist agent for LLM routing");
         Ok(id)
-    }
-
-    fn active_hand_agent_id(&self, hand_id: &str) -> Option<AgentId> {
-        self.hand_registry
-            .list_instances()
-            .into_iter()
-            .find(|instance| {
-                instance.hand_id == hand_id
-                    && instance.status == librefang_hands::HandStatus::Active
-            })
-            .and_then(|instance| instance.agent_id)
-            .or_else(|| {
-                self.hand_registry
-                    .get_definition(hand_id)
-                    .and_then(|definition| self.registry.find_by_name(&definition.agent.name))
-                    .map(|entry| entry.id)
-            })
-    }
-
-    /// Get the instance UUID for an active hand (for deactivation).
-    fn active_hand_instance_id(&self, hand_id: &str) -> Option<uuid::Uuid> {
-        self.hand_registry
-            .list_instances()
-            .into_iter()
-            .find(|instance| {
-                instance.hand_id == hand_id
-                    && instance.status == librefang_hands::HandStatus::Active
-            })
-            .map(|instance| instance.instance_id)
-    }
-
-    fn wrap_routed_result(result: AgentLoopResult) -> AgentLoopResult {
-        AgentLoopResult {
-            response: result.response,
-            total_usage: librefang_types::message::TokenUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                ..Default::default()
-            },
-            iterations: result.iterations,
-            cost_usd: None,
-            silent: result.silent,
-            directives: result.directives,
-            decision_traces: result.decision_traces,
-            memories_saved: result.memories_saved,
-            memories_used: result.memories_used,
-            memory_conflicts: result.memory_conflicts,
-            provider_not_configured: result.provider_not_configured,
-        }
     }
 
     /// Execute the default LLM-based agent loop.
