@@ -407,6 +407,7 @@ function settingsPage() {
     migrating: false,
     sourcePath: '',
     targetPath: '',
+    detectedSource: 'openclaw',
     scanResult: null,
     migResult: null,
 
@@ -1052,8 +1053,9 @@ function settingsPage() {
       this.detecting = true;
       try {
         var data = await LibreFangAPI.get('/api/migrate/detect');
-        if (data.detected && data.scan) {
+        if (data.detected) {
           this.sourcePath = data.path;
+          this.detectedSource = data.source || 'openclaw';
           this.scanResult = data.scan;
           this.migStep = 'preview';
         } else {
@@ -1069,14 +1071,20 @@ function settingsPage() {
       if (!this.sourcePath) return;
       this.scanning = true;
       try {
-        var data = await LibreFangAPI.post('/api/migrate/scan', { path: this.sourcePath });
-        if (data.error) {
-          LibreFangToast.error(this.t('settingsPage.scanError', 'Scan error: {message}', { message: data.error }));
-          this.scanning = false;
-          return;
+        if (this.detectedSource === 'openfang') {
+          // OpenFang uses the same format as LibreFang — no detailed scan needed
+          this.scanResult = null;
+          this.migStep = 'preview';
+        } else {
+          var data = await LibreFangAPI.post('/api/migrate/scan', { path: this.sourcePath });
+          if (data.error) {
+            LibreFangToast.error(this.t('settingsPage.scanError', 'Scan error: {message}', { message: data.error }));
+            this.scanning = false;
+            return;
+          }
+          this.scanResult = data;
+          this.migStep = 'preview';
         }
-        this.scanResult = data;
-        this.migStep = 'preview';
       } catch(e) {
         LibreFangToast.error(this.t('settingsPage.scanFailed', 'Scan failed: {message}', { message: e.message }));
       }
@@ -1089,7 +1097,7 @@ function settingsPage() {
         var target = this.targetPath;
         if (!target) target = '';
         var data = await LibreFangAPI.post('/api/migrate', {
-          source: 'openclaw',
+          source: this.detectedSource || 'openclaw',
           source_dir: this.sourcePath || (this.scanResult ? this.scanResult.path : ''),
           target_dir: target,
           dry_run: dryRun

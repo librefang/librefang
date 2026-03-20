@@ -284,6 +284,8 @@ struct State {
     migration_choice_list: ListState,
     openclaw_path: Option<PathBuf>,
     openclaw_scan: Option<librefang_migrate::openclaw::ScanResult>,
+    openfang_path: Option<PathBuf>,
+    migrate_source: Option<librefang_migrate::MigrateSource>,
     migration_report: Option<librefang_migrate::report::MigrationReport>,
     migration_error: Option<String>,
     migration_done_at: Option<Instant>,
@@ -332,6 +334,8 @@ impl State {
             migration_choice_list: ListState::default(),
             openclaw_path: None,
             openclaw_scan: None,
+            openfang_path: None,
+            migrate_source: None,
             migration_report: None,
             migration_error: None,
             migration_done_at: None,
@@ -643,11 +647,8 @@ pub fn run() -> InitResult {
 
         // ── Migration detection (resolves in 1 frame) ──
         if state.step == Step::Migration && state.migration_phase == MigrationPhase::Detecting {
-            match librefang_migrate::openclaw::detect_openclaw_home() {
-                None => {
-                    // No OpenClaw found — skip migration entirely
-                    state.advance_to_provider();
-                }
+            // Check OpenClaw first (more complex migration with scan)
+            let openclaw_found = match librefang_migrate::openclaw::detect_openclaw_home() {
                 Some(path) => {
                     let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
                     let has_content = scan.has_config
@@ -658,12 +659,38 @@ pub fn run() -> InitResult {
                     if has_content {
                         state.openclaw_path = Some(path);
                         state.openclaw_scan = Some(scan);
-                        state.migration_phase = MigrationPhase::Offer;
+                        state.migrate_source = Some(librefang_migrate::MigrateSource::OpenClaw);
+                        true
                     } else {
-                        // Nothing useful to migrate
+                        false
+                    }
+                }
+                None => false,
+            };
+
+            // If no OpenClaw, check OpenFang
+            if !openclaw_found {
+                let openfang_home = dirs::home_dir().map(|h| h.join(".openfang"));
+                match openfang_home {
+                    Some(path) if path.exists() && path.is_dir() => {
+                        // OpenFang uses the same format — just check it has files
+                        let has_content = path.join("config.toml").exists()
+                            || path.join("agents").exists()
+                            || path.join("skills").exists();
+                        if has_content {
+                            state.openfang_path = Some(path);
+                            state.migrate_source = Some(librefang_migrate::MigrateSource::OpenFang);
+                            state.migration_phase = MigrationPhase::Offer;
+                        } else {
+                            state.advance_to_provider();
+                        }
+                    }
+                    _ => {
                         state.advance_to_provider();
                     }
                 }
+            } else {
+                state.migration_phase = MigrationPhase::Offer;
             }
         }
 
@@ -957,7 +984,15 @@ fn handle_migration_key(
                 let yes = state.migration_choice_list.selected() == Some(0);
                 if yes {
                     state.migration_phase = MigrationPhase::Running;
-                    let source_dir = state.openclaw_path.clone().unwrap_or_default();
+                    let migrate_source = state
+                        .migrate_source
+                        .unwrap_or(librefang_migrate::MigrateSource::OpenClaw);
+                    let source_dir = match migrate_source {
+                        librefang_migrate::MigrateSource::OpenFang => {
+                            state.openfang_path.clone().unwrap_or_default()
+                        }
+                        _ => state.openclaw_path.clone().unwrap_or_default(),
+                    };
                     let target_dir = if let Ok(h) = std::env::var("LIBREFANG_HOME") {
                         PathBuf::from(h)
                     } else {
@@ -968,7 +1003,7 @@ fn handle_migration_key(
                     let tx = migrate_tx.clone();
                     std::thread::spawn(move || {
                         let options = librefang_migrate::MigrateOptions {
-                            source: librefang_migrate::MigrateSource::OpenClaw,
+                            source: migrate_source,
                             source_dir,
                             target_dir,
                             dry_run: false,
@@ -1365,76 +1400,97 @@ fn draw_migration_detecting(f: &mut Frame, area: Rect, state: &State) {
 }
 
 fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
-    let scan = match &state.openclaw_scan {
-        Some(s) => s,
-        None => return,
-    };
+    let is_openfang = matches!(
+        state.migrate_source,
+        Some(librefang_migrate::MigrateSource::OpenFang)
+    );
 
-    let path_display = state
-        .openclaw_path
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+    // For OpenClaw we need the scan; for OpenFang we just need the path
+    if !is_openfang && state.openclaw_scan.is_none() {
+        return;
+    }
+
+    let path_display = if is_openfang {
+        state
+            .openfang_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    } else {
+        state
+            .openclaw_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    };
 
     // Count content lines to determine layout
     let mut content_lines: Vec<Line> = Vec::new();
 
-    if !scan.agents.is_empty() {
-        let names: Vec<&str> = scan.agents.iter().map(|a| a.name.as_str()).collect();
-        let names_str = names.join(", ");
+    if is_openfang {
+        // OpenFang uses the same format — just show a simple summary
         content_lines.push(Line::from(vec![
             Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::raw(format!("{} agents ({})", scan.agents.len(), names_str)),
+            Span::raw("OpenFang configuration and data"),
         ]));
-    } else {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2500} ", theme::dim_style()),
-            Span::styled("No agents", theme::dim_style()),
-        ]));
-    }
+    } else if let Some(scan) = &state.openclaw_scan {
+        if !scan.agents.is_empty() {
+            let names: Vec<&str> = scan.agents.iter().map(|a| a.name.as_str()).collect();
+            let names_str = names.join(", ");
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
+                Span::raw(format!("{} agents ({})", scan.agents.len(), names_str)),
+            ]));
+        } else {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2500} ", theme::dim_style()),
+                Span::styled("No agents", theme::dim_style()),
+            ]));
+        }
 
-    if !scan.channels.is_empty() {
-        let chan_str = scan.channels.join(", ");
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::raw(format!("{} channels ({})", scan.channels.len(), chan_str)),
-        ]));
-    } else {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2500} ", theme::dim_style()),
-            Span::styled("No channels", theme::dim_style()),
-        ]));
-    }
+        if !scan.channels.is_empty() {
+            let chan_str = scan.channels.join(", ");
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
+                Span::raw(format!("{} channels ({})", scan.channels.len(), chan_str)),
+            ]));
+        } else {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2500} ", theme::dim_style()),
+                Span::styled("No channels", theme::dim_style()),
+            ]));
+        }
 
-    if !scan.skills.is_empty() {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::raw(format!("{} skills", scan.skills.len())),
-        ]));
-    } else {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2500} ", theme::dim_style()),
-            Span::styled("No skills", theme::dim_style()),
-        ]));
-    }
+        if !scan.skills.is_empty() {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
+                Span::raw(format!("{} skills", scan.skills.len())),
+            ]));
+        } else {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2500} ", theme::dim_style()),
+                Span::styled("No skills", theme::dim_style()),
+            ]));
+        }
 
-    if scan.has_memory {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::raw("Memory files"),
-        ]));
-    } else {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2500} ", theme::dim_style()),
-            Span::styled("No memory files", theme::dim_style()),
-        ]));
-    }
+        if scan.has_memory {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
+                Span::raw("Memory files"),
+            ]));
+        } else {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2500} ", theme::dim_style()),
+                Span::styled("No memory files", theme::dim_style()),
+            ]));
+        }
 
-    if scan.has_config {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::raw("Configuration"),
-        ]));
+        if scan.has_config {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
+                Span::raw("Configuration"),
+            ]));
+        }
     }
 
     let chunks = Layout::vertical([
@@ -1453,7 +1509,12 @@ fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "  OpenClaw Installation Detected",
+            match state.migrate_source {
+                Some(librefang_migrate::MigrateSource::OpenFang) => {
+                    "  OpenFang Installation Detected"
+                }
+                _ => "  OpenClaw Installation Detected",
+            },
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
@@ -1547,7 +1608,10 @@ fn draw_migration_running(f: &mut Frame, area: Rect, state: &State) {
         Paragraph::new(Line::from(vec![
             Span::raw("  "),
             Span::styled(spinner, Style::default().fg(theme::ACCENT)),
-            Span::raw(" Migrating from OpenClaw..."),
+            Span::raw(match state.migrate_source {
+                Some(librefang_migrate::MigrateSource::OpenFang) => " Migrating from OpenFang...",
+                _ => " Migrating from OpenClaw...",
+            }),
         ])),
         chunks[1],
     );
