@@ -20,6 +20,9 @@ fn looks_like_tool_call(text: &str) -> bool {
         || trimmed.starts_with("{\"name\":")
         || trimmed.starts_with("{\"type\":\"function\"")
         || (trimmed.starts_with('[') && trimmed.contains("'type': 'text'"))
+        // XML-style tool calls recovered by recover_text_tool_calls()
+        || trimmed.starts_with("<function=")
+        || trimmed.starts_with("<function>")
 }
 
 // Feature-gated adapter imports

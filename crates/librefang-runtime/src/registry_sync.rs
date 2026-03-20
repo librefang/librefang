@@ -84,7 +84,9 @@ pub fn sync_registry(home_dir: &Path) {
 /// Returns `false` if any critical directories are missing, meaning
 /// auto-sync should run.
 pub fn needs_sync(home_dir: &Path) -> bool {
-    !home_dir.join("providers").exists() || !home_dir.join("hands").exists()
+    !home_dir.join("providers").exists()
+        || !home_dir.join("hands").exists()
+        || !home_dir.join("agents").exists()
 }
 
 /// Sync flat .toml files (e.g. integrations/, providers/).
