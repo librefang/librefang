@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { listAgents, getAgentDetail, spawnAgent } from "../api";
+import { listAgents, getAgentDetail, spawnAgent, suspendAgent, resumeAgent } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -11,7 +11,7 @@ import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
-import { Search, Users, Settings, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2 } from "lucide-react";
+import { Search, Users, Settings, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -128,11 +128,26 @@ export function AgentsPage() {
               </div>
 
               <div className="pt-4 border-t border-border-subtle/30 flex gap-2">
-                <Button variant="secondary" size="sm" className="flex-1" onClick={() => navigate({ to: "/settings" })}>
-                  <Settings className="h-3.5 w-3.5 mr-1" />
-                  {t("common.config")}
-                </Button>
-                <Button variant="primary" size="sm" className="flex-1" onClick={() => navigate({ to: "/chat", search: { agentId: agent.id } })}>
+                {(agent.state || "").toLowerCase() === "suspended" ? (
+                  <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => {
+                    e.stopPropagation();
+                    await resumeAgent(agent.id);
+                    agentsQuery.refetch();
+                  }}>
+                    <Play className="h-3.5 w-3.5 mr-1" />
+                    {t("agents.resume")}
+                  </Button>
+                ) : (
+                  <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => {
+                    e.stopPropagation();
+                    await suspendAgent(agent.id);
+                    agentsQuery.refetch();
+                  }}>
+                    <Pause className="h-3.5 w-3.5 mr-1" />
+                    {t("agents.suspend")}
+                  </Button>
+                )}
+                <Button variant="primary" size="sm" className="flex-1" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
                   <MessageCircle className="h-3.5 w-3.5 mr-1" />
                   {t("common.interact")}
                 </Button>

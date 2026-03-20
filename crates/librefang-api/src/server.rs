@@ -76,6 +76,14 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/agents/{id}/mode",
             axum::routing::put(routes::set_agent_mode),
         )
+        .route(
+            "/agents/{id}/suspend",
+            axum::routing::put(routes::suspend_agent),
+        )
+        .route(
+            "/agents/{id}/resume",
+            axum::routing::put(routes::resume_agent),
+        )
         .route("/profiles", axum::routing::get(routes::list_profiles))
         .route("/profiles/{name}", axum::routing::get(routes::get_profile))
         .route(

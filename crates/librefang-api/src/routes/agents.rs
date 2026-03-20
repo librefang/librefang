@@ -1245,6 +1245,60 @@ pub async fn kill_agent(
     }
 }
 
+/// PUT /api/agents/:id/suspend — Suspend an agent (stops cron, keeps in registry).
+#[utoipa::path(put, path = "/api/agents/{id}/suspend", tag = "agents", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent suspended")))]
+pub async fn suspend_agent(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            )
+        }
+    };
+    match state.kernel.suspend_agent(agent_id) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "suspended", "agent_id": id})),
+        ),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
+/// PUT /api/agents/:id/resume — Resume a suspended agent.
+#[utoipa::path(put, path = "/api/agents/{id}/resume", tag = "agents", params(("id" = String, Path, description = "Agent ID")), responses((status = 200, description = "Agent resumed")))]
+pub async fn resume_agent(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid agent ID"})),
+            )
+        }
+    };
+    match state.kernel.resume_agent(agent_id) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "running", "agent_id": id})),
+        ),
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
 /// PUT /api/agents/:id/mode — Change an agent's operational mode.
 #[utoipa::path(
     put,

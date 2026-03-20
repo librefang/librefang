@@ -39,7 +39,8 @@
     "create_agent": "Create Agent", "from_template": "From Template", "from_toml": "From TOML",
     "template_name": "Template Name", "template_placeholder": "e.g. default, researcher, coder",
     "template_hint": "Templates are loaded from ~/.librefang/agents/{name}/agent.toml",
-    "manifest_toml": "Agent Manifest (TOML)"
+    "manifest_toml": "Agent Manifest (TOML)",
+    "suspend": "Suspend", "resume": "Resume"
   },
   "providers": {
     "title": "Providers", "subtitle": "Manage LLM API connections and health.",

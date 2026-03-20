@@ -1012,6 +1012,14 @@ export async function updateBudget(payload: Partial<BudgetStatus>): Promise<ApiA
   return put<ApiActionResponse>("/api/budget", payload);
 }
 
+export async function suspendAgent(agentId: string): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/suspend`, {});
+}
+
+export async function resumeAgent(agentId: string): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/agents/${encodeURIComponent(agentId)}/resume`, {});
+}
+
 export async function spawnAgent(req: { manifest_toml?: string; template?: string }): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/agents", req);
 }

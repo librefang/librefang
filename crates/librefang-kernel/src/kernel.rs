@@ -3831,6 +3831,32 @@ impl LibreFangKernel {
         }
     }
 
+    /// Suspend an agent — sets state to Suspended, cron jobs will skip it.
+    pub fn suspend_agent(&self, agent_id: AgentId) -> KernelResult<()> {
+        use librefang_types::agent::AgentState;
+        self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        let _ = self.registry.set_state(agent_id, AgentState::Suspended);
+        // Also stop any active run
+        if let Some((_, handle)) = self.running_tasks.remove(&agent_id) {
+            handle.abort();
+        }
+        info!(agent_id = %agent_id, "Agent suspended");
+        Ok(())
+    }
+
+    /// Resume a suspended agent — sets state back to Running.
+    pub fn resume_agent(&self, agent_id: AgentId) -> KernelResult<()> {
+        use librefang_types::agent::AgentState;
+        self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        let _ = self.registry.set_state(agent_id, AgentState::Running);
+        info!(agent_id = %agent_id, "Agent resumed");
+        Ok(())
+    }
+
     /// Compact an agent's session using LLM-based summarization.
     ///
     /// Replaces the existing text-truncation compaction with an intelligent
