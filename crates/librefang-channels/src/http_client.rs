@@ -2,9 +2,21 @@
 
 use std::sync::OnceLock;
 
+static INIT: OnceLock<()> = OnceLock::new();
+
+fn ensure_crypto_provider() {
+    INIT.get_or_init(|| {
+        // Initialize default crypto provider to prevent "CryptoProvider not found" errors
+        // when multiple TLS backends are available
+        use rustls::crypto::{aws_lc_rs, CryptoProvider};
+        let _ = aws_lc_rs::default_provider().install_default();
+    });
+}
+
 static TLS_CONFIG: OnceLock<rustls::ClientConfig> = OnceLock::new();
 
 fn init_tls_config() -> rustls::ClientConfig {
+    ensure_crypto_provider();
     let mut root_store = rustls::RootCertStore::empty();
     let result = rustls_native_certs::load_native_certs();
     let (added, _) = root_store.add_parsable_certificates(result.certs);

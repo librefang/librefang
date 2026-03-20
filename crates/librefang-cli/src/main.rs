@@ -1388,6 +1388,13 @@ fn load_log_level_from_config() -> String {
 }
 
 fn main() {
+    // Initialize rustls crypto provider FIRST, before any async/TLS operations
+    // This is required because rustls 0.23 needs explicit crypto provider initialization
+    {
+        use rustls::crypto::aws_lc_rs;
+        let _ = aws_lc_rs::default_provider().install_default();
+    }
+
     // Load ~/.librefang/.env into process environment (system env takes priority).
     dotenv::load_dotenv();
 

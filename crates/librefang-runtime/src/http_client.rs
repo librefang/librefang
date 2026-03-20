@@ -23,6 +23,10 @@ use std::sync::OnceLock;
 static TLS_CONFIG: OnceLock<rustls::ClientConfig> = OnceLock::new();
 
 fn init_tls_config() -> rustls::ClientConfig {
+    // Initialize default crypto provider first to prevent conflicts
+    use rustls::crypto::aws_lc_rs;
+    let _ = aws_lc_rs::default_provider().install_default();
+
     let mut root_store = rustls::RootCertStore::empty();
 
     let result = rustls_native_certs::load_native_certs();
