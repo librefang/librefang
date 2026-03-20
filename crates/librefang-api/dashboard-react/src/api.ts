@@ -1048,3 +1048,51 @@ export async function updateGoal(
 export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/goals/${encodeURIComponent(goalId)}`);
 }
+
+// ── Plugins ──────────────────────────────────────────
+
+export interface PluginItem {
+  name: string;
+  version: string;
+  description?: string;
+  author?: string;
+  hooks_valid: boolean;
+  size_bytes: number;
+  path?: string;
+  hooks?: { ingest?: boolean; after_turn?: boolean };
+}
+
+export interface RegistryEntry {
+  name: string;
+  github_repo: string;
+  error?: string | null;
+  plugins: Array<{ name: string; installed: boolean }>;
+}
+
+export async function listPlugins(): Promise<{ plugins: PluginItem[]; total: number; plugins_dir: string }> {
+  return get<{ plugins: PluginItem[]; total: number; plugins_dir: string }>("/api/plugins");
+}
+
+export async function getPlugin(name: string): Promise<PluginItem> {
+  return get<PluginItem>(`/api/plugins/${encodeURIComponent(name)}`);
+}
+
+export async function installPlugin(source: { source: string; name?: string; path?: string; url?: string; branch?: string; github_repo?: string }): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/plugins/install", source);
+}
+
+export async function uninstallPlugin(name: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/plugins/uninstall", { name });
+}
+
+export async function scaffoldPlugin(name: string, description: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/plugins/scaffold", { name, description });
+}
+
+export async function installPluginDeps(name: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/plugins/${encodeURIComponent(name)}/install-deps`, {});
+}
+
+export async function listPluginRegistries(): Promise<{ registries: RegistryEntry[] }> {
+  return get<{ registries: RegistryEntry[] }>("/api/plugins/registries");
+}

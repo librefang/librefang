@@ -21,6 +21,7 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { SkillsPage } from "./pages/SkillsPage";
 import { WizardPage } from "./pages/WizardPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
+import { PluginsPage } from "./pages/PluginsPage";
 
 const rootRoute = createRootRoute({
   component: App
@@ -158,6 +159,12 @@ const goalsRoute = createRoute({
   component: GoalsPage
 });
 
+const pluginsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/plugins",
+  component: PluginsPage
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   overviewRoute,
@@ -179,7 +186,8 @@ const routeTree = rootRoute.addChildren([
   approvalsRoute,
   commsRoute,
   handsRoute,
-  goalsRoute
+  goalsRoute,
+  pluginsRoute
 ]);
 
 export const router = createRouter({

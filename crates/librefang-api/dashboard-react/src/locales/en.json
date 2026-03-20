@@ -4,7 +4,7 @@
     "core": "Core", "automation": "Automation", "resources": "Resources", "system": "System",
     "overview": "Overview", "canvas": "Canvas", "chat": "Chat", "sessions": "Sessions", "approvals": "Approvals",
     "workflows": "Workflows", "scheduler": "Scheduler", "goals": "Goals", "agents": "Agents",
-    "providers": "Providers", "channels": "Channels", "skills": "Skills", "hands": "Hands",
+    "providers": "Providers", "channels": "Channels", "skills": "Skills", "hands": "Hands", "plugins": "Plugins",
     "analytics": "Analytics", "memory": "Memory", "comms": "Comms", "runtime": "Runtime", "logs": "Logs", "settings": "Settings"
   },
   "common": {
@@ -217,5 +217,17 @@
   },
   "wizard": {
     "welcome": "Welcome", "step_1": "Step 1", "connect_provider": "Connect Provider"
+  },
+  "plugins": {
+    "section": "Extensions", "title": "Plugins", "subtitle": "Extend agent capabilities with custom plugins.",
+    "new_plugin": "New Plugin", "install": "Install", "installed_tab": "Installed", "registry_tab": "Registry",
+    "no_plugins": "No plugins installed", "no_plugins_desc": "Install plugins from the registry or create your own.",
+    "loading_registries": "Loading registries...", "no_registries": "No registries configured.", "no_available": "No plugins available.",
+    "installed": "Installed", "plugin_name": "Plugin Name", "description": "Description",
+    "install_title": "Install Plugin", "source": "Source",
+    "source_registry": "Registry", "source_local": "Local", "source_git": "Git",
+    "registry_optional": "Registry (optional)", "registry_placeholder": "owner/repo",
+    "path": "Path", "url": "URL", "branch": "Branch",
+    "scaffold_title": "Create New Plugin", "scaffold_desc": "What does this plugin do?", "create": "Create"
   }
 }

@@ -4,7 +4,7 @@
     "core": "核心", "automation": "自动化", "resources": "资源", "system": "系统",
     "overview": "概览", "canvas": "画布", "chat": "对话", "sessions": "会话", "approvals": "审批",
     "workflows": "工作流", "scheduler": "调度器", "goals": "目标", "agents": "智能体",
-    "providers": "供应商", "channels": "通道", "skills": "技能", "hands": "Hands",
+    "providers": "供应商", "channels": "通道", "skills": "技能", "hands": "Hands", "plugins": "插件",
     "analytics": "分析", "memory": "记忆", "comms": "通信", "runtime": "运行时", "logs": "日志", "settings": "设置"
   },
   "common": {
@@ -217,5 +217,17 @@
   },
   "wizard": {
     "welcome": "欢迎", "step_1": "第一步", "connect_provider": "连接供应商"
+  },
+  "plugins": {
+    "section": "扩展", "title": "插件", "subtitle": "通过自定义插件扩展智能体能力。",
+    "new_plugin": "新建插件", "install": "安装", "installed_tab": "已安装", "registry_tab": "插件源",
+    "no_plugins": "未安装任何插件", "no_plugins_desc": "从插件源安装或创建你自己的插件。",
+    "loading_registries": "正在加载插件源...", "no_registries": "未配置插件源。", "no_available": "无可用插件。",
+    "installed": "已安装", "plugin_name": "插件名称", "description": "描述",
+    "install_title": "安装插件", "source": "来源",
+    "source_registry": "插件源", "source_local": "本地", "source_git": "Git",
+    "registry_optional": "注册表（可选）", "registry_placeholder": "owner/repo",
+    "path": "路径", "url": "URL", "branch": "分支",
+    "scaffold_title": "创建新插件", "scaffold_desc": "这个插件做什么？", "create": "创建"
   }
 }
