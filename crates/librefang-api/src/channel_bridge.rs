@@ -8,6 +8,20 @@ use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
 use librefang_channels::types::{ChannelAdapter, SenderContext};
 
+/// Check if text looks like a raw tool call leaked as content.
+///
+/// Some providers emit tool calls as plain text (recovered by
+/// `agent_loop::recover_text_tool_calls`). These should not be
+/// forwarded to the user through streaming channels.
+fn looks_like_tool_call(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.starts_with("[{")
+        || trimmed.starts_with("functions.")
+        || trimmed.starts_with("{\"name\":")
+        || trimmed.starts_with("{\"type\":\"function\"")
+        || (trimmed.starts_with('[') && trimmed.contains("'type': 'text'"))
+}
+
 // Feature-gated adapter imports
 #[cfg(feature = "channel-discord")]
 use librefang_channels::discord::DiscordAdapter;
@@ -193,16 +207,19 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     }
                     StreamEvent::ContentComplete { .. } => {
                         // Flush buffered text if it's real user-facing content.
-                        // Only suppress text when ToolUseStart was seen in this
-                        // iteration — the text is likely the tool call echoed as
-                        // content. Never filter based on text patterns alone;
-                        // normal JSON responses would be false-positived.
-                        if !iter_buf.is_empty() && !saw_tool_use {
-                            if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
+                        // Suppress when:
+                        // 1. ToolUseStart was seen (tool call echoed as content)
+                        // 2. Text looks like a raw tool call (recover_text_tool_calls
+                        //    scenario — model emits tool calls as plain text without
+                        //    ToolUseStart events)
+                        if !iter_buf.is_empty() {
+                            if saw_tool_use {
+                                debug!("Streaming bridge: filtered tool-use-adjacent text");
+                            } else if looks_like_tool_call(&iter_buf) {
+                                debug!("Streaming bridge: filtered leaked tool call text");
+                            } else if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
                                 break;
                             }
-                        } else if saw_tool_use && !iter_buf.is_empty() {
-                            debug!("Streaming bridge: filtered tool-use-adjacent text");
                         }
                         iter_buf.clear();
                         saw_tool_use = false;
@@ -224,13 +241,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             // recover_text_tool_calls() emits tool calls as plain text
             // without a ToolUseStart event.
             if !iter_buf.is_empty() && !saw_tool_use {
-                let trimmed = iter_buf.trim();
-                let looks_like_tool_call = trimmed.starts_with("[{")
-                    || trimmed.starts_with("functions.")
-                    || trimmed.starts_with("{\"name\":")
-                    || trimmed.starts_with("{\"type\":\"function\"")
-                    || (trimmed.starts_with('[') && trimmed.contains("'type': 'text'"));
-                if !looks_like_tool_call {
+                if !looks_like_tool_call(&iter_buf) {
                     let _ = tx.send(iter_buf).await;
                 } else {
                     debug!("Streaming bridge: filtered leaked tool call text in final flush");
