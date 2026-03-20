@@ -443,8 +443,10 @@ function settingsPage() {
           uptime_seconds: status.uptime_seconds || 0,
           agent_count: status.agent_count || 0,
           default_provider: status.default_provider || '-',
-          default_model: status.default_model || '-'
+          default_model: status.default_model || '-',
+          home_dir: status.home_dir || ''
         };
+        if (!this.targetPath && status.home_dir) this.targetPath = status.home_dir;
       } catch(e) { throw e; }
     },
 
