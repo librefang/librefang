@@ -3,7 +3,7 @@ use regex_lite::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 const ROUTING_EXCLUDED_TEMPLATES: &[&str] = &["assistant", "router"];
@@ -205,6 +205,14 @@ struct HandRouteCacheEntry {
 }
 
 static HAND_ROUTE_CACHE: OnceLock<Mutex<Option<HandRouteCacheEntry>>> = OnceLock::new();
+static HAND_ROUTE_HOME_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+/// Set the LibreFang home directory used for hand-route candidate loading.
+pub fn set_hand_route_home_dir(home_dir: &Path) {
+    let slot = HAND_ROUTE_HOME_DIR.get_or_init(|| Mutex::new(None));
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(home_dir.to_path_buf());
+}
 
 /// Invalidate the hand route cache (call alongside `invalidate_manifest_cache`).
 pub fn invalidate_hand_route_cache() {
@@ -216,10 +224,8 @@ pub fn invalidate_hand_route_cache() {
 }
 
 fn hand_route_candidates() -> Vec<HandRouteCandidate> {
-    let home_dir = dirs::home_dir();
-    let home_dir_key = home_dir
-        .as_ref()
-        .map(|path| path.to_string_lossy().to_string());
+    let home_dir = resolve_hand_route_home_dir();
+    let home_dir_key = Some(home_dir.to_string_lossy().to_string());
     let cache = HAND_ROUTE_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref cached) = *guard {
@@ -228,12 +234,29 @@ fn hand_route_candidates() -> Vec<HandRouteCandidate> {
         }
     }
 
-    let candidates = build_hand_route_candidates(home_dir.as_deref());
+    let candidates = build_hand_route_candidates(Some(&home_dir));
     *guard = Some(HandRouteCacheEntry {
         home_dir: home_dir_key,
         candidates: candidates.clone(),
     });
     candidates
+}
+
+fn resolve_hand_route_home_dir() -> PathBuf {
+    if let Some(slot) = HAND_ROUTE_HOME_DIR.get() {
+        let guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(home_dir) = guard.as_ref() {
+            return home_dir.clone();
+        }
+    }
+
+    if let Ok(home) = std::env::var("LIBREFANG_HOME") {
+        return PathBuf::from(home);
+    }
+
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".librefang")
 }
 
 fn build_hand_route_candidates(home_dir: Option<&Path>) -> Vec<HandRouteCandidate> {
@@ -259,7 +282,7 @@ fn build_hand_route_candidates(home_dir: Option<&Path>) -> Vec<HandRouteCandidat
 }
 
 fn load_user_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
-    let hands_dir = home_dir.join(".librefang").join("hands");
+    let hands_dir = home_dir.join("hands");
     let Ok(entries) = fs::read_dir(&hands_dir) else {
         return Vec::new();
     };
@@ -1191,7 +1214,7 @@ mod tests {
     }
 
     fn write_test_hand(home_dir: &Path, hand_id: &str, aliases: &[&str], weak_aliases: &[&str]) {
-        let hand_dir = home_dir.join(".librefang").join("hands").join(hand_id);
+        let hand_dir = home_dir.join("hands").join(hand_id);
         fs::create_dir_all(&hand_dir).unwrap();
 
         let aliases_toml = aliases
@@ -1634,7 +1657,7 @@ weak_aliases = ["changelog"]
     #[test]
     fn test_build_hand_route_candidates_ignores_invalid_user_hand_manifests() {
         let tmp = tempdir().unwrap();
-        let hand_dir = tmp.path().join(".librefang").join("hands").join("broken");
+        let hand_dir = tmp.path().join("hands").join("broken");
         fs::create_dir_all(&hand_dir).unwrap();
         fs::write(hand_dir.join("HAND.toml"), "not = valid = toml").unwrap();
 

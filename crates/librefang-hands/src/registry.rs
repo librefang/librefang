@@ -168,6 +168,40 @@ impl HandRegistry {
         Ok(def)
     }
 
+    /// Install a hand from raw TOML + skill content and persist it under
+    /// `<home_dir>/hands/<id>/`.
+    pub fn install_from_content_persisted(
+        &self,
+        home_dir: &std::path::Path,
+        toml_content: &str,
+        skill_content: &str,
+    ) -> HandResult<HandDefinition> {
+        let def = bundled::parse_bundled("custom", toml_content, skill_content)?;
+
+        if self.definitions.contains_key(&def.id) {
+            return Err(HandError::AlreadyActive(format!(
+                "Hand '{}' already registered",
+                def.id
+            )));
+        }
+
+        let hand_dir = home_dir.join("hands").join(&def.id);
+        std::fs::create_dir_all(&hand_dir)?;
+        std::fs::write(hand_dir.join("HAND.toml"), toml_content)?;
+        if !skill_content.is_empty() {
+            std::fs::write(hand_dir.join("SKILL.md"), skill_content)?;
+        }
+
+        info!(
+            hand = %def.id,
+            name = %def.name,
+            path = %hand_dir.display(),
+            "Installed hand from content"
+        );
+        self.definitions.insert(def.id.clone(), def.clone());
+        Ok(def)
+    }
+
     /// List all known hand definitions.
     pub fn list_definitions(&self) -> Vec<HandDefinition> {
         let mut defs: Vec<HandDefinition> =
@@ -567,6 +601,36 @@ mod tests {
 
         // Browser hand should be loaded
         assert!(reg.get_definition("browser").is_some());
+    }
+
+    #[test]
+    fn install_from_content_persists_hand_files() {
+        let reg = HandRegistry::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let toml_content = r#"
+id = "uptime-watcher"
+name = "Uptime Watcher"
+description = "Watches uptime."
+category = "data"
+
+[routing]
+aliases = ["uptime watcher"]
+
+[agent]
+name = "uptime-watcher-agent"
+description = "Test hand agent"
+system_prompt = "Test prompt"
+"#;
+        let skill_content = "# Test skill\n";
+
+        let def = reg
+            .install_from_content_persisted(tmp.path(), toml_content, skill_content)
+            .unwrap();
+
+        assert_eq!(def.id, "uptime-watcher");
+        assert!(tmp.path().join("hands/uptime-watcher/HAND.toml").exists());
+        assert!(tmp.path().join("hands/uptime-watcher/SKILL.md").exists());
+        assert!(reg.get_definition("uptime-watcher").is_some());
     }
 
     #[test]

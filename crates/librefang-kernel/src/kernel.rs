@@ -922,6 +922,7 @@ impl LibreFangKernel {
 
         // Initialize hand registry (curated autonomous packages)
         let hand_registry = librefang_hands::registry::HandRegistry::new();
+        router::set_hand_route_home_dir(&config.home_dir);
         let hand_count = hand_registry.load_bundled();
         if hand_count > 0 {
             info!("Loaded {hand_count} bundled hand(s)");
@@ -6947,8 +6948,9 @@ impl KernelHandle for LibreFangKernel {
     ) -> Result<serde_json::Value, String> {
         let def = self
             .hand_registry
-            .install_from_content(toml_content, skill_content)
+            .install_from_content_persisted(&self.config.home_dir, toml_content, skill_content)
             .map_err(|e| format!("{e}"))?;
+        router::invalidate_hand_route_cache();
 
         Ok(serde_json::json!({
             "id": def.id,

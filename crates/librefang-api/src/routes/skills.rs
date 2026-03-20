@@ -1113,20 +1113,23 @@ pub async fn install_hand(
         );
     }
 
-    match state
-        .kernel
-        .hand_registry
-        .install_from_content(toml_content, skill_content)
-    {
-        Ok(def) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "id": def.id,
-                "name": def.name,
-                "description": def.description,
-                "category": format!("{:?}", def.category),
-            })),
-        ),
+    match state.kernel.hand_registry.install_from_content_persisted(
+        &state.kernel.config.home_dir,
+        toml_content,
+        skill_content,
+    ) {
+        Ok(def) => {
+            librefang_kernel::router::invalidate_hand_route_cache();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": def.id,
+                    "name": def.name,
+                    "description": def.description,
+                    "category": format!("{:?}", def.category),
+                })),
+            )
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": format!("{e}")})),
