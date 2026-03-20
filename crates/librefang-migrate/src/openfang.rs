@@ -32,10 +32,8 @@ fn item_kind_for_path(rel: &Path) -> ItemKind {
             let file_name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if file_name == "secrets.env" || file_name.ends_with(".env") {
                 ItemKind::Secret
-            } else if file_name == "config.toml" {
-                ItemKind::Config
             } else {
-                ItemKind::Config // fallback
+                ItemKind::Config
             }
         }
     }
