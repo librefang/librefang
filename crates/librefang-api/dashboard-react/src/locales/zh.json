@@ -46,7 +46,10 @@
     "select_all": "全选", "health": "健康状态", "key_required": "需要密钥", "details": "详情",
     "last_test": "上次测试", "error": "错误", "open_settings": "打开设置",
     "filter_all": "全部", "filter_reachable": "可连接", "filter_unreachable": "无法连接",
-    "results": "结果", "config": "配置", "config_hint": "配置功能即将推出"
+    "results": "结果", "config": "配置", "config_hint": "配置功能即将推出",
+    "configure_provider": "配置供应商", "key_saved": "API Key 已保存", "key_removed": "API Key 已移除",
+    "key_placeholder": "输入 API Key...", "key_placeholder_existing": "输入新 Key 替换旧的...",
+    "optional": "可选", "remove_key": "移除 Key"
   },
   "channels": {
     "title": "通道", "subtitle": "消息适配器和集成网关。",

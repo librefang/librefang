@@ -1512,7 +1512,7 @@ pub struct ContextEngineTomlConfig {
     /// Optional Python script hooks that override specific lifecycle methods.
     pub hooks: ContextEngineHooks,
     /// Plugin registries (GitHub repos) to browse for installable plugins.
-    /// Defaults to the official `librefang/plugin-registry`.
+    /// Defaults to the official `librefang/librefang-registry`.
     #[serde(default = "default_plugin_registries")]
     pub plugin_registries: Vec<PluginRegistrySource>,
 }
@@ -1533,7 +1533,7 @@ impl Default for ContextEngineTomlConfig {
 /// ```toml
 /// [[context_engine.plugin_registries]]
 /// name = "Official"
-/// github_repo = "librefang/plugin-registry"
+/// github_repo = "librefang/librefang-registry"
 ///
 /// [[context_engine.plugin_registries]]
 /// name = "My Company"
@@ -1543,7 +1543,7 @@ impl Default for ContextEngineTomlConfig {
 pub struct PluginRegistrySource {
     /// Human-readable label shown in the dashboard.
     pub name: String,
-    /// GitHub `owner/repo` (e.g. `"librefang/plugin-registry"`).
+    /// GitHub `owner/repo` (e.g. `"librefang/librefang-registry"`).
     pub github_repo: String,
 }
 
@@ -1551,7 +1551,7 @@ pub struct PluginRegistrySource {
 fn default_plugin_registries() -> Vec<PluginRegistrySource> {
     vec![PluginRegistrySource {
         name: "Official".to_string(),
-        github_repo: "librefang/plugin-registry".to_string(),
+        github_repo: "librefang/librefang-registry".to_string(),
     }]
 }
 

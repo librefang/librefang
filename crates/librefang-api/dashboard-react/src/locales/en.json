@@ -46,7 +46,10 @@
     "select_all": "Select All", "health": "Health", "key_required": "Key Required", "details": "Details",
     "last_test": "Last Test", "error": "Error", "open_settings": "Open Settings",
     "filter_all": "All", "filter_reachable": "Reachable", "filter_unreachable": "Unreachable",
-    "results": "results", "config": "Configure", "config_hint": "Configuration coming soon"
+    "results": "results", "config": "Configure", "config_hint": "Configuration coming soon",
+    "configure_provider": "Configure Provider", "key_saved": "API Key saved", "key_removed": "API Key removed",
+    "key_placeholder": "Enter API key...", "key_placeholder_existing": "Enter new key to replace...",
+    "optional": "optional", "remove_key": "Remove Key"
   },
   "channels": {
     "title": "Channels", "subtitle": "Messaging adapters and integration gateways.",

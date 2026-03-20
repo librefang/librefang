@@ -302,13 +302,13 @@ pub async fn list_plugin_registries(State(state): State<Arc<AppState>>) -> impl 
     let mut registries = state.kernel.config.context_engine.plugin_registries.clone();
     if !registries
         .iter()
-        .any(|r| r.github_repo == "librefang/plugin-registry")
+        .any(|r| r.github_repo == "librefang/librefang-registry")
     {
         registries.insert(
             0,
             librefang_types::config::PluginRegistrySource {
                 name: "Official".to_string(),
-                github_repo: "librefang/plugin-registry".to_string(),
+                github_repo: "librefang/librefang-registry".to_string(),
             },
         );
     }

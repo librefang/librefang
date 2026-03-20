@@ -610,6 +610,18 @@ export async function testProvider(providerId: string): Promise<ApiActionRespons
   return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/test`, {});
 }
 
+export async function setProviderKey(providerId: string, key: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`, { key });
+}
+
+export async function deleteProviderKey(providerId: string): Promise<ApiActionResponse> {
+  return del<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`);
+}
+
+export async function setProviderUrl(providerId: string, baseUrl: string): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/url`, { base_url: baseUrl });
+}
+
 export async function listChannels(): Promise<ChannelItem[]> {
   const data = await get<ChannelsResponse>("/api/channels");
   return data.channels ?? [];

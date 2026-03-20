@@ -1,7 +1,7 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listProviders, testProvider } from "../api";
+import { listProviders, testProvider, setProviderKey, deleteProviderKey, setProviderUrl } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -445,6 +445,11 @@ export function ProvidersPage() {
   const [filterStatus, setFilterStatus] = useState<FilterStatus>("all");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [detailsProvider, setDetailsProvider] = useState<Provider | null>(null);
+  const [configProvider, setConfigProvider] = useState<Provider | null>(null);
+  const [keyInput, setKeyInput] = useState("");
+  const [urlInput, setUrlInput] = useState("");
+  const [keySaving, setKeySaving] = useState(false);
+  const [keyError, setKeyError] = useState<string | null>(null);
   const addToast = useUIStore((s) => s.addToast);
 
   const providersQuery = useQuery({ queryKey: ["providers", "list"], queryFn: listProviders, refetchInterval: REFRESH_MS });
@@ -557,8 +562,46 @@ export function ProvidersPage() {
   };
 
   const handleQuickConfig = (provider: Provider) => {
-    // Open settings or show config modal
-    addToast(t("providers.config_hint"), "info");
+    setConfigProvider(provider);
+    setKeyInput("");
+    setUrlInput(provider.base_url || "");
+    setKeyError(null);
+  };
+
+  const handleSaveKey = async () => {
+    if (!configProvider) return;
+    setKeySaving(true);
+    setKeyError(null);
+    try {
+      if (urlInput.trim() && urlInput !== configProvider.base_url) {
+        await setProviderUrl(configProvider.id, urlInput.trim());
+      }
+      if (keyInput.trim()) {
+        await setProviderKey(configProvider.id, keyInput.trim());
+      }
+      await providersQuery.refetch();
+      setConfigProvider(null);
+      addToast(t("providers.key_saved"), "success");
+    } catch (e: any) {
+      setKeyError(e?.message || String(e));
+    } finally {
+      setKeySaving(false);
+    }
+  };
+
+  const handleDeleteKey = async () => {
+    if (!configProvider) return;
+    setKeySaving(true);
+    try {
+      await deleteProviderKey(configProvider.id);
+      await providersQuery.refetch();
+      setConfigProvider(null);
+      addToast(t("providers.key_removed"), "success");
+    } catch (e: any) {
+      setKeyError(e?.message || String(e));
+    } finally {
+      setKeySaving(false);
+    }
   };
 
   const allSelected = paginatedProviders.length > 0 && selectedIds.size === paginatedProviders.length;
@@ -744,6 +787,69 @@ export function ProvidersPage() {
           pendingId={pendingId}
           t={t}
         />
+      )}
+
+      {/* API Key Config Modal */}
+      {configProvider && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setConfigProvider(null)}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px]" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
+              <div className="flex items-center gap-2">
+                <Key className="w-4 h-4 text-brand" />
+                <h3 className="text-sm font-bold">{t("providers.configure_provider")}</h3>
+              </div>
+              <button onClick={() => setConfigProvider(null)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="flex items-center gap-3 p-3 rounded-xl bg-main">
+                <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center">
+                  {providerIcons[configProvider.id] || <Server className="w-5 h-5 text-brand" />}
+                </div>
+                <div>
+                  <p className="text-sm font-bold">{configProvider.name || configProvider.id}</p>
+                  <p className="text-[10px] text-text-dim font-mono">{configProvider.id}</p>
+                </div>
+                <Badge variant={configProvider.auth_status === "configured" ? "success" : "error"} className="ml-auto">
+                  {configProvider.auth_status}
+                </Badge>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-bold text-text-dim uppercase">API Key</label>
+                <input type="password" value={keyInput} onChange={e => setKeyInput(e.target.value)}
+                  placeholder={configProvider.auth_status === "configured" ? t("providers.key_placeholder_existing") : t("providers.key_placeholder")}
+                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
+              </div>
+
+              <div>
+                <label className="text-[10px] font-bold text-text-dim uppercase">Base URL <span className="normal-case font-normal text-text-dim/50">({t("providers.optional")})</span></label>
+                <input type="text" value={urlInput} onChange={e => setUrlInput(e.target.value)}
+                  placeholder="https://api.example.com/v1"
+                  className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm font-mono outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
+              </div>
+
+              {keyError && (
+                <div className="flex items-center gap-2 text-error text-xs">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  {keyError}
+                </div>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <Button variant="primary" className="flex-1" onClick={handleSaveKey} disabled={keySaving || (!keyInput.trim() && urlInput === (configProvider.base_url || ""))}>
+                  {keySaving ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Key className="w-4 h-4 mr-1" />}
+                  {t("common.save")}
+                </Button>
+                {configProvider.auth_status === "configured" && (
+                  <Button variant="secondary" onClick={handleDeleteKey} disabled={keySaving}>
+                    <XCircle className="w-4 h-4 mr-1 text-error" />
+                    {t("providers.remove_key")}
+                  </Button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -6,7 +6,7 @@
 //! - `requirements.txt` — optional Python dependencies
 //!
 //! # Install sources
-//! - **GitHub registry**: configurable `owner/repo` (default: `librefang/plugin-registry`)
+//! - **GitHub registry**: configurable `owner/repo` (default: `librefang/librefang-registry`)
 //! - **Local path**: copy from a local directory
 //! - **Git URL**: clone a git repo into the plugins directory
 
@@ -84,7 +84,7 @@ pub struct PluginInfo {
 #[derive(Debug, Clone)]
 pub enum PluginSource {
     /// Install from a GitHub registry (`owner/repo`).
-    /// `None` defaults to `librefang/plugin-registry`.
+    /// `None` defaults to `librefang/librefang-registry`.
     Registry {
         name: String,
         github_repo: Option<String>,
@@ -172,7 +172,7 @@ pub async fn install_plugin(source: &PluginSource) -> Result<PluginInfo, String>
         PluginSource::Registry { name, github_repo } => {
             let repo = github_repo
                 .as_deref()
-                .unwrap_or("librefang/plugin-registry");
+                .unwrap_or("librefang/librefang-registry");
             install_from_registry(name, repo, &plugins).await
         }
         PluginSource::Git { url, branch } => {
