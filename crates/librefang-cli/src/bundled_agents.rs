@@ -85,10 +85,8 @@ pub fn sync_registry_agents(home_dir: &Path) {
             continue; // Preserve user customization
         }
 
-        if std::fs::create_dir_all(&dest_dir).is_ok() {
-            if std::fs::copy(&src, &dest_file).is_ok() {
-                synced += 1;
-            }
+        if std::fs::create_dir_all(&dest_dir).is_ok() && std::fs::copy(&src, &dest_file).is_ok() {
+            synced += 1;
         }
     }
 
