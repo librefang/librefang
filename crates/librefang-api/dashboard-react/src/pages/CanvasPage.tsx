@@ -4,6 +4,7 @@ import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ReactFlow,
   Background,
+  BackgroundVariant,
   Controls,
   MiniMap,
   addEdge,
@@ -1079,7 +1080,7 @@ export function CanvasPage() {
             connectionLineStyle={{ stroke: edgeColorActive, strokeWidth: 2 }}
             connectionLineType="smoothstep"
           >
-            <Background color={theme === "dark" ? "#333" : "#e2e8f0"} gap={24} size={1.5} />
+            <Background variant={BackgroundVariant.Dots} color={theme === "dark" ? "#444" : "#cbd5e1"} gap={24} size={1.5} />
             <Controls className="!bg-surface !border-border-subtle !rounded-xl !shadow-lg" />
             <MiniMap className="!bg-surface/80 !border-border-subtle !rounded-xl !shadow-lg"
               nodeColor={(n) => {
