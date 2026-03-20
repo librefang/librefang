@@ -362,12 +362,26 @@ export function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
-  const agents = agentsQuery.data ?? [];
+  const agents = (agentsQuery.data ?? []).sort((a, b) => {
+    // Suspended last
+    const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
+    const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
+    if (aSusp !== bSusp) return aSusp - bSusp;
+    // Core agents first, hands second
+    const aHand = a.name.includes("-hand") ? 1 : 0;
+    const bHand = b.name.includes("-hand") ? 1 : 0;
+    if (aHand !== bHand) return aHand - bHand;
+    return a.name.localeCompare(b.name);
+  });
   const { messages, isLoading, sendMessage, clearHistory } = useChatMessages(selectedAgentId || null, agents);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
   useEffect(() => {
-    if (!selectedAgentId && agents.length > 0) setSelectedAgentId(agents[0].id);
+    // Auto-select first running agent
+    if (!selectedAgentId && agents.length > 0) {
+      const firstRunning = agents.find(a => (a.state || "").toLowerCase() === "running");
+      setSelectedAgentId((firstRunning || agents[0]).id);
+    }
   }, [agents, selectedAgentId]);
 
   // 滚动到最新消息
