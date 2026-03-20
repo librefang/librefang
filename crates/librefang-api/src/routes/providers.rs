@@ -855,6 +855,7 @@ pub async fn test_provider(
     if base_url.is_empty() {
         let cli_ok = match name.as_str() {
             "claude-code" => librefang_runtime::drivers::claude_code::claude_code_available(),
+            "qwen-code" => librefang_runtime::drivers::qwen_code::qwen_code_available(),
             _ => false,
         };
         return if cli_ok {
