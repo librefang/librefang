@@ -909,7 +909,7 @@ function CanvasPageInner() {
   }, [setNodes, t]);
 
   // 连线
-  const edgeColor = theme === "dark" ? "#525252" : "#cbd5e1";
+  const edgeColor = theme === "dark" ? "#6b7280" : "#94a3b8";
   const edgeColorActive = theme === "dark" ? "#818cf8" : "#6366f1";
 
   const defaultEdgeOptions = useMemo(() => ({
@@ -1557,7 +1557,7 @@ function CanvasPageInner() {
 
       {/* Toast */}
       {toast && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-text text-surface text-xs font-bold shadow-lg animate-bounce-in">
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-text text-surface text-xs font-bold shadow-lg transition-all">
           <Check className="w-3.5 h-3.5 inline mr-1.5" />{toast}
         </div>
       )}

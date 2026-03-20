@@ -149,7 +149,7 @@
   "workflows": {
     "title": "工作流", "subtitle": "自动化枢纽。", "all_workflows": "所有工作流", "run_workflow": "运行工作流",
     "select_workflow": "选择工作流", "recent_runs": "最近运行记录", "no_runs": "暂无运行记录",
-    "select_workflow_hint": "请选择一个工作流以查看记录", "steps_count": "{{count}} 步", "automation_hub": "自动化枢纽",
+    "select_workflow_hint": "请选择一个工作流以查看记录", "steps_count": "{{count}} 步", "nodes_unit": "个节点", "automation_hub": "自动化枢纽",
     "templates": "模板", "use_template": "使用模板", "create_blank": "创建空白工作流",
     "new_workflow": "新建工作流", "workflow_name": "工作流名称", "description": "描述", "delete_confirm": "确定要删除此工作流吗？", "open_workflows": "工作流列表", "untitled_workflow": "未命名工作流",
     "search_placeholder": "搜索工作流...", "empty_title": "还没有工作流", "empty_desc": "从模板快速创建，或从空白开始设计。",

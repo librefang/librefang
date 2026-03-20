@@ -131,7 +131,7 @@ export function WorkflowsPage() {
                     <p className="text-sm font-bold truncate group-hover:text-brand transition-colors">{t(tmpl.name)}</p>
                     <p className="text-[10px] text-text-dim mt-0.5 line-clamp-2">{t(tmpl.description)}</p>
                     <div className="flex items-center gap-2 mt-2 text-[9px] font-semibold text-text-dim/50">
-                      <span>{nodeCount} nodes</span>
+                      <span>{nodeCount} {t("workflows.nodes_unit")}</span>
                       <ArrowRight className="w-3 h-3 text-brand/50 group-hover:translate-x-0.5 transition-transform" />
                     </div>
                   </div>
@@ -180,7 +180,7 @@ export function WorkflowsPage() {
                   <div className="flex items-center gap-2">
                     <h3 className="text-sm font-bold truncate">{wf.name}</h3>
                     <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-semibold shrink-0">
-                      {wf.steps || 0} steps
+                      {t("workflows.steps_count", { count: wf.steps || 0 })}
                     </span>
                   </div>
                   <p className="text-[10px] text-text-dim mt-0.5 truncate">{wf.description || t("common.no_data")}</p>
