@@ -111,12 +111,17 @@
     "no_agent_steps": "No nodes with assigned agents. Click a node to assign an agent.", "name_required": "Please enter a workflow name.",
     "node_config": "Node Config", "node_label": "Label", "node_desc": "Description", "assign_agent": "Assign Agent", "no_agent": "-- No Agent --", "agent_steps": "agent steps", "run_result": "Run Result",
     "run_input_title": "Run Workflow", "run_input_hint": "Enter input for the first step (passed as {{input}}). Leave empty to run without input.", "run_input_placeholder": "e.g. Translate this text...", "run_now": "Run", "to_run": "to run",
+    "step_mode": "Execution Mode", "mode_sequential": "Sequential", "mode_fan_out": "Parallel (Fan Out)", "mode_collect": "Collect (Merge Parallel)", "mode_conditional": "Conditional", "mode_loop": "Loop",
+    "condition_text": "Condition Text", "condition_placeholder": "Execute if prev output contains...", "loop_until": "Stop When Output Contains", "loop_until_placeholder": "e.g. DONE", "loop_max": "Max Iterations",
+    "error_mode": "Error Handling", "error_fail": "Stop on Error", "error_skip": "Skip on Error", "error_retry": "Retry on Error", "max_retries": "Max Retries",
+    "timeout": "Timeout (seconds)", "output_var": "Output Variable", "output_var_hint": "(use {{name}} in later steps)",
     "node_types": {
       "start": "Start", "start_desc": "Workflow entry point", "end": "End", "end_desc": "Workflow termination",
       "schedule": "Schedule", "schedule_desc": "Time-based trigger", "webhook": "Webhook", "webhook_desc": "HTTP webhook trigger",
       "channel": "Channel", "channel_desc": "Send to channel", "condition": "Condition", "condition_desc": "Branch logic",
       "loop": "Loop", "loop_desc": "Repeat actions", "parallel": "Parallel", "parallel_desc": "Parallel execution",
       "wait": "Wait", "wait_desc": "Delay/wait", "respond": "Respond", "respond_desc": "Send response",
+      "collect": "Collect", "collect_desc": "Merge parallel results",
       "agent": "Agent", "agent_desc": "Run agent task"
     },
     "nodes": {

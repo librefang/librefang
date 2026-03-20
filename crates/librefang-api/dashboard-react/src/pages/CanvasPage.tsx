@@ -29,16 +29,20 @@ import {
 
 // 节点类型配置
 const NODE_TYPES = [
+  // 触发器（视觉标记，不参与执行）
   { type: "start", labelKey: "canvas.node_types.start", color: "#22c55e", icon: "S", descKey: "canvas.node_types.start_desc" },
   { type: "end", labelKey: "canvas.node_types.end", color: "#ef4444", icon: "E", descKey: "canvas.node_types.end_desc" },
-  { type: "schedule", labelKey: "canvas.node_types.schedule", color: "#f59e0b", icon: "C", descKey: "canvas.node_types.schedule_desc" },
-  { type: "webhook", labelKey: "canvas.node_types.webhook", color: "#3b82f6", icon: "W", descKey: "canvas.node_types.webhook_desc" },
-  { type: "channel", labelKey: "canvas.node_types.channel", color: "#8b5cf6", icon: "M", descKey: "canvas.node_types.channel_desc" },
-  { type: "condition", labelKey: "canvas.node_types.condition", color: "#22c55e", icon: "?", descKey: "canvas.node_types.condition_desc" },
-  { type: "loop", labelKey: "canvas.node_types.loop", color: "#8b5cf6", icon: "L", descKey: "canvas.node_types.loop_desc" },
-  { type: "parallel", labelKey: "canvas.node_types.parallel", color: "#f59e0b", icon: "P", descKey: "canvas.node_types.parallel_desc" },
-  { type: "wait", labelKey: "canvas.node_types.wait", color: "#6b7280", icon: "T", descKey: "canvas.node_types.wait_desc" },
-  { type: "respond", labelKey: "canvas.node_types.respond", color: "#22c55e", icon: "R", descKey: "canvas.node_types.respond_desc" },
+  { type: "schedule", labelKey: "canvas.node_types.schedule", color: "#f59e0b", icon: "⏱", descKey: "canvas.node_types.schedule_desc" },
+  { type: "webhook", labelKey: "canvas.node_types.webhook", color: "#3b82f6", icon: "↗", descKey: "canvas.node_types.webhook_desc" },
+  { type: "channel", labelKey: "canvas.node_types.channel", color: "#8b5cf6", icon: "📢", descKey: "canvas.node_types.channel_desc" },
+  // 逻辑控制（绑 agent 后参与执行）
+  { type: "condition", labelKey: "canvas.node_types.condition", color: "#f59e0b", icon: "?", descKey: "canvas.node_types.condition_desc" },
+  { type: "loop", labelKey: "canvas.node_types.loop", color: "#8b5cf6", icon: "↻", descKey: "canvas.node_types.loop_desc" },
+  { type: "parallel", labelKey: "canvas.node_types.parallel", color: "#f59e0b", icon: "⫸", descKey: "canvas.node_types.parallel_desc" },
+  { type: "collect", labelKey: "canvas.node_types.collect", color: "#22c55e", icon: "⫷", descKey: "canvas.node_types.collect_desc" },
+  { type: "wait", labelKey: "canvas.node_types.wait", color: "#6b7280", icon: "⏸", descKey: "canvas.node_types.wait_desc" },
+  // 动作（核心执行节点）
+  { type: "respond", labelKey: "canvas.node_types.respond", color: "#22c55e", icon: "↩", descKey: "canvas.node_types.respond_desc" },
   { type: "agent", labelKey: "canvas.node_types.agent", color: "#3b82f6", icon: "A", descKey: "canvas.node_types.agent_desc" },
 ];
 
@@ -120,67 +124,173 @@ function WorkflowList({
 }
 
 // 节点配置面板
+const inputClass = "mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand";
+const labelClass = "text-[10px] font-bold text-text-dim uppercase";
+
 function NodeConfigPanel({
-  node, agents, onUpdate, onClose, t
+  node, agents, onUpdate, onClose, onDelete, t
 }: {
   node: Node; agents: AgentItem[]; onUpdate: (id: string, data: any) => void;
-  onClose: () => void; t: (key: string) => string;
+  onClose: () => void; onDelete: (id: string) => void; t: (key: string) => string;
 }) {
   const d = node.data as any;
   const [label, setLabel] = useState(d.label || "");
   const [description, setDescription] = useState(d.description || "");
   const [agentId, setAgentId] = useState(d.agentId || "");
   const [prompt, setPrompt] = useState(d.prompt || d.description || "");
+  const [mode, setMode] = useState<string>(d.stepMode || "sequential");
+  const [errorMode, setErrorMode] = useState<string>(d.errorMode || "fail");
+  const [timeoutSecs, setTimeoutSecs] = useState<number>(d.timeoutSecs || 120);
+  const [outputVar, setOutputVar] = useState(d.outputVar || "");
+  // Conditional fields
+  const [condition, setCondition] = useState(d.condition || "");
+  // Loop fields
+  const [maxIterations, setMaxIterations] = useState<number>(d.maxIterations || 5);
+  const [until, setUntil] = useState(d.until || "");
+  // Retry fields
+  const [maxRetries, setMaxRetries] = useState<number>(d.maxRetries || 3);
 
   const handleSave = () => {
     const agent = agents.find(a => a.id === agentId);
     onUpdate(node.id, {
       ...d,
-      label,
-      description,
+      label, description,
       agentId: agentId || undefined,
       agentName: agent?.name || undefined,
       prompt,
+      stepMode: mode,
+      errorMode,
+      timeoutSecs,
+      outputVar: outputVar || undefined,
+      condition: mode === "conditional" ? condition : undefined,
+      maxIterations: mode === "loop" ? maxIterations : undefined,
+      until: mode === "loop" ? until : undefined,
+      maxRetries: errorMode === "retry" ? maxRetries : undefined,
     });
     onClose();
   };
 
+  const hasAgent = !!agentId;
+
   return (
-    <div className="absolute top-3 right-3 z-20 w-72 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 bg-main/50 border-b border-border-subtle">
+    <div className="absolute top-3 right-3 z-20 w-80 max-h-[calc(100%-24px)] rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden flex flex-col">
+      <div className="flex items-center justify-between px-3 py-2 bg-main/50 border-b border-border-subtle shrink-0">
         <span className="text-xs font-bold">{t("canvas.node_config")}</span>
-        <button onClick={onClose} className="p-1 rounded hover:bg-main"><X className="w-3.5 h-3.5" /></button>
+        <div className="flex items-center gap-1">
+          <button onClick={() => { onDelete(node.id); onClose(); }}
+            className="p-1 rounded hover:bg-error/10 text-text-dim/40 hover:text-error"><Trash2 className="w-3.5 h-3.5" /></button>
+          <button onClick={onClose} className="p-1 rounded hover:bg-main"><X className="w-3.5 h-3.5" /></button>
+        </div>
       </div>
-      <div className="p-3 space-y-3">
+      <div className="p-3 space-y-2.5 overflow-y-auto flex-1">
+        {/* 基础信息 */}
         <div>
-          <label className="text-[10px] font-bold text-text-dim uppercase">{t("canvas.node_label")}</label>
-          <input type="text" value={label} onChange={e => setLabel(e.target.value)}
-            className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand" />
+          <label className={labelClass}>{t("canvas.node_label")}</label>
+          <input type="text" value={label} onChange={e => setLabel(e.target.value)} className={inputClass} />
         </div>
         <div>
-          <label className="text-[10px] font-bold text-text-dim uppercase">{t("canvas.node_desc")}</label>
-          <input type="text" value={description} onChange={e => setDescription(e.target.value)}
-            className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand" />
+          <label className={labelClass}>{t("canvas.node_desc")}</label>
+          <input type="text" value={description} onChange={e => setDescription(e.target.value)} className={inputClass} />
         </div>
+
+        {/* Agent 绑定 */}
         <div>
-          <label className="text-[10px] font-bold text-text-dim uppercase">{t("canvas.assign_agent")}</label>
-          <select value={agentId} onChange={e => setAgentId(e.target.value)}
-            className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand">
+          <label className={labelClass}>{t("canvas.assign_agent")}</label>
+          <select value={agentId} onChange={e => setAgentId(e.target.value)} className={inputClass}>
             <option value="">{t("canvas.no_agent")}</option>
             {agents.map(a => (
               <option key={a.id} value={a.id}>{a.name}{a.state === "Running" ? "" : ` (${a.state})`}</option>
             ))}
           </select>
         </div>
-        {agentId && (
+
+        {/* Prompt */}
+        {hasAgent && (
           <div>
-            <label className="text-[10px] font-bold text-text-dim uppercase">
-              Prompt <span className="text-text-dim/50 normal-case font-normal">{"(supports {{input}})"}</span>
+            <label className={labelClass}>
+              Prompt <span className="text-text-dim/50 normal-case font-normal">{"({{input}} = prev output)"}</span>
             </label>
             <textarea value={prompt} onChange={e => setPrompt(e.target.value)} rows={3}
-              className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand resize-none" />
+              className={`${inputClass} resize-none`} />
           </div>
         )}
+
+        {/* 执行模式 */}
+        {hasAgent && (
+          <div>
+            <label className={labelClass}>{t("canvas.step_mode")}</label>
+            <select value={mode} onChange={e => setMode(e.target.value)} className={inputClass}>
+              <option value="sequential">{t("canvas.mode_sequential")}</option>
+              <option value="fan_out">{t("canvas.mode_fan_out")}</option>
+              <option value="collect">{t("canvas.mode_collect")}</option>
+              <option value="conditional">{t("canvas.mode_conditional")}</option>
+              <option value="loop">{t("canvas.mode_loop")}</option>
+            </select>
+          </div>
+        )}
+
+        {/* Conditional 专属字段 */}
+        {hasAgent && mode === "conditional" && (
+          <div>
+            <label className={labelClass}>{t("canvas.condition_text")}</label>
+            <input type="text" value={condition} onChange={e => setCondition(e.target.value)}
+              placeholder={t("canvas.condition_placeholder")} className={inputClass} />
+          </div>
+        )}
+
+        {/* Loop 专属字段 */}
+        {hasAgent && mode === "loop" && (
+          <>
+            <div>
+              <label className={labelClass}>{t("canvas.loop_until")}</label>
+              <input type="text" value={until} onChange={e => setUntil(e.target.value)}
+                placeholder={t("canvas.loop_until_placeholder")} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>{t("canvas.loop_max")}</label>
+              <input type="number" value={maxIterations} onChange={e => setMaxIterations(Number(e.target.value))}
+                min={1} max={100} className={inputClass} />
+            </div>
+          </>
+        )}
+
+        {/* 错误处理 */}
+        {hasAgent && (
+          <div>
+            <label className={labelClass}>{t("canvas.error_mode")}</label>
+            <select value={errorMode} onChange={e => setErrorMode(e.target.value)} className={inputClass}>
+              <option value="fail">{t("canvas.error_fail")}</option>
+              <option value="skip">{t("canvas.error_skip")}</option>
+              <option value="retry">{t("canvas.error_retry")}</option>
+            </select>
+          </div>
+        )}
+        {hasAgent && errorMode === "retry" && (
+          <div>
+            <label className={labelClass}>{t("canvas.max_retries")}</label>
+            <input type="number" value={maxRetries} onChange={e => setMaxRetries(Number(e.target.value))}
+              min={1} max={10} className={inputClass} />
+          </div>
+        )}
+
+        {/* 高级选项 */}
+        {hasAgent && (
+          <>
+            <div>
+              <label className={labelClass}>{t("canvas.timeout")}</label>
+              <input type="number" value={timeoutSecs} onChange={e => setTimeoutSecs(Number(e.target.value))}
+                min={10} max={3600} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>
+                {t("canvas.output_var")} <span className="text-text-dim/50 normal-case font-normal">{t("canvas.output_var_hint")}</span>
+              </label>
+              <input type="text" value={outputVar} onChange={e => setOutputVar(e.target.value)}
+                placeholder="e.g. research_result" className={inputClass} />
+            </div>
+          </>
+        )}
+
         <Button variant="primary" size="sm" className="w-full" onClick={handleSave}>
           {t("common.save")}
         </Button>
@@ -212,8 +322,8 @@ export function CanvasPage() {
 
   const nodeTypes = useMemo(() => ({ custom: (props: any) => <CustomNode {...props} t={t} /> }), [t]);
 
-  // 需要 agent 的节点类型
-  const AGENT_NODE_TYPES = new Set(["agent", "channel", "respond"]);
+  // 需要 agent 的节点类型（后端所有 step 都需要 agent）
+  const AGENT_NODE_TYPES = new Set(["agent", "channel", "respond", "condition", "loop", "parallel", "collect"]);
 
   // 加载模板数据（传入 agents 列表以便自动分配）
   const loadTemplate = useCallback((availableAgents: AgentItem[]) => {
@@ -295,9 +405,18 @@ export function CanvasPage() {
     if (nodes.length > 0) sessionStorage.setItem("canvasNodes", JSON.stringify(nodes));
   }, [nodes]);
 
+  // nodeType → 默认 stepMode 映射
+  const NODE_MODE_MAP: Record<string, string> = {
+    condition: "conditional",
+    loop: "loop",
+    parallel: "fan_out",
+    collect: "collect",
+  };
+
   // 添加节点
   const addNode = useCallback((type: string) => {
     const config = NODE_TYPES.find(n => n.type === type) || NODE_TYPES[10];
+    const defaultMode = NODE_MODE_MAP[type];
     const newNode: Node = {
       id: `${type}-${Date.now()}`,
       type: "custom",
@@ -306,6 +425,7 @@ export function CanvasPage() {
         label: t(config.labelKey),
         description: t(config.descKey),
         nodeType: type,
+        ...(defaultMode ? { stepMode: defaultMode } : {}),
       }
     };
     setNodes((nds) => [...nds, newNode]);
@@ -324,6 +444,13 @@ export function CanvasPage() {
     setEditingNode(node);
   }, []);
 
+  // 节点被删除时清理编辑面板
+  const onNodesDelete = useCallback((deleted: Node[]) => {
+    if (editingNode && deleted.some(n => n.id === editingNode.id)) {
+      setEditingNode(null);
+    }
+  }, [editingNode]);
+
   // 更新节点数据
   const handleNodeUpdate = useCallback((id: string, newData: any) => {
     setNodes(nds => nds.map(n => n.id === id ? { ...n, data: newData } : n));
@@ -336,13 +463,35 @@ export function CanvasPage() {
         const d = n.data as any;
         return d.agentId || d.agentName;
       })
-      .map((n, idx) => ({
-        name: (n.data as any).label || `Step ${idx + 1}`,
-        agent_id: (n.data as any).agentId,
-        agent_name: (n.data as any).agentName,
-        prompt: (n.data as any).prompt || (n.data as any).description || "",
-        timeout_secs: 60,
-      }));
+      .map((n, idx) => {
+        const d = n.data as any;
+        const step: any = {
+          name: d.label || `Step ${idx + 1}`,
+          agent_id: d.agentId,
+          agent_name: d.agentName,
+          prompt: d.prompt || d.description || "",
+          timeout_secs: d.timeoutSecs || 120,
+        };
+        // 执行模式
+        const mode = d.stepMode || "sequential";
+        if (mode === "conditional") {
+          step.mode = { conditional: { condition: d.condition || "" } };
+        } else if (mode === "loop") {
+          step.mode = { loop: { max_iterations: d.maxIterations || 5, until: d.until || "" } };
+        } else {
+          step.mode = mode;
+        }
+        // 错误模式
+        const errMode = d.errorMode || "fail";
+        if (errMode === "retry") {
+          step.error_mode = { retry: { max_retries: d.maxRetries || 3 } };
+        } else {
+          step.error_mode = errMode;
+        }
+        // 输出变量
+        if (d.outputVar) step.output_var = d.outputVar;
+        return step;
+      });
   }, []);
 
   const showError = useCallback((msg: string) => {
@@ -639,7 +788,7 @@ export function CanvasPage() {
             <div>
               <p className="text-[10px] font-bold text-warning uppercase mb-2">{t("canvas.logic")}</p>
               <div className="grid gap-2">
-                {NODE_TYPES.slice(5, 9).map(n => (
+                {NODE_TYPES.slice(5, 10).map(n => (
                   <button key={n.type} onClick={() => addNode(n.type)}
                     className="flex items-center gap-2 p-2 rounded-lg border border-border-subtle bg-surface hover:border-brand transition-all text-left">
                     <div className="h-7 w-7 rounded flex items-center justify-center text-white text-xs font-black" style={{ backgroundColor: n.color }}>{n.icon}</div>
@@ -651,7 +800,7 @@ export function CanvasPage() {
             <div>
               <p className="text-[10px] font-bold text-accent uppercase mb-2">{t("canvas.actions")}</p>
               <div className="grid gap-2">
-                {NODE_TYPES.slice(9).map(n => (
+                {NODE_TYPES.slice(10).map(n => (
                   <button key={n.type} onClick={() => addNode(n.type)}
                     className="flex items-center gap-2 p-2 rounded-lg border border-border-subtle bg-surface hover:border-brand transition-all text-left">
                     <div className="h-7 w-7 rounded flex items-center justify-center text-white text-xs font-black" style={{ backgroundColor: n.color }}>{n.icon}</div>
@@ -677,7 +826,9 @@ export function CanvasPage() {
           {/* 节点配置面板 */}
           {editingNode && !showRunInput && (
             <NodeConfigPanel node={editingNode} agents={agents}
-              onUpdate={handleNodeUpdate} onClose={() => setEditingNode(null)} t={t} />
+              onUpdate={handleNodeUpdate} onClose={() => setEditingNode(null)}
+              onDelete={(id) => { setNodes(nds => nds.filter(n => n.id !== id)); setEditingNode(null); }}
+              t={t} />
           )}
 
           {/* 运行输入弹窗 */}
@@ -713,7 +864,7 @@ export function CanvasPage() {
           <ReactFlow
             nodes={nodes} edges={edges}
             onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
-            onConnect={onConnect} onNodeClick={onNodeClick}
+            onConnect={onConnect} onNodeClick={onNodeClick} onNodesDelete={onNodesDelete}
             nodeTypes={nodeTypes} colorMode={theme}
             defaultViewport={{ x: 50, y: 80, zoom: 1 }}
             minZoom={0.1} maxZoom={2} className="bg-main/20"
