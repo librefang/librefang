@@ -15,7 +15,18 @@ interface ChatMessage {
   isStreaming?: boolean;
   error?: string;
   tokens?: { input?: number; output?: number };
+  cost_usd?: number;
+  memories_saved?: string[];
+  memories_used?: string[];
 }
+
+// Slash 命令
+const SLASH_COMMANDS = [
+  { cmd: "/help", desc: "Show available commands" },
+  { cmd: "/clear", desc: "Clear chat history" },
+  { cmd: "/agents", desc: "List available agents" },
+  { cmd: "/info", desc: "Show current agent info" },
+];
 
 // 流式打字机效果
 function Typewriter({ text, speed = 15 }: { text: string; speed?: number }) {
@@ -64,14 +75,46 @@ function useChatMessages(agentId: string | null) {
       .catch(() => {});
   }, [agentId]);
 
+  // Slash 命令提示
+  const [showSlash, setShowSlash] = useState(false);
+  const [slashFilter, setSlashFilter] = useState("");
+
   // 发送消息并实现流式输出
   const sendMessage = useCallback(async (content: string) => {
-    if (!agentId || !content.trim()) return;
+    if (!content.trim()) return;
+    const trimmed = content.trim();
+
+    // Slash 命令处理
+    if (trimmed.startsWith("/")) {
+      const sysMsg = (text: string) => {
+        setMessages(prev => [...prev,
+          { id: `user-${Date.now()}`, role: "user" as const, content: trimmed, timestamp: new Date() },
+          { id: `sys-${Date.now()}`, role: "system" as const, content: text, timestamp: new Date() }
+        ]);
+      };
+      if (trimmed === "/help") {
+        sysMsg(SLASH_COMMANDS.map(c => `**${c.cmd}** — ${c.desc}`).join("\n"));
+        return;
+      }
+      if (trimmed === "/clear") { setMessages([]); return; }
+      if (trimmed === "/agents") {
+        const names = agents.map(a => `- **${a.name}** (${a.state || "unknown"})`).join("\n");
+        sysMsg(names || "No agents available.");
+        return;
+      }
+      if (trimmed === "/info") {
+        const a = agents.find(a => a.id === agentId);
+        sysMsg(a ? `**${a.name}**\nModel: ${a.model_name || "-"}\nProvider: ${a.model_provider || "-"}\nState: ${a.state}` : "No agent selected.");
+        return;
+      }
+    }
+
+    if (!agentId) return;
 
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
       role: "user",
-      content: content.trim(),
+      content: trimmed,
       timestamp: new Date(),
     };
 
@@ -87,7 +130,7 @@ function useChatMessages(agentId: string | null) {
     setIsLoading(true);
 
     try {
-      const response = await sendAgentMessage(agentId, content);
+      const response = await sendAgentMessage(agentId, trimmed);
       const fullContent = response.response || "";
       let currentLength = 0;
 
@@ -101,7 +144,13 @@ function useChatMessages(agentId: string | null) {
           clearInterval(streamInterval);
           setMessages(prev => prev.map(m =>
             m.id === botMsg.id
-              ? { ...m, isStreaming: false, tokens: { output: response.output_tokens, input: response.input_tokens } }
+              ? {
+                  ...m, isStreaming: false,
+                  tokens: { output: response.output_tokens, input: response.input_tokens },
+                  cost_usd: response.cost_usd,
+                  memories_saved: response.memories_saved,
+                  memories_used: response.memories_used,
+                }
               : m
           ));
           setIsLoading(false);
@@ -114,7 +163,7 @@ function useChatMessages(agentId: string | null) {
       ));
       setIsLoading(false);
     }
-  }, [agentId]);
+  }, [agentId, agents]);
 
   const clearHistory = useCallback(() => setMessages([]), []);
 
@@ -181,10 +230,24 @@ function MessageBubble({ message }: { message: ChatMessage }) {
           <span>{message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
           {message.tokens?.output && !message.isStreaming && (
             <span className="px-1.5 py-0.5 rounded bg-brand/10 text-brand/70 font-mono text-[9px]">
-              {message.tokens.output} tokens
+              {message.tokens.output} tok
+            </span>
+          )}
+          {message.cost_usd !== undefined && message.cost_usd > 0 && (
+            <span className="px-1.5 py-0.5 rounded bg-success/10 text-success/70 font-mono text-[9px]">
+              ${message.cost_usd.toFixed(4)}
             </span>
           )}
         </div>
+        {message.memories_saved && message.memories_saved.length > 0 && (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {message.memories_saved.map((m, i) => (
+              <span key={i} className="text-[8px] px-1.5 py-0.5 rounded bg-warning/10 text-warning/70 truncate max-w-[200px]">
+                {m}
+              </span>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -210,8 +273,24 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
     }
   }, [message]);
 
+  const showingSlash = message.startsWith("/") && !message.includes(" ");
+  const filteredCmds = showingSlash ? SLASH_COMMANDS.filter(c => c.cmd.startsWith(message)) : [];
+
   return (
     <form onSubmit={handleSubmit} className="space-y-2">
+      {/* Slash 命令补全 */}
+      {showingSlash && filteredCmds.length > 0 && (
+        <div className="rounded-xl border border-border-subtle bg-surface shadow-lg p-1 mb-1">
+          {filteredCmds.map(c => (
+            <button key={c.cmd} type="button"
+              onClick={() => { setMessage(c.cmd); onSend(c.cmd); setMessage(""); }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-main text-left transition-colors">
+              <span className="text-xs font-mono font-bold text-brand">{c.cmd}</span>
+              <span className="text-[10px] text-text-dim">{c.desc}</span>
+            </button>
+          ))}
+        </div>
+      )}
       <div className="flex gap-3 items-end">
         <div className="flex-1">
           <textarea
