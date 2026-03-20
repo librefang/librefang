@@ -41,6 +41,9 @@ const overviewRoute = createRoute({
 const canvasRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/canvas",
+  validateSearch: (search: Record<string, unknown>) => ({
+    t: search.t as number | undefined
+  }),
   component: CanvasPage
 });
 

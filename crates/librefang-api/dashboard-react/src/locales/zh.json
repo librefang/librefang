@@ -1,4 +1,5 @@
 {
+  "_lang": "zh",
   "nav": {
     "core": "核心", "automation": "自动化", "resources": "资源", "system": "系统",
     "overview": "概览", "canvas": "画布", "chat": "对话", "sessions": "会话", "approvals": "审批",
@@ -9,7 +10,7 @@
   "common": {
     "refresh": "刷新", "status": "状态", "daemon_online": "守护进程在线", "infrastructure": "基础设施",
     "toggle_theme": "切换主题", "change_language": "切换语言", "delete": "删除", "cancel": "取消",
-    "save": "保存", "saving": "保存中...", "edit": "编辑", "confirm": "确认", "loading": "加载中...", "search": "搜索",
+    "save": "保存", "saving": "保存中...", "edit": "编辑", "confirm": "确认", "loading": "加载中...", "search": "搜索", "back": "返回",
     "actions": "操作", "clear": "清空", "load": "加载", "active": "活跃", "idle": "空闲", "running": "运行中",
     "online": "在线", "offline": "离线", "setup": "需配置", "ok": "正常", "config": "配置", "interact": "交互",
     "never": "从不", "unknown": "未知", "no_data": "暂无数据", "resume": "恢复", "close": "关闭",
@@ -103,38 +104,62 @@
     "total_channels": "总通道数", "connected": "已连接", "events_today": "今日事件", "uptime": "可用率",
     "events": "事件流", "events_desc": "实时消息事件。", "connections": "连接"
   },
+  "canvas": {
+    "title": "流程设计器", "subtitle": "使用可视化逻辑流设计自主智能体行为。", "node_library": "节点库",
+    "triggers": "触发器", "logic": "逻辑", "actions": "动作", "clear_confirm": "确定要清空画布吗？",
+    "no_agent_steps": "没有已分配智能体的节点。点击节点可绑定智能体。", "name_required": "请输入工作流名称。",
+    "node_config": "节点配置", "node_label": "名称", "node_desc": "描述", "assign_agent": "绑定智能体", "no_agent": "-- 不绑定 --", "agent_steps": "个智能体步骤", "run_result": "运行结果",
+    "run_input_title": "运行工作流", "run_input_hint": "输入内容会传给第一个步骤（作为 {{input}}）。留空则无初始输入。", "run_input_placeholder": "例如：请翻译以下内容...", "run_now": "运行", "to_run": "运行",
+    "node_types": {
+      "start": "开始", "start_desc": "工作流入口", "end": "结束", "end_desc": "工作流终止",
+      "schedule": "定时", "schedule_desc": "时间触发器", "webhook": "Webhook", "webhook_desc": "HTTP webhook 触发器",
+      "channel": "通道", "channel_desc": "发送到通道", "condition": "条件", "condition_desc": "分支逻辑",
+      "loop": "循环", "loop_desc": "重复执行", "parallel": "并行", "parallel_desc": "并行执行",
+      "wait": "等待", "wait_desc": "延迟/等待", "respond": "响应", "respond_desc": "发送响应",
+      "agent": "智能体", "agent_desc": "运行智能体任务"
+    },
+    "nodes": {
+      "start": "开始", "start_desc": "工作流入口",
+      "end": "结束", "end_desc": "工作流终止",
+      "schedule": "定时", "schedule_desc": "时间触发器",
+      "webhook": "Webhook", "webhook_desc": "HTTP webhook 触发器",
+      "channel": "通道", "channel_desc": "发送到通道",
+      "condition": "条件", "condition_desc": "分支逻辑",
+      "loop": "循环", "loop_desc": "重复执行",
+      "parallel": "并行", "parallel_desc": "并行执行",
+      "wait": "等待", "wait_desc": "延迟/等待",
+      "respond": "响应", "respond_desc": "发送响应",
+      "agent": "智能体", "agent_desc": "运行智能体任务"
+    }
+  },
   "workflows": {
     "title": "工作流", "subtitle": "自动化枢纽。", "all_workflows": "所有工作流", "run_workflow": "运行工作流",
     "select_workflow": "选择工作流", "recent_runs": "最近运行记录", "no_runs": "暂无运行记录",
     "select_workflow_hint": "请选择一个工作流以查看记录", "steps_count": "{{count}} 步", "automation_hub": "自动化枢纽",
     "templates": "模板", "use_template": "使用模板", "create_blank": "创建空白工作流",
+    "new_workflow": "新建工作流", "workflow_name": "工作流名称", "description": "描述", "delete_confirm": "确定要删除此工作流吗？", "open_workflows": "工作流列表", "untitled_workflow": "未命名工作流",
     "template_details": {
-      "daily_summary": "每日总结", "daily_summary_desc": "自动汇总每日活动",
-      "news_digest": "新闻摘要", "news_digest_desc": "获取并总结最新新闻",
-      "system_health": "系统健康检查", "system_health_desc": "监控系统状态并发送告警",
-      "multi_agent": "多智能体协作", "multi_agent_desc": "协调多个智能体完成复杂任务"
+      "content_pipeline": "内容创作流水线", "content_pipeline_desc": "调研 → 写作 → 编辑，产出精品文章",
+      "translate_polish": "翻译润色", "translate_polish_desc": "自动识别语言，翻译并润色",
+      "brainstorm": "头脑风暴", "brainstorm_desc": "发散创意 → 评估打分 → 输出行动计划",
+      "weekly_report": "周报生成器", "weekly_report_desc": "把零散笔记变成专业周报"
     },
     "nodes": {
-      "daily": "每日触发", "daily_desc": "每天午夜执行",
-      "summarizer": "总结器", "summarizer_desc": "创建每日总结",
-      "notify": "通知", "notify_desc": "发送通知",
       "complete": "完成", "complete_desc": "工作流完成",
-      "scheduled": "定时执行", "scheduled_desc": "按计划运行",
-      "fetch": "获取数据", "fetch_desc": "获取外部数据",
-      "analyze": "分析", "analyze_desc": "分析处理",
-      "deliver": "发送结果", "deliver_desc": "发送结果",
-      "done": "已完成", "done_desc": "已完成",
-      "trigger": "触发器", "trigger_desc": "启动工作流",
-      "check": "检查", "check_desc": "检查状态",
-      "healthy": "条件判断", "healthy_desc": "检查健康状态",
-      "alert": "告警", "alert_desc": "发送告警",
-      "ok": "正常", "ok_desc": "一切正常",
-      "input": "Webhook", "input_desc": "接收输入",
-      "parallel": "并行执行", "parallel_desc": "并行运行",
-      "researcher": "研究员", "researcher_desc": "收集信息",
-      "writer": "写作者", "writer_desc": "创建内容",
-      "coordinator": "协调器", "coordinator_desc": "合并结果",
-      "response": "响应", "response_desc": "发送响应"
+      "topic_input": "输入主题", "topic_input_desc": "输入你的主题",
+      "researcher": "调研员", "researcher_desc": "深度调研主题",
+      "writer": "写作者", "writer_desc": "撰写结构化文章",
+      "editor": "编辑", "editor_desc": "润色定稿",
+      "source_text": "原文", "source_text_desc": "粘贴待翻译文本",
+      "translator": "翻译", "translator_desc": "自动识别并翻译",
+      "reviewer": "审校", "reviewer_desc": "审查翻译质量",
+      "challenge": "挑战", "challenge_desc": "描述你的挑战",
+      "idea_gen": "创意生成", "idea_gen_desc": "生成10个创意方案",
+      "evaluator": "评估", "evaluator_desc": "打分并排序",
+      "action_plan": "行动计划", "action_plan_desc": "制定实施方案",
+      "work_notes": "工作笔记", "work_notes_desc": "粘贴原始笔记",
+      "organizer": "整理", "organizer_desc": "分类和结构化",
+      "report_writer": "周报撰写", "report_writer_desc": "生成专业周报"
     }
   },
   "scheduler": {
@@ -172,17 +197,6 @@
   "approvals": {
     "title": "审批", "subtitle": "在执行前审查并授权关键操作。", "pending_review": "等待审查", "approve": "批准", "reject": "拒绝",
     "queue_clear": "队列清空", "queue_clear_desc": "没有需要您审批的操作。"
-  },
-  "canvas": {
-    "title": "流程设计器", "subtitle": "使用可视化逻辑流设计自主智能体行为。", "node_library": "节点库", "triggers": "触发器",
-    "logic_actions": "逻辑与动作", "save_workflow": "保存工作流", "clear_confirm": "您确定要清空画布吗？",
-    "logic": "逻辑", "actions": "动作",
-    "nodes": {
-      "start": "开始", "start_desc": "工作流起点", "end": "结束", "end_desc": "工作流终点", "schedule": "调度", "schedule_desc": "按计划运行",
-      "webhook": "钩子", "webhook_desc": "HTTP Webhook", "channel": "通道", "channel_desc": "消息触发器", "condition": "条件", "condition_desc": "分支逻辑",
-      "loop": "循环", "loop_desc": "遍历项目", "parallel": "并行", "parallel_desc": "并行分支", "wait": "等待", "wait_desc": "等待时长",
-      "respond": "响应", "respond_desc": "发送响应", "agent": "智能体", "agent_desc": "运行智能体"
-    }
   },
   "wizard": {
     "welcome": "欢迎", "step_1": "第一步", "connect_provider": "连接供应商"

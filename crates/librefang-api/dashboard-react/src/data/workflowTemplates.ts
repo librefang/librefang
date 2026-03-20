@@ -8,214 +8,184 @@ export interface WorkflowTemplate {
   icon: string;
   nodes: Node[];
   edges: Edge[];
-  steps?: Array<{ name: string; prompt: string }>;
 }
 
 export const workflowTemplates: WorkflowTemplate[] = [
+  // ── 1. 内容创作流水线 ──────────────────────────────
   {
-    id: "daily-summary",
-    name: "workflows.template_details.daily_summary",
-    description: "workflows.template_details.daily_summary_desc",
-    category: "automation",
-    icon: "📅",
+    id: "content-pipeline",
+    name: "workflows.template_details.content_pipeline",
+    description: "workflows.template_details.content_pipeline_desc",
+    category: "creation",
+    icon: "FileText",
     nodes: [
       {
-        id: "start-1",
-        type: "custom",
-        position: { x: 100, y: 100 },
-        data: { label: "workflows.nodes.daily", nodeType: "schedule", description: "workflows.nodes.daily_desc" }
+        id: "n1", type: "custom", position: { x: 50, y: 0 },
+        data: { label: "workflows.nodes.topic_input", nodeType: "start", description: "workflows.nodes.topic_input_desc" }
       },
       {
-        id: "agent-1",
-        type: "custom",
-        position: { x: 100, y: 250 },
-        data: { label: "workflows.nodes.summarizer", nodeType: "agent", description: "workflows.nodes.summarizer_desc" }
+        id: "n2", type: "custom", position: { x: 50, y: 80 },
+        data: {
+          label: "workflows.nodes.researcher", nodeType: "agent",
+          description: "workflows.nodes.researcher_desc",
+          prompt: "You are a research assistant. Research the following topic thoroughly and provide: 1) Background and context 2) Key facts and data points 3) Different perspectives on the topic 4) Recent developments. Be specific and detailed.\n\nTopic: {{input}}"
+        }
       },
       {
-        id: "channel-1",
-        type: "custom",
-        position: { x: 100, y: 400 },
-        data: { label: "workflows.nodes.notify", nodeType: "channel", description: "workflows.nodes.notify_desc" }
+        id: "n3", type: "custom", position: { x: 50, y: 160 },
+        data: {
+          label: "workflows.nodes.writer", nodeType: "agent",
+          description: "workflows.nodes.writer_desc",
+          prompt: "You are a professional writer. Based on the research below, write a well-structured article (800-1200 words). Include: a compelling headline, an engaging introduction, clear sections with subheadings, and a strong conclusion. Write in a clear, accessible style.\n\nResearch:\n{{input}}"
+        }
       },
       {
-        id: "end-1",
-        type: "custom",
-        position: { x: 100, y: 550 },
+        id: "n4", type: "custom", position: { x: 50, y: 240 },
+        data: {
+          label: "workflows.nodes.editor", nodeType: "agent",
+          description: "workflows.nodes.editor_desc",
+          prompt: "You are a senior editor. Review and polish the following article. Fix any grammar issues, improve flow, tighten wordy sentences, and ensure factual consistency. Output the final polished version only, no commentary.\n\nDraft:\n{{input}}"
+        }
+      },
+      {
+        id: "n5", type: "custom", position: { x: 50, y: 320 },
         data: { label: "workflows.nodes.complete", nodeType: "end", description: "workflows.nodes.complete_desc" }
       }
     ],
     edges: [
-      { id: "e1", source: "start-1", target: "agent-1" },
-      { id: "e2", source: "agent-1", target: "channel-1" },
-      { id: "e3", source: "channel-1", target: "end-1" }
-    ],
-    steps: [
-      { name: "trigger", prompt: "Run daily at midnight" },
-      { name: "collect", prompt: "Gather all events and activities from the past day" },
-      { name: "summarize", prompt: "Create a concise summary of key events" },
-      { name: "notify", prompt: "Send summary to configured notification channel" }
+      { id: "e1", source: "n1", target: "n2" },
+      { id: "e2", source: "n2", target: "n3" },
+      { id: "e3", source: "n3", target: "n4" },
+      { id: "e4", source: "n4", target: "n5" }
     ]
   },
+
+  // ── 2. 翻译润色 ──────────────────────────────────
   {
-    id: "news-digest",
-    name: "workflows.template_details.news_digest",
-    description: "workflows.template_details.news_digest_desc",
-    category: "information",
-    icon: "📰",
+    id: "translate-polish",
+    name: "workflows.template_details.translate_polish",
+    description: "workflows.template_details.translate_polish_desc",
+    category: "language",
+    icon: "Bot",
     nodes: [
       {
-        id: "start-2",
-        type: "custom",
-        position: { x: 100, y: 100 },
-        data: { label: "workflows.nodes.scheduled", nodeType: "schedule", description: "workflows.nodes.scheduled_desc" }
+        id: "n1", type: "custom", position: { x: 50, y: 0 },
+        data: { label: "workflows.nodes.source_text", nodeType: "start", description: "workflows.nodes.source_text_desc" }
       },
       {
-        id: "webhook-1",
-        type: "custom",
-        position: { x: 100, y: 250 },
-        data: { label: "workflows.nodes.fetch", nodeType: "webhook", description: "workflows.nodes.fetch_desc" }
+        id: "n2", type: "custom", position: { x: 50, y: 80 },
+        data: {
+          label: "workflows.nodes.translator", nodeType: "agent",
+          description: "workflows.nodes.translator_desc",
+          prompt: "You are an expert translator. Translate the following text. Auto-detect the source language: if it's Chinese, translate to English; if it's English, translate to Chinese; for other languages, translate to both Chinese and English. Preserve the original tone, style, and formatting.\n\nText:\n{{input}}"
+        }
       },
       {
-        id: "agent-2",
-        type: "custom",
-        position: { x: 100, y: 400 },
-        data: { label: "workflows.nodes.analyze", nodeType: "agent", description: "workflows.nodes.analyze_desc" }
+        id: "n3", type: "custom", position: { x: 50, y: 160 },
+        data: {
+          label: "workflows.nodes.reviewer", nodeType: "agent",
+          description: "workflows.nodes.reviewer_desc",
+          prompt: "You are a bilingual language expert. Review the following translation for accuracy and naturalness. Check for: 1) Mistranslations or meaning shifts 2) Awkward phrasing that sounds translated 3) Cultural context issues. Output the improved final translation only.\n\nTranslation to review:\n{{input}}"
+        }
       },
       {
-        id: "channel-2",
-        type: "custom",
-        position: { x: 100, y: 550 },
-        data: { label: "workflows.nodes.deliver", nodeType: "channel", description: "workflows.nodes.deliver_desc" }
-      },
-      {
-        id: "end-2",
-        type: "custom",
-        position: { x: 100, y: 700 },
-        data: { label: "workflows.nodes.done", nodeType: "end", description: "workflows.nodes.done_desc" }
+        id: "n4", type: "custom", position: { x: 50, y: 240 },
+        data: { label: "workflows.nodes.complete", nodeType: "end", description: "workflows.nodes.complete_desc" }
       }
     ],
     edges: [
-      { id: "e1", source: "start-2", target: "webhook-1" },
-      { id: "e2", source: "webhook-1", target: "agent-2" },
-      { id: "e3", source: "agent-2", target: "channel-2" },
-      { id: "e4", source: "channel-2", target: "end-2" }
-    ],
-    steps: [
-      { name: "schedule", prompt: "Run every 6 hours" },
-      { name: "fetch", prompt: "Fetch latest news from configured sources" },
-      { name: "analyze", prompt: "Analyze and extract key information" },
-      { name: "deliver", prompt: "Format and send digest to channel" }
+      { id: "e1", source: "n1", target: "n2" },
+      { id: "e2", source: "n2", target: "n3" },
+      { id: "e3", source: "n3", target: "n4" }
     ]
   },
+
+  // ── 3. 头脑风暴 ──────────────────────────────────
   {
-    id: "system-health",
-    name: "workflows.template_details.system_health",
-    description: "workflows.template_details.system_health_desc",
-    category: "monitoring",
-    icon: "🩺",
+    id: "brainstorm",
+    name: "workflows.template_details.brainstorm",
+    description: "workflows.template_details.brainstorm_desc",
+    category: "thinking",
+    icon: "Activity",
     nodes: [
       {
-        id: "start-3",
-        type: "custom",
-        position: { x: 100, y: 100 },
-        data: { label: "workflows.nodes.trigger", nodeType: "schedule", description: "workflows.nodes.trigger_desc" }
+        id: "n1", type: "custom", position: { x: 50, y: 0 },
+        data: { label: "workflows.nodes.challenge", nodeType: "start", description: "workflows.nodes.challenge_desc" }
       },
       {
-        id: "agent-3",
-        type: "custom",
-        position: { x: 100, y: 250 },
-        data: { label: "workflows.nodes.check", nodeType: "agent", description: "workflows.nodes.check_desc" }
+        id: "n2", type: "custom", position: { x: 50, y: 80 },
+        data: {
+          label: "workflows.nodes.idea_gen", nodeType: "agent",
+          description: "workflows.nodes.idea_gen_desc",
+          prompt: "You are a creative strategist. For the following challenge, generate 10 diverse solution ideas. Include: 3 conventional approaches, 4 creative approaches, and 3 bold/unconventional approaches. For each idea, give a one-line title and a 2-sentence explanation.\n\nChallenge: {{input}}"
+        }
       },
       {
-        id: "condition-1",
-        type: "custom",
-        position: { x: 100, y: 400 },
-        data: { label: "workflows.nodes.healthy", nodeType: "condition", description: "workflows.nodes.healthy_desc" }
+        id: "n3", type: "custom", position: { x: 50, y: 160 },
+        data: {
+          label: "workflows.nodes.evaluator", nodeType: "agent",
+          description: "workflows.nodes.evaluator_desc",
+          prompt: "You are a critical analyst. Evaluate each idea below on three criteria: Feasibility (1-5), Impact (1-5), Originality (1-5). Pick the top 3 ideas and for each provide: why it's promising, key risks, and concrete first steps to implement it.\n\nIdeas:\n{{input}}"
+        }
       },
       {
-        id: "channel-3",
-        type: "custom",
-        position: { x: 50, y: 550 },
-        data: { label: "workflows.nodes.alert", nodeType: "channel", description: "workflows.nodes.alert_desc" }
+        id: "n4", type: "custom", position: { x: 50, y: 240 },
+        data: {
+          label: "workflows.nodes.action_plan", nodeType: "agent",
+          description: "workflows.nodes.action_plan_desc",
+          prompt: "You are a project planner. Take the top-rated idea below and create a concrete action plan: 1) Clear goal statement 2) 5-step implementation roadmap with timelines 3) Required resources 4) Success metrics 5) Potential obstacles and mitigation strategies.\n\nEvaluation:\n{{input}}"
+        }
       },
       {
-        id: "end-3",
-        type: "custom",
-        position: { x: 200, y: 550 },
-        data: { label: "workflows.nodes.ok", nodeType: "end", description: "workflows.nodes.ok_desc" }
+        id: "n5", type: "custom", position: { x: 50, y: 320 },
+        data: { label: "workflows.nodes.complete", nodeType: "end", description: "workflows.nodes.complete_desc" }
       }
     ],
     edges: [
-      { id: "e1", source: "start-3", target: "agent-3" },
-      { id: "e2", source: "agent-3", target: "condition-1" },
-      { id: "e3", source: "condition-1", target: "channel-3", label: "Alert" },
-      { id: "e4", source: "condition-1", target: "end-3", label: "OK" }
-    ],
-    steps: [
-      { name: "trigger", prompt: "Run every hour" },
-      { name: "check", prompt: "Query system status, memory, CPU, agents" },
-      { name: "condition", prompt: "Check if all metrics are healthy" },
-      { name: "alert", prompt: "Send alert if any metric is critical" }
+      { id: "e1", source: "n1", target: "n2" },
+      { id: "e2", source: "n2", target: "n3" },
+      { id: "e3", source: "n3", target: "n4" },
+      { id: "e4", source: "n4", target: "n5" }
     ]
   },
+
+  // ── 4. 周报生成器 ─────────────────────────────────
   {
-    id: "multi-agent",
-    name: "workflows.template_details.multi_agent",
-    description: "workflows.template_details.multi_agent_desc",
-    category: "advanced",
-    icon: "🤖",
+    id: "weekly-report",
+    name: "workflows.template_details.weekly_report",
+    description: "workflows.template_details.weekly_report_desc",
+    category: "business",
+    icon: "Calendar",
     nodes: [
       {
-        id: "start-4",
-        type: "custom",
-        position: { x: 200, y: 50 },
-        data: { label: "workflows.nodes.input", nodeType: "webhook", description: "workflows.nodes.input_desc" }
+        id: "n1", type: "custom", position: { x: 50, y: 0 },
+        data: { label: "workflows.nodes.work_notes", nodeType: "start", description: "workflows.nodes.work_notes_desc" }
       },
       {
-        id: "parallel-1",
-        type: "custom",
-        position: { x: 200, y: 200 },
-        data: { label: "workflows.nodes.parallel", nodeType: "parallel", description: "workflows.nodes.parallel_desc" }
+        id: "n2", type: "custom", position: { x: 50, y: 80 },
+        data: {
+          label: "workflows.nodes.organizer", nodeType: "agent",
+          description: "workflows.nodes.organizer_desc",
+          prompt: "You are an executive assistant. Organize the following raw work notes into structured categories: 1) Completed tasks 2) In-progress items 3) Blockers/Issues 4) Key decisions made. Extract and list each item clearly, even if the notes are messy.\n\nRaw notes:\n{{input}}"
+        }
       },
       {
-        id: "agent-4a",
-        type: "custom",
-        position: { x: 50, y: 350 },
-        data: { label: "workflows.nodes.researcher", nodeType: "agent", description: "workflows.nodes.researcher_desc" }
+        id: "n3", type: "custom", position: { x: 50, y: 160 },
+        data: {
+          label: "workflows.nodes.report_writer", nodeType: "agent",
+          description: "workflows.nodes.report_writer_desc",
+          prompt: "You are a professional report writer. Transform the organized items below into a polished weekly report with these sections:\n\n## This Week's Highlights\n(top 3 achievements)\n\n## Progress Details\n(organized by project/area)\n\n## Challenges & Solutions\n(any blockers and how they were addressed)\n\n## Next Week's Priorities\n(based on in-progress items)\n\nKeep it concise and professional.\n\nOrganized items:\n{{input}}"
+        }
       },
       {
-        id: "agent-4b",
-        type: "custom",
-        position: { x: 350, y: 350 },
-        data: { label: "workflows.nodes.writer", nodeType: "agent", description: "workflows.nodes.writer_desc" }
-      },
-      {
-        id: "agent-5",
-        type: "custom",
-        position: { x: 200, y: 500 },
-        data: { label: "workflows.nodes.coordinator", nodeType: "agent", description: "workflows.nodes.coordinator_desc" }
-      },
-      {
-        id: "end-4",
-        type: "custom",
-        position: { x: 200, y: 650 },
-        data: { label: "workflows.nodes.response", nodeType: "end", description: "workflows.nodes.response_desc" }
+        id: "n4", type: "custom", position: { x: 50, y: 240 },
+        data: { label: "workflows.nodes.complete", nodeType: "end", description: "workflows.nodes.complete_desc" }
       }
     ],
     edges: [
-      { id: "e1", source: "start-4", target: "parallel-1" },
-      { id: "e2", source: "parallel-1", target: "agent-4a" },
-      { id: "e3", source: "parallel-1", target: "agent-4b" },
-      { id: "e4", source: "agent-4a", target: "agent-5" },
-      { id: "e5", source: "agent-4b", target: "agent-5" },
-      { id: "e6", source: "agent-5", target: "end-4" }
-    ],
-    steps: [
-      { name: "input", prompt: "Receive task via webhook" },
-      { name: "parallel", prompt: "Execute multiple agents in parallel" },
-      { name: "research", prompt: "Research agent gathers information" },
-      { name: "write", prompt: "Writer agent creates content" },
-      { name: "coordinate", prompt: "Coordinator merges results" }
+      { id: "e1", source: "n1", target: "n2" },
+      { id: "e2", source: "n2", target: "n3" },
+      { id: "e3", source: "n3", target: "n4" }
     ]
   }
 ];

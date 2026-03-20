@@ -5,7 +5,7 @@ import type { DashboardSnapshot, HealthCheck } from "../api";
 import { loadDashboardSnapshot } from "../api";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
-import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, Settings, User, Info, Clock, CheckCircle, Shield, Activity, Sparkles, TrendingUp, Target, Calendar } from "lucide-react";
+import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, User, Clock, Shield, Sparkles, Calendar } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -26,7 +26,6 @@ export function OverviewPage() {
   const providersReady = snapshot?.providers?.filter(p => p.auth_status === "configured").length ?? 0;
   const providersTotal = snapshot?.providers?.length ?? 0;
   const channelsReady = snapshot?.channels?.filter(c => c.configured).length ?? 0;
-  const channelsTotal = snapshot?.channels?.length ?? 0;
   const skillsCount = snapshot?.skillCount ?? 0;
   const sessionsCount = snapshot?.status?.session_count ?? 0;
 
@@ -152,8 +151,8 @@ export function OverviewPage() {
               className="cursor-pointer relative overflow-hidden group"
               onClick={() => navigate({ to: stat.link as any })}
             >
-              <div className={`absolute -right-4 -top-4 text-${stat.color}/5 transition-transform group-hover:scale-110 group-hover:text-${stat.color}/10`}>
-                <stat.icon className="h-24 w-24" />
+              <div className="absolute right-2 top-2 text-brand/30 transition-transform group-hover:scale-110 group-hover:text-brand/40">
+                <stat.icon className="h-5 w-5" />
               </div>
               <p className="text-[10px] font-bold uppercase tracking-widest text-text-dim relative z-10">{stat.title}</p>
               <div className="mt-2 flex items-baseline gap-2 relative z-10">

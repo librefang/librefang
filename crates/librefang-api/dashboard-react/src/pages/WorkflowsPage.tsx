@@ -1,29 +1,37 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useNavigate } from "@tanstack/react-router";
 import {
   createWorkflow,
   deleteWorkflow,
   listWorkflowRuns,
   listWorkflows,
   runWorkflow,
+  getWorkflow,
 } from "../api";
-import { WorkflowEditor } from "../components/WorkflowEditor";
 import { workflowTemplates, type WorkflowTemplate } from "../data/workflowTemplates";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
-import { Layers, RefreshCw, Trash2, FilePlus, Sparkles } from "lucide-react";
+import { Layers, RefreshCw, Trash2, FilePlus, Sparkles, Calendar, FileText, Activity, Bot } from "lucide-react";
+
+const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
+  Calendar,
+  FileText,
+  Activity,
+  Bot,
+};
 
 const REFRESH_MS = 30000;
 
 export function WorkflowsPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [isEditing, setIsEditing] = useState(false);
   const [showTemplates, setShowTemplates] = useState(false);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>("");
   const [runInput, setRunInput] = useState("");
-  const [initialData, setInitialData] = useState<{ nodes: any[]; edges: any[] } | undefined>();
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const workflowsQuery = useQuery({ queryKey: ["workflows", "list"], queryFn: listWorkflows, refetchInterval: REFRESH_MS });
   const runsQuery = useQuery({ queryKey: ["workflows", "runs", selectedWorkflowId], queryFn: () => listWorkflowRuns(selectedWorkflowId), enabled: Boolean(selectedWorkflowId) });
@@ -43,7 +51,11 @@ export function WorkflowsPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm(t("common.confirm"))) return;
+    if (confirmDeleteId !== id) {
+      setConfirmDeleteId(id);
+      return;
+    }
+    setConfirmDeleteId(null);
     try { await deleteMutation.mutateAsync(id); await queryClient.invalidateQueries({ queryKey: ["workflows"] }); } catch { /* ignore */ }
   };
 
@@ -60,14 +72,15 @@ export function WorkflowsPage() {
   };
 
   const handleNewWorkflow = (template?: WorkflowTemplate) => {
-    setInitialData(template ? { nodes: template.nodes, edges: template.edges } : undefined);
-    setShowTemplates(false);
-    setIsEditing(true);
+    // 清除旧的画布缓存，确保新模板能正确加载
+    sessionStorage.removeItem("canvasNodes");
+    if (template) {
+      sessionStorage.setItem("workflowTemplate", JSON.stringify({ nodes: template.nodes, edges: template.edges, name: template.name, description: template.description }));
+    } else {
+      sessionStorage.removeItem("workflowTemplate");
+    }
+    navigate({ to: "/canvas", search: { t: Date.now() } });
   };
-
-  if (isEditing) {
-    return <WorkflowEditor initialNodes={initialData?.nodes} initialEdges={initialData?.edges} onClose={() => { setIsEditing(false); setInitialData(undefined); }} onSave={() => { setIsEditing(false); setInitialData(undefined); }} />;
-  }
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -100,17 +113,20 @@ export function WorkflowsPage() {
                   </button>
                 </div>
                 <div className="p-2 max-h-64 overflow-y-auto">
-                  {workflowTemplates.map(template => (
+                  {workflowTemplates.map(template => {
+                    const IconComponent = iconMap[template.icon];
+                    return (
                     <button key={template.id} onClick={() => handleNewWorkflow(template)} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-main transition-colors text-left mb-1">
-                      <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-brand/20 to-brand/5 flex items-center justify-center text-lg">
-                        {template.icon}
+                      <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-brand/20 to-brand/5 flex items-center justify-center">
+                        {IconComponent ? <IconComponent className="h-4 w-4 text-brand" /> : template.icon}
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className="text-xs font-bold truncate">{t(template.name)}</p>
                         <p className="text-[10px] text-text-dim truncate">{t(template.description)}</p>
                       </div>
                     </button>
-                  ))}
+                  );
+                })}
                 </div>
                 <div className="p-2 border-t border-border-subtle">
                   <button onClick={() => handleUseTemplate(workflowTemplates[0])} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-brand/10 text-brand transition-colors text-left">
@@ -133,7 +149,42 @@ export function WorkflowsPage() {
           <h2 className="text-lg font-black tracking-tight mb-6">{t("workflows.all_workflows")}</h2>
           <div className="grid gap-3 sm:grid-cols-2">
             {workflows.map(wf => (
-              <Card key={wf.id} hover padding="sm" className={`cursor-pointer ${selectedWorkflowId === wf.id ? 'border-brand' : ''}`} onClick={() => setSelectedWorkflowId(wf.id)}>
+              <Card key={wf.id} hover padding="sm" className={`cursor-pointer ${selectedWorkflowId === wf.id ? 'border-brand' : ''}`}
+                onClick={() => setSelectedWorkflowId(wf.id)}
+                onDoubleClick={async () => {
+                  try {
+                    const detail = await getWorkflow(wf.id);
+                    let nodes, edges;
+                    // 优先从后端 layout 恢复完整画布
+                    if (detail.layout?.nodes) {
+                      nodes = detail.layout.nodes;
+                      edges = detail.layout.edges || [];
+                    } else {
+                      // 降级：从 steps 重建
+                      const steps = Array.isArray(detail.steps) ? detail.steps : [];
+                      nodes = steps.map((s: any, idx: number) => {
+                        const fullPrompt = s.prompt_template || s.prompt || "";
+                        return {
+                          id: `node-${idx}`, type: "custom", position: { x: 50, y: idx * 80 },
+                          data: {
+                            label: s.name,
+                            description: fullPrompt.length > 40 ? fullPrompt.slice(0, 40) + "..." : fullPrompt,
+                            prompt: fullPrompt,
+                            nodeType: "agent",
+                            agentId: s.agent?.agent_id || s.agent?.id,
+                            agentName: s.agent?.name || s.agent_name,
+                          }
+                        };
+                      });
+                      edges = nodes.slice(0, -1).map((_: any, i: number) => ({
+                        id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}`
+                      }));
+                    }
+                    sessionStorage.removeItem("canvasNodes");
+                    sessionStorage.setItem("workflowTemplate", JSON.stringify({ nodes, edges, name: detail.name, description: detail.description, workflowId: wf.id }));
+                    navigate({ to: "/canvas", search: { t: Date.now() } });
+                  } catch (e) { console.error("Failed to load workflow:", e); }
+                }}>
                 <div className="flex justify-between items-start">
                   <div className="min-w-0 flex-1">
                     <h3 className="text-sm font-black truncate group-hover:text-brand transition-colors">{wf.name}</h3>
@@ -144,9 +195,16 @@ export function WorkflowsPage() {
                       <span>{t("common.created")}: {new Date(wf.created_at || "").toLocaleDateString()}</span>
                     </div>
                   </div>
-                  <button onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }} className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-text-dim hover:text-error transition-all">
-                    <Trash2 className="h-4 w-4" />
-                  </button>
+                  {confirmDeleteId === wf.id ? (
+                    <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+                      <button onClick={() => handleDelete(wf.id)} className="px-2 py-0.5 rounded-md bg-error text-white text-[10px] font-bold hover:bg-error/80">{t("common.confirm")}</button>
+                      <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-0.5 rounded-md bg-main text-text-dim text-[10px] font-bold hover:bg-main/80">{t("common.cancel")}</button>
+                    </div>
+                  ) : (
+                    <button onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }} className="p-1.5 rounded-lg text-text-dim/40 hover:text-error transition-all">
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </div>
               </Card>
             ))}

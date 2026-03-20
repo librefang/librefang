@@ -1,4 +1,5 @@
 {
+  "_lang": "en",
   "nav": {
     "core": "Core", "automation": "Automation", "resources": "Resources", "system": "System",
     "overview": "Overview", "canvas": "Canvas", "chat": "Chat", "sessions": "Sessions", "approvals": "Approvals",
@@ -9,7 +10,7 @@
   "common": {
     "refresh": "Refresh", "status": "Status", "daemon_online": "Daemon Online", "infrastructure": "Infrastructure",
     "toggle_theme": "Toggle theme", "change_language": "Change language", "delete": "Delete", "cancel": "Cancel",
-    "save": "Save", "saving": "Saving...", "edit": "Edit", "confirm": "Confirm", "loading": "Loading...", "search": "Search",
+    "save": "Save", "saving": "Saving...", "edit": "Edit", "confirm": "Confirm", "loading": "Loading...", "search": "Search", "back": "Back",
     "actions": "Actions", "clear": "Clear", "load": "Load", "active": "Active", "idle": "Idle", "running": "Running",
     "online": "Online", "offline": "Offline", "setup": "Setup", "ok": "OK", "config": "Config", "interact": "Interact",
     "never": "Never", "unknown": "Unknown", "no_data": "No data", "resume": "Resume", "close": "Close", "yes": "Yes", "no": "No", "details": "Details",
@@ -104,38 +105,62 @@
     "total_channels": "Total Channels", "connected": "Connected", "events_today": "Events Today", "uptime": "Uptime",
     "events": "Events", "events_desc": "Real-time message events.", "connections": "Connections"
   },
+  "canvas": {
+    "title": "Designer", "subtitle": "Design visual logic flows for autonomous agent behavior.", "node_library": "Node Library",
+    "triggers": "Triggers", "logic": "Logic", "actions": "Actions", "clear_confirm": "Are you sure you want to clear the canvas?",
+    "no_agent_steps": "No nodes with assigned agents. Click a node to assign an agent.", "name_required": "Please enter a workflow name.",
+    "node_config": "Node Config", "node_label": "Label", "node_desc": "Description", "assign_agent": "Assign Agent", "no_agent": "-- No Agent --", "agent_steps": "agent steps", "run_result": "Run Result",
+    "run_input_title": "Run Workflow", "run_input_hint": "Enter input for the first step (passed as {{input}}). Leave empty to run without input.", "run_input_placeholder": "e.g. Translate this text...", "run_now": "Run", "to_run": "to run",
+    "node_types": {
+      "start": "Start", "start_desc": "Workflow entry point", "end": "End", "end_desc": "Workflow termination",
+      "schedule": "Schedule", "schedule_desc": "Time-based trigger", "webhook": "Webhook", "webhook_desc": "HTTP webhook trigger",
+      "channel": "Channel", "channel_desc": "Send to channel", "condition": "Condition", "condition_desc": "Branch logic",
+      "loop": "Loop", "loop_desc": "Repeat actions", "parallel": "Parallel", "parallel_desc": "Parallel execution",
+      "wait": "Wait", "wait_desc": "Delay/wait", "respond": "Respond", "respond_desc": "Send response",
+      "agent": "Agent", "agent_desc": "Run agent task"
+    },
+    "nodes": {
+      "start": "Start", "start_desc": "Workflow entry point",
+      "end": "End", "end_desc": "Workflow termination",
+      "schedule": "Schedule", "schedule_desc": "Time-based trigger",
+      "webhook": "Webhook", "webhook_desc": "HTTP webhook trigger",
+      "channel": "Channel", "channel_desc": "Send to channel",
+      "condition": "Condition", "condition_desc": "Branch logic",
+      "loop": "Loop", "loop_desc": "Repeat actions",
+      "parallel": "Parallel", "parallel_desc": "Parallel execution",
+      "wait": "Wait", "wait_desc": "Delay/wait",
+      "respond": "Respond", "respond_desc": "Send response",
+      "agent": "Agent", "agent_desc": "Run agent task"
+    }
+  },
   "workflows": {
     "title": "Workflows", "subtitle": "Automation hub.", "all_workflows": "All Workflows", "run_workflow": "Run Workflow",
     "select_workflow": "Select workflow", "recent_runs": "Recent Runs", "no_runs": "No runs yet",
     "select_workflow_hint": "Select a workflow to view runs", "steps_count": "{{count}} steps", "automation_hub": "Automation Hub",
     "templates": "Templates", "use_template": "Use Template", "create_blank": "Create Blank",
+    "new_workflow": "New Workflow", "workflow_name": "Workflow Name", "description": "Description", "delete_confirm": "Are you sure you want to delete this workflow?", "open_workflows": "Workflow List", "untitled_workflow": "Untitled Workflow",
     "template_details": {
-      "daily_summary": "Daily Summary", "daily_summary_desc": "Automatically summarize daily activities",
-      "news_digest": "News Digest", "news_digest_desc": "Fetch and summarize latest news",
-      "system_health": "System Health", "system_health_desc": "Monitor system status and send alerts",
-      "multi_agent": "Multi-Agent", "multi_agent_desc": "Coordinate multiple agents for complex tasks"
+      "content_pipeline": "Content Pipeline", "content_pipeline_desc": "Research → Write → Edit, produce polished articles",
+      "translate_polish": "Translate & Polish", "translate_polish_desc": "Auto-detect language, translate and refine",
+      "brainstorm": "Brainstorm", "brainstorm_desc": "Generate ideas → Evaluate → Create action plan",
+      "weekly_report": "Weekly Report", "weekly_report_desc": "Turn messy notes into professional weekly reports"
     },
     "nodes": {
-      "daily": "Daily Trigger", "daily_desc": "Runs at midnight daily",
-      "summarizer": "Summarizer", "summarizer_desc": "Creates daily summaries",
-      "notify": "Notify", "notify_desc": "Sends notifications",
       "complete": "Complete", "complete_desc": "Workflow complete",
-      "scheduled": "Scheduled", "scheduled_desc": "Runs on schedule",
-      "fetch": "Fetch", "fetch_desc": "Fetch external data",
-      "analyze": "Analyze", "analyze_desc": "Analyze and process",
-      "deliver": "Deliver", "deliver_desc": "Send results",
-      "done": "Done", "done_desc": "Finished",
-      "trigger": "Trigger", "trigger_desc": "Start workflow",
-      "check": "Check", "check_desc": "Check status",
-      "healthy": "Condition", "healthy_desc": "Check health",
-      "alert": "Alert", "alert_desc": "Send alert",
-      "ok": "OK", "ok_desc": "All good",
-      "input": "Webhook", "input_desc": "Receive input",
-      "parallel": "Parallel", "parallel_desc": "Run in parallel",
-      "researcher": "Researcher", "researcher_desc": "Gather information",
-      "writer": "Writer", "writer_desc": "Create content",
-      "coordinator": "Coordinator", "coordinator_desc": "Merge results",
-      "response": "Response", "response_desc": "Send response"
+      "topic_input": "Topic Input", "topic_input_desc": "Enter your topic",
+      "researcher": "Researcher", "researcher_desc": "Deep research on topic",
+      "writer": "Writer", "writer_desc": "Write structured article",
+      "editor": "Editor", "editor_desc": "Polish and finalize",
+      "source_text": "Source Text", "source_text_desc": "Paste text to translate",
+      "translator": "Translator", "translator_desc": "Auto-detect and translate",
+      "reviewer": "Reviewer", "reviewer_desc": "Review translation quality",
+      "challenge": "Challenge", "challenge_desc": "Describe your challenge",
+      "idea_gen": "Idea Generator", "idea_gen_desc": "Generate 10 diverse ideas",
+      "evaluator": "Evaluator", "evaluator_desc": "Score and rank ideas",
+      "action_plan": "Action Plan", "action_plan_desc": "Create implementation plan",
+      "work_notes": "Work Notes", "work_notes_desc": "Paste raw work notes",
+      "organizer": "Organizer", "organizer_desc": "Categorize and structure",
+      "report_writer": "Report Writer", "report_writer_desc": "Generate polished report"
     }
   },
   "scheduler": {
@@ -173,16 +198,6 @@
   "approvals": {
     "title": "Approvals", "subtitle": "Review and authorize critical agent actions.", "pending_review": "Pending Review", "approve": "Approve", "reject": "Reject",
     "queue_clear": "Queue Clear", "queue_clear_desc": "No pending actions."
-  },
-  "canvas": {
-    "title": "Designer", "subtitle": "Design visual logic flows for autonomous agent behavior.", "node_library": "Node Library", "triggers": "Triggers",
-    "logic_actions": "Logic & Actions", "save_workflow": "Save Workflow", "clear_confirm": "Are you sure you want to clear the canvas?",
-    "nodes": {
-      "start": "Start", "start_desc": "Workflow start", "end": "End", "end_desc": "Workflow end", "schedule": "Schedule", "schedule_desc": "Run on schedule",
-      "webhook": "Webhook", "webhook_desc": "HTTP Webhook", "channel": "Channel", "channel_desc": "Message trigger", "condition": "Condition", "condition_desc": "Branch logic",
-      "loop": "Loop", "loop_desc": "Loop items", "parallel": "Parallel", "parallel_desc": "Parallel branches", "wait": "Wait", "wait_desc": "Wait duration",
-      "respond": "Respond", "respond_desc": "Send response", "agent": "Agent", "agent_desc": "Run agent"
-    }
   },
   "wizard": {
     "welcome": "Welcome", "step_1": "Step 1", "connect_provider": "Connect Provider"

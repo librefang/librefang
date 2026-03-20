@@ -1,5 +1,6 @@
 import { useCallback, useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   ReactFlow,
   Background,
@@ -12,6 +13,8 @@ import {
   type Edge,
   type Connection,
   MarkerType,
+  Handle,
+  Position,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, type AgentItem, type WorkflowItem } from "../api";
@@ -20,61 +23,64 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import {
-  Play, Save, Trash2, Plus, FolderOpen, X, Settings, Zap, Clock, Webhook, MessageSquare,
-  GitBranch, Repeat, Layers, Hourglass, Send, Bot, ChevronRight, Loader2, Search
+  Play, Save, Trash2, Plus, FolderOpen, Loader2,
+  Maximize2, Minimize2, ArrowLeft, X
 } from "lucide-react";
 
 // 节点类型配置
 const NODE_TYPES = [
-  { type: "start", label: "Start", color: "#22c55e", icon: "S", description: "Workflow entry point" },
-  { type: "end", label: "End", color: "#ef4444", icon: "E", description: "Workflow termination" },
-  { type: "schedule", label: "Schedule", color: "#f59e0b", icon: "C", description: "Time-based trigger" },
-  { type: "webhook", label: "Webhook", color: "#3b82f6", icon: "W", description: "HTTP webhook trigger" },
-  { type: "channel", label: "Channel", color: "#8b5cf6", icon: "M", description: "Send to channel" },
-  { type: "condition", label: "Condition", color: "#22c55e", icon: "?", description: "Branch logic" },
-  { type: "loop", label: "Loop", color: "#8b5cf6", icon: "L", description: "Repeat actions" },
-  { type: "parallel", label: "Parallel", color: "#f59e0b", icon: "P", description: "Parallel execution" },
-  { type: "wait", label: "Wait", color: "#6b7280", icon: "T", description: "Delay/wait" },
-  { type: "respond", label: "Respond", color: "#22c55e", icon: "R", description: "Send response" },
-  { type: "agent", label: "Agent", color: "#3b82f6", icon: "A", description: "Run agent task" },
+  { type: "start", labelKey: "canvas.node_types.start", color: "#22c55e", icon: "S", descKey: "canvas.node_types.start_desc" },
+  { type: "end", labelKey: "canvas.node_types.end", color: "#ef4444", icon: "E", descKey: "canvas.node_types.end_desc" },
+  { type: "schedule", labelKey: "canvas.node_types.schedule", color: "#f59e0b", icon: "C", descKey: "canvas.node_types.schedule_desc" },
+  { type: "webhook", labelKey: "canvas.node_types.webhook", color: "#3b82f6", icon: "W", descKey: "canvas.node_types.webhook_desc" },
+  { type: "channel", labelKey: "canvas.node_types.channel", color: "#8b5cf6", icon: "M", descKey: "canvas.node_types.channel_desc" },
+  { type: "condition", labelKey: "canvas.node_types.condition", color: "#22c55e", icon: "?", descKey: "canvas.node_types.condition_desc" },
+  { type: "loop", labelKey: "canvas.node_types.loop", color: "#8b5cf6", icon: "L", descKey: "canvas.node_types.loop_desc" },
+  { type: "parallel", labelKey: "canvas.node_types.parallel", color: "#f59e0b", icon: "P", descKey: "canvas.node_types.parallel_desc" },
+  { type: "wait", labelKey: "canvas.node_types.wait", color: "#6b7280", icon: "T", descKey: "canvas.node_types.wait_desc" },
+  { type: "respond", labelKey: "canvas.node_types.respond", color: "#22c55e", icon: "R", descKey: "canvas.node_types.respond_desc" },
+  { type: "agent", labelKey: "canvas.node_types.agent", color: "#3b82f6", icon: "A", descKey: "canvas.node_types.agent_desc" },
 ];
 
 // 自定义节点组件
-function CustomNode({ data, type: nodeTypeKey }: { data: any; type: string }) {
-  const config = NODE_TYPES.find(n => n.type === nodeTypeKey) || NODE_TYPES[10];
+function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t: (key: string) => string }) {
+  const config = NODE_TYPES.find(n => n.type === (data.nodeType || nodeTypeKey)) || NODE_TYPES[10];
+  const isStart = data.nodeType === "start";
+  const isEnd = data.nodeType === "end";
+  // runState: "running" | "done" | undefined
+  const runState = data._runState as string | undefined;
+  const borderClass = runState === "running"
+    ? "border-warning shadow-warning/30 shadow-lg animate-pulse"
+    : runState === "done"
+    ? "border-success shadow-success/20 shadow-md"
+    : "border-border-subtle";
   return (
-    <div className="rounded-lg border-2 border-border-subtle bg-surface shadow-lg min-w-[160px] overflow-hidden">
-      <div className="flex items-center gap-2 px-3 py-2" style={{ backgroundColor: config.color }}>
-        <span className="text-sm font-bold text-white">{config.icon}</span>
-        <span className="text-sm font-bold text-white truncate">{data.label || config.label}</span>
+    <div className={`rounded-lg border-2 bg-surface min-w-[80px] overflow-hidden relative transition-all duration-300 ${borderClass}`}>
+      {!isStart && <Handle type="target" position={Position.Top} className="!w-2 !h-2 !bg-border-subtle !border-surface" />}
+      <div className="flex items-center gap-1 px-2 py-1" style={{ backgroundColor: config.color }}>
+        {runState === "running" && <Loader2 className="w-3 h-3 text-white animate-spin shrink-0" />}
+        {runState === "done" && <span className="text-xs text-white shrink-0">✓</span>}
+        {!runState && <span className="text-xs font-bold text-white">{config.icon}</span>}
+        <span className="text-xs font-bold text-white truncate">{data.label || t(config.labelKey)}</span>
       </div>
-      <div className="px-3 py-2 bg-surface">
-        <p className="text-[10px] font-medium text-text-dim leading-tight">{data.description || config.description}</p>
+      <div className="px-2 py-1 bg-surface">
+        <p className="text-[8px] font-medium text-text-dim leading-tight">{data.description || t(config.descKey)}</p>
         {data.agentName && (
-          <p className="text-[10px] font-bold text-brand mt-1">Agent: {data.agentName}</p>
+          <p className="text-[8px] font-bold text-brand mt-0.5">{data.agentName}</p>
         )}
       </div>
+      {!isEnd && <Handle type="source" position={Position.Bottom} className="!w-2 !h-2 !bg-border-subtle !border-surface" />}
     </div>
   );
 }
 
 // 工作流列表侧边栏
 function WorkflowList({
-  workflows,
-  selectedId,
-  onSelect,
-  onDelete,
-  onRun,
-  isRunning,
-  t
+  workflows, selectedId, onSelect, onDelete, onRun, isRunning, t
 }: {
-  workflows: WorkflowItem[];
-  selectedId: string | null;
-  onSelect: (w: WorkflowItem) => void;
-  onDelete: (id: string) => void;
-  onRun: (id: string) => void;
-  isRunning: string | null;
-  t: (key: string) => string;
+  workflows: WorkflowItem[]; selectedId: string | null;
+  onSelect: (w: WorkflowItem) => void; onDelete: (id: string) => void;
+  onRun: (id: string) => void; isRunning: string | null; t: (key: string) => string;
 }) {
   return (
     <Card padding="md" className="w-72 border-r border-border-subtle bg-main/30 overflow-y-auto rounded-none">
@@ -87,29 +93,19 @@ function WorkflowList({
           <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
         ) : (
           workflows.map(w => (
-            <div
-              key={w.id}
-              onClick={() => onSelect(w)}
+            <div key={w.id} onClick={() => onSelect(w)}
               className={`p-3 rounded-xl border cursor-pointer transition-all ${
-                selectedId === w.id
-                  ? "border-brand bg-brand/5"
-                  : "border-border-subtle hover:border-brand/50 bg-surface"
-              }`}
-            >
+                selectedId === w.id ? "border-brand bg-brand/5" : "border-border-subtle hover:border-brand/50 bg-surface"
+              }`}>
               <div className="flex items-center justify-between">
                 <span className="text-sm font-bold truncate">{w.name}</span>
                 <div className="flex gap-1">
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onRun(w.id); }}
-                    disabled={isRunning === w.id}
-                    className="p-1.5 rounded-lg hover:bg-success/10 text-success disabled:opacity-50"
-                  >
+                  <button onClick={(e) => { e.stopPropagation(); onRun(w.id); }} disabled={isRunning === w.id}
+                    className="p-1.5 rounded-lg hover:bg-success/10 text-success disabled:opacity-50">
                     {isRunning === w.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
                   </button>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); onDelete(w.id); }}
-                    className="p-1.5 rounded-lg hover:bg-error/10 text-error"
-                  >
+                  <button onClick={(e) => { e.stopPropagation(); onDelete(w.id); }}
+                    className="p-1.5 rounded-lg hover:bg-error/10 text-error">
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
                 </div>
@@ -123,32 +119,181 @@ function WorkflowList({
   );
 }
 
+// 节点配置面板
+function NodeConfigPanel({
+  node, agents, onUpdate, onClose, t
+}: {
+  node: Node; agents: AgentItem[]; onUpdate: (id: string, data: any) => void;
+  onClose: () => void; t: (key: string) => string;
+}) {
+  const d = node.data as any;
+  const [label, setLabel] = useState(d.label || "");
+  const [description, setDescription] = useState(d.description || "");
+  const [agentId, setAgentId] = useState(d.agentId || "");
+  const [prompt, setPrompt] = useState(d.prompt || d.description || "");
+
+  const handleSave = () => {
+    const agent = agents.find(a => a.id === agentId);
+    onUpdate(node.id, {
+      ...d,
+      label,
+      description,
+      agentId: agentId || undefined,
+      agentName: agent?.name || undefined,
+      prompt,
+    });
+    onClose();
+  };
+
+  return (
+    <div className="absolute top-3 right-3 z-20 w-72 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2 bg-main/50 border-b border-border-subtle">
+        <span className="text-xs font-bold">{t("canvas.node_config")}</span>
+        <button onClick={onClose} className="p-1 rounded hover:bg-main"><X className="w-3.5 h-3.5" /></button>
+      </div>
+      <div className="p-3 space-y-3">
+        <div>
+          <label className="text-[10px] font-bold text-text-dim uppercase">{t("canvas.node_label")}</label>
+          <input type="text" value={label} onChange={e => setLabel(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand" />
+        </div>
+        <div>
+          <label className="text-[10px] font-bold text-text-dim uppercase">{t("canvas.node_desc")}</label>
+          <input type="text" value={description} onChange={e => setDescription(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand" />
+        </div>
+        <div>
+          <label className="text-[10px] font-bold text-text-dim uppercase">{t("canvas.assign_agent")}</label>
+          <select value={agentId} onChange={e => setAgentId(e.target.value)}
+            className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand">
+            <option value="">{t("canvas.no_agent")}</option>
+            {agents.map(a => (
+              <option key={a.id} value={a.id}>{a.name}{a.state === "Running" ? "" : ` (${a.state})`}</option>
+            ))}
+          </select>
+        </div>
+        {agentId && (
+          <div>
+            <label className="text-[10px] font-bold text-text-dim uppercase">
+              Prompt <span className="text-text-dim/50 normal-case font-normal">{"(supports {{input}})"}</span>
+            </label>
+            <textarea value={prompt} onChange={e => setPrompt(e.target.value)} rows={3}
+              className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand resize-none" />
+          </div>
+        )}
+        <Button variant="primary" size="sm" className="w-full" onClick={handleSave}>
+          {t("common.save")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function CanvasPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { t: routeTimestamp } = useSearch({ from: "/canvas" });
   const { theme } = useUIStore();
-  const [nodes, setNodes, onNodesChange] = useNodesState([]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState([]);
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [agents, setAgents] = useState<AgentItem[]>([]);
   const [workflows, setWorkflows] = useState<WorkflowItem[]>([]);
   const [selectedWorkflow, setSelectedWorkflow] = useState<WorkflowItem | null>(null);
   const [workflowName, setWorkflowName] = useState("");
   const [workflowDescription, setWorkflowDescription] = useState("");
-  const [showWorkflowPanel, setShowWorkflowPanel] = useState(true);
+  const [showWorkflowPanel, setShowWorkflowPanel] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(true);
   const [runningWorkflowId, setRunningWorkflowId] = useState<string | null>(null);
-  const [selectedAgent, setSelectedAgent] = useState<string>("");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [editingNode, setEditingNode] = useState<Node | null>(null);
+  const [runResult, setRunResult] = useState<{ output: string; status: string; run_id: string } | null>(null);
+  const [showRunInput, setShowRunInput] = useState(false);
+  const [runInput, setRunInput] = useState("");
 
-  const nodeTypes = useMemo(() => ({ custom: CustomNode }), []);
+  const nodeTypes = useMemo(() => ({ custom: (props: any) => <CustomNode {...props} t={t} /> }), [t]);
 
-  // 加载数据
+  // 需要 agent 的节点类型
+  const AGENT_NODE_TYPES = new Set(["agent", "channel", "respond"]);
+
+  // 加载模板数据（传入 agents 列表以便自动分配）
+  const loadTemplate = useCallback((availableAgents: AgentItem[]) => {
+    const templateData = sessionStorage.getItem("workflowTemplate");
+    if (templateData) {
+      try {
+        const { nodes: templateNodes, edges: templateEdges, name, description, workflowId } = JSON.parse(templateData);
+        // 找一个可用的 agent 作为默认分配
+        const defaultAgent = availableAgents.find(a => a.state === "Running") || availableAgents[0];
+        // 根据界面语言决定输出语言指令
+        const lang = t("_lang", { defaultValue: "en" });
+        const langSuffix = lang === "zh" ? "\n\nIMPORTANT: You MUST respond entirely in Chinese (中文)." : "";
+        const newNodes = templateNodes.map((n: any, idx: number) => {
+          const nodeType = n.data?.nodeType;
+          const needsAgent = AGENT_NODE_TYPES.has(nodeType);
+          const rawPrompt = n.data?.prompt || (n.data?.description ? t(n.data.description) : "");
+          return {
+            id: n.id || `${n.type || 'custom'}-${Date.now()}-${idx}`,
+            type: "custom",
+            position: n.position || { x: 50, y: idx * 80 },
+            data: {
+              label: n.data?.label ? t(n.data.label) : t("canvas.node_types.start"),
+              description: n.data?.description ? t(n.data.description) : t("canvas.node_types.start_desc"),
+              nodeType,
+              labelKey: n.data?.label,
+              descKey: n.data?.description,
+              // 保留已有 agent 绑定（按 ID 查名字），或自动分配默认 agent
+              ...(n.data?.agentId ? {
+                agentId: n.data.agentId,
+                agentName: n.data.agentName || availableAgents.find(a => a.id === n.data.agentId)?.name || n.data.agentId,
+                prompt: n.data.prompt || rawPrompt,
+              } : needsAgent && defaultAgent ? {
+                agentId: defaultAgent.id,
+                agentName: defaultAgent.name,
+                prompt: rawPrompt + langSuffix,
+              } : {}),
+            }
+          };
+        });
+        setNodes(newNodes);
+        if (Array.isArray(templateEdges) && templateEdges.length > 0) {
+          setEdges(templateEdges.map((e: any) => ({
+            ...e,
+            markerEnd: { type: MarkerType.ArrowClosed },
+          })));
+        } else {
+          setEdges([]);
+        }
+        if (name) setWorkflowName(name.startsWith("workflows.") ? t(name) : name);
+        if (description) setWorkflowDescription(description.startsWith("workflows.") ? t(description) : description);
+        // 如果是编辑已有工作流，恢复 selectedWorkflow 以便保存时走更新逻辑
+        if (workflowId) setSelectedWorkflow({ id: workflowId, name: name || "", description: description || "" } as WorkflowItem);
+        sessionStorage.removeItem("workflowTemplate");
+        return true;
+      } catch { /* ignore */ }
+    }
+    return false;
+  }, [t, setNodes, setEdges]);
+
+  // 加载智能体、工作流，然后加载模板
   useEffect(() => {
-    Promise.all([
-      listAgents(),
-      listWorkflows()
-    ]).then(([agentsData, workflowsData]) => {
-      setAgents(agentsData);
-      setWorkflows(workflowsData);
-    }).catch(() => {});
-  }, []);
+    Promise.all([listAgents(), listWorkflows()])
+      .then(([a, w]) => {
+        setAgents(a);
+        setWorkflows(w);
+        // agents 就绪后再加载模板
+        if (!loadTemplate(a)) {
+          const savedNodes = sessionStorage.getItem("canvasNodes");
+          if (savedNodes) {
+            try { setNodes(JSON.parse(savedNodes)); } catch { /* ignore */ }
+          }
+        }
+      })
+      .catch(() => {});
+  }, [routeTimestamp, loadTemplate]);
+
+  // 保存节点到 sessionStorage
+  useEffect(() => {
+    if (nodes.length > 0) sessionStorage.setItem("canvasNodes", JSON.stringify(nodes));
+  }, [nodes]);
 
   // 添加节点
   const addNode = useCallback((type: string) => {
@@ -156,15 +301,15 @@ export function CanvasPage() {
     const newNode: Node = {
       id: `${type}-${Date.now()}`,
       type: "custom",
-      position: { x: 200 + Math.random() * 200, y: 100 + Math.random() * 200 },
+      position: { x: 50 + Math.random() * 50, y: 30 + Math.random() * 30 },
       data: {
-        label: config.label,
-        description: config.description,
-        agentName: type === "agent" ? agents.find(a => a.id === selectedAgent)?.name : undefined
+        label: t(config.labelKey),
+        description: t(config.descKey),
+        nodeType: type,
       }
     };
     setNodes((nds) => [...nds, newNode]);
-  }, [agents, selectedAgent, setNodes]);
+  }, [setNodes, t]);
 
   // 连线
   const onConnect = useCallback((params: Connection) => {
@@ -174,53 +319,178 @@ export function CanvasPage() {
     }, eds));
   }, [setEdges, theme]);
 
+  // 节点点击 → 打开配置面板
+  const onNodeClick = useCallback((_: any, node: Node) => {
+    setEditingNode(node);
+  }, []);
+
+  // 更新节点数据
+  const handleNodeUpdate = useCallback((id: string, newData: any) => {
+    setNodes(nds => nds.map(n => n.id === id ? { ...n, data: newData } : n));
+  }, [setNodes]);
+
+  // 从节点构建后端 steps：只有绑定了真实 agent 的节点才是 step
+  const buildSteps = useCallback((nodeList: Node[]) => {
+    return nodeList
+      .filter(n => {
+        const d = n.data as any;
+        return d.agentId || d.agentName;
+      })
+      .map((n, idx) => ({
+        name: (n.data as any).label || `Step ${idx + 1}`,
+        agent_id: (n.data as any).agentId,
+        agent_name: (n.data as any).agentName,
+        prompt: (n.data as any).prompt || (n.data as any).description || "",
+        timeout_secs: 60,
+      }));
+  }, []);
+
+  const showError = useCallback((msg: string) => {
+    setErrorMsg(msg);
+    setTimeout(() => setErrorMsg(null), 5000);
+  }, []);
+
   // 保存工作流
   const handleSave = useCallback(async () => {
-    if (!workflowName.trim()) return;
-
-    const steps = nodes.map((n, idx) => ({
-      name: n.data.label || `Step ${idx + 1}`,
-      agent_id: n.data.agentId,
-      agent_name: n.data.agentName,
-      prompt: n.data.description || "",
-      timeout_secs: 60,
-    }));
-
+    if (!workflowName.trim()) {
+      showError(t("canvas.name_required"));
+      return;
+    }
+    const steps = buildSteps(nodes);
+    if (steps.length === 0) {
+      showError(t("canvas.no_agent_steps"));
+      return;
+    }
+    const layout = { nodes, edges };
     try {
       if (selectedWorkflow?.id) {
-        await updateWorkflow(selectedWorkflow.id, {
-          name: workflowName,
-          description: workflowDescription,
-          steps
-        });
+        await updateWorkflow(selectedWorkflow.id, { name: workflowName, description: workflowDescription, steps, layout });
       } else {
-        await createWorkflow({
-          name: workflowName,
-          description: workflowDescription,
-          steps
-        });
+        await createWorkflow({ name: workflowName, description: workflowDescription, steps, layout });
       }
       const workflowsData = await listWorkflows();
       setWorkflows(workflowsData);
-    } catch (e) {
-      console.error(e);
+      if (!selectedWorkflow?.id) {
+        const newest = [...workflowsData].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
+        if (newest) setSelectedWorkflow(newest);
+      }
+      setErrorMsg(null);
+    } catch (e: any) {
+      showError(e?.message || String(e));
     }
-  }, [workflowName, workflowDescription, selectedWorkflow, nodes]);
+  }, [workflowName, workflowDescription, selectedWorkflow, nodes, buildSteps, t, showError]);
 
-  // 运行工作流
-  const handleRun = useCallback(async (id?: string) => {
-    const workflowId = id || selectedWorkflow?.id;
+  // 点击运行 → 弹出输入框
+  const handleRunClick = useCallback((id?: string) => {
+    if (id) {
+      // 从侧边栏直接运行已保存的工作流
+      setRunInput("");
+      setShowRunInput(true);
+    } else if (selectedWorkflow?.id || nodes.length > 0) {
+      setRunInput("");
+      setShowRunInput(true);
+    }
+  }, [selectedWorkflow, nodes]);
+
+  // 确认运行
+  const handleRunConfirm = useCallback(async (id?: string) => {
+    setShowRunInput(false);
+    let workflowId = id || selectedWorkflow?.id;
+
+    // 没有已保存的工作流 → 先保存
+    if (!workflowId && nodes.length > 0) {
+      const steps = buildSteps(nodes);
+      if (steps.length === 0) {
+        showError(t("canvas.no_agent_steps"));
+        return;
+      }
+      const name = workflowName.trim() || t("workflows.untitled_workflow");
+      const layout = { nodes, edges };
+      try {
+        await createWorkflow({ name, description: workflowDescription, steps, layout });
+        const updatedList = await listWorkflows();
+        setWorkflows(updatedList);
+        const newest = [...updatedList].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
+        if (newest) {
+          workflowId = newest.id;
+          setSelectedWorkflow(newest);
+          setWorkflowName(name);
+        }
+      } catch (e: any) {
+        showError(e?.message || String(e));
+        return;
+      }
+    }
+
     if (!workflowId) return;
 
     setRunningWorkflowId(workflowId);
+    setErrorMsg(null);
+    setRunResult(null);
+
+    // 逐步点亮节点动画
+    const agentNodeIds = nodes.filter(n => (n.data as any).agentId).map(n => n.id);
+    const allNodeIds = nodes.map(n => n.id);
+    let stepTimer: ReturnType<typeof setInterval> | null = null;
+    let currentStep = 0;
+
+    const updateRunState = (runningId: string | null, doneIds: Set<string>) => {
+      setNodes(nds => nds.map(n => ({
+        ...n,
+        data: {
+          ...(n.data as any),
+          _runState: doneIds.has(n.id) ? "done" : n.id === runningId ? "running" : undefined,
+        }
+      })));
+    };
+
+    // 逐步推进动画，最后一个节点保持 running 直到 API 返回
+    const doneSet = new Set<string>();
+    if (agentNodeIds.length > 0) {
+      updateRunState(agentNodeIds[0], doneSet);
+      if (agentNodeIds.length > 1) {
+        stepTimer = setInterval(() => {
+          if (currentStep < agentNodeIds.length - 1) {
+            // 标记当前为 done，推进到下一个
+            doneSet.add(agentNodeIds[currentStep]);
+            currentStep++;
+            updateRunState(agentNodeIds[currentStep], doneSet);
+          }
+          // 到最后一个节点就停止 timer，保持 running 等 API 返回
+          if (currentStep >= agentNodeIds.length - 1) {
+            if (stepTimer) clearInterval(stepTimer);
+            stepTimer = null;
+          }
+        }, 20000);
+      }
+    }
+
     try {
-      await runWorkflow(workflowId, "");
-    } catch (e) {
-      console.error(e);
+      const resp = await runWorkflow(workflowId, runInput);
+      // 完成：所有节点标记 done
+      if (stepTimer) clearInterval(stepTimer);
+      setNodes(nds => nds.map(n => ({
+        ...n,
+        data: { ...(n.data as any), _runState: allNodeIds.includes(n.id) ? "done" : undefined }
+      })));
+      setRunResult({
+        output: (resp as any).output || (resp as any).message || JSON.stringify(resp),
+        status: (resp as any).status || "completed",
+        run_id: (resp as any).run_id || "",
+      });
+      // 3秒后清除 done 状态
+      setTimeout(() => {
+        setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
+      }, 3000);
+    } catch (e: any) {
+      if (stepTimer) clearInterval(stepTimer);
+      // 错误：清除所有状态
+      setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
+      showError(e?.message || String(e));
     } finally {
       setRunningWorkflowId(null);
     }
-  }, [selectedWorkflow]);
+  }, [selectedWorkflow, nodes, edges, workflowName, workflowDescription, buildSteps, runInput, t, showError]);
 
   // 删除工作流
   const handleDelete = useCallback(async (id: string) => {
@@ -230,37 +500,38 @@ export function CanvasPage() {
       setWorkflows(prev => prev.filter(w => w.id !== id));
       if (selectedWorkflow?.id === id) {
         setSelectedWorkflow(null);
-        setNodes([]);
-        setEdges([]);
-        setWorkflowName("");
-        setWorkflowDescription("");
+        setNodes([]); setEdges([]);
+        setWorkflowName(""); setWorkflowDescription("");
       }
-    } catch (e) {
-      console.error(e);
-    }
+    } catch (e) { console.error(e); }
   }, [selectedWorkflow, t, setNodes, setEdges]);
 
-  // 选择工作流
+  // 选择已保存的工作流
   const handleSelectWorkflow = useCallback((w: WorkflowItem) => {
     setSelectedWorkflow(w);
     setWorkflowName(w.name);
     setWorkflowDescription(w.description || "");
+    setEditingNode(null);
 
-    // 解析步骤为节点
-    const newNodes: Node[] = (w.steps || []).map((step: any, idx: number) => ({
+    const stepsArray = Array.isArray(w.steps) ? w.steps : [];
+    const newNodes: Node[] = stepsArray.map((step: any, idx: number) => {
+      const fullPrompt = step.prompt_template || step.prompt || "";
+      return {
       id: `node-${idx}`,
       type: "custom",
-      position: { x: 200, y: 100 + idx * 120 },
+      position: { x: 50, y: idx * 80 },
       data: {
         label: step.name,
-        description: step.prompt,
-        agentId: step.agent_id,
-        agentName: step.agent_name
+        description: fullPrompt.length > 40 ? fullPrompt.slice(0, 40) + "..." : fullPrompt,
+        prompt: fullPrompt,
+        agentId: step.agent_id || step.agent?.agent_id,
+        agentName: step.agent_name || step.agent?.name,
+        nodeType: "agent",
       }
-    }));
+    };
+    });
     setNodes(newNodes);
 
-    // 创建边
     const newEdges: Edge[] = [];
     for (let i = 0; i < newNodes.length - 1; i++) {
       newEdges.push({
@@ -276,79 +547,91 @@ export function CanvasPage() {
   // 新建工作流
   const handleNewWorkflow = useCallback(() => {
     setSelectedWorkflow(null);
-    setNodes([]);
-    setEdges([]);
-    setWorkflowName("");
-    setWorkflowDescription("");
+    setNodes([]); setEdges([]);
+    setWorkflowName(""); setWorkflowDescription("");
+    setEditingNode(null);
   }, [setNodes, setEdges]);
 
+  // 有效 agent 步骤数量
+  const agentStepCount = useMemo(() => buildSteps(nodes).length, [nodes, buildSteps]);
+
   return (
-    <div className="flex h-[calc(100vh-140px)] flex-col">
+    <div className={`flex flex-col transition-all duration-300 ${isFullscreen ? "fixed inset-0 z-50 bg-main" : "h-[calc(100vh-140px)]"}`}>
       <header className="flex justify-between items-end pb-4">
         <div className="flex items-center gap-4">
-          <div>
-            <h1 className="text-2xl font-extrabold">{t("canvas.title")}</h1>
-            <p className="text-text-dim font-medium text-sm">{t("canvas.subtitle")}</p>
-          </div>
-          <Button variant="secondary" size="sm" onClick={handleNewWorkflow}>
-            <Plus className="w-4 h-4 mr-1" />
-            {t("workflows.new_workflow")}
-          </Button>
+          {isFullscreen && (
+            <Button variant="ghost" size="sm" onClick={() => navigate({ to: "/workflows" })}>
+              <ArrowLeft className="w-4 h-4 mr-1" />
+              {t("common.back")}
+            </Button>
+          )}
+          {!isFullscreen && (
+            <>
+              <div>
+                <h1 className="text-2xl font-extrabold">{t("canvas.title")}</h1>
+                <p className="text-text-dim font-medium text-sm">{t("canvas.subtitle")}</p>
+              </div>
+              <Button variant="secondary" size="sm" onClick={handleNewWorkflow}>
+                <Plus className="w-4 h-4 mr-1" />
+                {t("workflows.new_workflow")}
+              </Button>
+            </>
+          )}
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
+          {agentStepCount > 0 && (
+            <span className="text-[10px] font-bold text-success mr-1">
+              {agentStepCount} {t("canvas.agent_steps")}
+            </span>
+          )}
+          <Button variant="secondary" onClick={() => setIsFullscreen(!isFullscreen)}>
+            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+          </Button>
           <Button variant="secondary" onClick={() => setShowWorkflowPanel(!showWorkflowPanel)}>
             <FolderOpen className="w-4 h-4 mr-1" />
-            {t("workflows.all_workflows")}
+            {t("workflows.open_workflows")}
           </Button>
-          <Button variant="secondary" onClick={() => { setNodes([]); setEdges([]); }}>
+          <Button variant="secondary" onClick={() => { setNodes([]); setEdges([]); setEditingNode(null); }}>
             {t("common.clear")}
           </Button>
-          <Button variant="primary" onClick={handleSave} disabled={!workflowName.trim()}>
+          <Button variant="primary" onClick={handleSave} disabled={!workflowName.trim() || agentStepCount === 0}>
             <Save className="w-4 h-4 mr-1" />
             {t("common.save")}
           </Button>
-          <Button
-            variant="success"
-            onClick={() => handleRun()}
-            disabled={!selectedWorkflow && nodes.length === 0}
-          >
-            <Play className="w-4 h-4 mr-1" />
+          <Button variant="primary" onClick={() => handleRunClick()}
+            disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId}>
+            {runningWorkflowId ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Play className="w-4 h-4 mr-1" />}
             {t("workflows.run_workflow")}
           </Button>
         </div>
       </header>
 
+      {errorMsg && (
+        <div className="mx-1 mb-2 px-4 py-2 rounded-lg bg-error/10 border border-error/30 text-error text-sm font-medium flex items-center justify-between">
+          <span>{errorMsg}</span>
+          <button onClick={() => setErrorMsg(null)} className="ml-2 text-error/60 hover:text-error">&times;</button>
+        </div>
+      )}
+
       <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface">
-        {/* 左侧工作流列表 */}
         {showWorkflowPanel && (
-          <WorkflowList
-            workflows={workflows}
-            selectedId={selectedWorkflow?.id || null}
-            onSelect={handleSelectWorkflow}
-            onDelete={handleDelete}
-            onRun={handleRun}
-            isRunning={runningWorkflowId}
-            t={t}
-          />
+          <WorkflowList workflows={workflows} selectedId={selectedWorkflow?.id || null}
+            onSelect={handleSelectWorkflow} onDelete={handleDelete} onRun={handleRunClick}
+            isRunning={runningWorkflowId} t={t} />
         )}
 
         {/* 节点库 */}
-        <Card padding="md" className="w-56 border-r border-border-subtle bg-main/30 overflow-y-auto rounded-none">
+        <Card padding="md" className="w-48 border-r border-border-subtle bg-main/30 overflow-y-auto rounded-none">
           <h3 className="text-[10px] font-black uppercase text-text-dim/60 mb-4">{t("canvas.node_library")}</h3>
           <div className="space-y-4">
             <div>
               <p className="text-[10px] font-bold text-brand uppercase mb-2">{t("canvas.triggers")}</p>
               <div className="grid gap-2">
                 {NODE_TYPES.slice(0, 5).map(n => (
-                  <button
-                    key={n.type}
-                    onClick={() => addNode(n.type)}
-                    className="flex items-center gap-2 p-2 rounded-lg border border-border-subtle bg-surface hover:border-brand transition-all text-left"
-                  >
-                    <div className="h-7 w-7 rounded flex items-center justify-center text-white text-xs font-black" style={{ backgroundColor: n.color }}>
-                      {n.icon}
-                    </div>
-                    <span className="text-xs font-bold truncate">{n.label}</span>
+                  <button key={n.type} onClick={() => addNode(n.type)}
+                    className="flex items-center gap-2 p-2 rounded-lg border border-border-subtle bg-surface hover:border-brand transition-all text-left">
+                    <div className="h-7 w-7 rounded flex items-center justify-center text-white text-xs font-black" style={{ backgroundColor: n.color }}>{n.icon}</div>
+                    <span className="text-xs font-bold truncate">{t(n.labelKey)}</span>
                   </button>
                 ))}
               </div>
@@ -357,15 +640,10 @@ export function CanvasPage() {
               <p className="text-[10px] font-bold text-warning uppercase mb-2">{t("canvas.logic")}</p>
               <div className="grid gap-2">
                 {NODE_TYPES.slice(5, 9).map(n => (
-                  <button
-                    key={n.type}
-                    onClick={() => addNode(n.type)}
-                    className="flex items-center gap-2 p-2 rounded-lg border border-border-subtle bg-surface hover:border-brand transition-all text-left"
-                  >
-                    <div className="h-7 w-7 rounded flex items-center justify-center text-white text-xs font-black" style={{ backgroundColor: n.color }}>
-                      {n.icon}
-                    </div>
-                    <span className="text-xs font-bold truncate">{n.label}</span>
+                  <button key={n.type} onClick={() => addNode(n.type)}
+                    className="flex items-center gap-2 p-2 rounded-lg border border-border-subtle bg-surface hover:border-brand transition-all text-left">
+                    <div className="h-7 w-7 rounded flex items-center justify-center text-white text-xs font-black" style={{ backgroundColor: n.color }}>{n.icon}</div>
+                    <span className="text-xs font-bold truncate">{t(n.labelKey)}</span>
                   </button>
                 ))}
               </div>
@@ -374,15 +652,10 @@ export function CanvasPage() {
               <p className="text-[10px] font-bold text-accent uppercase mb-2">{t("canvas.actions")}</p>
               <div className="grid gap-2">
                 {NODE_TYPES.slice(9).map(n => (
-                  <button
-                    key={n.type}
-                    onClick={() => addNode(n.type)}
-                    className="flex items-center gap-2 p-2 rounded-lg border border-border-subtle bg-surface hover:border-brand transition-all text-left"
-                  >
-                    <div className="h-7 w-7 rounded flex items-center justify-center text-white text-xs font-black" style={{ backgroundColor: n.color }}>
-                      {n.icon}
-                    </div>
-                    <span className="text-xs font-bold truncate">{n.label}</span>
+                  <button key={n.type} onClick={() => addNode(n.type)}
+                    className="flex items-center gap-2 p-2 rounded-lg border border-border-subtle bg-surface hover:border-brand transition-all text-left">
+                    <div className="h-7 w-7 rounded flex items-center justify-center text-white text-xs font-black" style={{ backgroundColor: n.color }}>{n.icon}</div>
+                    <span className="text-xs font-bold truncate">{t(n.labelKey)}</span>
                   </button>
                 ))}
               </div>
@@ -392,39 +665,79 @@ export function CanvasPage() {
 
         {/* 画布 */}
         <main className="flex-1 relative">
-          {/* 工作流信息栏 */}
           <div className="absolute top-3 left-3 right-3 z-10 flex gap-3">
-            <input
-              type="text"
-              value={workflowName}
-              onChange={(e) => setWorkflowName(e.target.value)}
+            <input type="text" value={workflowName} onChange={(e) => setWorkflowName(e.target.value)}
               placeholder={t("workflows.workflow_name")}
-              className="flex-1 max-w-xs rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm font-bold focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
-            />
-            <input
-              type="text"
-              value={workflowDescription}
-              onChange={(e) => setWorkflowDescription(e.target.value)}
+              className="flex-1 max-w-xs rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm font-bold focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none" />
+            <input type="text" value={workflowDescription} onChange={(e) => setWorkflowDescription(e.target.value)}
               placeholder={t("workflows.description")}
-              className="flex-1 max-w-xs rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
-            />
+              className="flex-1 max-w-xs rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none" />
           </div>
 
+          {/* 节点配置面板 */}
+          {editingNode && !showRunInput && (
+            <NodeConfigPanel node={editingNode} agents={agents}
+              onUpdate={handleNodeUpdate} onClose={() => setEditingNode(null)} t={t} />
+          )}
+
+          {/* 运行输入弹窗 */}
+          {showRunInput && (
+            <div className="absolute top-3 right-3 z-20 w-80 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden">
+              <div className="flex items-center justify-between px-3 py-2 bg-success/10 border-b border-border-subtle">
+                <span className="text-xs font-bold text-success">{t("canvas.run_input_title")}</span>
+                <button onClick={() => setShowRunInput(false)} className="p-1 rounded hover:bg-main"><X className="w-3.5 h-3.5" /></button>
+              </div>
+              <div className="p-3 space-y-3">
+                <p className="text-[10px] text-text-dim">{t("canvas.run_input_hint")}</p>
+                <textarea value={runInput} onChange={e => setRunInput(e.target.value)}
+                  placeholder={t("canvas.run_input_placeholder")}
+                  rows={4} autoFocus
+                  className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-xs outline-none focus:border-brand resize-none"
+                  onKeyDown={e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) handleRunConfirm(); }}
+                />
+                <div className="flex gap-2">
+                  <Button variant="primary" size="sm" className="flex-1" onClick={() => handleRunConfirm()}
+                    disabled={!!runningWorkflowId}>
+                    <Play className="w-3.5 h-3.5 mr-1" />
+                    {t("canvas.run_now")}
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={() => setShowRunInput(false)}>
+                    {t("common.cancel")}
+                  </Button>
+                </div>
+                <p className="text-[9px] text-text-dim/50 text-center">Ctrl+Enter {t("canvas.to_run")}</p>
+              </div>
+            </div>
+          )}
+
           <ReactFlow
-            nodes={nodes}
-            edges={edges}
-            onNodesChange={onNodesChange}
-            onEdgesChange={onEdgesChange}
-            onConnect={onConnect}
-            nodeTypes={nodeTypes}
-            colorMode={theme}
-            fitView
-            className="bg-main/20"
+            nodes={nodes} edges={edges}
+            onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
+            onConnect={onConnect} onNodeClick={onNodeClick}
+            nodeTypes={nodeTypes} colorMode={theme}
+            defaultViewport={{ x: 50, y: 80, zoom: 1 }}
+            minZoom={0.1} maxZoom={2} className="bg-main/20"
           >
             <Background color={theme === "dark" ? "#333" : "#ccc"} gap={20} />
             <Controls className="!bg-surface !border-border-subtle" />
-            <MiniMap className="!bg-surface !border-border-subtle" nodeColor={(n) => NODE_TYPES.find(t => t.type === n.type)?.color || "#3b82f6"} />
+            <MiniMap className="!bg-surface !border-border-subtle"
+              nodeColor={(n) => NODE_TYPES.find(t => t.type === n.type)?.color || "#3b82f6"} />
           </ReactFlow>
+
+          {/* 运行结果面板 */}
+          {runResult && (
+            <div className="absolute bottom-3 left-3 right-3 z-20 max-h-48 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden flex flex-col">
+              <div className="flex items-center justify-between px-3 py-2 bg-success/10 border-b border-border-subtle shrink-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-bold text-success">{t("canvas.run_result")}</span>
+                  <Badge variant="success">{runResult.status}</Badge>
+                  {runResult.run_id && <span className="text-[9px] text-text-dim font-mono">{runResult.run_id.slice(0, 8)}</span>}
+                </div>
+                <button onClick={() => setRunResult(null)} className="p-1 rounded hover:bg-main"><X className="w-3.5 h-3.5" /></button>
+              </div>
+              <pre className="px-3 py-2 text-xs text-text whitespace-pre-wrap overflow-y-auto flex-1">{runResult.output}</pre>
+            </div>
+          )}
         </main>
       </div>
     </div>

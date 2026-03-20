@@ -20,6 +20,7 @@ export interface StatusResponse {
   home_dir?: string;
   log_level?: string;
   network_enabled?: boolean;
+  session_count?: number;
 }
 
 export interface VersionResponse {
@@ -187,11 +188,19 @@ export interface ApiActionResponse {
   [key: string]: unknown;
 }
 
+export interface WorkflowStep {
+  name: string;
+  agent_id?: string;
+  agent_name?: string;
+  prompt: string;
+  timeout_secs?: number;
+}
+
 export interface WorkflowItem {
   id: string;
-  name?: string;
+  name: string;
   description?: string;
-  steps?: number;
+  steps?: number | WorkflowStep[];
   created_at?: string;
 }
 
@@ -701,14 +710,19 @@ export async function createWorkflow(payload: {
     prompt: string;
     timeout_secs?: number;
   }>;
+  layout?: any;
 }): Promise<ApiActionResponse> {
   return post<ApiActionResponse>("/api/workflows", payload);
+}
+
+export async function getWorkflow(workflowId: string): Promise<any> {
+  return get<any>(`/api/workflows/${encodeURIComponent(workflowId)}`);
 }
 
 export async function runWorkflow(workflowId: string, input: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}/run`, {
     input
-  });
+  }, 300000); // 5 min timeout — workflows run multiple LLM steps
 }
 
 export async function deleteWorkflow(workflowId: string): Promise<ApiActionResponse> {
@@ -725,6 +739,7 @@ export async function updateWorkflow(workflowId: string, payload: {
     prompt: string;
     timeout_secs?: number;
   }>;
+  layout?: any;
 }): Promise<ApiActionResponse> {
   return put<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}`, payload);
 }
