@@ -1460,6 +1460,24 @@ impl LibreFangKernel {
         if kernel.registry.list().is_empty() {
             info!("No agents found — spawning default assistant");
             let manifest = router::load_template_manifest(&kernel.config.home_dir, "assistant")
+                .or_else(|_| {
+                    // Fallback: minimal assistant for zero-network boot (init not yet run)
+                    toml::from_str::<librefang_types::agent::AgentManifest>(
+                        r#"
+name = "assistant"
+description = "General-purpose assistant"
+module = "builtin:chat"
+tags = ["general", "assistant"]
+[model]
+provider = "default"
+model = "default"
+max_tokens = 8192
+temperature = 0.5
+system_prompt = "You are a helpful assistant."
+"#,
+                    )
+                    .map_err(|e| format!("fallback manifest parse error: {e}"))
+                })
                 .map_err(|e| {
                     KernelError::BootFailed(format!("failed to load assistant template: {e}"))
                 })?;

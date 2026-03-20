@@ -1800,8 +1800,8 @@ fn cmd_init(quick: bool) {
         }
     }
 
-    // Install bundled agent templates (skips existing ones to preserve user edits)
-    bundled_agents::install_bundled_agents(&librefang_dir.join("agents"));
+    // Sync agent templates from registry (skips existing ones to preserve user edits)
+    bundled_agents::sync_registry_agents(&librefang_dir);
 
     // Initialize vault if not already initialized
     init_vault_if_missing(&librefang_dir);

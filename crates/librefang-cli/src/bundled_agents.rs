@@ -1,138 +1,98 @@
-//! Compile-time embedded agent templates.
+//! Registry-based agent sync.
 //!
-//! All bundled agent templates are embedded into the binary via `include_str!`.
-//! This ensures `librefang agent new` works immediately after install — no filesystem
-//! discovery needed.
+//! Agent manifests are maintained in the librefang-registry repo.
+//! `sync_registry_agents` clones or pulls the registry and copies
+//! agent definitions to `~/.librefang/agents/`.
 
-/// Returns all bundled agent templates as `(name, toml_content)` pairs.
-pub fn bundled_agents() -> Vec<(&'static str, &'static str)> {
-    vec![
-        (
-            "analyst",
-            include_str!("../../../agents/analyst/agent.toml"),
-        ),
-        (
-            "architect",
-            include_str!("../../../agents/architect/agent.toml"),
-        ),
-        (
-            "assistant",
-            include_str!("../../../agents/assistant/agent.toml"),
-        ),
-        ("coder", include_str!("../../../agents/coder/agent.toml")),
-        (
-            "code-reviewer",
-            include_str!("../../../agents/code-reviewer/agent.toml"),
-        ),
-        (
-            "customer-support",
-            include_str!("../../../agents/customer-support/agent.toml"),
-        ),
-        (
-            "data-scientist",
-            include_str!("../../../agents/data-scientist/agent.toml"),
-        ),
-        (
-            "debugger",
-            include_str!("../../../agents/debugger/agent.toml"),
-        ),
-        (
-            "devops-lead",
-            include_str!("../../../agents/devops-lead/agent.toml"),
-        ),
-        (
-            "doc-writer",
-            include_str!("../../../agents/doc-writer/agent.toml"),
-        ),
-        (
-            "email-assistant",
-            include_str!("../../../agents/email-assistant/agent.toml"),
-        ),
-        (
-            "health-tracker",
-            include_str!("../../../agents/health-tracker/agent.toml"),
-        ),
-        (
-            "hello-world",
-            include_str!("../../../agents/hello-world/agent.toml"),
-        ),
-        (
-            "home-automation",
-            include_str!("../../../agents/home-automation/agent.toml"),
-        ),
-        (
-            "legal-assistant",
-            include_str!("../../../agents/legal-assistant/agent.toml"),
-        ),
-        (
-            "meeting-assistant",
-            include_str!("../../../agents/meeting-assistant/agent.toml"),
-        ),
-        ("ops", include_str!("../../../agents/ops/agent.toml")),
-        (
-            "orchestrator",
-            include_str!("../../../agents/orchestrator/agent.toml"),
-        ),
-        (
-            "personal-finance",
-            include_str!("../../../agents/personal-finance/agent.toml"),
-        ),
-        (
-            "planner",
-            include_str!("../../../agents/planner/agent.toml"),
-        ),
-        (
-            "recruiter",
-            include_str!("../../../agents/recruiter/agent.toml"),
-        ),
-        (
-            "recipe-assistant",
-            include_str!("../../../agents/recipe-assistant/agent.toml"),
-        ),
-        (
-            "researcher",
-            include_str!("../../../agents/researcher/agent.toml"),
-        ),
-        (
-            "sales-assistant",
-            include_str!("../../../agents/sales-assistant/agent.toml"),
-        ),
-        (
-            "security-auditor",
-            include_str!("../../../agents/security-auditor/agent.toml"),
-        ),
-        (
-            "social-media",
-            include_str!("../../../agents/social-media/agent.toml"),
-        ),
-        (
-            "test-engineer",
-            include_str!("../../../agents/test-engineer/agent.toml"),
-        ),
-        (
-            "translator",
-            include_str!("../../../agents/translator/agent.toml"),
-        ),
-        (
-            "travel-planner",
-            include_str!("../../../agents/travel-planner/agent.toml"),
-        ),
-        ("tutor", include_str!("../../../agents/tutor/agent.toml")),
-        ("writer", include_str!("../../../agents/writer/agent.toml")),
-    ]
-}
+use std::path::Path;
+use std::process::Command;
 
-/// Install bundled agent templates to `~/.librefang/agents/`.
-/// Skips any template that already exists on disk (user customization preserved).
-pub fn install_bundled_agents(agents_dir: &std::path::Path) {
-    for (name, content) in bundled_agents() {
-        let dest_dir = agents_dir.join(name);
+const REGISTRY_REPO: &str = "https://github.com/librefang/librefang-registry.git";
+
+/// Sync agent definitions from the registry to the local agents directory.
+///
+/// Clones the registry (shallow) on first run, pulls on subsequent runs.
+/// Only copies agents that don't already exist on disk (preserves user customization).
+pub fn sync_registry_agents(home_dir: &Path) {
+    let registry_cache = home_dir.join("registry");
+    let agents_dir = home_dir.join("agents");
+
+    // Clone or pull the registry
+    if registry_cache.join(".git").exists() {
+        let status = Command::new("git")
+            .args(["pull", "--ff-only", "-q"])
+            .current_dir(&registry_cache)
+            .status();
+        if let Err(e) = status {
+            eprintln!("  ⚠ Failed to pull registry: {e}");
+        }
+    } else {
+        let status = Command::new("git")
+            .args([
+                "clone",
+                "--depth",
+                "1",
+                "-q",
+                REGISTRY_REPO,
+                &registry_cache.display().to_string(),
+            ])
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => eprintln!("  ⚠ git clone exited with {s}"),
+            Err(e) => {
+                eprintln!("  ⚠ Failed to clone registry (is git installed?): {e}");
+                return;
+            }
+        }
+    }
+
+    // Copy agents from registry to ~/.librefang/agents/
+    let registry_agents = registry_cache.join("agents");
+    if !registry_agents.exists() {
+        eprintln!("  ⚠ Registry cloned but agents/ directory not found");
+        return;
+    }
+
+    let entries = match std::fs::read_dir(&registry_agents) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("  ⚠ Failed to read registry agents: {e}");
+            return;
+        }
+    };
+
+    let mut synced = 0;
+    let mut skipped = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let src = path.join("agent.toml");
+        if !src.exists() {
+            continue;
+        }
+
+        let dest_dir = agents_dir.join(&name);
         let dest_file = dest_dir.join("agent.toml");
         if dest_file.exists() {
+            skipped += 1;
             continue; // Preserve user customization
         }
+
         if std::fs::create_dir_all(&dest_dir).is_ok() {
-            let _ = std::fs::write(&dest_file, content);
+            if std::fs::copy(&src, &dest_file).is_ok() {
+                synced += 1;
+            }
         }
+    }
+
+    if synced > 0 || skipped > 0 {
+        println!("  ✔ Agents synced from registry ({synced} new, {skipped} existing)");
     }
 }

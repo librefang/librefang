@@ -7,122 +7,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 const ROUTING_EXCLUDED_TEMPLATES: &[&str] = &["assistant"];
-// Keep this in sync with crates/librefang-cli/src/bundled_agents.rs so the kernel
-// can route against bundled templates even before they are written to disk.
-const BUNDLED_TEMPLATE_MANIFESTS: &[(&str, &str)] = &[
-    (
-        "analyst",
-        include_str!("../../../agents/analyst/agent.toml"),
-    ),
-    (
-        "architect",
-        include_str!("../../../agents/architect/agent.toml"),
-    ),
-    (
-        "assistant",
-        include_str!("../../../agents/assistant/agent.toml"),
-    ),
-    ("coder", include_str!("../../../agents/coder/agent.toml")),
-    (
-        "code-reviewer",
-        include_str!("../../../agents/code-reviewer/agent.toml"),
-    ),
-    (
-        "customer-support",
-        include_str!("../../../agents/customer-support/agent.toml"),
-    ),
-    (
-        "data-scientist",
-        include_str!("../../../agents/data-scientist/agent.toml"),
-    ),
-    (
-        "debugger",
-        include_str!("../../../agents/debugger/agent.toml"),
-    ),
-    (
-        "devops-lead",
-        include_str!("../../../agents/devops-lead/agent.toml"),
-    ),
-    (
-        "doc-writer",
-        include_str!("../../../agents/doc-writer/agent.toml"),
-    ),
-    (
-        "email-assistant",
-        include_str!("../../../agents/email-assistant/agent.toml"),
-    ),
-    (
-        "health-tracker",
-        include_str!("../../../agents/health-tracker/agent.toml"),
-    ),
-    (
-        "hello-world",
-        include_str!("../../../agents/hello-world/agent.toml"),
-    ),
-    (
-        "home-automation",
-        include_str!("../../../agents/home-automation/agent.toml"),
-    ),
-    (
-        "legal-assistant",
-        include_str!("../../../agents/legal-assistant/agent.toml"),
-    ),
-    (
-        "meeting-assistant",
-        include_str!("../../../agents/meeting-assistant/agent.toml"),
-    ),
-    ("ops", include_str!("../../../agents/ops/agent.toml")),
-    (
-        "orchestrator",
-        include_str!("../../../agents/orchestrator/agent.toml"),
-    ),
-    (
-        "personal-finance",
-        include_str!("../../../agents/personal-finance/agent.toml"),
-    ),
-    (
-        "planner",
-        include_str!("../../../agents/planner/agent.toml"),
-    ),
-    (
-        "recruiter",
-        include_str!("../../../agents/recruiter/agent.toml"),
-    ),
-    (
-        "recipe-assistant",
-        include_str!("../../../agents/recipe-assistant/agent.toml"),
-    ),
-    (
-        "researcher",
-        include_str!("../../../agents/researcher/agent.toml"),
-    ),
-    (
-        "sales-assistant",
-        include_str!("../../../agents/sales-assistant/agent.toml"),
-    ),
-    (
-        "security-auditor",
-        include_str!("../../../agents/security-auditor/agent.toml"),
-    ),
-    (
-        "social-media",
-        include_str!("../../../agents/social-media/agent.toml"),
-    ),
-    (
-        "test-engineer",
-        include_str!("../../../agents/test-engineer/agent.toml"),
-    ),
-    (
-        "translator",
-        include_str!("../../../agents/translator/agent.toml"),
-    ),
-    (
-        "travel-planner",
-        include_str!("../../../agents/travel-planner/agent.toml"),
-    ),
-    ("tutor", include_str!("../../../agents/tutor/agent.toml")),
-    ("writer", include_str!("../../../agents/writer/agent.toml")),
-];
 const GENERIC_ENGLISH_WORDS: &[&str] = &[
     "a",
     "agent",
@@ -1013,13 +897,8 @@ fn load_template_manifest_at(agents_dir: &Path, template: &str) -> Result<AgentM
             .map_err(|e| format!("failed to parse {}: {e}", manifest_path.display()));
     }
 
-    if let Some(manifest_toml) = bundled_template_manifest(template) {
-        return toml::from_str::<AgentManifest>(manifest_toml)
-            .map_err(|e| format!("failed to parse bundled manifest '{template}': {e}"));
-    }
-
     Err(format!(
-        "template '{template}' not found in {} or bundled manifests",
+        "template '{template}' not found in {}. Run `librefang init` to sync agents from the registry.",
         agents_dir.display()
     ))
 }
@@ -1045,28 +924,10 @@ fn template_names_from_dir(root: &Path) -> Vec<String> {
 }
 
 fn all_template_names(agents_dir: &Path) -> Vec<String> {
-    let mut names: HashSet<String> = template_names_from_dir(agents_dir).into_iter().collect();
-    names.extend(
-        BUNDLED_TEMPLATE_MANIFESTS
-            .iter()
-            .map(|(name, _)| *name)
-            .filter(|name| is_safe_template_name(name))
-            .map(str::to_string),
-    );
-
-    let mut ordered: Vec<String> = names.into_iter().collect();
-    ordered.sort();
-    ordered
-}
-
-fn bundled_template_manifest(template: &str) -> Option<&'static str> {
-    if !is_safe_template_name(template) {
-        return None;
-    }
-    BUNDLED_TEMPLATE_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == template)
-        .map(|(_, manifest)| *manifest)
+    let mut names = template_names_from_dir(agents_dir);
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn is_safe_template_name(template: &str) -> bool {
@@ -1804,14 +1665,13 @@ weak_aliases = ["changelog"]
     }
 
     #[test]
-    fn test_load_template_manifest_falls_back_to_bundled_template() {
+    fn test_load_template_manifest_not_found_returns_error() {
         let tmp = tempdir().unwrap();
-        let manifest = load_template_manifest(tmp.path(), "assistant").unwrap();
-        assert_eq!(manifest.name, "assistant");
+        assert!(load_template_manifest(tmp.path(), "nonexistent").is_err());
     }
 
     #[test]
-    fn test_load_template_manifest_prefers_local_override() {
+    fn test_load_template_manifest_from_disk() {
         let tmp = tempdir().unwrap();
         let template_dir = tmp.path().join("agents").join("assistant");
         fs::create_dir_all(&template_dir).unwrap();
