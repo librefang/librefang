@@ -1,0 +1,325 @@
+# 故障排除
+
+LibreFang 常见问题及解决方案。
+
+---
+
+## 常见问题
+
+### 1. 安装问题
+
+#### cargo install 失败
+
+**问题**: `cargo install` 失败
+
+**解决方案**:
+```bash
+# 确保 Rust 工具链已安装
+rustup update
+
+# 使用 --force 重新安装
+cargo install --force --git https://github.com/librefang/librefang librefang-cli
+```
+
+#### 二进制未找到
+
+**问题**: `librefang: command not found`
+
+**解决方案**:
+```bash
+# 添加到 PATH
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# 重新加载 shell
+source ~/.bashrc  # 或 ~/.zshrc
+```
+
+---
+
+### 2. 配置问题
+
+#### API 密钥未设置
+
+**问题**: `API key not found`
+
+**解决方案**:
+```bash
+# 设置环境变量
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# 或使用其他提供商
+export GROQ_API_KEY="gsk_..."
+```
+
+#### 配置文件不存在
+
+**问题**: `Config file not found`
+
+**解决方案**:
+```bash
+# 初始化配置
+librefang init
+```
+
+---
+
+### 3. 守护进程问题
+
+#### 端口已被占用
+
+**问题**: `Address already in use`
+
+**解决方案**:
+```bash
+# 查找占用进程
+lsof -i :4200
+
+# 杀掉进程
+kill <PID>
+
+# 或使用其他端口
+librefang start --config custom.toml
+```
+
+#### 守护进程启动失败
+
+**问题**: `Failed to start daemon`
+
+**解决方案**:
+```bash
+# 查看详细日志
+RUST_LOG=debug librefang start
+
+# 检查配置
+librefang doctor
+```
+
+---
+
+### 4. Agent 问题
+
+#### Agent 无响应
+
+**问题**: Agent 不回复消息
+
+**解决方案**:
+```bash
+# 查看 Agent 状态
+librefang agent status <agent-id>
+
+# 重启 Agent
+librefang agent kill <agent-id>
+librefang agent spawn <manifest.toml>
+```
+
+#### 内存不足
+
+**问题**: `Out of memory`
+
+**解决方案**:
+```toml
+# 在 agent.toml 中限制资源
+[resources]
+max_llm_tokens_per_hour = 50000
+max_iterations = 50
+```
+
+---
+
+### 5. 连接问题
+
+#### 无法连接到 LLM
+
+**问题**: `Connection failed` / `Timeout`
+
+**解决方案**:
+```bash
+# 检查网络
+curl -I https://api.anthropic.com
+
+# 更换提供商
+# 编辑 config.toml
+[default_model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+```
+
+#### 速率限制
+
+**问题**: `Rate limit exceeded`
+
+**解决方案**:
+```toml
+# 添加后备提供商
+[[fallback_providers]]
+provider = "groq"
+model = "llama-3.1-70b-versatile"
+```
+
+---
+
+### 6. 通道问题
+
+#### Telegram Bot 失败
+
+**问题**: Telegram bot 无法启动
+
+**解决方案**:
+```bash
+# 验证 Bot Token
+curl -X POST "https://api.telegram.org/bot<TOKEN>/getMe"
+
+# 检查配置
+librefang channel test telegram
+```
+
+#### Discord 消息不发送
+
+**问题**: Discord 消息失败
+
+**解决方案**:
+```bash
+# 检查 Bot 权限
+# 确保 Bot 拥有发送消息权限
+
+# 检查 intents
+librefang channel test discord
+```
+
+---
+
+## 诊断命令
+
+### librefang doctor
+
+运行完整诊断：
+
+```bash
+librefang doctor
+```
+
+检查内容：
+- 配置文件存在性
+- API 密钥配置
+- 网络连接
+- Rust 工具链
+- 依赖项
+
+<Note>
+**提示**: 遇到问题时，首先运行 `librefang doctor` 可以快速定位大多数常见问题。
+</Note>
+
+### 查看日志
+
+```bash
+# 设置日志级别
+RUST_LOG=debug librefang start
+
+# 查看日志文件
+tail -f ~/.librefang/logs/librefang.log
+```
+
+### 检查状态
+
+```bash
+# 守护进程状态
+librefang status
+
+# Agent 列表
+librefang agent list
+
+# 通道状态
+librefang channel list
+```
+
+---
+
+## 调试模式
+
+### 启用调试日志
+
+```bash
+# 所有日志
+RUST_LOG=debug librefang start
+
+# 特定模块
+RUST_LOG=librefang_kernel=trace librefang start
+
+# 保存到文件
+RUST_LOG=debug librefang start 2>&1 | tee debug.log
+```
+
+### 验证配置
+
+```bash
+# 显示当前配置
+librefang config show
+
+# 验证配置
+librefang doctor
+```
+
+---
+
+## 常见错误代码
+
+| 错误代码 | 说明 |
+|----------|------|
+| E001 | 配置错误 |
+| E002 | API 密钥无效 |
+| E003 | 网络连接失败 |
+| E004 | 速率限制 |
+| E005 | Agent 不存在 |
+| E006 | 权限不足 |
+| E007 | 资源不足 |
+
+---
+
+## 重置
+
+### 重置配置
+
+```bash
+# 删除配置
+rm -rf ~/.librefang/
+
+# 重新初始化
+librefang init
+```
+
+### 重置 Agent 状态
+
+```bash
+# 删除 Agent 数据
+librefang agent kill <agent-id>
+
+# 重新生成
+librefang agent spawn <manifest.toml>
+```
+
+### 重置内存
+
+```bash
+# 删除内存数据库
+rm ~/.librefang/data/librefang.db
+
+# 重启守护进程
+librefang start
+```
+
+---
+
+## 获取帮助
+
+### 社区支持
+
+- GitHub Issues: https://github.com/librefang/librefang/issues
+- Discord: https://discord.gg/librefang
+
+### 报告问题
+
+请提供：
+1. 错误信息
+2. 配置文件 (脱敏)
+3. 日志输出
+4. 重现步骤

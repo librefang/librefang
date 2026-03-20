@@ -1,0 +1,202 @@
+# 通道适配器
+
+LibreFang 支持 40 个消息平台适配器，连接您的 agent 到用户所在的每个平台。
+
+<Note>
+**提示**: 每个通道都可以单独配置访问控制、速率限制和过滤规则。
+</Note>
+
+---
+
+## 支持的平台
+
+### 核心平台
+
+| 平台 | 说明 | 状态 |
+|------|------|------|
+| Telegram | Bot API | ✅ |
+| Discord | Bot API | ✅ |
+| Slack | Bot API | ✅ |
+| WhatsApp | Business API | ✅ |
+| Signal | Bot API | ✅ |
+| Matrix | Client API | ✅ |
+| Email | IMAP/SMTP | ✅ |
+
+### 企业平台
+
+| 平台 | 说明 |
+|------|------|
+| Microsoft Teams | Bot Framework |
+| Mattermost | Webhook/API |
+| Google Chat | Bot API |
+| Webex | Bot API |
+| Feishu/Lark | Open Platform |
+| Zulip | API |
+
+### 社交平台
+
+| 平台 | 说明 |
+|------|------|
+| LINE | Messaging API |
+| Viber | Bot API |
+| Facebook Messenger | Graph API |
+| Mastodon | Client API |
+| Bluesky | AT Protocol |
+| Reddit | OAuth API |
+| LinkedIn | Marketing API |
+| Twitch | PubSub |
+
+### 社区平台
+
+| 平台 | 说明 |
+|------|------|
+| IRC | Client/Server |
+| XMPP | Client API |
+| Guilded | HTTP API |
+| Revolt | HTTP API |
+| Keybase | Client API |
+| Discourse | API |
+| Gitter | Client API |
+
+### 隐私平台
+
+| 平台 | 说明 |
+|------|------|
+| Threema | Gateway API |
+| Nostr | NIP-04/26 |
+| Mumble | Murmur API |
+| Nextcloud Talk | HTTP API |
+| Rocket.Chat | Client API |
+| Ntfy | HTTP API |
+| Gotify | HTTP API |
+
+### 工作平台
+
+| 平台 | 说明 |
+|------|------|
+| Pumble | HTTP API |
+| Flock | Webhook/API |
+| Twist | API |
+| DingTalk | Open API |
+| Zalo | API |
+
+---
+
+## 配置
+
+### Telegram
+
+```toml
+[telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allowed_users = ["user_id_1", "user_id_2"]
+```
+
+### Discord
+
+```toml
+[discord]
+bot_token_env = "DISCORD_BOT_TOKEN"
+guild_ids = ["server_id_1", "server_id_2"]
+```
+
+### Slack
+
+```toml
+[slack]
+bot_token_env = "SLACK_BOT_TOKEN"
+app_token_env = "SLACK_APP_TOKEN"
+```
+
+---
+
+## 通道覆盖
+
+每个通道支持覆盖设置：
+
+```toml
+[channels.telegram]
+model = "claude-sonnet-4-20250514"
+system_prompt = "你是一个客服 agent"
+dm_policy = "allow"  # allow/deny
+group_policy = "allow"  # allow/deny
+rate_limit = 10  # 每分钟消息数
+output_format = "markdown"  # markdown/html/plaintext
+```
+
+### 覆盖选项
+
+| 选项 | 说明 |
+|------|------|
+| `model` | 覆盖默认模型 |
+| `system_prompt` | 覆盖系统提示 |
+| `dm_policy` | DM 策略 (allow/deny) |
+| `group_policy` | 群组策略 (allow/deny) |
+| `rate_limit` | 每分钟限制 |
+| `output_format` | 输出格式 |
+
+---
+
+## 速率限制
+
+每个通道有内置速率限制：
+
+- **每用户限制** - 防止滥用
+- **每通道限制** - 平台限制
+- **成本感知** - 跟踪 token 使用
+
+```toml
+[channels.telegram]
+rate_limit = 10  # 每分钟 10 条消息
+```
+
+---
+
+## 格式化
+
+LibreFang 自动格式化消息：
+
+- **Telegram** → HTML
+- **Slack** → Mrkdwn
+- **Discord** → 嵌入
+- **其他** → 纯文本
+
+---
+
+## CLI 命令
+
+```bash
+# 列出通道状态
+librefang channel list
+
+# 设置新通道
+librefang channel setup telegram
+
+# 测试通道
+librefang channel test telegram
+
+# 启用通道
+librefang channel enable telegram
+
+# 禁用通道
+librefang channel disable telegram
+```
+
+---
+
+## 消息路由
+
+`AgentRouter` 根据规则路由消息：
+
+- **用户匹配** - 特定用户
+- **通道匹配** - 特定通道
+- **内容匹配** - 关键词/正则
+
+---
+
+## 最佳实践
+
+1. **限制访问** - 使用 `allowed_users` 限制谁可以访问
+2. **设置速率限制** - 防止滥用
+3. **使用覆盖** - 为不同通道定制行为
+4. **监控使用** - 定期检查通道统计

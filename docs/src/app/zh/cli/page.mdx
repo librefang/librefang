@@ -1,0 +1,569 @@
+# CLI 参考
+
+完整的 `librefang` 命令行参考。
+
+---
+
+## 概述
+
+`librefang` 二进制是管理 LibreFang Agent OS 的主要接口。支持两种操作模式：
+
+- **守护进程模式** - 当守护进程运行时 (`librefang start`)，CLI 通过 HTTP 与其通信
+- **进程内模式** - 未检测到守护进程时，支持此模式的命令将启动临时内核
+
+---
+
+## 安装
+
+### 从源码 (cargo)
+
+```bash
+cargo install --path crates/librefang-cli
+```
+
+### 从工作空间构建
+
+```bash
+cargo build --release -p librefang-cli
+# 二进制: target/release/librefang (或 Windows 上的 librefang.exe)
+```
+
+### Docker
+
+```bash
+docker run -it librefang/librefang:latest
+```
+
+---
+
+## 全局选项
+
+| 选项 | 说明 |
+|------|------|
+| `--config <PATH>` | 自定义配置文件路径 |
+| `--help` | 打印帮助信息 |
+| `--version` | 打印版本 |
+
+**环境变量:**
+
+| 变量 | 说明 |
+|------|------|
+| `RUST_LOG` | 日志级别 (info/debug/trace) |
+| `LIBREFANG_AGENTS_DIR` | 覆盖 agent 模板目录 |
+| `EDITOR` / `VISUAL` | `librefang config edit` 使用的编辑器 |
+
+---
+
+## 命令速查
+
+### 常用命令
+
+| 命令 | 说明 |
+|------|------|
+| `librefang` | 启动交互式 TUI 仪表板 |
+| `librefang init` | 初始化工作空间 |
+| `librefang start` | 启动守护进程 |
+| `librefang stop` | 停止守护进程 |
+| `librefang status` | 查看状态 |
+| `librefang doctor` | 运行诊断 |
+
+---
+
+## 核心命令
+
+### librefang (无子命令)
+
+启动交互式 TUI 仪表板。
+
+```
+librefang
+```
+
+TUI 提供全屏终端界面，包含 agent、聊天、工作流、通道、技能、设置等面板。
+
+### librefang init
+
+初始化 LibreFang 工作空间。创建 `~/.librefang/` 包含子目录和默认 `config.toml`。
+
+```
+librefang init [--quick]
+```
+
+| 选项 | 说明 |
+|------|------|
+| `--quick` | 跳过交互式提示，自动检测最佳 LLM 提供商 |
+
+### librefang start / stop
+
+启动或停止 LibreFang 守护进程。
+
+```
+librefang start [--config <PATH>]
+librefang stop
+```
+
+### librefang status
+
+检查守护进程状态。
+
+```
+librefang status
+```
+
+### librefang doctor
+
+运行诊断检查。
+
+```
+librefang doctor
+```
+
+### librefang tui
+
+启动交互式终端仪表板。
+
+```
+librefang tui
+```
+
+### librefang dashboard
+
+在浏览器中打开 Web 仪表板。
+
+```
+librefang dashboard
+```
+
+### librefang chat
+
+快速聊天。
+
+```
+librefang chat [agent-name]
+```
+
+---
+
+## Agent 管理
+
+### 完整命令列表
+
+| 命令 | 说明 |
+|------|------|
+| `librefang agent spawn <file>` | 从清单文件生成 Agent |
+| `librefang agent new` | 交互式创建新 Agent |
+| `librefang agent list` | 列出所有 Agent |
+| `librefang agent chat <id>` | 与 Agent 交互式聊天 |
+| `librefang agent kill <id>` | 终止 Agent |
+| `librefang agent set <id> <key> <value>` | 设置 Agent 属性 |
+
+### 示例
+
+```bash
+# 从模板生成 Agent
+librefang agent spawn agents/hello-world/agent.toml
+
+# 交互式创建
+librefang agent new
+
+# 列出所有 Agent
+librefang agent list
+
+# 与 Agent 聊天
+librefang agent chat a1b2c3d4
+
+# 终止 Agent
+librefang agent kill a1b2c3d4
+
+# 设置默认模型
+librefang agent set a1b2c3d4 model.provider groq
+```
+
+---
+
+## Hand 管理
+
+### 完整命令列表
+
+| 命令 | 说明 |
+|------|------|
+| `librefang hand list` | 列出所有可用 Hands |
+| `librefang hand active` | 显示当前活跃的 Hand 实例 |
+| `librefang hand install <path>` | 从本地目录安装 Hand |
+| `librefang hand activate <id>` | 激活 Hand |
+| `librefang hand deactivate <id>` | 停用 Hand |
+| `librefang hand info <id>` | 显示 Hand 详细信息 |
+| `librefang hand check-deps` | 检查依赖状态 |
+| `librefang hand install-deps` | 安装缺失的依赖 |
+| `librefang hand pause <id>` | 暂停运行中的 Hand |
+| `librefang hand resume <id>` | 恢复暂停的 Hand |
+
+### 示例
+
+```bash
+# 列出 Hands
+librefang hand list
+
+# 查看活跃 Hands
+librefang hand active
+
+# 激活 Hand
+librefang hand activate researcher
+
+# 暂停 Hand
+librefang hand pause researcher
+
+# 查看信息
+librefang hand info clip
+```
+
+---
+
+## 工作流与调度
+
+### 工作流命令
+
+| 命令 | 说明 |
+|------|------|
+| `librefang workflow list` | 列出所有工作流 |
+| `librefang workflow create <file>` | 从 JSON 文件创建工作流 |
+| `librefang workflow run <id> <input>` | 运行工作流 |
+
+### Cron 命令
+
+| 命令 | 说明 |
+|------|------|
+| `librefang cron list` | 列出定时任务 |
+| `librefang cron create <args>` | 创建定时任务 |
+| `librefang cron delete <id>` | 删除定时任务 |
+| `librefang cron enable <id>` | 启用定时任务 |
+| `librefang cron disable <id>` | 禁用定时任务 |
+
+### 触发器命令
+
+| 命令 | 说明 |
+|------|------|
+| `librefang trigger list` | 列出触发器 |
+| `librefang trigger create <args>` | 创建触发器 |
+| `librefang trigger delete <id>` | 删除触发器 |
+
+### Webhook 命令
+
+| 命令 | 说明 |
+|------|------|
+| `librefang webhooks list` | 列出 Webhook |
+| `librefang webhooks create <args>` | 创建 Webhook |
+| `librefang webhooks delete <id>` | 删除 Webhook |
+| `librefang webhooks test <id>` | 测试 Webhook |
+
+### 示例
+
+```bash
+# 列出工作流
+librefang workflow list
+
+# 运行工作流
+librefang workflow run daily-lead-generation '{"icp": "AI companies"}'
+
+# 创建定时任务
+librefang cron create --agent researcher --cron "0 9 * * *"
+```
+
+---
+
+## 技能管理
+
+| 命令 | 说明 |
+|------|------|
+| `librefang skill install <source>` | 安装技能 |
+| `librefang skill list` | 列出已安装技能 |
+| `librefang skill remove <name>` | 移除技能 |
+| `librefang skill search <query>` | 搜索 FangHub |
+| `librefang skill create` | 创建技能脚手架 |
+| `librefang skill verify <name>` | 验证技能 |
+
+### 示例
+
+```bash
+# 从 FangHub 安装
+librefang skill install fanghub:data-analysis
+
+# 从本地安装
+librefang skill install ./my-skill
+
+# 搜索技能
+librefang skill search "python"
+
+# 创建新技能
+librefang skill create
+```
+
+---
+
+## 通道管理
+
+| 命令 | 说明 |
+|------|------|
+| `librefang channel list` | 列出通道状态 |
+| `librefang channel setup <channel>` | 交互式设置通道 |
+| `librefang channel test <channel>` | 测试通道连接 |
+| `librefang channel enable <channel>` | 启用通道 |
+| `librefang channel disable <channel>` | 禁用通道 |
+
+### 示例
+
+```bash
+# 列出通道
+librefang channel list
+
+# 设置 Telegram
+librefang channel setup telegram
+
+# 测试通道
+librefang channel test telegram
+```
+
+---
+
+## 模型与提供商
+
+### 模型命令
+
+| 命令 | 说明 |
+|------|------|
+| `librefang models list` | 列出可用模型 |
+| `librefang models list --provider anthropic` | 按提供商筛选 |
+| `librefang models aliases` | 显示模型别名 |
+| `librefang models providers` | 列出提供商及认证状态 |
+| `librefang models set <model>` | 设置默认模型 |
+
+### 示例
+
+```bash
+# 列出所有模型
+librefang models list
+
+# 按提供商筛选
+librefang models list --provider groq
+
+# 列出提供商
+librefang models providers
+```
+
+---
+
+## 配置管理
+
+| 命令 | 说明 |
+|------|------|
+| `librefang config show` | 显示当前配置 |
+| `librefang config edit` | 在编辑器中打开配置 |
+| `librefang config get <key>` | 获取配置值 |
+| `librefang config set <key> <value>` | 设置配置值 |
+| `librefang config set-key <provider>` | 保存 API 密钥 |
+| `librefang config delete-key <provider>` | 删除 API 密钥 |
+| `librefang config test-key <provider>` | 测试提供商连接 |
+
+### 示例
+
+```bash
+# 显示配置
+librefang config show
+
+# 编辑配置
+librefang config edit
+
+# 设置默认模型
+librefang config set default_model.provider groq
+
+# 保存 API 密钥
+librefang config set-key anthropic
+
+# 测试连接
+librefang config test-key anthropic
+```
+
+---
+
+## 安全与审计
+
+### 安全命令
+
+| 命令 | 说明 |
+|------|------|
+| `librefang security status` | 显示安全状态 |
+| `librefang security audit` | 显示审计日志 |
+| `librefang security verify` | 验证 Merkle 链完整性 |
+
+### 审批命令
+
+| 命令 | 说明 |
+|------|------|
+| `librefang approvals list` | 列出待审批请求 |
+| `librefang approvals approve <id>` | 批准请求 |
+| `librefang approvals reject <id>` | 拒绝请求 |
+
+### 示例
+
+```bash
+# 查看安全状态
+librefang security status
+
+# 查看审计日志
+librefang security audit
+
+# 验证审计链
+librefang security verify
+
+# 列出待审批
+librefang approvals list
+```
+
+---
+
+## 内存与会话
+
+### 内存命令
+
+| 命令 | 说明 |
+|------|------|
+| `librefang memory list` | 列出 Agent 的 KV 对 |
+| `librefang memory get <key>` | 获取值 |
+| `librefang memory set <key> <value>` | 设置值 |
+| `librefang memory delete <key>` | 删除值 |
+
+### 会话命令
+
+| 命令 | 说明 |
+|------|------|
+| `librefang sessions` | 列出对话会话 |
+
+### 示例
+
+```bash
+# 列出记忆
+librefang memory list --agent a1b2c3d4
+
+# 设置记忆
+librefang memory set --agent a1b2c3d4 --key "pref:theme" --value "dark"
+
+# 列出会话
+librefang sessions
+```
+
+---
+
+## 凭证与保险库
+
+### Vault 命令
+
+| 命令 | 说明 |
+|------|------|
+| `librefang vault init` | 初始化凭证保险库 |
+| `librefang vault set <key> <value>` | 存储凭证 |
+| `librefang vault list` | 列出凭证 |
+| `librefang vault remove <key>` | 删除凭证 |
+
+### 示例
+
+```bash
+# 初始化保险库
+librefang vault init
+
+# 存储凭证
+librefang vault set api_key "your-secret-key"
+
+# 列出凭证
+librefang vault list
+```
+
+---
+
+## 系统维护
+
+| 命令 | 说明 |
+|------|------|
+| `librefang system info` | 显示系统信息 |
+| `librefang system version` | 显示版本信息 |
+| `librefang logs` | 实时查看日志 |
+| `librefang reset` | 重置本地配置 |
+| `librefang uninstall` | 卸载 LibreFang |
+| `librefang completion` | 生成 Shell 补全脚本 |
+
+### 示例
+
+```bash
+# 系统信息
+librefang system info
+
+# 版本
+librefang system version
+
+# 实时日志
+librefang logs
+
+# 生成 bash 补全
+librefang completion bash
+```
+
+---
+
+## 迁移
+
+```bash
+# 从 OpenClaw 迁移
+librefang migrate --from openclaw
+
+# 预览模式
+librefang migrate --from openclaw --dry-run
+
+# 指定路径
+librefang migrate --from openclaw --path ~/.openclaw
+```
+
+---
+
+## MCP
+
+```bash
+# 启动 MCP 服务器
+librefang mcp
+```
+
+---
+
+## 守护进程交互
+
+### 直接 API 调用
+
+```bash
+# 健康检查
+curl http://127.0.0.1:4200/api/health
+
+# 列出 agent
+curl http://127.0.0.1:4200/api/agents
+
+# 发送消息
+curl -X POST http://127.0.0.1:4200/api/agents/<id>/message \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Hello!"}'
+
+# OpenAI 兼容 API
+curl -X POST http://127.0.0.1:4200/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model": "researcher", "messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+---
+
+## 环境变量参考
+
+| 变量 | 说明 |
+|------|------|
+| `ANTHROPIC_API_KEY` | Anthropic Claude API 密钥 |
+| `OPENAI_API_KEY` | OpenAI API 密钥 |
+| `GROQ_API_KEY` | Groq API 密钥 |
+| `GEMINI_API_KEY` | Google Gemini API 密钥 |
+| `DEEPSEEK_API_KEY` | DeepSeek API 密钥 |
+| `RUST_LOG` | 日志级别 (info/debug/trace) |
+| `LIBREFANG_AGENTS_DIR` | Agent 模板目录 |

@@ -1,0 +1,211 @@
+# LibreFang 配置参考
+
+LibreFang 配置文件完整参考。
+
+---
+
+## 概述
+
+LibreFang 从 TOML 配置文件中读取配置：
+
+```bash
+~/.librefang/config.toml
+```
+
+**关键特性：**
+- 所有字段都是可选的，使用 `#[serde(default)]`
+- 通道配置Absent时表示禁用
+- 密钥存储在环境变量中，不直接存储在配置文件中
+
+---
+
+## 最小配置
+
+```toml
+[default_model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+```
+
+---
+
+## 完整配置示例
+
+```toml
+# API 服务器
+api_key = "your-bearer-token"
+
+[default_model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+
+[memory]
+decay_rate = 0.05
+sqlite_path = "~/.librefang/data/librefang.db"
+
+[network]
+listen_addr = "127.0.0.1:4200"
+shared_secret = "your-secret"
+
+[compaction]
+threshold = 80
+keep_recent = 20
+max_summary_tokens = 1024
+
+[usage_footer]
+display = "Full"
+
+# 通道配置
+[telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allowed_users = ["user1", "user2"]
+
+[discord]
+bot_token_env = "DISCORD_BOT_TOKEN"
+guild_ids = ["123456789"]
+
+[slack]
+bot_token_env = "SLACK_BOT_TOKEN"
+app_token_env = "SLACK_APP_TOKEN"
+
+# MCP 服务器
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+# A2A 配置
+[a2a]
+enabled = true
+agent_card_path = "/a2a/agent.json"
+
+# 后备提供商
+[[fallback_providers]]
+provider = "groq"
+model = "llama-3.1-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+
+# 用户
+[[users]]
+username = "admin"
+role = "admin"
+```
+
+---
+
+## 配置项参考
+
+### 顶层字段
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key` | String | - | Bearer 认证令牌 |
+| `api_listen` | String | "127.0.0.1:4200" | API 监听地址 |
+
+### [default_model]
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `provider` | String | "anthropic" | LLM 提供商 |
+| `model` | String | "claude-sonnet-4-20250514" | 模型名称 |
+| `api_key_env` | String | "ANTHROPIC_API_KEY" | API 密钥环境变量 |
+| `base_url` | String | 提供商默认 | API 基础 URL |
+| `max_tokens` | Integer | 4096 | 最大生成 token 数 |
+| `temperature` | Float | 0.7 | 采样温度 |
+
+### [memory]
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `decay_rate` | Float | 0.05 | 记忆置信度衰减率 |
+| `sqlite_path` | String | ~/.librefang/data/librefang.db | SQLite 数据库路径 |
+
+### [network]
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `listen_addr` | String | "127.0.0.1:4200" | OFP 监听地址 |
+| `shared_secret` | String | - | P2P 认证共享密钥 |
+
+### [compaction]
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `threshold` | Integer | 80 | 消息数量阈值 |
+| `keep_recent` | Integer | 20 | 保留最近消息数 |
+| `max_summary_tokens` | Integer | 1024 | 摘要最大 token 数 |
+
+### 通道配置
+
+#### [telegram]
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `bot_token_env` | String | Bot Token 环境变量 |
+| `allowed_users` | Array | 允许的用户 ID |
+
+#### [discord]
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `bot_token_env` | String | Bot Token 环境变量 |
+| `guild_ids` | Array | 允许的服务器 ID |
+
+#### [slack]
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `bot_token_env` | String | Bot Token 环境变量 |
+| `app_token_env` | String | App Token 环境变量 |
+
+### [[mcp_servers]]
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | String | 服务器名称 |
+| `command` | String | 执行命令 |
+| `args` | Array | 命令参数 |
+
+### [[users]]
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `username` | String | 用户名 |
+| `role` | String | 角色 (admin/operator/user) |
+
+---
+
+## 环境变量
+
+LibreFang 使用以下环境变量：
+
+| 变量 | 说明 |
+|------|------|
+| `ANTHROPIC_API_KEY` | Anthropic Claude API 密钥 |
+| `OPENAI_API_KEY` | OpenAI API 密钥 |
+| `GROQ_API_KEY` | Groq API 密钥 |
+| `GEMINI_API_KEY` | Google Gemini API 密钥 |
+| `DEEPSEEK_API_KEY` | DeepSeek API 密钥 |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot Token |
+| `DISCORD_BOT_TOKEN` | Discord Bot Token |
+| `SLACK_BOT_TOKEN` | Slack Bot Token |
+| `RUST_LOG` | 日志级别 (info/debug/trace) |
+
+---
+
+## 验证
+
+运行诊断命令检查配置：
+
+```bash
+librefang doctor
+```
+
+这将检查：
+- 配置文件存在性
+- API 密钥配置
+- 网络连接
+- 依赖项可用性

@@ -1,0 +1,318 @@
+# 技能开发
+
+LibreFang 技能系统允许您创建可插拔的工具包来扩展 Agent 的能力。
+
+---
+
+## 概述
+
+技能是包含以下内容的包：
+
+- **skill.toml** - 清单文件
+- **代码** - Python / WASM / Node.js / PromptOnly
+- **SKILL.md** (可选) - 领域知识参考
+
+---
+
+## 60 个内置技能
+
+LibreFang 预装了 60 个技能，编译到二进制中：
+
+| 类别 | 技能示例 |
+|------|----------|
+| 开发 | git, docker, kubernetes, code_review |
+| 数据 | python, pandas, numpy, jupyter |
+| 网络 | http, websockets, rest_api |
+| 系统 | bash, file_system, process |
+| AI/ML | openai, anthropic, huggingface |
+| 工具 | search, scrape, parse_json |
+
+---
+
+## 创建自定义技能
+
+### 1. 创建技能清单
+
+创建 `skill.toml`：
+
+```toml
+name = "my-skill"
+version = "1.0.0"
+description = "A custom skill for X"
+author = "you"
+
+[runtime]
+type = "python"  # python/wasm/nodejs/prompt_only
+entrypoint = "main.py"
+
+[config]
+timeout = 30
+memory = "256MB"
+
+[tools]
+provided = ["my_tool"]
+
+[requirements]
+packages = ["requests"]
+```
+
+### 2. 实现代码
+
+`main.py`:
+
+```python
+import requests
+
+def my_tool(query: str) -> str:
+    """My custom tool"""
+    return f"Result for: {query}"
+```
+
+### 3. 添加知识 (可选)
+
+创建 `SKILL.md`:
+
+```markdown
+# My Skill
+
+## Domain Knowledge
+
+This skill handles X specific scenarios...
+
+## Examples
+
+Example 1: ...
+```
+
+---
+
+## 技能类型
+
+### Python 技能
+
+```toml
+[runtime]
+type = "python"
+entrypoint = "main.py"
+
+[requirements]
+packages = ["requests", "pandas"]
+```
+
+### WASM 技能
+
+```toml
+[runtime]
+type = "wasm"
+entrypoint = "skill.wasm"
+```
+
+### Node.js 技能
+
+```toml
+[runtime]
+type = "nodejs"
+entrypoint = "index.js"
+
+[requirements]
+packages = ["axios"]
+```
+
+### Prompt Only 技能
+
+```toml
+[runtime]
+type = "prompt_only"
+prompt_file = "system_prompt.md"
+```
+
+---
+
+## 技能清单参考
+
+```toml
+name = "skill-name"
+version = "1.0.0"
+description = "Skill description"
+author = "author"
+
+[runtime]
+type = "python"  # python/wasm/nodejs/prompt_only
+entrypoint = "main.py"
+timeout = 30
+
+[config]
+environment = {}
+settings = {}
+
+[tools]
+provided = ["tool1", "tool2"]
+
+[requirements]
+packages = ["package1"]
+env_vars = ["API_KEY"]
+
+[capabilities]
+network = true
+file_system = false
+
+[dependencies]
+skills = ["other_skill"]
+```
+
+---
+
+## 安装技能
+
+<Note>
+**提示**: 使用 `librefang skill list` 查看已安装技能，`librefang skill search` 搜索新技能。
+</Note>
+
+### 从本地安装
+
+```bash
+librefang skill install ./my-skill
+```
+
+### 从 FangHub 安装
+
+```bash
+librefang skill install fanghub:skill-name
+```
+
+### 从 URL 安装
+
+```bash
+librefang skill install https://example.com/skill.tar.gz
+```
+
+---
+
+## 技能管理
+
+### 列出技能
+
+```bash
+librefang skill list
+```
+
+### 搜索技能
+
+```bash
+librefang skill search "python"
+```
+
+### 移除技能
+
+```bash
+librefang skill remove my-skill
+```
+
+### 验证技能
+
+```bash
+librefang skill verify my-skill
+```
+
+---
+
+## 在 Agent 中使用技能
+
+在 Agent 清单中声明技能：
+
+```toml
+[capabilities]
+skills = ["my_skill"]
+tools = ["my_skill.my_tool"]
+```
+
+---
+
+## 技能开发最佳实践
+
+1. **保持专注** - 一个技能做一件事
+2. **添加文档** - SKILL.md 帮助 Agent 理解何时使用
+3. **处理错误** - 返回有意义的错误消息
+4. **设置超时** - 防止技能卡住
+5. **验证输入** - 检查参数有效性
+
+---
+
+## 技能安全
+
+### 提示注入扫描
+
+LibreFang 自动扫描技能中的提示注入：
+
+```python
+def scan_prompt_content(content: str) -> bool:
+    """检测覆盖尝试、数据外泄、shell 引用"""
+    # 实现检测逻辑
+```
+
+### 技能验证
+
+```bash
+librefang skill verify my-skill
+```
+
+验证内容：
+- SHA256 校验
+- 权限检查
+- 依赖检查
+
+---
+
+## FangHub 市场
+
+FangHub 是 LibreFang 技能市场：
+
+```bash
+# 搜索技能
+librefang skill search "data analysis"
+
+# 安装技能
+librefang skill install fanghub:data-analysis
+
+# 列出热门
+librefang skill trending
+```
+
+---
+
+## 迁移 OpenClaw 技能
+
+LibreFang 兼容 OpenClaw 技能：
+
+```bash
+# 自动迁移
+librefang migrate --from openclaw
+
+# 手动迁移
+cp -r ~/.openclaw/skills/* ~/.librefang/skills/
+```
+
+---
+
+## 故障排除
+
+### 技能不加载
+
+```bash
+# 检查技能状态
+librefang skill list
+
+# 验证技能
+librefang skill verify my-skill
+
+# 查看日志
+RUST_LOG=debug librefang skill list
+```
+
+### 权限错误
+
+确保技能文件有正确权限：
+
+```bash
+chmod +x skills/*/main.py
+```

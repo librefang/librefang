@@ -1,0 +1,449 @@
+# SDK and Clients
+
+LibreFang provides SDKs and client libraries in multiple languages.
+
+---
+
+## Overview
+
+LibreFang provides official SDK support for multiple programming languages for easy integration into your applications.
+
+| SDK | Status | Description |
+|-----|--------|-------------|
+| JavaScript/TypeScript | ✅ Official | @librefang/sdk |
+| Python | ✅ Official | librefang-client |
+| Rust | ✅ Official | librefang crate |
+| Go | 🚧 In Development | Community contribution |
+
+---
+
+## JavaScript/TypeScript SDK
+
+### Installation
+
+```bash
+npm install @librefang/sdk
+```
+
+### Usage
+
+```typescript
+import { LibreFang } from '@librefang/sdk';
+
+// Create client
+const client = new LibreFang({
+  apiKey: 'your-api-key',
+  baseUrl: 'http://127.0.0.1:4200'
+});
+
+// List Agents
+const agents = await client.agents.list();
+
+// Send message
+const response = await client.agents.sendMessage('agent-id', {
+  message: 'Hello!'
+});
+
+// Streaming response
+for await (const chunk of client.agents.streamMessage('agent-id', {
+  message: 'Tell me a story'
+})) {
+  console.log(chunk);
+}
+```
+
+### API Reference
+
+```typescript
+// Client configuration
+interface LibreFangConfig {
+  apiKey: string;
+  baseUrl?: string;
+  timeout?: number;
+}
+
+// Agent operations
+client.agents.list()
+client.agents.get(id)
+client.agents.create(manifest)
+client.agents.sendMessage(id, { message })
+client.agents.streamMessage(id, { message })
+client.agents.delete(id)
+
+// Memory operations
+client.memory.store(key, value)
+client.memory.get(key)
+client.memory.search(query)
+
+// Workflows
+client.workflows.list()
+client.workflows.run(id, input)
+```
+
+---
+
+## Python SDK
+
+### Installation
+
+```bash
+pip install librefang-client
+```
+
+### Usage
+
+```python
+from librefang import LibreFang
+
+# Create client
+client = LibreFang(
+    api_key="your-api-key",
+    base_url="http://127.0.0.1:4200"
+)
+
+# List Agents
+agents = client.agents.list()
+
+# Send message
+response = client.agents.send_message("agent-id", message="Hello!")
+
+# Streaming response
+for chunk in client.agents.stream_message("agent-id", message="Tell me a story"):
+    print(chunk, end="")
+```
+
+### API Reference
+
+```python
+# Client configuration
+client = LibreFang(
+    api_key: str,
+    base_url: str = "http://127.0.0.1:4200",
+    timeout: int = 60
+)
+
+# Agent operations
+client.agents.list() -> List[Agent]
+client.agents.get(id: str) -> Agent
+client.agents.create(manifest: str) -> Agent
+client.agents.send_message(id: str, message: str) -> Response
+client.agents.stream_message(id: str, message: str) -> Generator
+
+# Memory operations
+client.memory.store(key: str, value: Any) -> None
+client.memory.get(key: str) -> Any
+client.memory.search(query: str) -> List[MemoryItem]
+
+# Workflows
+client.workflows.list() -> List[Workflow]
+client.workflows.run(id: str, input: Dict) -> WorkflowResult
+```
+
+---
+
+## Rust Client
+
+### Add Dependency
+
+```toml
+[dependencies]
+librefang = { version = "0.1", features = ["client"] }
+```
+
+### Usage
+
+```rust
+use librefang::Client;
+
+// Create client
+let client = Client::new("http://127.0.0.1:4200")
+    .api_key("your-api-key");
+
+// List Agents
+let agents = client.agents().list().await?;
+
+// Send message
+let response = client.agents()
+    .send_message("agent-id", "Hello!")
+    .await?;
+```
+
+---
+
+## OpenAI Compatible API
+
+LibreFang provides an OpenAI-compatible API that can be used directly with OpenAI client libraries.
+
+### Endpoint
+
+```
+Base URL: http://127.0.0.1:4200/v1
+```
+
+### Chat Completions
+
+```bash
+curl -X POST http://127.0.0.1:4200/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-api-key" \
+  -d '{
+    "model": "researcher",
+    "messages": [
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "Hello!"}
+    ]
+  }'
+```
+
+### Using OpenAI Library
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    api_key="your-api-key",  # LibreFang API key
+    base_url="http://127.0.0.1:4200/v1"
+)
+
+response = client.chat.completions.create(
+    model="researcher",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+
+print(response.choices[0].message.content)
+```
+
+```typescript
+import OpenAI from 'openai';
+
+const client = new OpenAI({
+  apiKey: 'your-api-key',
+  baseURL: 'http://127.0.0.1:4200/v1'
+});
+
+const response = await client.chat.completions.create({
+  model: 'researcher',
+  messages: [{role: 'user', content: 'Hello!'}]
+});
+```
+
+### Available Models
+
+Models available via OpenAI compatible API:
+
+- `researcher` - Research Agent
+- `coder` - Coding Agent
+- `writer` - Writing Agent
+- Any configured Agent
+
+### Streaming Response
+
+```bash
+curl -X POST http://127.0.0.1:4200/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-api-key" \
+  -d '{
+    "model": "researcher",
+    "messages": [{"role": "user", "content": "Count to 5"}],
+    "stream": true
+  }'
+```
+
+---
+
+## WebSocket API
+
+### Connection
+
+```javascript
+const ws = new WebSocket('ws://127.0.0.1:4200/api/agents/{agent-id}/ws');
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  console.log(data);
+};
+ws.send(JSON.stringify({ message: 'Hello!' }));
+```
+
+### Message Format
+
+```json
+{
+  "type": "message",
+  "content": {
+    "message": "Hello!"
+  }
+}
+```
+
+```json
+{
+  "type": "response",
+  "content": {
+    "text": "Response text",
+    "done": false
+  }
+}
+```
+
+---
+
+## SSE Streaming
+
+### Connection
+
+```bash
+curl -N http://127.0.0.1:4200/api/agents/{agent-id}/stream \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your-api-key" \
+  -d '{"message": "Hello!"}'
+```
+
+### Event Format
+
+```
+data: {"type": "chunk", "content": "Hello"}
+
+data: {"type": "chunk", "content": " there"}
+
+data: {"type": "done", "content": ""}
+```
+
+---
+
+## Example Applications
+
+### React Example
+
+```tsx
+import { useState } from 'react';
+import { LibreFang } from '@librefang/sdk';
+
+function ChatApp() {
+  const [messages, setMessages] = useState([]);
+  const client = new LibreFang({ apiKey: 'your-key' });
+
+  const sendMessage = async (text) => {
+    setMessages(m => [...m, { role: 'user', content: text }]);
+
+    const response = await client.agents.streamMessage('agent-id', {
+      message: text
+    });
+
+    for await (const chunk of response) {
+      // Handle streaming response
+    }
+  };
+
+  return (
+    <div>
+      {messages.map(m => (
+        <div key={m.role}>{m.content}</div>
+      ))}
+    </div>
+  );
+}
+```
+
+### Next.js Example
+
+```typescript
+// app/api/chat/route.ts
+import { LibreFang } from '@librefang/sdk';
+import { NextResponse } from 'next/server';
+
+const client = new LibreFang({
+  apiKey: process.env.LIBREFANG_API_KEY!
+});
+
+export async function POST(req: Request) {
+  const { message, agentId } = await req.json();
+
+  const response = await client.agents.sendMessage(agentId, { message });
+
+  return NextResponse.json({ response: response.content });
+}
+```
+
+### Flask Example
+
+```python
+from flask import Flask, request, jsonify
+from librefang import LibreFang
+
+app = Flask(__name__)
+client = LibreFang(api_key="your-key")
+
+@app.route('/chat', methods=['POST'])
+def chat():
+    data = request.json
+    response = client.agents.send_message(
+        data['agent_id'],
+        message=data['message']
+    )
+    return jsonify({'response': response.content})
+```
+
+---
+
+## Error Handling
+
+```typescript
+import { LibreFang, LibreFangError } from '@librefang/sdk';
+
+try {
+  const response = await client.agents.sendMessage('invalid-id', {
+    message: 'Hello'
+  });
+} catch (error) {
+  if (error instanceof LibreFangError) {
+    console.log(error.code);    // 'agent_not_found'
+    console.log(error.message);  // Error message
+  }
+}
+```
+
+### Error Types
+
+| Error Code | Description |
+|------------|-------------|
+| `invalid_request` | Invalid request format |
+| `unauthorized` | Authentication failed |
+| `rate_limit` | Rate limit exceeded |
+| `agent_not_found` | Agent does not exist |
+| `internal_error` | Internal error |
+| `service_unavailable` | Service unavailable |
+
+---
+
+## Type Definitions
+
+### TypeScript
+
+```typescript
+// Agent type
+interface Agent {
+  id: string;
+  name: string;
+  state: 'Created' | 'Initializing' | 'Running' | 'Paused' | 'Stopped';
+  created_at: string;
+  model_provider: string;
+  model_name: string;
+}
+
+// Message type
+interface Message {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp?: string;
+}
+
+// Response type
+interface Response {
+  id: string;
+  content: string;
+  agent_id: string;
+  tokens_used: number;
+}
+```
+
+export const sections = [];

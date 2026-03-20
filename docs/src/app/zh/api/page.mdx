@@ -1,0 +1,499 @@
+# API 参考
+
+LibreFang 暴露 REST API、WebSocket 端点和 SSE 流式传输。默认监听地址 `http://127.0.0.1:4200`。
+
+## 目录
+
+- [认证](#认证)
+- [Agent 端点](#agent-端点)
+- [工作流端点](#工作流端点)
+- [触发器端点](#触发器端点)
+- [内存端点](#内存端点)
+- [通道端点](#通道端点)
+- [模板端点](#模板端点)
+- [系统端点](#系统端点)
+- [模型目录端点](#模型目录端点)
+- [提供商配置端点](#提供商配置端点)
+- [技能和市场端点](#技能和市场端点)
+- [MCP 和 A2A 端点](#mcp-和-a2a-端点)
+- [审计和安全端点](#审计和安全端点)
+- [使用和分析端点](#使用和分析端点)
+- [迁移端点](#迁移端点)
+- [会话管理端点](#会话管理端点)
+- [WebSocket 协议](#websocket-协议)
+- [SSE 流式传输](#sse-流式传输)
+- [OpenAI 兼容 API](#openai-兼容-api)
+- [错误响应](#错误响应)
+
+---
+
+## 认证
+
+配置 API 密钥后，所有端点（除 `/api/health` 和 `/` 外）需要 Bearer 令牌：
+
+```bash
+Authorization: Bearer <your-api-key>
+```
+
+### 设置 API 密钥
+
+在 `~/.librefang/config.toml` 中添加：
+
+```toml
+api_key = "your-secret-api-key"
+```
+
+<Note>
+**注意**: 生产环境请使用强密钥，并通过环境变量存储敏感信息。
+</Note>
+
+### 公共端点（无需认证）
+
+- `GET /api/health`
+- `GET /` (WebChat UI)
+
+---
+
+## Agent 端点
+
+### GET /api/agents
+
+列出所有运行中的 Agent。
+
+**响应** `200 OK`:
+
+```json
+[
+  {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "name": "hello-world",
+    "state": "Running",
+    "created_at": "2025-01-15T10:30:00Z",
+    "model_provider": "groq",
+    "model_name": "llama-3.3-70b-versatile"
+  }
+]
+```
+
+### GET /api/agents/\{id\}
+
+获取单个 Agent 详情。
+
+### POST /api/agents
+
+从 TOML 清单生成新 Agent。
+
+**请求体** (JSON):
+
+```json
+{
+  "manifest_toml": "name = \"my-agent\"\nversion = \"0.1.0\"\ndescription = \"Test agent\"\nauthor = \"me\"\nmodule = \"builtin:chat\"\n\n[model]\nprovider = \"groq\"\nmodel = \"llama-3.3-70b-versatile\"\n\n[capabilities]\ntools = [\"file_read\", \"web_fetch\"]\nmemory_read = [\"*\"]\nmemory_write = [\"self.*\"]\n"
+}
+```
+
+### PUT /api/agents/\{id\}/update
+
+运行时更新 Agent 配置。
+
+### PUT /api/agents/\{id\}/mode
+
+设置 Agent 运行模式。`Stable` 模式固定当前模型和技能注册表。
+
+### POST /api/agents/\{id\}/message
+
+向 Agent 发送消息并接收完整响应。
+
+### GET /api/agents/\{id\}/session
+
+获取 Agent 对话历史。
+
+### DELETE /api/agents/\{id\}
+
+终止 Agent。
+
+---
+
+## 工作流端点
+
+### GET /api/workflows
+
+列出所有工作流。
+
+### POST /api/workflows
+
+创建新工作流。
+
+### GET /api/workflows/\{id\}
+
+获取工作流详情。
+
+### PUT /api/workflows/\{id\}
+
+更新工作流。
+
+### DELETE /api/workflows/\{id\}
+
+删除工作流。
+
+### POST /api/workflows/\{id\}/run
+
+运行工作流。
+
+### GET /api/workflows/\{id\}/runs
+
+获取工作流运行历史。
+
+---
+
+## 触发器端点
+
+### GET /api/triggers
+
+列出所有触发器。
+
+### POST /api/triggers
+
+创建新触发器。
+
+### GET /api/triggers/\{id\}
+
+获取触发器详情。
+
+### PUT /api/triggers/\{id\}
+
+更新触发器。
+
+### DELETE /api/triggers/\{id\}
+
+删除触发器。
+
+---
+
+## 内存端点
+
+### GET /api/memory
+
+获取记忆搜索结果。
+
+### POST /api/memory
+
+存储新记忆。
+
+### DELETE /api/memory/\{id\}
+
+删除记忆。
+
+### GET /api/memory/sessions
+
+列出所有会话。
+
+### GET /api/memory/sessions/\{id\}
+
+获取会话详情。
+
+---
+
+## 通道端点
+
+### GET /api/channels
+
+列出所有通道状态。
+
+### POST /api/channels/\{channel\}/test
+
+测试通道连接。
+
+### PUT /api/channels/\{channel\}/enable
+
+启用通道。
+
+### PUT /api/channels/\{channel\}/disable
+
+禁用通道。
+
+---
+
+## 模板端点
+
+### GET /api/templates
+
+列出所有 Agent 模板。
+
+### GET /api/templates/\{id\}
+
+获取模板详情。
+
+---
+
+## 系统端点
+
+### GET /api/health
+
+健康检查。
+
+### GET /api/status
+
+系统状态。
+
+### GET /api/version
+
+版本信息。
+
+### POST /api/shutdown
+
+关闭守护进程。
+
+### POST /api/restart
+
+重启守护进程。
+
+---
+
+## 模型目录端点
+
+### GET /api/models
+
+列出所有可用模型。
+
+### GET /api/models/\{id\}
+
+获取模型详情。
+
+### GET /api/providers
+
+列出所有提供商。
+
+### GET /api/providers/\{id\}
+
+获取提供商详情。
+
+---
+
+## 提供商配置端点
+
+### GET /api/config/provider
+
+获取当前提供商配置。
+
+### PUT /api/config/provider
+
+更新提供商配置。
+
+### POST /api/config/provider/test
+
+测试提供商连接。
+
+---
+
+## 技能和市场端点
+
+### GET /api/skills
+
+列出所有已安装技能。
+
+### POST /api/skills/install
+
+安装新技能。
+
+### DELETE /api/skills/\{id\}
+
+卸载技能。
+
+### GET /api/skills/search
+
+搜索 FangHub。
+
+---
+
+## MCP 和 A2A 端点
+
+### GET /.well-known/agent.json
+
+获取 Agent Card (A2A)。
+
+### POST /a2a/tasks
+
+创建 A2A 任务。
+
+### GET /a2a/tasks/\{id\}
+
+获取 A2A 任务状态。
+
+### GET /a2a/tasks/\{id\}/messages
+
+获取 A2A 消息历史。
+
+### GET /api/mcp/tools
+
+列出 MCP 工具。
+
+---
+
+## 审计和安全端点
+
+### GET /api/audit/logs
+
+获取审计日志。
+
+### GET /api/audit/chain
+
+获取 Merkle 哈希链。
+
+### GET /api/security/status
+
+获取安全状态。
+
+---
+
+## 使用和分析端点
+
+### GET /api/usage
+
+获取使用统计。
+
+### GET /api/usage/agents
+
+获取每个 Agent 的使用情况。
+
+### GET /api/usage/providers
+
+获取每个提供商的使用情况。
+
+### GET /api/budget
+
+获取预算状态。
+
+### PUT /api/budget
+
+更新预算设置。
+
+---
+
+## 迁移端点
+
+### POST /api/migrate
+
+执行迁移。
+
+### GET /api/migrate/status
+
+获取迁移状态。
+
+---
+
+## 会话管理端点
+
+### GET /api/sessions
+
+列出所有会话。
+
+### GET /api/sessions/\{id\}
+
+获取会话详情。
+
+### DELETE /api/sessions/\{id\}
+
+删除会话。
+
+### POST /api/sessions/\{id\}/compact
+
+压缩会话。
+
+---
+
+## WebSocket 协议
+
+### ws://127.0.0.1:4200/api/agents/\{id\}/ws
+
+WebSocket 实时聊天。
+
+```javascript
+const ws = new WebSocket('ws://127.0.0.1:4200/api/agents/\{id\}/ws');
+
+ws.onmessage = (event) => {
+  console.log(event.data);
+};
+
+ws.send(JSON.stringify({ message: "Hello!" }));
+```
+
+---
+
+## SSE 流式传输
+
+### GET /api/agents/\{id\}/stream
+
+SSE 流式响应。
+
+```bash
+curl -N http://127.0.0.1:4200/api/agents/\{id\}/stream \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Hello!"}'
+```
+
+---
+
+## OpenAI 兼容 API
+
+### POST /v1/chat/completions
+
+OpenAI 兼容聊天完成端点。
+
+```bash
+curl -X POST http://127.0.0.1:4200/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "researcher",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "stream": true
+  }'
+```
+
+### GET /v1/models
+
+列出可用模型。
+
+```bash
+curl http://127.0.0.1:4200/v1/models
+```
+
+---
+
+## 错误响应
+
+### 错误格式
+
+```json
+{
+  "error": {
+    "code": "invalid_request",
+    "message": "Invalid message format",
+    "details": {}
+  }
+}
+```
+
+### 错误代码
+
+| 代码 | 说明 |
+|------|------|
+| invalid_request | 请求格式错误 |
+| unauthorized | 认证失败 |
+| rate_limit | 速率限制 |
+| agent_not_found | Agent 不存在 |
+| internal_error | 内部错误 |
+| service_unavailable | 服务不可用 |
+
+### HTTP 状态码
+
+| 状态码 | 说明 |
+|--------|------|
+| 200 | 成功 |
+| 201 | 已创建 |
+| 400 | 请求错误 |
+| 401 | 未认证 |
+| 403 | 禁止访问 |
+| 404 | 未找到 |
+| 429 | 速率限制 |
+| 500 | 服务器错误 |
+| 503 | 服务不可用 |
