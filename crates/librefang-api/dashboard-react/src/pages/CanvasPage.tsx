@@ -125,16 +125,29 @@ function GroupNodeComponent({ data, id }: { data: any; id: string }) {
       <div
         className="flex items-center gap-2 px-3 py-2 bg-brand/10 rounded-t-xl cursor-pointer relative z-10"
         style={{ pointerEvents: "auto" }}
-        onClick={(e) => { e.stopPropagation(); data._onToggle?.(id); }}
       >
-        {expanded
-          ? <ChevronDown className="w-3.5 h-3.5 text-brand shrink-0" />
-          : <ChevronRight className="w-3.5 h-3.5 text-brand shrink-0" />}
-        <Group className="w-3.5 h-3.5 text-brand shrink-0" />
-        <span className="text-xs font-bold text-brand truncate">{data.label || "Group"}</span>
-        {!expanded && data._childCount > 0 && (
-          <span className="text-[9px] text-brand/50 ml-auto">{data._childCount} nodes</span>
-        )}
+        <div className="flex items-center gap-2 flex-1 min-w-0" onClick={(e) => { e.stopPropagation(); data._onToggle?.(id); }}>
+          {expanded
+            ? <ChevronDown className="w-3.5 h-3.5 text-brand shrink-0" />
+            : <ChevronRight className="w-3.5 h-3.5 text-brand shrink-0" />}
+          <Group className="w-3.5 h-3.5 text-brand shrink-0" />
+          <span className="text-xs font-bold text-brand truncate">{data.label || "Group"}</span>
+          {!expanded && data._childCount > 0 && (
+            <span className="text-[9px] text-brand/50">{data._childCount}</span>
+          )}
+        </div>
+        {/* 解散分组（保留子节点） */}
+        <button onClick={(e) => { e.stopPropagation(); data._onUngroup?.(id); }}
+          title="Ungroup"
+          className="p-0.5 rounded hover:bg-brand/20 text-brand/50 hover:text-brand shrink-0">
+          <X className="w-3 h-3" />
+        </button>
+        {/* 删除分组+子节点 */}
+        <button onClick={(e) => { e.stopPropagation(); data._onDeleteGroup?.(id); }}
+          title="Delete group and children"
+          className="p-0.5 rounded hover:bg-error/20 text-text-dim/30 hover:text-error shrink-0">
+          <Trash2 className="w-3 h-3" />
+        </button>
       </div>
       {!expanded && (
         <div className="px-3 py-2">
@@ -465,10 +478,53 @@ export function CanvasPage() {
     });
   }, [nodes, setNodes, setEdges]);
 
+  // 解散分组：删掉 group 节点，子节点保留并清除 _groupId
+  const ungroupNodes = useCallback((groupId: string) => {
+    setNodes(nds => {
+      const group = nds.find(n => n.id === groupId);
+      const childIds = new Set<string>((group?.data as any)?._childIds || []);
+      return nds
+        .filter(n => n.id !== groupId)
+        .map(n => childIds.has(n.id)
+          ? { ...n, data: { ...(n.data as any), _groupId: undefined } }
+          : n
+        );
+    });
+    // 恢复被重定向的边
+    setEdges(eds => eds.map(e => {
+      const ed = e.data as any;
+      if (ed?._origSource) return { ...e, source: ed._origSource, data: { ...e.data, _origSource: undefined }, hidden: false };
+      if (ed?._origTarget) return { ...e, target: ed._origTarget, data: { ...e.data, _origTarget: undefined }, hidden: false };
+      return { ...e, hidden: false };
+    }));
+  }, [setNodes, setEdges]);
+
+  // 删除分组 + 所有子节点
+  const deleteGroupAndChildren = useCallback((groupId: string) => {
+    setNodes(nds => {
+      const group = nds.find(n => n.id === groupId);
+      const childIds = new Set<string>((group?.data as any)?._childIds || []);
+      childIds.add(groupId);
+      return nds.filter(n => !childIds.has(n.id));
+    });
+    // 删除涉及子节点的边
+    setEdges(eds => {
+      const group = nodes.find(n => n.id === groupId);
+      const childIds = new Set<string>((group?.data as any)?._childIds || []);
+      childIds.add(groupId);
+      return eds.filter(e => !childIds.has(e.source) && !childIds.has(e.target));
+    });
+  }, [nodes, setNodes, setEdges]);
+
   const nodeTypes = useMemo(() => ({
     custom: (props: any) => <CustomNode {...props} t={t} />,
-    groupNode: (props: any) => <GroupNodeComponent {...props} data={{ ...props.data, _onToggle: toggleGroup }} />,
-  }), [t, toggleGroup]);
+    groupNode: (props: any) => <GroupNodeComponent {...props} data={{
+      ...props.data,
+      _onToggle: toggleGroup,
+      _onUngroup: ungroupNodes,
+      _onDeleteGroup: deleteGroupAndChildren,
+    }} />,
+  }), [t, toggleGroup, ungroupNodes, deleteGroupAndChildren]);
 
   // 需要 agent 的节点类型（后端所有 step 都需要 agent）
   const AGENT_NODE_TYPES = new Set(["agent", "channel", "respond", "condition", "loop", "parallel", "collect"]);
