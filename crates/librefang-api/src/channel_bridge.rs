@@ -18,9 +18,9 @@ fn looks_like_tool_call(text: &str) -> bool {
     // JSON-style tool calls (may appear at start of text)
     t.starts_with("[{")
         || t.starts_with("functions.")
-        || t.starts_with("{\"name\":")
         || t.starts_with("{\"type\":\"function\"")
         || (t.starts_with('[') && t.contains("'type': 'text'"))
+        || contains_bare_json_tool_call(t)
         // Tag-based patterns — use contains() because tool call tags may
         // appear after natural language preamble
         || t.contains("<function=")
@@ -30,9 +30,152 @@ fn looks_like_tool_call(text: &str) -> bool {
         || t.contains("[TOOL_CALL]")
         || t.contains("<tool_call>")
         // Pattern 4: markdown code block containing a tool call
-        || t.contains("```")
+        || contains_markdown_tool_call(t)
         // Pattern 5: backtick-wrapped tool call
-        || (t.contains('`') && t.contains('{'))
+        || contains_backtick_tool_call(t)
+}
+
+fn contains_markdown_tool_call(text: &str) -> bool {
+    let mut in_block = false;
+    let mut block_content = String::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            if in_block {
+                if looks_like_named_json_tool_call(&block_content) {
+                    return true;
+                }
+                block_content.clear();
+                in_block = false;
+            } else {
+                in_block = true;
+                block_content.clear();
+            }
+        } else if in_block {
+            if !block_content.is_empty() {
+                block_content.push('\n');
+            }
+            block_content.push_str(trimmed);
+        }
+    }
+
+    false
+}
+
+fn contains_backtick_tool_call(text: &str) -> bool {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .any(looks_like_named_json_tool_call)
+}
+
+fn looks_like_named_json_tool_call(text: &str) -> bool {
+    let trimmed = text.trim();
+    let Some(brace_pos) = trimmed.find('{') else {
+        return false;
+    };
+
+    let potential_tool = trimmed[..brace_pos].trim();
+    if potential_tool.is_empty() || !looks_like_tool_name(potential_tool) {
+        return false;
+    }
+
+    serde_json::from_str::<serde_json::Value>(trimmed[brace_pos..].trim()).is_ok()
+}
+
+fn looks_like_tool_name(name: &str) -> bool {
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/'))
+}
+
+fn contains_bare_json_tool_call(text: &str) -> bool {
+    let mut scan_from = 0;
+
+    while let Some(brace_start) = text[scan_from..].find('{') {
+        let abs_brace = scan_from + brace_start;
+        if let Some(end) = find_json_object_end(&text[abs_brace..]) {
+            if looks_like_tool_call_object(&text[abs_brace..abs_brace + end]) {
+                return true;
+            }
+        }
+        scan_from = abs_brace + 1;
+    }
+
+    false
+}
+
+fn find_json_object_end(text: &str) -> Option<usize> {
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (i, c) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+
+            match c {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn looks_like_tool_call_object(text: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+
+    let Some(name) = obj
+        .get("name")
+        .or_else(|| obj.get("function"))
+        .or_else(|| obj.get("tool"))
+        .and_then(|value| value.as_str())
+    else {
+        return false;
+    };
+
+    if !looks_like_tool_name(name) {
+        return false;
+    }
+
+    let args = obj
+        .get("arguments")
+        .or_else(|| obj.get("parameters"))
+        .or_else(|| obj.get("args"))
+        .or_else(|| obj.get("input"));
+
+    match args {
+        Some(serde_json::Value::String(s)) => serde_json::from_str::<serde_json::Value>(s).is_ok(),
+        Some(_) => true,
+        None => matches!(
+            obj.get("type").and_then(|value| value.as_str()),
+            Some("function")
+        ),
+    }
 }
 
 // Feature-gated adapter imports
@@ -2416,6 +2559,45 @@ pub async fn reload_channels_from_disk(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn test_looks_like_tool_call_detects_markdown_tool_call_with_preamble() {
+        let text = "Here is the tool call:\n```json\nweb_search {\"query\":\"rust\"}\n```";
+        assert!(looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_detects_backtick_tool_call_with_preamble() {
+        let text = "I'll use `web_search {\"query\":\"rust\"}` for that.";
+        assert!(looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_detects_bare_json_tool_call_with_preamble() {
+        let text =
+            "I'll run that: {\"name\":\"shell_exec\",\"arguments\":{\"command\":\"ls -la\"}}";
+        assert!(looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_allows_normal_code_block() {
+        let text = "```rust\nfn main() {\n    println!(\"hi\");\n}\n```";
+        assert!(!looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_allows_inline_json_example() {
+        let text = "Use `{\"foo\":\"bar\"}` in your config.";
+        assert!(!looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_allows_non_tool_json_object() {
+        let text = "Profile payload: {\"name\":\"Alice\",\"role\":\"admin\"}";
+        assert!(!looks_like_tool_call(text));
+    }
+
     #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();
