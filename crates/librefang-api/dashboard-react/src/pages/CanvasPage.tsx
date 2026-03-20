@@ -33,20 +33,20 @@ import {
 // 节点类型配置 — n8n 风格配色
 const NODE_TYPES = [
   // 触发器（视觉标记）
-  { type: "start", labelKey: "canvas.node_types.start", color: "#10b981", bg: "#ecfdf5", icon: "▶", descKey: "canvas.node_types.start_desc" },
-  { type: "end", labelKey: "canvas.node_types.end", color: "#ef4444", bg: "#fef2f2", icon: "■", descKey: "canvas.node_types.end_desc" },
-  { type: "schedule", labelKey: "canvas.node_types.schedule", color: "#f59e0b", bg: "#fffbeb", icon: "⏱", descKey: "canvas.node_types.schedule_desc" },
-  { type: "webhook", labelKey: "canvas.node_types.webhook", color: "#6366f1", bg: "#eef2ff", icon: "⚡", descKey: "canvas.node_types.webhook_desc" },
-  { type: "channel", labelKey: "canvas.node_types.channel", color: "#8b5cf6", bg: "#f5f3ff", icon: "📢", descKey: "canvas.node_types.channel_desc" },
+  { type: "start", labelKey: "canvas.node_types.start", color: "#10b981", bg: "#ecfdf5", icon: "S", descKey: "canvas.node_types.start_desc" },
+  { type: "end", labelKey: "canvas.node_types.end", color: "#ef4444", bg: "#fef2f2", icon: "E", descKey: "canvas.node_types.end_desc" },
+  { type: "schedule", labelKey: "canvas.node_types.schedule", color: "#f59e0b", bg: "#fffbeb", icon: "C", descKey: "canvas.node_types.schedule_desc" },
+  { type: "webhook", labelKey: "canvas.node_types.webhook", color: "#6366f1", bg: "#eef2ff", icon: "W", descKey: "canvas.node_types.webhook_desc" },
+  { type: "channel", labelKey: "canvas.node_types.channel", color: "#8b5cf6", bg: "#f5f3ff", icon: "M", descKey: "canvas.node_types.channel_desc" },
   // 逻辑控制
-  { type: "condition", labelKey: "canvas.node_types.condition", color: "#f59e0b", bg: "#fffbeb", icon: "◇", descKey: "canvas.node_types.condition_desc" },
-  { type: "loop", labelKey: "canvas.node_types.loop", color: "#8b5cf6", bg: "#f5f3ff", icon: "↻", descKey: "canvas.node_types.loop_desc" },
-  { type: "parallel", labelKey: "canvas.node_types.parallel", color: "#f59e0b", bg: "#fffbeb", icon: "⫸", descKey: "canvas.node_types.parallel_desc" },
-  { type: "collect", labelKey: "canvas.node_types.collect", color: "#10b981", bg: "#ecfdf5", icon: "⫷", descKey: "canvas.node_types.collect_desc" },
-  { type: "wait", labelKey: "canvas.node_types.wait", color: "#6b7280", bg: "#f9fafb", icon: "⏸", descKey: "canvas.node_types.wait_desc" },
+  { type: "condition", labelKey: "canvas.node_types.condition", color: "#f59e0b", bg: "#fffbeb", icon: "?", descKey: "canvas.node_types.condition_desc" },
+  { type: "loop", labelKey: "canvas.node_types.loop", color: "#8b5cf6", bg: "#f5f3ff", icon: "L", descKey: "canvas.node_types.loop_desc" },
+  { type: "parallel", labelKey: "canvas.node_types.parallel", color: "#f59e0b", bg: "#fffbeb", icon: "P", descKey: "canvas.node_types.parallel_desc" },
+  { type: "collect", labelKey: "canvas.node_types.collect", color: "#10b981", bg: "#ecfdf5", icon: "C", descKey: "canvas.node_types.collect_desc" },
+  { type: "wait", labelKey: "canvas.node_types.wait", color: "#6b7280", bg: "#f9fafb", icon: "T", descKey: "canvas.node_types.wait_desc" },
   // 动作
-  { type: "respond", labelKey: "canvas.node_types.respond", color: "#10b981", bg: "#ecfdf5", icon: "↩", descKey: "canvas.node_types.respond_desc" },
-  { type: "agent", labelKey: "canvas.node_types.agent", color: "#3b82f6", bg: "#eff6ff", icon: "🤖", descKey: "canvas.node_types.agent_desc" },
+  { type: "respond", labelKey: "canvas.node_types.respond", color: "#10b981", bg: "#ecfdf5", icon: "R", descKey: "canvas.node_types.respond_desc" },
+  { type: "agent", labelKey: "canvas.node_types.agent", color: "#3b82f6", bg: "#eff6ff", icon: "A", descKey: "canvas.node_types.agent_desc" },
 ];
 
 // 自定义节点组件 — n8n 风格
