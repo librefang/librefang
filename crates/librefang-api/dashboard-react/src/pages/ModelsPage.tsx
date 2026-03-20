@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listModels, type ModelItem } from "../api";
 import { Badge } from "../components/ui/Badge";
@@ -31,7 +31,6 @@ export function ModelsPage() {
   }, [allModels]);
 
   const filtered = useMemo(() => {
-    setPage(0);
     return allModels.filter(m => {
       if (search && !m.id.toLowerCase().includes(search.toLowerCase()) && !(m.display_name || "").toLowerCase().includes(search.toLowerCase())) return false;
       if (tierFilter !== "all" && m.tier !== tierFilter) return false;
@@ -40,6 +39,9 @@ export function ModelsPage() {
       return true;
     });
   }, [allModels, search, tierFilter, providerFilter, availableOnly]);
+
+  // Reset page when filters change
+  useEffect(() => { setPage(0); }, [search, tierFilter, providerFilter, availableOnly]);
 
   const paged = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
