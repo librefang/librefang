@@ -312,6 +312,52 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${GITHUB_REF#refs/tags/}" librefang-${{ matrix.target }}-mini.* --clobber
 
+  # ── CLI Binary → npm ────────────────────────────────────────────────────
+  cli_npm:
+    name: CLI / npm
+    needs: [cli_mac, cli_linux, cli_musl, cli_windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish CLI binaries to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          FULL="${GITHUB_REF#refs/tags/v}"
+          export VERSION="${FULL%-*}"
+          bash scripts/publish-npm-binaries.sh
+
+  # ── CLI Binary → PyPI ──────────────────────────────────────────────────
+  cli_pypi:
+    name: CLI / PyPI
+    needs: [cli_mac, cli_linux, cli_musl, cli_windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Publish CLI binaries to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          FULL="${GITHUB_REF#refs/tags/v}"
+          export VERSION="${FULL%-*}"
+          bash scripts/publish-pypi-binaries.sh
+
   # ── Sync to Homebrew Tap ──────────────────────────────────────────────
   sync_homebrew:
     name: Sync to Homebrew Tap

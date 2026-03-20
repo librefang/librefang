@@ -169,52 +169,6 @@ jobs:
             cargo publish --allow-dirty
           fi
 
-  # ── CLI Binary → npm ────────────────────────────────────────────────────
-  cli_npm:
-    name: CLI / npm
-    needs: [wait_for_release]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Publish CLI binaries to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          FULL="${GITHUB_REF#refs/tags/v}"
-          export VERSION="${FULL%-*}"
-          bash scripts/publish-npm-binaries.sh
-
-  # ── CLI Binary → PyPI ──────────────────────────────────────────────────
-  cli_pypi:
-    name: CLI / PyPI
-    needs: [wait_for_release]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Publish CLI binaries to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          FULL="${GITHUB_REF#refs/tags/v}"
-          export VERSION="${FULL%-*}"
-          bash scripts/publish-pypi-binaries.sh
-
   # ── Go SDK — tag for Go modules ──────────────────────────────────────────
   sdk_go:
     name: SDK / Go (tag)

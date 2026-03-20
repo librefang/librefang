@@ -7,6 +7,20 @@ set -euo pipefail
 : "${REPO:?}"
 : "${TAG:?}"
 
+# Retry download (brief retries for GitHub CDN propagation)
+download_asset() {
+  local url=$1 dest=$2
+  for i in $(seq 1 5); do
+    if curl -fsSL -o "$dest" "$url" 2>/dev/null; then
+      return 0
+    fi
+    echo "  Retrying download in 10s... ($i/5)"
+    sleep 10
+  done
+  echo "ERROR: Failed to download $url"
+  return 1
+}
+
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -60,7 +74,7 @@ for target in "${!TARGETS[@]}"; do
   asset="librefang-${target}.${ext}"
   url="https://github.com/${REPO}/releases/download/${TAG}/${asset}"
   echo "  Downloading $url"
-  curl -fsSL -o "$pkg_dir/$asset" "$url"
+  download_asset "$url" "$pkg_dir/$asset"
 
   # Extract binary
   if [ "$ext" = "tar.gz" ]; then
