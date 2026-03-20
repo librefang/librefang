@@ -111,35 +111,37 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
 
 // 分组节点组件
 function GroupNodeComponent({ data, id }: { data: any; id: string }) {
-  const expanded = data._expanded !== false; // 默认展开
+  const expanded = data._expanded !== false;
   return (
     <div
-      className={`rounded-xl border-2 border-dashed transition-all ${
-        expanded ? "border-brand/40 bg-brand/5" : "border-brand bg-surface shadow-lg w-[160px]"
+      className={`rounded-2xl border-2 border-dashed transition-all ${
+        expanded ? "border-brand/30 bg-brand/5" : "border-brand bg-surface shadow-lg"
       }`}
-      style={expanded ? { pointerEvents: "none" } : undefined}
+      style={expanded
+        ? { width: "100%", height: "100%", pointerEvents: "none" }
+        : { width: 180 }}
     >
-      <Handle type="target" position={Position.Top} className="!w-2 !h-2 !bg-brand !border-surface" />
+      <Handle type="target" position={Position.Top} className="!w-3 !h-3 !rounded-full !bg-brand !border-2 !border-surface" />
       <div
-        className="flex items-center gap-1.5 px-2 py-1.5 bg-brand/10 rounded-t-lg cursor-pointer relative z-10"
+        className="flex items-center gap-2 px-3 py-2 bg-brand/10 rounded-t-xl cursor-pointer relative z-10"
         style={{ pointerEvents: "auto" }}
         onClick={(e) => { e.stopPropagation(); data._onToggle?.(id); }}
       >
         {expanded
-          ? <ChevronDown className="w-3 h-3 text-brand shrink-0" />
-          : <ChevronRight className="w-3 h-3 text-brand shrink-0" />}
-        <Group className="w-3 h-3 text-brand shrink-0" />
+          ? <ChevronDown className="w-3.5 h-3.5 text-brand shrink-0" />
+          : <ChevronRight className="w-3.5 h-3.5 text-brand shrink-0" />}
+        <Group className="w-3.5 h-3.5 text-brand shrink-0" />
         <span className="text-xs font-bold text-brand truncate">{data.label || "Group"}</span>
         {!expanded && data._childCount > 0 && (
-          <span className="text-[9px] text-brand/60 ml-auto">{data._childCount} nodes</span>
+          <span className="text-[9px] text-brand/50 ml-auto">{data._childCount} nodes</span>
         )}
       </div>
       {!expanded && (
-        <div className="px-2 py-1">
-          <p className="text-[8px] text-text-dim italic">Click to expand</p>
+        <div className="px-3 py-2">
+          <p className="text-[9px] text-text-dim">Click to expand</p>
         </div>
       )}
-      <Handle type="source" position={Position.Bottom} className="!w-2 !h-2 !bg-brand !border-surface" />
+      <Handle type="source" position={Position.Bottom} className="!w-3 !h-3 !rounded-full !bg-brand !border-2 !border-surface" />
     </div>
   );
 }
@@ -635,23 +637,38 @@ export function CanvasPage() {
     const selected = nodes.filter(n => selectedNodeIds.has(n.id) && n.type !== "groupNode");
     if (selected.length < 2) return;
 
-    const bounds = getNodesBounds(selected);
+    // 手动计算包围盒（考虑节点自身宽高，getNodesBounds 不一定准）
+    const NODE_W = 200; // 节点最大宽度
+    const NODE_H = 80;  // 节点估算高度
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const n of selected) {
+      const w = (n.measured?.width ?? n.width ?? NODE_W);
+      const h = (n.measured?.height ?? n.height ?? NODE_H);
+      minX = Math.min(minX, n.position.x);
+      minY = Math.min(minY, n.position.y);
+      maxX = Math.max(maxX, n.position.x + w);
+      maxY = Math.max(maxY, n.position.y + h);
+    }
     const padding = 30;
+    const headerH = 36;
     const groupId = `group-${Date.now()}`;
     const childIds = selected.map(n => n.id);
+    const gw = maxX - minX + padding * 2;
+    const gh = maxY - minY + padding * 2 + headerH;
 
-    // group 节点放在最底层（z-index 通过数组顺序控制）
     const groupNode: Node = {
       id: groupId,
       type: "groupNode",
-      position: { x: bounds.x - padding, y: bounds.y - padding - 30 },
-      style: { width: bounds.width + padding * 2, height: bounds.height + padding * 2 + 30, zIndex: -1 },
+      position: { x: minX - padding, y: minY - padding - headerH },
+      style: { width: gw, height: gh, zIndex: -1 },
       zIndex: -1,
       data: {
         label: t("canvas.new_group"),
         _expanded: true,
         _childIds: childIds,
         _childCount: childIds.length,
+        _origWidth: gw,
+        _origHeight: gh,
       },
     };
 
