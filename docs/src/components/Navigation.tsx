@@ -192,6 +192,7 @@ const zhNavigation: Array<NavGroup> = [
 			{ title: '发布路线图', href: withPrefix('/zh/roadmap') },
 			{ title: '使用示例', href: withPrefix('/zh/examples') },
 			{ title: '术语表', href: withPrefix('/zh/glossary') },
+			{ title: '横向对比', href: withPrefix('/zh/comparison') },
 		],
 	},
 	{
@@ -249,6 +250,7 @@ export const enNavigation: Array<NavGroup> = [
 			{ title: 'Roadmap', href: withPrefix('/roadmap') },
 			{ title: 'Examples', href: withPrefix('/examples') },
 			{ title: 'Glossary', href: withPrefix('/glossary') },
+			{ title: 'Comparison', href: withPrefix('/comparison') },
 		],
 	},
 	{
