@@ -1355,8 +1355,32 @@ impl LibreFangKernel {
 
                     // Re-register in the in-memory registry
                     let mut restored_entry = entry;
-                    // Respect `enabled` flag from manifest — disabled agents start as Suspended
-                    if restored_entry.manifest.enabled {
+
+                    // Check enabled flag — also do a direct TOML read as fallback
+                    let mut is_enabled = restored_entry.manifest.enabled;
+                    if is_enabled {
+                        // Double-check: read directly from hands/agents TOML in case DB is stale
+                        for dir in &["agents", "hands"] {
+                            let check_path = kernel
+                                .config
+                                .home_dir
+                                .join(dir)
+                                .join(&name)
+                                .join("agent.toml");
+                            if check_path.exists() {
+                                if let Ok(content) = std::fs::read_to_string(&check_path) {
+                                    if content.contains("enabled = false")
+                                        || content.contains("enabled=false")
+                                    {
+                                        is_enabled = false;
+                                        restored_entry.manifest.enabled = false;
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    if is_enabled {
                         restored_entry.state = AgentState::Running;
                     } else {
                         restored_entry.state = AgentState::Suspended;
