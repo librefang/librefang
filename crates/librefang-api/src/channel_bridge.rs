@@ -14,27 +14,21 @@ use librefang_channels::types::{ChannelAdapter, SenderContext};
 /// `agent_loop::recover_text_tool_calls`). These should not be
 /// forwarded to the user through streaming channels.
 fn looks_like_tool_call(text: &str) -> bool {
-    let trimmed = text.trim();
-    // JSON array of tool calls
-    trimmed.starts_with("[{")
-        || trimmed.starts_with("functions.")
-        || trimmed.starts_with("{\"name\":")
-        || trimmed.starts_with("{\"type\":\"function\"")
-        || (trimmed.starts_with('[') && trimmed.contains("'type': 'text'"))
-        // Patterns 1-2: <function=TOOL>...</function>, <function>TOOL...</function>
-        || trimmed.starts_with("<function=")
-        || trimmed.starts_with("<function>")
-        || trimmed.starts_with("<function ")
-        // Pattern 3: <tool>TOOL...</tool>
-        || trimmed.starts_with("<tool>")
-        // Pattern 6: [TOOL_CALL]...[/TOOL_CALL]
-        || trimmed.starts_with("[TOOL_CALL]")
-        // Pattern 7: <tool_call>...</tool_call>
-        || trimmed.starts_with("<tool_call>")
-        // Pattern 4: markdown code block with tool call
-        || (trimmed.starts_with("```") && trimmed.contains('{'))
-        // Pattern 5: backtick-wrapped tool call — `tool_name {"key":"value"}`
-        || (trimmed.starts_with('`') && !trimmed.starts_with("```") && trimmed.contains('{'))
+    let t = text.trim();
+    // JSON-style tool calls (may appear at start of text)
+    t.starts_with("[{")
+        || t.starts_with("functions.")
+        || t.starts_with("{\"name\":")
+        || t.starts_with("{\"type\":\"function\"")
+        || (t.starts_with('[') && t.contains("'type': 'text'"))
+        // Tag-based patterns — use contains() because tool call tags may
+        // appear after natural language preamble (e.g. "Let me search for that.\n<function=...")
+        || t.contains("<function=")
+        || t.contains("<function>")
+        || t.contains("<function ")
+        || t.contains("<tool>")
+        || t.contains("[TOOL_CALL]")
+        || t.contains("<tool_call>")
 }
 
 // Feature-gated adapter imports
