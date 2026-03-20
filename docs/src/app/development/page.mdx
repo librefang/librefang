@@ -1,0 +1,430 @@
+# Development Guide
+
+LibreFang development environment setup and contribution guidelines.
+
+---
+
+## Development Environment
+
+### Prerequisites
+
+- **Rust** 1.75+
+- **Node.js** 18+ (for desktop app)
+- **pnpm** 8+ (for documentation site)
+
+### Clone Repository
+
+```bash
+git clone https://github.com/librefang/librefang.git
+cd librefang
+```
+
+### Build
+
+```bash
+# Build entire workspace
+cargo build --workspace
+
+# Build CLI
+cargo build -p librefang-cli
+
+# Build desktop app
+cargo build -p librefang-desktop
+```
+
+### Test
+
+```bash
+# Run all tests
+cargo test --workspace
+
+# Run specific crate
+cargo test -p librefang-kernel
+
+# Run doc tests
+cargo test --doc
+```
+
+### Linting
+
+```bash
+# Must have zero warnings
+cargo clippy --workspace --all-targets -- -D warnings
+
+# Format check
+cargo fmt --all -- --check
+```
+
+---
+
+## Project Structure
+
+```
+librefang/
+├── Cargo.lock
+├── Cargo.toml
+├── crates/
+│   ├── librefang-cli/          # CLI tool
+│   ├── librefang-api/         # REST API server
+│   ├── librefang-kernel/      # Core kernel
+│   ├── librefang-runtime/     # Agent runtime
+│   ├── librefang-memory/      # Memory subsystem
+│   ├── librefang-types/       # Shared types
+│   ├── librefang-channels/    # Channel adapters
+│   ├── librefang-skills/      # Skill system
+│   ├── librefang-hands/       # Hands system
+│   ├── librefang-wire/        # P2P protocol
+│   ├── librefang-desktop/     # Desktop app
+│   ├── librefang-migrate/     # Migration tools
+│   └── librefang-extensions/   # Extensions
+├── xtask/                      # Build scripts
+├── docs/                       # Project documentation
+└── scripts/                    # Helper scripts
+```
+
+---
+
+## Adding New Channel
+
+### 1. Create Channel Module
+
+```rust
+// crates/librefang-channels/src/my_channel.rs
+
+use async_trait::async_trait;
+use crate::channel::{Channel, Message, ChannelConfig};
+
+pub struct MyChannel {
+    config: ChannelConfig,
+}
+
+#[async_trait]
+impl Channel for MyChannel {
+    async fn send(&self, message: Message) -> Result<(), Error> {
+        // Implement send logic
+        Ok(())
+    }
+
+    async fn receive(&self) -> Result<Message, Error> {
+        // Implement receive logic
+        Ok(Message::default())
+    }
+}
+```
+
+### 2. Register Channel
+
+```rust
+// crates/librefang-channels/src/lib.rs
+
+pub mod my_channel;
+
+use crate::registry::ChannelRegistry;
+
+pub fn register_channels(registry: &mut ChannelRegistry) {
+    registry.register("my_channel", |config| {
+        Ok(Box::new(MyChannel::new(config)))
+    });
+}
+```
+
+### 3. Add Configuration
+
+```rust
+// crates/librefang-types/src/config.rs
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MyChannelConfig {
+    pub api_key_env: String,
+    pub allowed_users: Option<Vec<String>>,
+}
+```
+
+---
+
+## Adding New Skill
+
+### 1. Create Skill Structure
+
+```toml
+# skills/my-skill/skill.toml
+name = "my-skill"
+version = "1.0.0"
+description = "My custom skill"
+
+[runtime]
+type = "python"
+entrypoint = "main.py"
+
+[tools]
+provided = ["my_tool"]
+
+[requirements]
+packages = ["requests"]
+```
+
+### 2. Implement Code
+
+```python
+# skills/my-skill/main.py
+
+def my_tool(param: str) -> str:
+    """My custom tool description"""
+    # Implement logic
+    return f"Result: {param}"
+
+# Register tools
+TOOLS = [my_tool]
+```
+
+### 3. Compile Skill
+
+```bash
+# Skills are automatically compiled into binary
+cargo build --workspace
+```
+
+---
+
+## Adding New Tool
+
+### 1. Define Tool
+
+```rust
+// crates/librefang-runtime/src/tools/mod.rs
+
+use crate::tool::{Tool, ToolResult};
+
+pub struct MyTool;
+
+impl Tool for MyTool {
+    fn name(&self) -> &str {
+        "my_tool"
+    }
+
+    fn description(&self) -> &str {
+        "My custom tool description"
+    }
+
+    async fn execute(&self, params: Value) -> ToolResult {
+        // Implement tool logic
+        Ok(Value::String("result".to_string()))
+    }
+}
+```
+
+### 2. Register Tool
+
+```rust
+// crates/librefang-runtime/src/lib.rs
+
+pub fn register_tools(registry: &mut ToolRegistry) {
+    registry.register(MyTool::new());
+}
+```
+
+---
+
+## Adding New LLM Provider
+
+### 1. Implement Driver
+
+```rust
+// crates/librefang-runtime/src/llm/my_provider.rs
+
+use crate::llm::{LlmDriver, LlmResponse, LlmError};
+
+pub struct MyProvider {
+    api_key: String,
+    base_url: String,
+}
+
+#[async_trait]
+impl LlmDriver for MyProvider {
+    async fn complete(&self, prompt: &str) -> Result<LlmResponse, LlmError> {
+        // Call API
+        Ok(LlmResponse {
+            text: "response".to_string(),
+            tokens: 100,
+        })
+    }
+}
+```
+
+### 2. Add to Model Catalog
+
+```rust
+// crates/librefang-types/src/models.rs
+
+pub fn get_provider(name: &str) -> Option<Box<dyn LlmDriver>> {
+    match name {
+        "my_provider" => Some(Box::new(MyProvider::new())),
+        _ => None,
+    }
+}
+```
+
+---
+
+## Code Style
+
+### Rust Standards
+
+- Format with `cargo fmt`
+- Check with `cargo clippy`
+- Follow Rust naming conventions
+- Add documentation comments (`///`)
+
+### Commit Standards
+
+```bash
+# Format: <type>(<scope>): <description>
+
+git commit -m "feat(kernel): add new scheduling algorithm"
+git commit -m "fix(channels): resolve Slack rate limit"
+git commit -m "docs(api): update endpoint documentation"
+git commit -m "test(runtime): add tool execution tests"
+```
+
+### Types
+
+| Type | Description |
+|------|-------------|
+| feat | New feature |
+| fix | Bug fix |
+| docs | Documentation |
+| style | Formatting |
+| refactor | Refactoring |
+| test | Testing |
+| chore | Maintenance |
+
+---
+
+## Testing
+
+### Unit Tests
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_my_function() {
+        assert_eq!(my_function(2), 4);
+    }
+}
+```
+
+### Integration Tests
+
+```rust
+#[tokio::test]
+async fn test_agent_spawn() {
+    let kernel = Kernel::new().await;
+    let agent = kernel.spawn("test-agent").await;
+    assert!(agent.is_running());
+}
+```
+
+### Benchmark Tests
+
+```rust
+#[tokio::bench]
+async fn benchmark_llm_call(b: &mut Bencher) {
+    b.iter(|| {
+        runtime.block_on(llm.complete("test prompt"))
+    })
+}
+```
+
+---
+
+## Debugging
+
+### Logging
+
+```rust
+use tracing::{info, warn, error};
+
+info!("Starting agent {}", agent_id);
+warn!("Rate limit exceeded for channel {}", channel_id);
+error!("Failed to connect to provider: {}", error);
+```
+
+### Debug Mode
+
+```bash
+# Enable verbose logging
+RUST_LOG=debug cargo run
+
+# See specific module only
+RUST_LOG=librefang_kernel=trace cargo run
+```
+
+### Performance Profiling
+
+```bash
+# CPU profiling
+cargo flamegraph --bin librefang-cli -- start
+
+# Memory profiling
+cargo leptos --bin librefang-cli -- start
+```
+
+---
+
+## Release
+
+### Version Numbers
+
+Follow Semantic Versioning (SemVer):
+
+- **Major** - Incompatible API changes
+- **Minor** - Backward-compatible new features
+- **Patch** - Backward-compatible bug fixes
+
+### Release Process
+
+```bash
+# 1. Update version
+cargo version bump patch
+
+# 2. Update CHANGELOG
+vim CHANGELOG.md
+
+# 3. Create tag
+git tag v0.1.0
+
+# 4. Build release
+cargo build --release
+
+# 5. Publish to crates.io
+cargo publish
+```
+
+---
+
+## Contributing
+
+### Contribution Process
+
+1. Fork the repository
+2. Create feature branch (`git checkout -b feature/my-feature`)
+3. Commit changes (`git commit -m "feat: add my feature"`)
+4. Push branch (`git push origin feature/my-feature`)
+5. Create Pull Request
+
+### Code Review
+
+- Ensure `cargo clippy` has no warnings
+- Ensure `cargo test` passes
+- Add test coverage for new code
+- Update documentation
+
+### Code of Conduct
+
+- Respect others
+- Welcome newcomers
+- Communicate professionally
+- Accept constructive criticism

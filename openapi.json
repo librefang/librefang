@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "0.6.3-20260319"
+    "version": "0.6.8-20260320"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -1750,12 +1750,12 @@
         "tags": [
           "approvals"
         ],
-        "summary": "GET /api/approvals — List pending approval requests.",
+        "summary": "GET /api/approvals — List pending and recent approval requests.",
         "description": "Transforms field names to match the dashboard template expectations:\n`action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.",
         "operationId": "list_approvals",
         "responses": {
           "200": {
-            "description": "List pending approvals",
+            "description": "List pending and recent approvals",
             "content": {
               "application/json": {
                 "schema": {
@@ -7073,8 +7073,29 @@
             },
             "description": "Optional file attachments (uploaded via /upload endpoint)."
           },
+          "channel_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional channel type (e.g. \"whatsapp\", \"telegram\")."
+          },
           "message": {
             "type": "string"
+          },
+          "sender_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional sender ID (platform-specific user ID)."
+          },
+          "sender_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional sender display name."
           }
         }
       },

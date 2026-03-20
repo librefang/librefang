@@ -6,6 +6,7 @@ license.workspace = true
 description = "Hands system for LibreFang — curated autonomous capability packages"
 
 [dependencies]
+dirs = "6"
 librefang-types = { path = "../librefang-types" }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -19,3 +20,4 @@ dashmap = { workspace = true }
 [dev-dependencies]
 tokio-test = { workspace = true }
 tempfile = { workspace = true }
+librefang-runtime = { path = "../librefang-runtime" }

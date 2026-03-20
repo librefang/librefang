@@ -27,10 +27,9 @@ const CATALOG_REPO: &str = "librefang/model-catalog";
 
 /// Sync the model catalog from the remote repository.
 ///
-/// Downloads TOML files from GitHub and saves to `~/.librefang/cache/catalog/`.
-pub async fn sync_catalog() -> Result<CatalogSyncResult, String> {
-    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
-    let cache_dir = home.join(".librefang").join("cache").join("catalog");
+/// Downloads TOML files from GitHub and saves to `home_dir/cache/catalog/`.
+pub async fn sync_catalog_to(home_dir: &std::path::Path) -> Result<CatalogSyncResult, String> {
+    let cache_dir = home_dir.join("cache").join("catalog");
     let providers_dir = cache_dir.join("providers");
 
     // Create directories
@@ -110,19 +109,14 @@ pub async fn sync_catalog() -> Result<CatalogSyncResult, String> {
 }
 
 /// Check when the catalog was last synced.
-pub fn last_sync_time() -> Option<String> {
-    let home = dirs::home_dir()?;
-    let path = home
-        .join(".librefang")
-        .join("cache")
-        .join("catalog")
-        .join(".last_sync");
+pub fn last_sync_time_for(home_dir: &std::path::Path) -> Option<String> {
+    let path = home_dir.join("cache").join("catalog").join(".last_sync");
     std::fs::read_to_string(path).ok()
 }
 
 /// Return the cache directory for the catalog.
-pub fn cache_dir() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".librefang").join("cache").join("catalog"))
+pub fn cache_dir_for(home_dir: &std::path::Path) -> std::path::PathBuf {
+    home_dir.join("cache").join("catalog")
 }
 
 #[cfg(test)]
@@ -170,16 +164,14 @@ gpt4 = "gpt-4o"
 
     #[test]
     fn test_last_sync_time_missing() {
-        // Should return None when no sync has happened (or home dir has no cache)
-        // This test just verifies it doesn't panic.
-        let _ = last_sync_time();
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(last_sync_time_for(tmp.path()).is_none());
     }
 
     #[test]
     fn test_cache_dir() {
-        let dir = cache_dir();
-        assert!(dir.is_some());
-        let d = dir.unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let d = cache_dir_for(tmp.path());
         assert!(d.ends_with("cache/catalog") || d.ends_with("cache\\catalog"));
     }
 }

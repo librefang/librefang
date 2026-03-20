@@ -1,0 +1,367 @@
+# Memory System
+
+LibreFang's memory system provides persistent storage, semantic search, and knowledge graph functionality.
+
+---
+
+## Overview
+
+The LibreFang memory system includes:
+
+- **SQLite Persistence** - Structured KV storage
+- **Vector Embeddings** - Semantic search capability
+- **Knowledge Graph** - Entities and relationships
+- **Session Management** - Cross-channel memory
+- **Usage Tracking** - Cost and usage statistics
+
+<Note>
+**Tip**: Memory data is stored in `~/.librefang/data/librefang.db` by default, with configurable storage path.
+</Note>
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────┐
+│              Agent Loop                  │
+└─────────────────┬───────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────┐
+│           Memory Subsystem               │
+├─────────────────────────────────────────┤
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  │
+│  │ Session │  │ Vector  │  │Knowledge│  │
+│  │ Store   │  │ Search  │  │ Graph   │  │
+│  └─────────┘  └─────────┘  └─────────┘  │
+├─────────────────────────────────────────┤
+│           SQLite Database               │
+└─────────────────────────────────────────┘
+```
+
+---
+
+## Configuration
+
+### Basic Configuration
+
+```toml
+[memory]
+decay_rate = 0.05
+sqlite_path = "~/.librefang/data/librefang.db"
+```
+
+### Advanced Configuration
+
+```toml
+[memory]
+decay_rate = 0.05
+sqlite_path = "~/.librefang/data/librefang.db"
+vector_dimension = 1536
+max_memory_items = 10000
+auto_compact = true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `decay_rate` | Float | 0.05 | Memory confidence decay rate |
+| `sqlite_path` | String | ~/.librefang/data/librefang.db | Database path |
+| `vector_dimension` | Integer | 1536 | Vector dimension |
+| `max_memory_items` | Integer | 10000 | Maximum memory entries |
+| `auto_compact` | Boolean | true | Auto compaction |
+
+---
+
+## Session Management
+
+### Create Session
+
+```bash
+# Create new session
+librefang session create --name "research-project"
+```
+
+### List Sessions
+
+```bash
+# List all sessions
+librefang session list
+```
+
+### Session Operations
+
+```bash
+# View session details
+librefang session info <session-id>
+
+# Delete session
+librefang session delete <session-id>
+
+# Compact session
+librefang session compact <session-id>
+
+# Export session
+librefang session export <session-id> --format json
+```
+
+---
+
+## Memory Operations
+
+### Store Memory
+
+```bash
+# Store simple memory
+librefang memory store --key "user:preference:theme" --value "dark"
+
+# Store structured data
+librefang memory store --key "project:details" --data '{"name": "LibreFang", "version": "1.0"}'
+
+# Store with tags
+librefang memory store --key "note:1" --value "Important note" --tags "work,urgent"
+```
+
+### Search Memory
+
+```bash
+# Keyword search
+librefang memory search "project"
+
+# Vector search (semantic search)
+librefang memory search --vector "find information about AI agents"
+
+# Search with filters
+librefang memory search "meeting" --tags "work" --limit 10
+```
+
+### Memory Operations
+
+```bash
+# Read memory
+librefang memory get <key>
+
+# Update memory
+librefang memory update <key> --value "new value"
+
+# Delete memory
+librefang memory delete <key>
+
+# List all memories
+librefang memory list --prefix "project:"
+```
+
+---
+
+## Vector Search
+
+### Semantic Search
+
+LibreFang supports semantic search with vector embeddings:
+
+```bash
+# Semantic search example
+librefang memory search --vector "machine learning techniques for text classification"
+```
+
+### Similarity Threshold
+
+```toml
+[memory]
+similarity_threshold = 0.75
+```
+
+### API Endpoint
+
+```bash
+# Semantic search API
+curl -X POST http://127.0.0.1:4545/api/memory/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "find information about AI",
+    "limit": 10,
+    "threshold": 0.8
+  }'
+```
+
+---
+
+## Knowledge Graph
+
+### Entity Management
+
+```bash
+# Add entity
+librefang kg add-entity --type "person" --name "John Doe" --properties '{"role": "developer"}'
+
+# List entities
+librefang kg list-entities --type "person"
+
+# Search entities
+librefang kg search-entities "John"
+```
+
+### Relationship Management
+
+```bash
+# Add relationship
+librefang kg add-relation \
+  --from "person:john" \
+  --relation "works_at" \
+  --to "company:acme"
+
+# List relationships
+librefang kg list-relations --entity "person:john"
+
+# Query relationships
+librefang kg query --from "person:john" --relation "works_at"
+```
+
+### Graph Queries
+
+```bash
+# Query path
+librefang kg path --from "person:alice" --to "company:acme"
+
+# Query subgraph
+librefang kg subgraph --entity "person:bob" --depth 2
+```
+
+---
+
+## Session Compaction
+
+### Auto Compaction
+
+Automatic compaction when session message count reaches threshold:
+
+```toml
+[compaction]
+threshold = 80
+keep_recent = 20
+max_summary_tokens = 1024
+```
+
+### Manual Compaction
+
+```bash
+# Compact session
+librefang session compact <session-id>
+
+# Compact all sessions
+librefang session compact-all
+
+# View compaction status
+librefang session compaction-status
+```
+
+### Compaction Algorithm
+
+1. **Keep Recent N Messages**
+2. **Extract Key Information**
+3. **Generate Summary**
+4. **Keep Tool Call History**
+
+---
+
+## Usage Tracking
+
+### View Usage
+
+```bash
+# View usage statistics
+librefang usage
+
+# View Agent usage
+librefang usage --agent <agent-id>
+
+# View provider usage
+librefang usage --provider
+```
+
+### Cost Tracking
+
+```bash
+# View costs
+librefang cost
+
+# View costs by date range
+librefang cost --from 2025-01-01 --to 2025-01-31
+
+# Export report
+librefang cost export --format csv
+```
+
+---
+
+## API Endpoints
+
+### Memory Operations
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/memory` | GET | Search memory |
+| `/api/memory` | POST | Store memory |
+| `/api/memory/{id}` | GET | Get memory |
+| `/api/memory/{id}` | DELETE | Delete memory |
+
+### Session Operations
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/memory/sessions` | GET | List sessions |
+| `/api/memory/sessions/{id}` | GET | Get session |
+| `/api/memory/sessions/{id}/compact` | POST | Compact session |
+
+### Knowledge Graph
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/memory/kg/entities` | GET | List entities |
+| `/api/memory/kg/relations` | GET | List relations |
+| `/api/memory/kg/query` | POST | Query graph |
+
+---
+
+## Best Practices
+
+1. **Regular Compaction** - Prevent sessions from growing too large
+2. **Use Tags** - Easy organization and search
+3. **Set Decay Rate** - Control memory confidence
+4. **Monitor Usage** - Track costs and usage
+
+---
+
+## Troubleshooting
+
+### Slow Memory Search
+
+```bash
+# Rebuild vector index
+librefang memory reindex
+
+# Check index status
+librefang memory index-status
+```
+
+### Database Bloat
+
+```bash
+# Clean old data
+librefang memory cleanup --older-than 30d
+
+# Vacuum database
+librefang memory vacuum
+```
+
+### Memory Loss
+
+```bash
+# Check database integrity
+librefang doctor
+
+# Restore backup
+librefang memory restore --backup <path>
+```
+
+export const sections = [];

@@ -1,6 +1,0 @@
-[provider]
-id = "lemonade"
-display_name = "Lemonade"
-api_key_env = "LEMONADE_API_KEY"
-base_url = "http://localhost:8888/api/v1"
-key_required = false

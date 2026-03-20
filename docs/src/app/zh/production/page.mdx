@@ -1,0 +1,265 @@
+# 生产部署检查清单
+
+LibreFang 生产环境部署检查清单。
+
+---
+
+## 部署前检查
+
+### 1. 安全配置
+
+- [ ] API 认证已启用
+- [ ] 强密码/密钥已设置
+- [ ] 网络访问已限制
+- [ ] 防火墙规则已配置
+
+### 2. 资源配置
+
+- [ ] 内存充足 (推荐 4GB+)
+- [ ] CPU 核心数足够 (推荐 2+)
+- [ ] 磁盘空间足够 (推荐 20GB+)
+
+### 3. 依赖检查
+
+- [ ] Rust 工具链已安装
+- [ ] 所有依赖已解析
+- [ ] 构建成功
+
+---
+
+## 配置检查
+
+### 必需配置
+
+```toml
+# API 认证
+api_key = "your-secure-random-key"
+
+# 默认模型
+[default_model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+
+# 网络
+[network]
+listen_addr = "127.0.0.1:4545"
+```
+
+### 推荐配置
+
+```toml
+# 内存
+[memory]
+decay_rate = 0.05
+
+# 会话压缩
+[compaction]
+threshold = 80
+keep_recent = 20
+max_summary_tokens = 1024
+
+# 使用统计
+[usage_footer]
+display = "Full"
+```
+
+---
+
+## 部署步骤
+
+### 1. 构建发布版本
+
+```bash
+cargo build --release
+```
+
+### 2. 配置环境变量
+
+```bash
+export ANTHROPIC_API_KEY="sk-..."
+export RUST_LOG=info
+```
+
+### 3. 启动守护进程
+
+```bash
+# 前台运行测试
+./target/release/librefang start
+
+# 或后台运行
+nohup ./target/release/librefang start &
+
+# 或使用 systemd
+sudo cp librefang.service /etc/systemd/system/
+sudo systemctl enable librefang
+sudo systemctl start librefang
+```
+
+### 4. 验证运行
+
+```bash
+# 健康检查
+curl http://127.0.0.1:4545/api/health
+
+# 列出 agent
+curl http://127.0.0.1:4545/api/agents
+```
+
+---
+
+## 监控
+
+### 日志
+
+```bash
+# 实时日志
+tail -f ~/.librefang/logs/librefang.log
+
+# 错误日志
+grep ERROR ~/.librefang/logs/librefang.log
+```
+
+### 指标
+
+```bash
+# 预算使用
+curl http://127.0.0.1:4545/api/budget
+
+# 通道状态
+curl http://127.0.0.1:4545/api/channels
+```
+
+---
+
+## 备份
+
+### 数据目录
+
+```
+~/.librefang/
+├── config.toml       # 配置文件
+├── data/
+│   └── librefang.db  # SQLite 数据库
+└── agents/          # Agent 清单
+```
+
+### 备份脚本
+
+```bash
+#!/bin/bash
+BACKUP_DIR="/backup/librefang"
+DATE=$(date +%Y%m%d)
+
+mkdir -p $BACKUP_DIR
+
+# 备份配置
+cp ~/.librefang/config.toml $BACKUP_DIR/config-$DATE.toml
+
+# 备份数据库
+cp ~/.librefang/data/librefang.db $BACKUP_DIR/librefang-$DATE.db
+
+# 压缩
+tar -czf librefang-backup-$DATE.tar.gz $BACKUP_DIR
+```
+
+---
+
+## 故障恢复
+
+### 从备份恢复
+
+```bash
+# 停止服务
+systemctl stop librefang
+
+# 恢复配置
+cp backup/config.toml ~/.librefang/config.toml
+
+# 恢复数据库
+cp backup/librefang.db ~/.librefang/data/librefang.db
+
+# 重启服务
+systemctl start librefang
+```
+
+---
+
+## 性能优化
+
+### 资源限制
+
+```toml
+# Agent 资源限制
+[resources]
+max_llm_tokens_per_hour = 100000
+max_concurrent_agents = 10
+```
+
+### 缓存
+
+```toml
+# 模型缓存
+[cache]
+enabled = true
+ttl = 3600
+```
+
+---
+
+## 安全加固
+
+### 生产环境建议
+
+1. **使用反向代理** (Nginx/Caddy)
+2. **启用 HTTPS**
+3. **配置防火墙**
+4. **定期更新**
+5. **监控异常**
+
+### Nginx 配置示例
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name librefang.example.com;
+
+    ssl_certificate /etc/letsencrypt/live/example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:4545;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+```
+
+---
+
+## 维护
+
+### 定期任务
+
+| 任务 | 频率 |
+|------|------|
+| 日志轮转 | 每天 |
+| 备份 | 每天 |
+| 安全更新 | 每周 |
+| 系统更新 | 每月 |
+
+### 更新 LibreFang
+
+```bash
+# 拉取最新
+git pull
+
+# 重新构建
+cargo build --release
+
+# 重启服务
+systemctl restart librefang
+```

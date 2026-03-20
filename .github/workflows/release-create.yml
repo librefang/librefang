@@ -52,20 +52,44 @@ jobs:
             echo ""
             echo "**Desktop App** — Download the installer for your platform below."
             echo ""
-            echo '**CLI (Linux/macOS)**:'
+            echo '**CLI (Linux/macOS):**'
             echo '```bash'
             echo 'curl -fsSL https://librefang.ai/install.sh | sh'
             echo '```'
             echo ""
-            echo '**Docker**:'
+            echo '**npm:**'
+            echo '```bash'
+            echo 'npm install -g @librefang/cli'
+            echo '```'
+            echo ""
+            echo '**pip:**'
+            echo '```bash'
+            echo 'pip install librefang'
+            echo '```'
+            echo ""
+            echo '**Cargo:**'
+            echo '```bash'
+            echo 'cargo install librefang'
+            echo '```'
+            echo ""
+            echo '**Docker:**'
             echo '```bash'
             echo 'docker pull ghcr.io/librefang/librefang:latest'
             echo '```'
             echo ""
-            echo '**Coming from OpenClaw?**'
+            echo "## Migration"
+            echo ""
+            echo '**Coming from OpenClaw or OpenFang?**'
             echo '```bash'
             echo 'librefang migrate --from openclaw'
+            echo 'librefang migrate --from openfang'
             echo '```'
+            echo ""
+            echo "## Links"
+            echo ""
+            echo "- [Documentation](https://librefang.ai)"
+            echo "- [Discord](https://discord.gg/DzTYqAZZmc)"
+            echo "- [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)"
           } > /tmp/release-body.md
 
           if gh release view "$TAG" &>/dev/null; then

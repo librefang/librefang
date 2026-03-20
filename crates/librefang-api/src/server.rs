@@ -1008,14 +1008,16 @@ pub async fn run_daemon(
         let kernel = state.kernel.clone();
         tokio::spawn(async move {
             loop {
-                match librefang_runtime::catalog_sync::sync_catalog().await {
+                match librefang_runtime::catalog_sync::sync_catalog_to(&kernel.config.home_dir)
+                    .await
+                {
                     Ok(result) => {
                         info!(
                             "Model catalog synced: {} files downloaded",
                             result.files_downloaded
                         );
                         if let Ok(mut catalog) = kernel.model_catalog.write() {
-                            catalog.load_default_cached_catalog();
+                            catalog.load_cached_catalog_for(&kernel.config.home_dir);
                             catalog.detect_auth();
                         }
                     }

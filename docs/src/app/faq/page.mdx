@@ -1,0 +1,372 @@
+# FAQ
+
+Frequently asked questions about LibreFang.
+
+---
+
+## Installation and Configuration
+
+### Q: How to install LibreFang?
+
+```bash
+# Install using cargo
+cargo install --git https://github.com/librefang/librefang librefang-cli
+
+# Or build from source
+git clone https://github.com/librefang/librefang.git
+cd librefang
+cargo install --path crates/librefang-cli
+```
+
+### Q: Which API keys do I need to configure?
+
+LibreFang requires API keys from at least one LLM provider:
+
+```bash
+# Option 1: Anthropic (recommended)
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# Option 2: OpenAI
+export OPENAI_API_KEY="sk-..."
+
+# Option 3: Groq (has free tier)
+export GROQ_API_KEY="gsk_..."
+```
+
+### Q: Where is the configuration file?
+
+Default location: `~/.librefang/config.toml`
+
+Automatically created when running `librefang init` for the first time.
+
+### Q: How to view logs?
+
+```bash
+# Real-time logs
+librefang logs
+
+# Or manually view
+tail -f ~/.librefang/logs/librefang.log
+
+# Debug mode
+RUST_LOG=debug librefang start
+```
+
+---
+
+## Agent Operations
+
+### Q: How to create a custom Agent?
+
+```bash
+# Create using template
+librefang agent spawn agents/hello-world/agent.toml
+
+# Or interactive creation
+librefang agent new
+```
+
+### Q: What to do if Agent is not responding?
+
+1. Check Agent status: `librefang agent list`
+2. View Agent logs: `librefang agent logs <id>`
+3. Restart Agent: `librefang agent kill <id>` then respawn
+
+### Q: How to limit Agent capabilities?
+
+Use capabilities in the Agent manifest:
+
+```toml
+[capabilities]
+tools = ["file_read", "web_fetch"]  # Only allow these tools
+network = ["example.com"]  # Only allow this domain
+memory_read = ["self.*"]  # Only allow reading own memory
+memory_write = ["self.*"]  # Only allow writing own memory
+agent_spawn = false  # Disable sub-agent spawning
+```
+
+### Q: How to implement multi-Agent collaboration?
+
+Use orchestrator Agent or workflows:
+
+```json
+{
+  "name": "multi-agent",
+  "steps": [
+    {"agent": "researcher", "input": "Research topic"},
+    {"agent": "writer", "input": "Write about {{research.results}}"}
+  ]
+}
+```
+
+---
+
+## Skills and Tools
+
+### Q: What are Skills?
+
+Skills are pluggable toolkits that extend Agent capabilities. For example:
+
+- `git` - Git operations
+- `python` - Python code execution
+- `web_search` - Web search
+
+### Q: How to install custom Skills?
+
+```bash
+# Install from local
+librefang skill install ./my-skill
+
+# Install from FangHub
+librefang skill install fanghub:skill-name
+```
+
+### Q: How to create custom tools?
+
+Define tool functions in a skill:
+
+```python
+def my_tool(param: str) -> str:
+    """Tool description"""
+    return f"Result: {param}"
+```
+
+---
+
+## Channels and Integrations
+
+### Q: Which messaging platforms are supported?
+
+LibreFang supports 40+ channel adapters:
+
+- **Core**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
+- **Enterprise**: Microsoft Teams, Google Chat, Webex, Feishu
+- **Social**: LINE, Viber, Facebook Messenger, Twitter
+
+### Q: How to configure Telegram Bot?
+
+1. Create Bot: @BotFather on Telegram
+2. Get Bot Token
+3. Configure LibreFang:
+
+```toml
+[telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allowed_users = ["user_id_1", "user_id_2"]
+```
+
+### Q: How to use MCP servers?
+
+```toml
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+```
+
+---
+
+## Security
+
+### Q: How does LibreFang protect my data?
+
+LibreFang uses 16-layer security protection:
+
+1. **WASM Dual-Metering Sandbox** - Tools run in isolated environment
+2. **Merkle Hash Chain** - All operations are auditable
+3. **Taint Tracking** - Sensitive information is tracked
+4. **SSRF Protection** - Prevents server-side request forgery
+5. **Secret Zeroing** - API keys are automatically cleared
+
+### Q: How to enable API authentication?
+
+```toml
+api_key = "your-secure-api-key"
+```
+
+Then use in requests:
+
+```
+Authorization: Bearer your-secure-api-key
+```
+
+### Q: What are Capability Gates?
+
+Capability gates control what resources an Agent can access:
+
+```toml
+[capabilities]
+tools = ["file_read"]  # Read-only files
+file_system = false  # Disable file system write
+agent_spawn = false  # Disable sub-agent spawning
+```
+
+---
+
+## Performance
+
+### Q: How to optimize performance?
+
+1. **Choose the right model**: Use smaller models for simple tasks
+2. **Enable compression**: Auto-compact session history
+3. **Configure limits**: Limit concurrent Agent count
+
+```toml
+[compaction]
+threshold = 80
+keep_recent = 20
+max_summary_tokens = 1024
+```
+
+### Q: What to do if memory usage is too high?
+
+1. Compact sessions: `librefang session compact <id>`
+2. Limit Agent count
+3. Use smaller models
+
+### Q: How to monitor usage?
+
+```bash
+# View usage statistics
+librefang usage
+
+# View costs
+librefang cost
+
+# API endpoint
+curl http://127.0.0.1:4545/api/usage
+```
+
+---
+
+## Troubleshooting
+
+### Q: Daemon won't start?
+
+```bash
+# Check if port is in use
+lsof -i :4545
+
+# View detailed errors
+RUST_LOG=debug librefang start
+
+# Run diagnostics
+librefang doctor
+```
+
+### Q: API key invalid?
+
+1. Confirm environment variable is set: `echo $ANTHROPIC_API_KEY`
+2. Verify key is valid
+3. Check `api_key_env` name in config file
+
+### Q: Channel connection failed?
+
+```bash
+# Test channel
+librefang channel test telegram
+
+# Check Bot Token
+curl -X POST "https://api.telegram.org/bot<TOKEN>/getMe"
+```
+
+### Q: Skill won't load?
+
+```bash
+# List skills
+librefang skill list
+
+# Verify skill
+librefang skill verify my-skill
+
+# View error logs
+RUST_LOG=debug librefang skill list
+```
+
+---
+
+## Migration
+
+### Q: How to migrate from OpenClaw?
+
+```bash
+# Automatic migration
+librefang migrate --from openclaw
+
+# Preview mode
+librefang migrate --from openclaw --dry-run
+```
+
+### Q: Which migration sources are supported?
+
+- OpenClaw (direct support)
+- LangChain (compatibility layer)
+- AutoGPT (configuration conversion)
+
+---
+
+## Billing and Costs
+
+### Q: Does LibreFang charge?
+
+LibreFang itself is open source and free. You only pay for LLM provider API fees.
+
+### Q: How to track costs?
+
+```bash
+# View costs
+librefang cost
+
+# View by provider
+curl http://127.0.0.1:4545/api/usage/providers
+```
+
+### Q: How to set budget limits?
+
+```toml
+[budget]
+monthly_limit = 100  # USD
+alert_threshold = 0.8  # Alert at 80%
+```
+
+---
+
+## Development
+
+### Q: How to contribute code?
+
+1. Fork the repository
+2. Create feature branch
+3. Submit PR
+
+Make sure:
+- `cargo clippy` has no warnings
+- `cargo test` passes
+- Add test coverage
+
+### Q: How to add new channels?
+
+Refer to the "Adding New Channels" section in the Development Guide.
+
+---
+
+## Other
+
+### Q: How is LibreFang different from other frameworks?
+
+| Feature | LibreFang | OpenClaw | LangChain |
+|---------|-----------|----------|-----------|
+| Language | Rust | Node.js | Python |
+| Memory | ~40MB | ~200MB | Language-dependent |
+| Channels | 40+ | ~15 | None |
+| Security | 16-layer | Basic | None |
+| Desktop | Tauri | Electron | None |
+
+### Q: How to get help?
+
+- GitHub Issues: https://github.com/librefang/librefang/issues
+- Discord: https://discord.gg/librefang
+
+### Q: How to report security vulnerabilities?
+
+Please refer to SECURITY.md: https://github.com/librefang/librefang/blob/main/SECURITY.md

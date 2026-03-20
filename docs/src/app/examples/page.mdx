@@ -1,0 +1,522 @@
+# Usage Examples
+
+Complete examples for common LibreFang use cases.
+
+---
+
+## Scenario 1: Customer Service Agent
+
+### Requirements
+
+- 7x24 automatic response to customer inquiries
+- Connect to Telegram and Discord
+- Remember customer conversation history
+- Require human approval for complex issues
+
+### Agent Manifest
+
+```toml
+# customer-support.toml
+name = "customer-support"
+version = "1.0.0"
+description = "Customer support agent with approval workflow"
+module = "builtin:chat"
+
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+
+[system_prompt]
+prompt = """You are a professional customer support agent. Your responsibilities are:
+1. Respond to customer inquiries politely
+2. Provide accurate product information
+3. Escalate complex issues to human agents
+4. Maintain professionalism and friendliness"""
+
+[capabilities]
+tools = ["file_read", "web_fetch", "memory_recall", "memory_store"]
+memory_read = ["customer:*"]
+memory_write = ["customer:*"]
+network = ["*"]
+
+[resources]
+max_llm_tokens_per_hour = 50000
+
+[approval]
+required = true
+channels = ["telegram"]
+keywords = ["refund", "complaint", "manager"]
+```
+
+### Channel Configuration
+
+```toml
+[telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allowed_users = ["*"]
+
+[discord]
+bot_token_env = "DISCORD_BOT_TOKEN"
+guild_ids = ["123456789"]
+
+[channels.customer-support]
+system_prompt = "You are a customer support agent. Please respond politely and professionally."
+rate_limit = 20
+```
+
+---
+
+## Scenario 2: Daily News Digest
+
+### Requirements
+
+- Automatically run every morning at 8 AM
+- Scrape multiple news sources
+- Generate summary
+- Send to Slack
+
+### Workflow
+
+```json
+{
+  "name": "daily-news-digest",
+  "version": "1.0.0",
+  "trigger": {
+    "type": "schedule",
+    "cron": "0 8 * * *"
+  },
+  "steps": [
+    {
+      "id": "fetch-tech-news",
+      "type": "agent",
+      "agent": "researcher",
+      "input": "Fetch latest tech news from Hacker News and TechCrunch",
+      "output_var": "tech_news"
+    },
+    {
+      "id": "fetch-ai-news",
+      "type": "agent",
+      "agent": "researcher",
+      "input": "Fetch latest AI news from AI News and OpenAI blog",
+      "output_var": "ai_news"
+    },
+    {
+      "id": "summarize",
+      "type": "agent",
+      "agent": "writer",
+      "input": "Create a brief summary of these news items: {{tech_news}} and {{ai_news}}",
+      "output_var": "summary"
+    },
+    {
+      "id": "send-slack",
+      "type": "notification",
+      "channel": "slack",
+      "message": "📰 Daily News Digest\n\n{{summary}}"
+    }
+  ]
+}
+```
+
+---
+
+## Scenario 3: Code Review Assistant
+
+### Requirements
+
+- Monitor GitHub PRs
+- Automatically perform code review
+- Provide improvement suggestions
+
+### Agent Manifest
+
+```toml
+# code-reviewer.toml
+name = "code-reviewer"
+version = "1.0.0"
+description = "Automated code review agent"
+module = "builtin:chat"
+
+[model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[system_prompt]
+prompt = """You are a professional code reviewer. Your responsibilities are:
+1. Check code quality and style
+2. Identify potential bugs and security issues
+3. Provide specific improvement suggestions
+4. Remain constructive and professional"""
+
+[capabilities]
+tools = ["file_read", "web_fetch", "git"]
+memory_read = ["review:*"]
+memory_write = ["review:*"]
+
+[schedule]
+enabled = true
+cron = "0 * * * *"
+```
+
+### Webhook Trigger
+
+```json
+{
+  "type": "webhook",
+  "path": "/webhook/github",
+  "events": ["pull_request"]
+}
+```
+
+---
+
+## Scenario 4: Sales Lead Generation
+
+### Requirements
+
+- Automatically generate leads daily
+- Enrich company information
+- Score and rank
+- Send to CRM
+
+### Hand Configuration
+
+```toml
+[lead]
+icp = "B2B SaaS companies, 50-500 employees, Series A+"
+search_sources = ["linkedin", "crunchbase", "hunter"]
+score_criteria = [
+  "funding_stage: A+ = 30",
+  "employee_count: 50-500 = 20",
+  "tech_stack: contains(ai|ml) = 25",
+  "job_postings: recent = 15"
+]
+deduplicate = true
+crm_integration = "hubspot"
+
+[[lead.quality_thresholds]]
+score = 80
+action = "auto_add_to_crm"
+
+[[lead.quality_thresholds]]
+score = 50
+action = "require_approval"
+```
+
+### Workflow
+
+```json
+{
+  "name": "lead-generation",
+  "trigger": {
+    "type": "schedule",
+    "cron": "0 9 * * *"
+  },
+  "steps": [
+    {
+      "id": "discover",
+      "type": "agent",
+      "agent": "lead",
+      "input": "Find 50 companies matching our ICP"
+    },
+    {
+      "id": "enrich",
+      "type": "agent",
+      "agent": "collector",
+      "input": "Enrich company data: {{discover.companies}}"
+    },
+    {
+      "id": "score",
+      "type": "agent",
+      "agent": "classifier",
+      "input": "Score leads: {{enrich.leads}}"
+    },
+    {
+      "id": "notify",
+      "type": "notification",
+      "channel": "telegram",
+      "message": "Generated {{score.high_quality_count}} qualified leads"
+    }
+  ]
+}
+```
+
+---
+
+## Scenario 5: Content Creation Assistant
+
+### Requirements
+
+- Regularly generate social media content
+- Support multiple platforms
+- Approval workflow
+
+### Twitter Hand Configuration
+
+```toml
+[twitter]
+content_formats = ["thread", "hot_take", "question"]
+topics = ["ai", "technology", "productivity"]
+approval_queue = true
+posting_times = ["9:00", "12:00", "18:00"]
+max_posts_per_day = 5
+
+[twitter.linkedin]
+enabled = true
+posting_times = ["10:00"]
+```
+
+### Content Approval Workflow
+
+```json
+{
+  "name": "content-approval",
+  "steps": [
+    {
+      "id": "generate",
+      "type": "agent",
+      "agent": "twitter",
+      "input": "Generate 3 tweet ideas about AI"
+    },
+    {
+      "id": "create",
+      "type": "agent",
+      "agent": "writer",
+      "input": "Write a thread based on: {{generate.ideas[0]}}"
+    },
+    {
+      "id": "approve",
+      "type": "approval",
+      "channels": ["telegram"],
+      "timeout": "24h"
+    },
+    {
+      "id": "publish",
+      "type": "notification",
+      "channel": "twitter",
+      "message": "{{create.content}}"
+    }
+  ]
+}
+```
+
+---
+
+## Scenario 6: Database Assistant
+
+### Requirements
+
+- Answer database-related questions
+- Execute read-only queries
+- Generate SQL
+
+### Agent Manifest
+
+```toml
+# db-assistant.toml
+name = "db-assistant"
+version = "1.0.0"
+module = "builtin:chat"
+
+[model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[system_prompt]
+prompt = """You are a database assistant. You can:
+1. Answer questions about database design
+2. Write and optimize SQL queries
+3. Explain query execution plans
+Note: Do not execute any data-modifying operations."""
+
+[capabilities]
+tools = ["file_read", "postgres_query"]
+memory_read = ["schema:*"]
+
+[security]
+read_only = true
+allowed_tables = ["users", "orders", "products", "analytics_*"]
+max_rows = 1000
+```
+
+---
+
+## Scenario 7: Personal Knowledge Assistant
+
+### Requirements
+
+- Manage and retrieve personal notes
+- Semantic search
+- Auto-organization
+
+### Agent Manifest
+
+```toml
+# knowledge-assistant.toml
+name = "knowledge-assistant"
+version = "1.0.0"
+module = "builtin:chat"
+
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+
+[capabilities]
+tools = ["file_read", "file_write", "memory_recall", "memory_store"]
+memory_read = ["knowledge:*", "notes:*", "bookmarks:*"]
+memory_write = ["knowledge:*", "notes:*"]
+
+[memory]
+decay_rate = 0.02
+```
+
+### Usage Examples
+
+```bash
+# Store note
+librefang memory set --key "notes:meeting-2025-01-15" --value "Discussed project roadmap"
+
+# Semantic search
+librefang memory search "project planning"
+
+# Knowledge graph query
+librefang kg query --from "person:alice" --relation "works_with"
+```
+
+---
+
+## Scenario 8: CI/CD Monitor Assistant
+
+### Requirements
+
+- Monitor GitHub Actions
+- Alert on failures
+- Provide debugging suggestions
+
+### Configuration
+
+```toml
+[github]
+webhook_secret_env = "GITHUB_WEBHOOK_SECRET"
+
+[[triggers]]
+type = "webhook"
+path = "/webhook/github"
+events = ["workflow_run.completed", "workflow_run.failed"]
+
+[notifications]
+channels = ["slack", "telegram"]
+```
+
+### Workflow
+
+```json
+{
+  "name": "cicd-monitor",
+  "trigger": {
+    "type": "event",
+    "event": "workflow_run.failed"
+  },
+  "steps": [
+    {
+      "id": "analyze",
+      "type": "agent",
+      "agent": "debugger",
+      "input": "Analyze failed workflow: {{event.workflow_url}}"
+    },
+    {
+      "id": "notify",
+      "type": "notification",
+      "channel": "slack",
+      "message": "⚠️ Workflow Failed: {{event.workflow_name}}\n\n{{analyze.suggestion}}"
+    }
+  ]
+}
+```
+
+---
+
+## Scenario 9: Smart Home Control
+
+### Requirements
+
+- Control smart devices via chat
+- Scheduled tasks
+- Scene automation
+
+### Agent Manifest
+
+```toml
+# smart-home.toml
+name = "smart-home"
+version = "1.0.0"
+module = "builtin:chat"
+
+[model]
+provider = "groq"
+model = "llama-3.1-8b-instant"
+
+[capabilities]
+tools = ["shell_execute", "http_request"]
+
+[allowed_devices]
+lights = ["living_room", "bedroom", "kitchen"]
+thermostat = ["main"]
+locks = ["front_door", "back_door"]
+cameras = ["front_porch", "backyard"]
+```
+
+### Command Examples
+
+```
+User: "Turn off the living room light"
+Agent: Living room light turned off ✓
+
+User: "Set temperature to 22°C at 6 PM"
+Agent: Scheduled task created: 18:00 temperature adjustment to 22°C ✓
+
+User: "Notify me on Telegram if someone appears on the front door camera"
+Agent: Automation rule created: Camera detection → Telegram notification ✓
+```
+
+---
+
+## Scenario 10: Meeting Assistant
+
+### Requirements
+
+- Schedule meetings
+- Send invitations
+- Meeting notes
+
+### Agent Manifest
+
+```toml
+# meeting-assistant.toml
+name = "meeting-assistant"
+version = "1.0.0"
+module = "builtin:chat"
+
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+
+[capabilities]
+tools = ["calendar", "email", "file_write", "memory_recall"]
+memory_read = ["meeting:*", "contacts:*"]
+memory_write = ["meeting:*"]
+
+[calendar]
+provider = "google"
+timezone = "Asia/Shanghai"
+
+[email]
+smtp_host = "smtp.gmail.com"
+```
+
+### Features
+
+- Natural language meeting scheduling
+- Auto-find available times
+- Send calendar invitations
+- Generate meeting notes after meetings
+- Track action items

@@ -1,0 +1,365 @@
+# 内存系统
+
+LibreFang 的内存系统提供持久化存储、语义搜索和知识图谱功能。
+
+---
+
+## 概述
+
+LibreFang 内存系统包含：
+
+- **SQLite 持久化** - 结构化 KV 存储
+- **向量嵌入** - 语义搜索能力
+- **知识图谱** - 实体和关系
+- **会话管理** - 跨通道记忆
+- **使用追踪** - 成本和使用统计
+
+<Note>
+**提示**: 内存数据默认存储在 `~/.librefang/data/librefang.db`，可配置存储路径。
+</Note>
+
+---
+
+## 架构
+
+```
+┌─────────────────────────────────────────┐
+│              Agent Loop                  │
+└─────────────────┬───────────────────────┘
+                  │
+                  ▼
+┌─────────────────────────────────────────┐
+│           Memory Subsystem               │
+├─────────────────────────────────────────┤
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  │
+│  │ Session │  │ Vector  │  │Knowledge│  │
+│  │ Store   │  │ Search  │  │ Graph   │  │
+│  └─────────┘  └─────────┘  └─────────┘  │
+├─────────────────────────────────────────┤
+│           SQLite Database               │
+└─────────────────────────────────────────┘
+```
+
+---
+
+## 配置
+
+### 基本配置
+
+```toml
+[memory]
+decay_rate = 0.05
+sqlite_path = "~/.librefang/data/librefang.db"
+```
+
+### 高级配置
+
+```toml
+[memory]
+decay_rate = 0.05
+sqlite_path = "~/.librefang/data/librefang.db"
+vector_dimension = 1536
+max_memory_items = 10000
+auto_compact = true
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `decay_rate` | Float | 0.05 | 记忆置信度衰减率 |
+| `sqlite_path` | String | ~/.librefang/data/librefang.db | 数据库路径 |
+| `vector_dimension` | Integer | 1536 | 向量维度 |
+| `max_memory_items` | Integer | 10000 | 最大记忆条目 |
+| `auto_compact` | Boolean | true | 自动压缩 |
+
+---
+
+## 会话管理
+
+### 创建会话
+
+```bash
+# 创建新会话
+librefang session create --name "research-project"
+```
+
+### 列出会话
+
+```bash
+# 列出所有会话
+librefang session list
+```
+
+### 会话操作
+
+```bash
+# 查看会话详情
+librefang session info <session-id>
+
+# 删除会话
+librefang session delete <session-id>
+
+# 压缩会话
+librefang session compact <session-id>
+
+# 导出会话
+librefang session export <session-id> --format json
+```
+
+---
+
+## 记忆操作
+
+### 存储记忆
+
+```bash
+# 存储简单记忆
+librefang memory store --key "user:preference:theme" --value "dark"
+
+# 存储结构化数据
+librefang memory store --key "project:details" --data '{"name": "LibreFang", "version": "1.0"}'
+
+# 存储带标签
+librefang memory store --key "note:1" --value "Important note" --tags "work,urgent"
+```
+
+### 搜索记忆
+
+```bash
+# 关键词搜索
+librefang memory search "project"
+
+# 向量搜索 (语义搜索)
+librefang memory search --vector "find information about AI agents"
+
+# 带过滤的搜索
+librefang memory search "meeting" --tags "work" --limit 10
+```
+
+### 记忆操作
+
+```bash
+# 读取记忆
+librefang memory get <key>
+
+# 更新记忆
+librefang memory update <key> --value "new value"
+
+# 删除记忆
+librefang memory delete <key>
+
+# 列出所有记忆
+librefang memory list --prefix "project:"
+```
+
+---
+
+## 向量搜索
+
+### 语义搜索
+
+LibreFang 支持向量嵌入的语义搜索：
+
+```bash
+# 语义搜索示例
+librefang memory search --vector "machine learning techniques for text classification"
+```
+
+### 相似度阈值
+
+```toml
+[memory]
+similarity_threshold = 0.75
+```
+
+### API 端点
+
+```bash
+# 语义搜索 API
+curl -X POST http://127.0.0.1:4545/api/memory/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "find information about AI",
+    "limit": 10,
+    "threshold": 0.8
+  }'
+```
+
+---
+
+## 知识图谱
+
+### 实体管理
+
+```bash
+# 添加实体
+librefang kg add-entity --type "person" --name "John Doe" --properties '{"role": "developer"}'
+
+# 列出实体
+librefang kg list-entities --type "person"
+
+# 搜索实体
+librefang kg search-entities "John"
+```
+
+### 关系管理
+
+```bash
+# 添加关系
+librefang kg add-relation \
+  --from "person:john" \
+  --relation "works_at" \
+  --to "company:acme"
+
+# 列出关系
+librefang kg list-relations --entity "person:john"
+
+# 查询关系
+librefang kg query --from "person:john" --relation "works_at"
+```
+
+### 图谱查询
+
+```bash
+# 查询路径
+librefang kg path --from "person:alice" --to "company:acme"
+
+# 查询子图
+librefang kg subgraph --entity "person:bob" --depth 2
+```
+
+---
+
+## 会话压缩
+
+### 自动压缩
+
+当会话消息数量达到阈值时自动压缩：
+
+```toml
+[compaction]
+threshold = 80
+keep_recent = 20
+max_summary_tokens = 1024
+```
+
+### 手动压缩
+
+```bash
+# 压缩会话
+librefang session compact <session-id>
+
+# 压缩所有会话
+librefang session compact-all
+
+# 查看压缩状态
+librefang session compaction-status
+```
+
+### 压缩算法
+
+1. **保留最近 N 条消息**
+2. **提取关键信息**
+3. **生成摘要**
+4. **保留工具调用历史**
+
+---
+
+## 使用追踪
+
+### 追踪操作
+
+```bash
+# 查看使用统计
+librefang usage
+
+# 查看 Agent 使用
+librefang usage --agent <agent-id>
+
+# 查看提供商使用
+librefang usage --provider
+```
+
+### 成本追踪
+
+```bash
+# 查看成本
+librefang cost
+
+# 按时间范围查看成本
+librefang cost --from 2025-01-01 --to 2025-01-31
+
+# 导出报告
+librefang cost export --format csv
+```
+
+---
+
+## API 端点
+
+### 内存操作
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/memory` | GET | 搜索记忆 |
+| `/api/memory` | POST | 存储记忆 |
+| `/api/memory/{id}` | GET | 获取记忆 |
+| `/api/memory/{id}` | DELETE | 删除记忆 |
+
+### 会话操作
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/memory/sessions` | GET | 列出会话 |
+| `/api/memory/sessions/{id}` | GET | 获取会话 |
+| `/api/memory/sessions/{id}/compact` | POST | 压缩会话 |
+
+### 知识图谱
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/memory/kg/entities` | GET | 列出实体 |
+| `/api/memory/kg/relations` | GET | 列出关系 |
+| `/api/memory/kg/query` | POST | 查询图谱 |
+
+---
+
+## 最佳实践
+
+1. **定期压缩** - 防止会话过大
+2. **使用标签** - 便于组织和搜索
+3. **设置衰减率** - 控制记忆置信度
+4. **监控使用** - 跟踪成本和使用量
+
+---
+
+## 故障排除
+
+### 内存搜索慢
+
+```bash
+# 重建向量索引
+librefang memory reindex
+
+# 检查索引状态
+librefang memory index-status
+```
+
+### 数据库膨胀
+
+```bash
+# 清理旧数据
+librefang memory cleanup --older-than 30d
+
+# 压缩数据库
+librefang memory vacuum
+```
+
+### 记忆丢失
+
+```bash
+# 检查数据库完整性
+librefang doctor
+
+# 恢复备份
+librefang memory restore --backup <path>
+```

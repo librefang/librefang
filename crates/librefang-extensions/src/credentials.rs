@@ -126,6 +126,13 @@ impl CredentialResolver {
             ))
         }
     }
+
+    /// Clear a credential from the in-memory dotenv cache.
+    /// Call this when a key is deleted via the dashboard so the resolver
+    /// doesn't return a stale value from the boot-time snapshot.
+    pub fn clear_dotenv_cache(&mut self, key: &str) {
+        self.dotenv.remove(key);
+    }
 }
 
 /// Load a dotenv file into a HashMap.

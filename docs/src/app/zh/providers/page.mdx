@@ -1,0 +1,212 @@
+# LLM 提供商指南
+
+LibreFang 包含全面的模型目录，覆盖 **3 个原生 LLM 驱动**、**20+ 提供商**、**51 个内置模型**。
+
+---
+
+## 快速设置
+
+```bash
+# 选择一个提供商 - 设置环境变量即可
+export GEMINI_API_KEY="your-key"      # 免费额度可用
+export GROQ_API_KEY="your-key"        # 免费额度可用
+export ANTHROPIC_API_KEY="your-key"
+export OPENAI_API_KEY="your-key"
+```
+
+LibreFang 在启动时自动检测哪些提供商已配置 API 密钥。
+
+<Note>
+**推荐**: Groq 和 Gemini 提供免费额度，适合测试和开发。
+</Note>
+
+---
+
+## 提供商参考
+
+### 1. Anthropic
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | Anthropic |
+| 驱动 | 原生 Anthropic (Messages API) |
+| 环境变量 | `ANTHROPIC_API_KEY` |
+| 基础 URL | `https://api.anthropic.com` |
+| 免费额度 | 无 |
+| 模型数 | 3 |
+
+**可用模型:**
+- `claude-opus-4-20250514` (旗舰)
+- `claude-sonnet-4-20250514` (智能)
+- `claude-haiku-4-5-20251001` (快速)
+
+### 2. OpenAI
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | OpenAI |
+| 驱动 | OpenAI 兼容 |
+| 环境变量 | `OPENAI_API_KEY` |
+| 基础 URL | `https://api.openai.com/v1` |
+| 免费额度 | 无 |
+| 模型数 | 6 |
+
+**可用模型:**
+- `gpt-4.1` (旗舰)
+- `gpt-4o` (智能)
+- `o3-mini` (智能)
+- `gpt-4.1-mini` (平衡)
+- `gpt-4o-mini` (快速)
+- `gpt-4.1-nano` (快速)
+
+### 3. Google Gemini
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | Google Gemini |
+| 驱动 | 原生 Gemini |
+| 环境变量 | `GEMINI_API_KEY` 或 `GOOGLE_API_KEY` |
+| 基础 URL | `https://generativelanguage.googleapis.com` |
+| 免费额度 | 有 |
+| 模型数 | 5 |
+
+### 4. Groq
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | Groq |
+| 驱动 | OpenAI 兼容 |
+| 环境变量 | `GROQ_API_KEY` |
+| 基础 URL | `https://api.groq.com/openai/v1` |
+| 免费额度 | 有 |
+| 模型数 | 8 |
+
+### 5. DeepSeek
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | DeepSeek |
+| 驱动 | OpenAI 兼容 |
+| 环境变量 | `DEEPSEEK_API_KEY` |
+| 基础 URL | `https://api.deepseek.com/v1` |
+| 免费额度 | 有 |
+| 模型数 | 3 |
+
+### 6. Ollama (本地)
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | Ollama |
+| 驱动 | OpenAI 兼容 |
+| 环境变量 | 无需 |
+| 基础 URL | `http://localhost:11434/v1` |
+| 免费额度 | 本地运行 |
+| 模型数 | 取决于本地安装 |
+
+---
+
+## 支持的提供商列表
+
+| 提供商 | 驱动 | 免费额度 |
+|--------|------|----------|
+| Anthropic | 原生 | ❌ |
+| OpenAI | OpenAI 兼容 | ❌ |
+| Gemini | 原生 | ✅ |
+| Groq | OpenAI 兼容 | ✅ |
+| DeepSeek | OpenAI 兼容 | ✅ |
+| OpenRouter | OpenAI 兼容 | ❌ |
+| Together | OpenAI 兼容 | ❌ |
+| Mistral | OpenAI 兼容 | ❌ |
+| Fireworks | OpenAI 兼容 | ❌ |
+| Cohere | OpenAI 兼容 | ❌ |
+| Perplexity | OpenAI 兼容 | ❌ |
+| xAI | OpenAI 兼容 | ❌ |
+| AI21 | OpenAI 兼容 | ❌ |
+| Cerebras | OpenAI 兼容 | ✅ |
+| SambaNova | OpenAI 兼容 | ❌ |
+| HuggingFace | OpenAI 兼容 | ✅ |
+| Replicate | OpenAI 兼容 | ❌ |
+| Ollama | OpenAI 兼容 | 本地 |
+| vLLM | OpenAI 兼容 | 本地 |
+| LM Studio | OpenAI 兼容 | 本地 |
+
+---
+
+## 模型目录
+
+### 按能力分类
+
+**旗舰模型:**
+- claude-opus-4-20250514
+- gpt-4.1
+
+**智能模型:**
+- claude-sonnet-4-20250514
+- gpt-4o
+- gemini-2.0-flash-exp
+
+**快速模型:**
+- claude-haiku-4-5-20251001
+- gpt-4o-mini
+- gpt-4.1-nano
+- llama-3.1-70b-versatile
+
+---
+
+## 每个 Agent 的模型覆盖
+
+可以在 agent 级别覆盖默认模型：
+
+```toml
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+```
+
+---
+
+## 模型路由
+
+`ModelRouter` 根据任务复杂度自动选择模型：
+
+- **简单任务** → 快速/便宜模型
+- **复杂任务** → 智能/昂贵模型
+
+---
+
+## 成本追踪
+
+LibreFang 跟踪每个模型的使用成本：
+
+```bash
+# 查看全局预算
+curl http://127.0.0.1:4545/api/budget
+
+# 查看每个 agent 的成本
+curl http://127.0.0.1:4545/api/budget/agents
+```
+
+---
+
+## 后备提供商
+
+配置后备提供商以提高可靠性：
+
+```toml
+[[fallback_providers]]
+provider = "groq"
+model = "llama-3.1-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+```
+
+---
+
+## API 端点
+
+```bash
+# 列出可用模型
+curl http://127.0.0.1:4545/api/models
+
+# 列出提供商
+curl http://127.0.0.1:4545/api/providers
+```
