@@ -364,24 +364,24 @@ export function CanvasPage() {
     setNodes(nds => {
       const groupNode = nds.find(n => n.id === groupId);
       if (!groupNode) return nds;
-      const isExpanded = (groupNode.data as any)._expanded !== false;
+      const gd = groupNode.data as any;
+      const isExpanded = gd._expanded !== false;
       const willCollapse = isExpanded;
+      const childIds = new Set<string>(gd._childIds || []);
 
-      // 收集所有子节点
-      const childIds = new Set<string>();
-      const collectChildren = (pid: string) => {
-        nds.forEach(n => { if (n.parentId === pid) { childIds.add(n.id); collectChildren(n.id); } });
-      };
-      collectChildren(groupId);
+      // 折叠时记录当前尺寸，展开时恢复
+      const origStyle = willCollapse
+        ? { _origWidth: groupNode.style?.width, _origHeight: groupNode.style?.height }
+        : {};
 
       return nds.map(n => {
         if (n.id === groupId) {
           return {
             ...n,
             style: willCollapse
-              ? { width: 160, height: undefined }
-              : { width: (n.data as any)._origWidth || 300, height: (n.data as any)._origHeight || 200 },
-            data: { ...n.data as any, _expanded: !isExpanded, _childCount: childIds.size },
+              ? { ...n.style, width: 160, height: undefined, zIndex: 0 }
+              : { ...n.style, width: gd._origWidth || 300, height: gd._origHeight || 200, zIndex: -1 },
+            data: { ...gd, ...origStyle, _expanded: !isExpanded },
           };
         }
         if (childIds.has(n.id)) {
@@ -391,42 +391,33 @@ export function CanvasPage() {
       });
     });
 
-    // 处理边：隐藏内部边，重定向外部边
+    // 处理边
     setEdges(eds => {
-      const nds = nodes; // 当前 nodes（可能还没更新，但足够获取 parentId）
-      const childIds = new Set<string>();
-      const collectChildren = (pid: string) => {
-        nds.forEach(n => { if (n.parentId === pid) { childIds.add(n.id); collectChildren(n.id); } });
-      };
-      collectChildren(groupId);
-
-      const groupNode = nds.find(n => n.id === groupId);
-      const isExpanded = (groupNode?.data as any)?._expanded !== false;
+      const groupNode = nodes.find(n => n.id === groupId);
+      const gd = groupNode?.data as any;
+      const isExpanded = gd?._expanded !== false;
       const willCollapse = isExpanded;
+      const childIds = new Set<string>(gd?._childIds || []);
 
       return eds.map(e => {
         const srcChild = childIds.has(e.source);
         const tgtChild = childIds.has(e.target);
 
+        // 内部边：折叠时隐藏
         if (srcChild && tgtChild) {
           return { ...e, hidden: willCollapse };
         }
         if (willCollapse) {
-          if (srcChild && !tgtChild) {
-            return { ...e, data: { ...e.data, _origSource: e.source }, source: groupId };
-          }
-          if (tgtChild && !srcChild) {
-            return { ...e, data: { ...e.data, _origTarget: e.target }, target: groupId };
-          }
+          // 外部边：重定向到 group 节点，保存原始端点
+          if (srcChild) return { ...e, data: { ...e.data, _origSource: e.source }, source: groupId };
+          if (tgtChild) return { ...e, data: { ...e.data, _origTarget: e.target }, target: groupId };
         } else {
           // 展开：恢复原始端点
           const ed = e.data as any;
-          if (ed?._origSource) {
-            return { ...e, source: ed._origSource, data: { ...e.data, _origSource: undefined } };
-          }
-          if (ed?._origTarget) {
-            return { ...e, target: ed._origTarget, data: { ...e.data, _origTarget: undefined } };
-          }
+          if (ed?._origSource) return { ...e, source: ed._origSource, data: { ...e.data, _origSource: undefined }, hidden: false };
+          if (ed?._origTarget) return { ...e, target: ed._origTarget, data: { ...e.data, _origTarget: undefined }, hidden: false };
+          // 恢复内部边可见
+          if (srcChild && tgtChild) return { ...e, hidden: false };
         }
         return e;
       });
@@ -572,56 +563,44 @@ export function CanvasPage() {
     setSelectedNodeIds(new Set(selected.map(n => n.id)));
   }, []);
 
-  // 创建分组：把选中的节点包进一个 group
+  // 创建分组：不改变子节点位置，只在底层加一个背景框 + 标记归属
   const createGroup = useCallback(() => {
     if (selectedNodeIds.size < 2) return;
 
-    const selected = nodes.filter(n => selectedNodeIds.has(n.id) && !n.parentId);
+    const selected = nodes.filter(n => selectedNodeIds.has(n.id) && n.type !== "groupNode");
     if (selected.length < 2) return;
 
-    // 计算选中节点的边界
     const bounds = getNodesBounds(selected);
     const padding = 30;
     const groupId = `group-${Date.now()}`;
+    const childIds = selected.map(n => n.id);
 
-    // 创建 group 节点
+    // group 节点放在最底层（z-index 通过数组顺序控制）
     const groupNode: Node = {
       id: groupId,
       type: "groupNode",
       position: { x: bounds.x - padding, y: bounds.y - padding - 30 },
-      style: { width: bounds.width + padding * 2, height: bounds.height + padding * 2 + 30 },
+      style: { width: bounds.width + padding * 2, height: bounds.height + padding * 2 + 30, zIndex: -1 },
+      zIndex: -1,
       data: {
         label: t("canvas.new_group"),
         _expanded: true,
-        _childCount: selected.length,
-        _origWidth: bounds.width + padding * 2,
-        _origHeight: bounds.height + padding * 2 + 30,
-        _onToggle: toggleGroup,
+        _childIds: childIds,
+        _childCount: childIds.length,
       },
     };
 
-    // 更新子节点：设置 parentId，坐标变为相对于 group
+    // 标记子节点归属（不改 parentId 和 position）
     const updatedNodes = nodes.map(n => {
-      if (selectedNodeIds.has(n.id) && !n.parentId) {
-        return {
-          ...n,
-          parentId: groupId,
-          extent: "parent" as const,
-          position: {
-            x: n.position.x - (bounds.x - padding),
-            y: n.position.y - (bounds.y - padding - 30),
-          },
-        };
+      if (childIds.includes(n.id)) {
+        return { ...n, data: { ...(n.data as any), _groupId: groupId } };
       }
       return n;
     });
 
-    // group 必须在子节点之前
     setNodes([groupNode, ...updatedNodes]);
-    // 强制边重新计算路径（延迟一帧让 ReactFlow 先更新节点布局）
-    setTimeout(() => setEdges(eds => eds.map(e => ({ ...e }))), 50);
     setSelectedNodeIds(new Set());
-  }, [selectedNodeIds, nodes, setNodes, t, toggleGroup]);
+  }, [selectedNodeIds, nodes, setNodes, t]);
 
   // 更新节点数据
   const handleNodeUpdate = useCallback((id: string, newData: any) => {
