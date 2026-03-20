@@ -1289,7 +1289,7 @@ function CanvasPageInner() {
   const agentStepCount = useMemo(() => buildSteps(nodes).length, [nodes, buildSteps]);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [, setZoomLevel] = useState(100);
+  const [zoomLevel, setZoomLevel] = useState(100);
 
   return (
     <div className={`flex flex-col transition-all duration-300 ${isFullscreen ? "fixed inset-0 z-50 bg-main" : "h-[calc(100vh-140px)]"}`}>
