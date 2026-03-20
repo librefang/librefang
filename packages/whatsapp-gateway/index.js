@@ -11,6 +11,21 @@ const PORT = parseInt(process.env.WHATSAPP_GATEWAY_PORT || '3009', 10);
 const LIBREFANG_URL = (process.env.LIBREFANG_URL || 'http://127.0.0.1:4545').replace(/\/+$/, '');
 const DEFAULT_AGENT = process.env.LIBREFANG_DEFAULT_AGENT || 'assistant';
 
+// Owner routing: responses to external DMs go to the owner, not back to the sender.
+// Set WHATSAPP_OWNER_JID to the owner's phone number (e.g. "393760105565").
+const OWNER_JID_RAW = process.env.WHATSAPP_OWNER_JID || '';
+const OWNER_JID = OWNER_JID_RAW ? OWNER_JID_RAW.replace(/^\+/, '') + '@s.whatsapp.net' : '';
+
+// Validate OWNER_JID format at startup
+if (OWNER_JID_RAW) {
+  const digits = OWNER_JID_RAW.replace(/^\+/, '');
+  if (!/^\d{7,15}$/.test(digits)) {
+    console.error(`[gateway] WARNING: WHATSAPP_OWNER_JID="${OWNER_JID_RAW}" looks invalid (expected 7-15 digits, optionally prefixed with +). Owner routing may not work.`);
+  } else {
+    console.log(`[gateway] Owner routing enabled → ${OWNER_JID}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -268,9 +283,34 @@ async function startConnection() {
       try {
         const response = await forwardToLibreFang(text, phone, pushName);
         if (response && sock) {
-          // Send agent response back to WhatsApp
-          await sock.sendMessage(sender, { text: response });
-          console.log(`[gateway] Replied to ${pushName}`);
+          // Owner routing: for DMs from external contacts, send the agent's
+          // response to the owner instead of back to the external contact.
+          // This prevents the bot from accidentally replying to shops/services
+          // with messages meant for the owner (e.g. "Signore, X ha risposto...").
+          const isGroup = sender.endsWith('@g.us');
+          let replyJid = sender;
+          let replyText = response;
+          if (!isGroup && OWNER_JID && sender !== OWNER_JID) {
+            replyJid = OWNER_JID;
+            // Prefix with sender context so the owner knows who triggered it
+            replyText = `[From ${pushName} (${phone})]\n${response}`;
+            console.log(`[gateway] Owner routing: redirecting response from ${pushName} (${phone}) -> owner`);
+
+            // Send a brief LLM-generated ack to the external sender in their language
+            try {
+              const ack = await generateSenderAck(text, pushName);
+              if (ack) {
+                await sock.sendMessage(sender, { text: ack });
+              }
+            } catch (ackErr) {
+              console.error(`[gateway] Failed to send ack to ${pushName}:`, ackErr.message);
+            }
+          }
+
+          await sock.sendMessage(replyJid, { text: replyText });
+          const target = replyJid === OWNER_JID && replyJid !== sender
+            ? `owner (via ${pushName})` : pushName;
+          console.log(`[gateway] Replied to ${target}`);
         }
       } catch (err) {
         console.error(`[gateway] Forward/reply failed:`, err.message);
@@ -351,6 +391,69 @@ async function forwardToLibreFang(text, phone, pushName) {
     req.on('timeout', () => {
       req.destroy();
       reject(new Error('LibreFang API timeout'));
+    });
+    req.write(payload);
+    req.end();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Generate a brief ack for external senders via LLM (language-aware)
+// ---------------------------------------------------------------------------
+async function generateSenderAck(originalMessage, pushName) {
+  if (!cachedAgentId) {
+    try { await resolveAgentId(); } catch { return ''; }
+  }
+
+  const prompt = [
+    `[SYSTEM-ACK] An external contact named "${pushName}" just sent a WhatsApp message.`,
+    `Their message: "${(originalMessage || '').substring(0, 300)}"`,
+    `Generate a very brief, warm acknowledgment (1-2 sentences max) in the SAME language as their message.`,
+    `Do NOT answer their question. Just confirm receipt and say someone will get back to them.`,
+    `Do NOT mention being an AI or bot. Sign off as "Ambrogio".`,
+  ].join(' ');
+
+  return new Promise((resolve) => {
+    const payload = JSON.stringify({
+      message: prompt,
+      metadata: { channel: 'whatsapp', sender: 'system', sender_name: 'system-ack' },
+    });
+
+    const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(cachedAgentId)}/message`);
+
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port || 4545,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+        timeout: 30_000,
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => (body += chunk));
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(body);
+            resolve(data.response || data.message || data.text || '');
+          } catch {
+            resolve(body.trim() || '');
+          }
+        });
+      },
+    );
+    req.on('error', (err) => {
+      console.error(`[gateway] generateSenderAck failed: ${err.message}`);
+      resolve('');
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      console.error('[gateway] generateSenderAck timeout');
+      resolve('');
     });
     req.write(payload);
     req.end();

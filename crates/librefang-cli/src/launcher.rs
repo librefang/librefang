@@ -57,6 +57,12 @@ fn has_openclaw() -> bool {
         .unwrap_or(false)
 }
 
+fn has_openfang() -> bool {
+    dirs::home_dir()
+        .map(|h| h.join(".openfang").exists())
+        .unwrap_or(false)
+}
+
 // ── Types ───────────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -154,12 +160,14 @@ struct LauncherState {
     tick: usize,
     first_run: bool,
     openclaw_detected: bool,
+    openfang_detected: bool,
 }
 
 impl LauncherState {
     fn new() -> Self {
         let first_run = is_first_run();
         let openclaw_detected = first_run && has_openclaw();
+        let openfang_detected = first_run && has_openfang();
         let mut list = ListState::default();
         list.select(Some(0));
         Self {
@@ -170,6 +178,7 @@ impl LauncherState {
             tick: 0,
             first_run,
             openclaw_detected,
+            openfang_detected,
         }
     }
 
@@ -324,11 +333,8 @@ fn draw(frame: &mut ratatui::Frame, state: &mut LauncherState) {
     } else {
         3
     };
-    let migration_hint_h: u16 = if state.first_run && state.openclaw_detected {
-        2
-    } else {
-        0
-    };
+    let has_migration = state.first_run && (state.openclaw_detected || state.openfang_detected);
+    let migration_hint_h: u16 = if has_migration { 2 } else { 0 };
     let menu_h = menu.len() as u16;
 
     let total_needed = 1 + header_h + 1 + status_h + 1 + menu_h + migration_hint_h + 1;
@@ -508,13 +514,22 @@ fn draw(frame: &mut ratatui::Frame, state: &mut LauncherState) {
 
     frame.render_stateful_widget(list, chunks[5], &mut state.list);
 
-    // ── OpenClaw migration hint ─────────────────────────────────────────────
-    if state.first_run && state.openclaw_detected {
+    // ── Migration hint ────────────────────────────────────────────────────────
+    if state.first_run && (state.openclaw_detected || state.openfang_detected) {
+        let source = match (state.openclaw_detected, state.openfang_detected) {
+            (true, true) => "OpenClaw / OpenFang",
+            (true, false) => "OpenClaw",
+            (false, true) => "OpenFang",
+            _ => unreachable!(),
+        };
         let hint_lines = vec![
             Line::from(""),
             Line::from(vec![
                 Span::styled("\u{2192} ", Style::default().fg(theme::BLUE)),
-                Span::styled("Coming from OpenClaw? ", Style::default().fg(theme::BLUE)),
+                Span::styled(
+                    format!("Coming from {source}? "),
+                    Style::default().fg(theme::BLUE),
+                ),
                 Span::styled(
                     "'Get started' includes automatic migration.",
                     theme::hint_style(),

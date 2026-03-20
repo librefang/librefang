@@ -1035,20 +1035,64 @@ fn approval_to_json(
     })
 }
 
-/// GET /api/approvals — List pending approval requests.
+/// GET /api/approvals — List pending and recent approval requests.
 ///
 /// Transforms field names to match the dashboard template expectations:
 /// `action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.
-#[utoipa::path(get, path = "/api/approvals", tag = "approvals", responses((status = 200, description = "List pending approvals", body = Vec<serde_json::Value>)))]
+#[utoipa::path(get, path = "/api/approvals", tag = "approvals", responses((status = 200, description = "List pending and recent approvals", body = Vec<serde_json::Value>)))]
 pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let pending = state.kernel.approval_manager.list_pending();
-    let total = pending.len();
+    let recent = state.kernel.approval_manager.list_recent(50);
 
     let registry_agents = state.kernel.registry.list();
-    let approvals: Vec<serde_json::Value> = pending
+    let agent_name_for = |agent_id: &str| {
+        registry_agents
+            .iter()
+            .find(|ag| ag.id.to_string() == agent_id || ag.name == agent_id)
+            .map(|ag| ag.name.clone())
+            .unwrap_or_else(|| agent_id.to_string())
+    };
+
+    let mut approvals: Vec<serde_json::Value> = pending
         .iter()
         .map(|a| approval_to_json(a, &registry_agents))
         .collect();
+
+    approvals.extend(recent.into_iter().map(|record| {
+        let request = record.request;
+        let agent_name = agent_name_for(&request.agent_id);
+        let status = match record.decision {
+            librefang_types::approval::ApprovalDecision::Approved => "approved",
+            librefang_types::approval::ApprovalDecision::Denied => "rejected",
+            librefang_types::approval::ApprovalDecision::TimedOut => "expired",
+        };
+        serde_json::json!({
+            "id": request.id,
+            "agent_id": request.agent_id,
+            "agent_name": agent_name,
+            "tool_name": request.tool_name,
+            "description": request.description,
+            "action_summary": request.action_summary,
+            "action": request.action_summary,
+            "risk_level": request.risk_level,
+            "requested_at": request.requested_at,
+            "created_at": request.requested_at,
+            "timeout_secs": request.timeout_secs,
+            "status": status,
+            "decided_at": record.decided_at,
+            "decided_by": record.decided_by,
+        })
+    }));
+
+    approvals.sort_by(|a, b| {
+        let a_pending = a["status"].as_str() == Some("pending");
+        let b_pending = b["status"].as_str() == Some("pending");
+        b_pending
+            .cmp(&a_pending)
+            .then_with(|| b["created_at"].as_str().cmp(&a["created_at"].as_str()))
+    });
+
+    let total = approvals.len();
 
     Json(serde_json::json!({"approvals": approvals, "total": total}))
 }
@@ -2023,6 +2067,37 @@ pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoRespon
     Json(serde_json::json!({"backups": backups, "total": total}))
 }
 
+fn is_invalid_backup_filename(filename: &str) -> bool {
+    if filename.is_empty() {
+        return true;
+    }
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return true;
+    }
+    std::path::Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        != Some(filename)
+}
+
+fn find_backup_path(
+    backups_dir: &std::path::Path,
+    filename: &str,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    let entries = std::fs::read_dir(backups_dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("zip") {
+            continue;
+        }
+        if entry.file_name().to_str() == Some(filename) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 /// DELETE /api/backups/{filename} — Delete a specific backup.
 #[utoipa::path(delete, path = "/api/backups/{filename}", tag = "system", params(("filename" = String, Path, description = "Backup filename")), responses((status = 200, description = "Backup deleted")))]
 pub async fn delete_backup(
@@ -2032,7 +2107,7 @@ pub async fn delete_backup(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Sanitize filename to prevent path traversal
-    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+    if is_invalid_backup_filename(&filename) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": t.t("api-error-backup-invalid-filename")})),
@@ -2045,13 +2120,30 @@ pub async fn delete_backup(
         );
     }
 
-    let backup_path = state.kernel.config.home_dir.join("backups").join(&filename);
-    if !backup_path.exists() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
-        );
-    }
+    let backups_dir = state.kernel.config.home_dir.join("backups");
+    let backup_path = match find_backup_path(&backups_dir, &filename) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-backup-delete-failed", &[("error", &e.to_string())])}),
+                ),
+            );
+        }
+    };
 
     if let Err(e) = std::fs::remove_file(&backup_path) {
         return (
@@ -2094,21 +2186,44 @@ pub async fn restore_backup(
     };
 
     // Sanitize
-    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+    if is_invalid_backup_filename(&filename) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": t.t("api-error-backup-invalid-filename")})),
         );
     }
-
-    let home_dir = &state.kernel.config.home_dir;
-    let backup_path = home_dir.join("backups").join(&filename);
-    if !backup_path.exists() {
+    if !filename.ends_with(".zip") {
         return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": t.t("api-error-backup-must-be-zip")})),
         );
     }
+
+    let home_dir = &state.kernel.config.home_dir;
+    let backups_dir = home_dir.join("backups");
+    let backup_path = match find_backup_path(&backups_dir, &filename) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())])}),
+                ),
+            );
+        }
+    };
 
     // Open zip
     let file = match std::fs::File::open(&backup_path) {

@@ -38,6 +38,7 @@ reqwest = { workspace = true }
 url = { workspace = true }
 zip = { workspace = true }
 walkdir = { workspace = true }
+dirs = { workspace = true }
 jsonwebtoken = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }

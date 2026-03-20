@@ -245,7 +245,7 @@
     "section": "基础设施", "title": "模型目录", "subtitle": "浏览所有供应商的可用 LLM 模型。",
     "search_placeholder": "搜索模型...", "all_providers": "所有供应商", "all_tiers": "全部",
     "available_only": "仅可用", "available": "可用", "results": "个模型",
-    "free": "免费", "no_results": "没有匹配的模型。",
+    "free": "免费", "no_results": "没有匹配的模型。", "no_models": "未加载任何模型。守护进程是否在运行？", "load_error": "加载模型失败。请检查守护进程是否在运行。",
     "col_model": "模型", "col_provider": "供应商", "col_tier": "等级", "col_context": "上下文", "col_input": "输入 $/M"
   },
   "plugins": {

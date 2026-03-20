@@ -300,6 +300,16 @@ pub async fn install_plugin_deps(Path(name): Path<String>) -> impl IntoResponse 
 pub async fn list_plugin_registries(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Ensure the official registry is always present.
     let mut registries = state.kernel.config.context_engine.plugin_registries.clone();
+
+    // Merge registries from [plugins].plugin_registries (URL strings treated as github repos)
+    for url in &state.kernel.config.plugins.plugin_registries {
+        if !registries.iter().any(|r| r.github_repo == *url) {
+            registries.push(librefang_types::config::PluginRegistrySource {
+                name: url.clone(),
+                github_repo: url.clone(),
+            });
+        }
+    }
     if !registries
         .iter()
         .any(|r| r.github_repo == "librefang/librefang-registry")

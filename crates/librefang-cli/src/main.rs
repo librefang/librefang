@@ -31,6 +31,9 @@ use std::time::{Duration, Instant};
 
 /// Global flag set by the Ctrl+C handler.
 static CTRLC_PRESSED: AtomicBool = AtomicBool::new(false);
+const INIT_DEFAULT_CONFIG_TEMPLATE: &str = include_str!("../templates/init_default_config.toml");
+const PROVIDER_DEFAULT_MODELS_TEMPLATE: &str =
+    include_str!("../templates/provider_default_models.toml");
 
 /// Install a Ctrl+C handler that force-exits the process.
 /// On Windows/MINGW, the default handler doesn't reliably interrupt blocking
@@ -575,6 +578,7 @@ enum MigrateSourceArg {
     Openclaw,
     Langchain,
     Autogpt,
+    Openfang,
 }
 
 #[derive(Subcommand)]
@@ -666,11 +670,18 @@ enum ChannelCommands {
     },
     /// Test a channel by sending a test message.
     #[command(
-        long_about = "Send a test message through a configured channel to verify connectivity.\n\nExamples:\n  librefang channel test telegram\n  librefang channel test slack"
+        long_about = "Send a test message through a configured channel to verify connectivity.\n\nExamples:\n  librefang channel test telegram\n  librefang channel test telegram --chat-id 123456789\n  librefang channel test discord --channel 123456789\n  librefang channel test slack --channel C1234567890"
     )]
     Test {
         /// Channel name.
-        channel: String,
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Target channel ID for Discord or Slack live message tests.
+        #[arg(long = "channel", conflicts_with = "chat_id")]
+        channel_id: Option<String>,
+        /// Target chat ID for Telegram live message tests.
+        #[arg(long, conflicts_with = "channel_id")]
+        chat_id: Option<String>,
     },
     /// Enable a channel.
     #[command(
@@ -1378,6 +1389,13 @@ fn load_log_level_from_config() -> String {
 }
 
 fn main() {
+    // Initialize rustls crypto provider FIRST, before any async/TLS operations
+    // This is required because rustls 0.23 needs explicit crypto provider initialization
+    {
+        use rustls::crypto::aws_lc_rs;
+        let _ = aws_lc_rs::default_provider().install_default();
+    }
+
     // Load ~/.librefang/.env into process environment (system env takes priority).
     dotenv::load_dotenv();
 
@@ -1500,7 +1518,11 @@ fn main() {
         Some(Commands::Channel(sub)) => match sub {
             ChannelCommands::List => cmd_channel_list(),
             ChannelCommands::Setup { channel } => cmd_channel_setup(channel.as_deref()),
-            ChannelCommands::Test { channel } => cmd_channel_test(&channel),
+            ChannelCommands::Test {
+                name,
+                channel_id,
+                chat_id,
+            } => cmd_channel_test(&name, channel_id.as_deref(), chat_id.as_deref()),
             ChannelCommands::Enable { channel } => cmd_channel_toggle(&channel, true),
             ChannelCommands::Disable { channel } => cmd_channel_toggle(&channel, false),
         },
@@ -1779,8 +1801,11 @@ fn cmd_init(quick: bool) {
         }
     }
 
-    // Install bundled agent templates (skips existing ones to preserve user edits)
-    bundled_agents::install_bundled_agents(&librefang_dir.join("agents"));
+    // Sync agent templates from registry (skips existing ones to preserve user edits)
+    bundled_agents::sync_registry_agents(&librefang_dir);
+
+    // Initialize vault if not already initialized
+    init_vault_if_missing(&librefang_dir);
 
     if quick {
         cmd_init_quick(&librefang_dir);
@@ -1795,6 +1820,20 @@ fn cmd_init(quick: bool) {
     }
 }
 
+/// Initialize vault if it doesn't exist yet (silent no-op if already initialized).
+fn init_vault_if_missing(librefang_dir: &std::path::Path) {
+    let vault_path = librefang_dir.join("vault.enc");
+    if vault_path.exists() {
+        return; // Already initialized
+    }
+
+    let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+    if let Err(e) = vault.init() {
+        // Silently skip vault init on failure - it's optional
+        tracing::debug!("vault init skipped: {e}");
+    }
+}
+
 /// Quick init: no prompts, auto-detect, write config + .env, print next steps.
 fn cmd_init_quick(librefang_dir: &std::path::Path) {
     ui::banner();
@@ -1802,12 +1841,12 @@ fn cmd_init_quick(librefang_dir: &std::path::Path) {
 
     let (provider, api_key_env, model) = detect_best_provider();
 
-    write_config_if_missing(librefang_dir, provider, model, api_key_env);
+    write_config_if_missing(librefang_dir, &provider, &model, &api_key_env);
 
     ui::blank();
     ui::success(&i18n::t("init-quick-success"));
-    ui::kv(&i18n::t("label-provider"), provider);
-    ui::kv(&i18n::t("label-model"), model);
+    ui::kv(&i18n::t("label-provider"), &provider);
+    ui::kv(&i18n::t("label-model"), &model);
     ui::blank();
     ui::next_steps(&[&i18n::t("init-next-start"), &i18n::t("init-next-chat")]);
 }
@@ -1931,53 +1970,59 @@ fn launch_desktop_app(_librefang_dir: &std::path::Path) {
 }
 
 /// Auto-detect the best available provider.
-fn detect_best_provider() -> (&'static str, &'static str, &'static str) {
+fn detect_best_provider() -> (String, String, String) {
     let providers = provider_list();
 
-    for (p, env_var, m, display) in &providers {
-        if std::env::var(env_var).is_ok() {
+    for (p, env_var, display) in &providers {
+        if std::env::var(*env_var).is_ok() {
             ui::success(&i18n::t_args(
                 "detected-provider",
-                &[("display", display), ("env_var", env_var)],
+                &[("display", *display), ("env_var", *env_var)],
             ));
-            return (p, env_var, m);
+            return (
+                (*p).to_string(),
+                (*env_var).to_string(),
+                default_model_for_provider(p),
+            );
         }
     }
     // Also check GOOGLE_API_KEY
     if std::env::var("GOOGLE_API_KEY").is_ok() {
         ui::success(&i18n::t("detected-gemini"));
-        return ("gemini", "GOOGLE_API_KEY", "gemini-2.5-flash");
+        return (
+            "gemini".to_string(),
+            "GOOGLE_API_KEY".to_string(),
+            default_model_for_provider("gemini"),
+        );
     }
     // Check if Ollama is running locally (no API key needed)
     if check_ollama_available() {
         ui::success(&i18n::t("detected-ollama"));
-        return ("ollama", "OLLAMA_API_KEY", "llama3.2");
+        return (
+            "ollama".to_string(),
+            "OLLAMA_API_KEY".to_string(),
+            default_model_for_provider("ollama"),
+        );
     }
     ui::hint(&i18n::t("hint-no-api-keys"));
     ui::hint(&i18n::t("hint-groq-free"));
     ui::hint(&i18n::t("hint-ollama-local"));
-    ("groq", "GROQ_API_KEY", "llama-3.3-70b-versatile")
+    (
+        "openrouter".to_string(),
+        "OPENROUTER_API_KEY".to_string(),
+        default_model_for_provider("openrouter"),
+    )
 }
 
-/// Static list of supported providers: (id, env_var, default_model, display_name).
-fn provider_list() -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+/// Static list of supported providers: (id, env_var, display_name).
+fn provider_list() -> Vec<(&'static str, &'static str, &'static str)> {
     vec![
-        ("groq", "GROQ_API_KEY", "llama-3.3-70b-versatile", "Groq"),
-        ("gemini", "GEMINI_API_KEY", "gemini-2.5-flash", "Gemini"),
-        ("deepseek", "DEEPSEEK_API_KEY", "deepseek-chat", "DeepSeek"),
-        (
-            "anthropic",
-            "ANTHROPIC_API_KEY",
-            "claude-sonnet-4-20250514",
-            "Anthropic",
-        ),
-        ("openai", "OPENAI_API_KEY", "gpt-4o", "OpenAI"),
-        (
-            "openrouter",
-            "OPENROUTER_API_KEY",
-            "openrouter/google/gemini-2.5-flash",
-            "OpenRouter",
-        ),
+        ("groq", "GROQ_API_KEY", "Groq"),
+        ("gemini", "GEMINI_API_KEY", "Gemini"),
+        ("deepseek", "DEEPSEEK_API_KEY", "DeepSeek"),
+        ("anthropic", "ANTHROPIC_API_KEY", "Anthropic"),
+        ("openai", "OPENAI_API_KEY", "OpenAI"),
+        ("openrouter", "OPENROUTER_API_KEY", "OpenRouter"),
     ]
 }
 
@@ -1988,6 +2033,31 @@ fn check_ollama_available() -> bool {
         std::time::Duration::from_millis(500),
     )
     .is_ok()
+}
+
+fn render_init_default_config(provider: &str, model: &str, api_key_env: &str) -> String {
+    INIT_DEFAULT_CONFIG_TEMPLATE
+        .replace("{{provider}}", provider)
+        .replace("{{model}}", model)
+        .replace("{{api_key_env}}", api_key_env)
+}
+
+fn configured_default_model(provider: &str) -> Option<String> {
+    let parsed = toml::from_str::<toml::Value>(PROVIDER_DEFAULT_MODELS_TEMPLATE).ok()?;
+    parsed
+        .get("default_models")?
+        .get(provider)?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+fn default_model_for_provider(provider: &str) -> String {
+    configured_default_model(provider)
+        .or_else(|| {
+            let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
+            catalog.default_model_for_provider(provider)
+        })
+        .unwrap_or_else(|| "local-model".to_string())
 }
 
 /// Write config.toml if it doesn't already exist.
@@ -2004,35 +2074,7 @@ fn write_config_if_missing(
             &[("path", &config_path.display().to_string())],
         ));
     } else {
-        let default_config = format!(
-            r#"# LibreFang Agent OS configuration
-# See https://github.com/librefang/librefang for documentation
-
-# For Docker, change to "0.0.0.0:4545" or set LIBREFANG_LISTEN env var.
-api_listen = "127.0.0.1:4545"
-
-[default_model]
-provider = "{provider}"
-model = "{model}"
-api_key_env = "{api_key_env}"
-
-[memory]
-decay_rate = 0.05
-
-# Proactive memory (mem0-style auto-memorize / auto-retrieve)
-[proactive_memory]
-enabled = true
-auto_memorize = true
-auto_retrieve = true
-max_retrieve = 10
-# extraction_model = ""  # defaults to your default_model
-# extraction_threshold = 0.7
-# session_ttl_hours = 24
-# duplicate_threshold = 0.5
-# confidence_decay_rate = 0.01
-# max_memories_per_agent = 1000
-"#
-        );
+        let default_config = render_init_default_config(provider, model, api_key_env);
         std::fs::write(&config_path, &default_config).unwrap_or_else(|e| {
             ui::error_with_fix(&i18n::t("error-write-config"), &e.to_string());
             std::process::exit(1);
@@ -3088,18 +3130,14 @@ fn cmd_doctor(json: bool, repair: bool) {
                             ui::check_ok(".env file (permissions fixed to 0600)");
                         }
                         repaired = true;
-                    } else {
-                        if !json {
-                            ui::check_warn(&format!(
-                                ".env file has loose permissions ({:o}), should be 0600",
-                                mode
-                            ));
-                        }
+                    } else if !json {
+                        ui::check_warn(&format!(
+                            ".env file has loose permissions ({:o}), should be 0600",
+                            mode
+                        ));
                     }
-                } else {
-                    if !json {
-                        ui::check_ok(".env file");
-                    }
+                } else if !json {
+                    ui::check_ok(".env file");
                 }
             }
             #[cfg(not(unix))]
@@ -3145,35 +3183,7 @@ fn cmd_doctor(json: bool, repair: bool) {
             let answer = prompt_input("    Create default config? [Y/n] ");
             if answer.is_empty() || answer.starts_with('y') || answer.starts_with('Y') {
                 let (provider, api_key_env, model) = detect_best_provider();
-                let default_config = format!(
-                    r#"# LibreFang Agent OS configuration
-# See https://github.com/librefang/librefang for documentation
-
-# For Docker, change to "0.0.0.0:4545" or set LIBREFANG_LISTEN env var.
-api_listen = "127.0.0.1:4545"
-
-[default_model]
-provider = "{provider}"
-model = "{model}"
-api_key_env = "{api_key_env}"
-
-[memory]
-decay_rate = 0.05
-
-# Proactive memory (mem0-style auto-memorize / auto-retrieve)
-[proactive_memory]
-enabled = true
-auto_memorize = true
-auto_retrieve = true
-max_retrieve = 10
-# extraction_model = ""  # defaults to your default_model
-# extraction_threshold = 0.7
-# session_ttl_hours = 24
-# duplicate_threshold = 0.5
-# confidence_decay_rate = 0.01
-# max_memories_per_agent = 1000
-"#
-                );
+                let default_config = render_init_default_config(&provider, &model, &api_key_env);
                 let _ = std::fs::create_dir_all(&librefang_dir);
                 if std::fs::write(&config_path, default_config).is_ok() {
                     restrict_file_permissions(&config_path);
@@ -3771,7 +3781,7 @@ max_retrieve = 10
         }
         let skills_dir = cli_librefang_home().join("skills");
         let mut skill_reg = librefang_skills::registry::SkillRegistry::new(skills_dir.clone());
-        skill_reg.load_bundled();
+        skill_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let bundled_count = skill_reg.count();
         if !json {
             ui::check_ok(&format!("Bundled skills loaded: {bundled_count}"));
@@ -3845,7 +3855,7 @@ max_retrieve = 10
         let librefang_dir = cli_librefang_home();
         let mut ext_registry =
             librefang_extensions::registry::IntegrationRegistry::new(&librefang_dir);
-        ext_registry.load_bundled();
+        ext_registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let _ = ext_registry.load_installed();
         let template_count = ext_registry.template_count();
         let installed_count = ext_registry.installed_count();
@@ -4479,6 +4489,7 @@ fn cmd_migrate(args: MigrateArgs) {
         MigrateSourceArg::Openclaw => librefang_migrate::MigrateSource::OpenClaw,
         MigrateSourceArg::Langchain => librefang_migrate::MigrateSource::LangChain,
         MigrateSourceArg::Autogpt => librefang_migrate::MigrateSource::AutoGpt,
+        MigrateSourceArg::Openfang => librefang_migrate::MigrateSource::OpenFang,
     };
 
     let source_dir = args.source_dir.unwrap_or_else(|| {
@@ -4490,6 +4501,7 @@ fn cmd_migrate(args: MigrateArgs) {
             librefang_migrate::MigrateSource::OpenClaw => home.join(".openclaw"),
             librefang_migrate::MigrateSource::LangChain => home.join(".langchain"),
             librefang_migrate::MigrateSource::AutoGpt => home.join("Auto-GPT"),
+            librefang_migrate::MigrateSource::OpenFang => home.join(".openfang"),
         }
     });
 
@@ -5090,7 +5102,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
                 return;
             }
 
-            let config_block = "\n[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("telegram", config_block);
 
             // Save token to .env
@@ -5148,7 +5160,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let app_token = prompt_input("  Paste your App Token (xapp-...): ");
             let bot_token = prompt_input("  Paste your Bot Token (xoxb-...): ");
 
-            let config_block = "\n[channels.slack]\napp_token_env = \"SLACK_APP_TOKEN\"\nbot_token_env = \"SLACK_BOT_TOKEN\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.slack]\napp_token_env = \"SLACK_APP_TOKEN\"\nbot_token_env = \"SLACK_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("slack", config_block);
 
             if !app_token.is_empty() {
@@ -5183,7 +5195,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let access_token = prompt_input("  Access Token: ");
             let verify_token = prompt_input("  Verify Token: ");
 
-            let config_block = "\n[channels.whatsapp]\nmode = \"cloud_api\"\nphone_number_id_env = \"WA_PHONE_ID\"\naccess_token_env = \"WA_ACCESS_TOKEN\"\nverify_token_env = \"WA_VERIFY_TOKEN\"\nwebhook_port = 8443\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.whatsapp]\nmode = \"cloud_api\"\nphone_number_id_env = \"WA_PHONE_ID\"\naccess_token_env = \"WA_ACCESS_TOKEN\"\nverify_token_env = \"WA_VERIFY_TOKEN\"\nwebhook_port = 8443\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("whatsapp", config_block);
 
             for (key, val) in [
@@ -5219,7 +5231,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let password = prompt_input("  App password (or Enter to set later): ");
 
             let config_block = format!(
-                "\n[channels.email]\nimap_host = \"imap.gmail.com\"\nimap_port = 993\nsmtp_host = \"smtp.gmail.com\"\nsmtp_port = 587\nusername = \"{username}\"\npassword_env = \"EMAIL_PASSWORD\"\npoll_interval = 30\ndefault_agent = \"router\"\n"
+                "\n[channels.email]\nimap_host = \"imap.gmail.com\"\nimap_port = 993\nsmtp_host = \"smtp.gmail.com\"\nsmtp_port = 587\nusername = \"{username}\"\npassword_env = \"EMAIL_PASSWORD\"\npoll_interval = 30\ndefault_agent = \"assistant\"\n"
             );
             maybe_write_channel_config("email", &config_block);
 
@@ -5254,7 +5266,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
 
             let phone = prompt_input("  Your phone number (+1XXXX, or Enter to skip): ");
 
-            let config_block = "\n[channels.signal]\nphone_env = \"SIGNAL_PHONE\"\nsocket_path = \"/tmp/signal-cli.sock\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.signal]\nphone_env = \"SIGNAL_PHONE\"\nsocket_path = \"/tmp/signal-cli.sock\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("signal", config_block);
 
             if !phone.is_empty() {
@@ -5288,7 +5300,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             };
             let token = prompt_input("  Access token: ");
 
-            let config_block = "\n[channels.matrix]\nhomeserver_env = \"MATRIX_HOMESERVER\"\naccess_token_env = \"MATRIX_ACCESS_TOKEN\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.matrix]\nhomeserver_env = \"MATRIX_HOMESERVER\"\naccess_token_env = \"MATRIX_ACCESS_TOKEN\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("matrix", config_block);
 
             let _ = dotenv::save_env_key("MATRIX_HOMESERVER", &homeserver);
@@ -5352,21 +5364,40 @@ fn notify_daemon_restart() {
     }
 }
 
-fn cmd_channel_test(channel: &str) {
+fn channel_test_request_body(
+    channel_id: Option<&str>,
+    chat_id: Option<&str>,
+) -> Option<serde_json::Value> {
+    channel_id
+        .map(|id| serde_json::json!({ "channel_id": id }))
+        .or_else(|| chat_id.map(|id| serde_json::json!({ "chat_id": id })))
+}
+
+fn cmd_channel_test(channel: &str, channel_id: Option<&str>, chat_id: Option<&str>) {
     if let Some(base) = find_daemon() {
         let client = daemon_client();
-        let body = daemon_json(
-            client
-                .post(format!("{base}/api/channels/{channel}/test"))
-                .send(),
-        );
-        if body.get("status").is_some() {
-            println!("Test message sent to {channel}!");
+        let request = client.post(format!("{base}/api/channels/{channel}/test"));
+        let body = if let Some(payload) = channel_test_request_body(channel_id, chat_id) {
+            daemon_json(request.json(&payload).send())
+        } else {
+            daemon_json(request.send())
+        };
+        if body["status"].as_str() == Some("ok") {
+            println!(
+                "{}",
+                body["message"]
+                    .as_str()
+                    .unwrap_or("Channel test completed successfully.")
+            );
         } else {
             eprintln!(
                 "Failed: {}",
-                body["error"].as_str().unwrap_or("Unknown error")
+                body["message"]
+                    .as_str()
+                    .or_else(|| body["error"].as_str())
+                    .unwrap_or("Unknown error")
             );
+            std::process::exit(1);
         }
     } else {
         eprintln!("Channel test requires a running daemon. Start with: librefang start");
@@ -6343,7 +6374,7 @@ pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
 fn cmd_integration_add(name: &str, key: Option<&str>) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
+    registry.load_bundled(&librefang_dir);
     let _ = registry.load_installed();
 
     // Check template exists
@@ -6429,7 +6460,7 @@ fn cmd_integration_add(name: &str, key: Option<&str>) {
 fn cmd_integration_remove(name: &str) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
+    registry.load_bundled(&librefang_dir);
     let _ = registry.load_installed();
 
     match librefang_extensions::installer::remove_integration(&mut registry, name) {
@@ -6453,7 +6484,7 @@ fn cmd_integration_remove(name: &str) {
 fn cmd_integrations_list(query: Option<&str>) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
+    registry.load_bundled(&librefang_dir);
     let _ = registry.load_installed();
 
     let dotenv_path = home.join(".env");
@@ -6821,7 +6852,7 @@ fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
         }
     } else {
         // Standalone: use ModelCatalog directly
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
         let models = catalog.list_models();
         if json {
             let arr: Vec<serde_json::Value> = models
@@ -6897,7 +6928,7 @@ fn cmd_models_aliases(json: bool) {
             );
         }
     } else {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
         let aliases = catalog.list_aliases();
         if json {
             let obj: serde_json::Map<String, serde_json::Value> = aliases
@@ -6952,7 +6983,7 @@ fn cmd_models_providers(json: bool) {
             );
         }
     } else {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
         let providers = catalog.list_providers();
         if json {
             let arr: Vec<serde_json::Value> = providers
@@ -7012,7 +7043,7 @@ fn cmd_models_set(model: Option<String>) {
 
 /// Interactive model picker — shows numbered list, accepts number or model ID.
 fn pick_model() -> String {
-    let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+    let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
     let models = catalog.list_models();
 
     if models.is_empty() {
@@ -8818,11 +8849,12 @@ fn remove_self_binary(exe_path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_release_tag, daemon_log_path_for_config, daemon_log_path_for_home,
-        detached_daemon_args, normalize_release_tag, parse_version_core, resolve_hand_instance,
-        Cli, Commands, GatewayCommands, ReleaseComparison,
+        channel_test_request_body, compare_release_tag, daemon_log_path_for_config,
+        daemon_log_path_for_home, detached_daemon_args, normalize_release_tag, parse_version_core,
+        resolve_hand_instance, ChannelCommands, Cli, Commands, GatewayCommands, ReleaseComparison,
     };
     use clap::Parser;
+    use serde_json::json;
     use std::ffi::OsString;
     use std::fs;
     use std::path::Path;
@@ -8936,6 +8968,90 @@ mod tests {
     }
 
     #[test]
+    fn test_channel_test_accepts_target_channel_flag() {
+        let cli = Cli::parse_from([
+            "librefang",
+            "channel",
+            "test",
+            "discord",
+            "--channel",
+            "123456789",
+        ]);
+        match cli.command {
+            Some(Commands::Channel(ChannelCommands::Test {
+                name,
+                channel_id,
+                chat_id,
+            })) => {
+                assert_eq!(name, "discord");
+                assert_eq!(channel_id.as_deref(), Some("123456789"));
+                assert!(chat_id.is_none());
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_channel_test_accepts_chat_id_flag() {
+        let cli = Cli::parse_from([
+            "librefang",
+            "channel",
+            "test",
+            "telegram",
+            "--chat-id",
+            "999",
+        ]);
+        match cli.command {
+            Some(Commands::Channel(ChannelCommands::Test {
+                name,
+                channel_id,
+                chat_id,
+            })) => {
+                assert_eq!(name, "telegram");
+                assert!(channel_id.is_none());
+                assert_eq!(chat_id.as_deref(), Some("999"));
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_channel_test_rejects_both_target_flags() {
+        let cli = Cli::try_parse_from([
+            "librefang",
+            "channel",
+            "test",
+            "discord",
+            "--channel",
+            "123",
+            "--chat-id",
+            "456",
+        ]);
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn test_channel_test_request_body_prefers_channel_id() {
+        assert_eq!(
+            channel_test_request_body(Some("C123"), None),
+            Some(json!({ "channel_id": "C123" }))
+        );
+    }
+
+    #[test]
+    fn test_channel_test_request_body_supports_chat_id() {
+        assert_eq!(
+            channel_test_request_body(None, Some("42")),
+            Some(json!({ "chat_id": "42" }))
+        );
+    }
+
+    #[test]
+    fn test_channel_test_request_body_empty_when_no_target() {
+        assert_eq!(channel_test_request_body(None, None), None);
+    }
+
+    #[test]
     fn test_start_rejects_tail_with_foreground() {
         let cli = Cli::try_parse_from(["librefang", "start", "--tail", "--foreground"]);
         assert!(cli.is_err());
@@ -8994,8 +9110,9 @@ mod tests {
     fn test_doctor_skill_registry_loads_bundled() {
         let skills_dir = std::env::temp_dir().join("librefang-doctor-test-skills");
         let mut skill_reg = librefang_skills::registry::SkillRegistry::new(skills_dir);
-        let count = skill_reg.load_bundled();
-        assert!(count > 0, "Should load bundled skills");
+        let count =
+            skill_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        // Skills are loaded from disk at runtime; count depends on registry files being present
         assert_eq!(skill_reg.count(), count);
     }
 
@@ -9004,8 +9121,9 @@ mod tests {
         let tmp = std::env::temp_dir().join("librefang-doctor-test-ext");
         let _ = std::fs::create_dir_all(&tmp);
         let mut ext_reg = librefang_extensions::registry::IntegrationRegistry::new(&tmp);
-        let count = ext_reg.load_bundled();
-        assert!(count > 0, "Should load bundled integration templates");
+        let count =
+            ext_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        // Integrations are loaded from disk at runtime; count depends on registry files being present
         assert_eq!(ext_reg.template_count(), count);
     }
 

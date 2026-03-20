@@ -312,6 +312,52 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${GITHUB_REF#refs/tags/}" librefang-${{ matrix.target }}-mini.* --clobber
 
+  # ── CLI Binary → npm ────────────────────────────────────────────────────
+  cli_npm:
+    name: CLI / npm
+    needs: [cli_mac, cli_linux, cli_musl, cli_windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Publish CLI binaries to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          FULL="${GITHUB_REF#refs/tags/v}"
+          export VERSION="${FULL%-*}"
+          bash scripts/publish-npm-binaries.sh
+
+  # ── CLI Binary → PyPI ──────────────────────────────────────────────────
+  cli_pypi:
+    name: CLI / PyPI
+    needs: [cli_mac, cli_linux, cli_musl, cli_windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Publish CLI binaries to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          FULL="${GITHUB_REF#refs/tags/v}"
+          export VERSION="${FULL%-*}"
+          bash scripts/publish-pypi-binaries.sh
+
   # ── Sync to Homebrew Tap ──────────────────────────────────────────────
   sync_homebrew:
     name: Sync to Homebrew Tap
@@ -325,20 +371,42 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
 
-      - name: Fetch release metadata
+      - name: Fetch release metadata (with retry for asset availability)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
-          curl -fsSL \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
-            > release.json
+          # Retry up to 10 times (100s total) to allow asset uploads to complete
+          for attempt in $(seq 1 10); do
+            curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+              > release.json
 
-          jq -e '.tag_name and (.assets | type == "array")' release.json >/dev/null
+            jq -e '.tag_name and (.assets | type == "array")' release.json >/dev/null
+
+            # Check that both macOS assets exist
+            ARM_OK=$(jq -r '.assets[] | select(.name == "librefang-aarch64-apple-darwin.tar.gz") | .name' release.json)
+            X86_OK=$(jq -r '.assets[] | select(.name == "librefang-x86_64-apple-darwin.tar.gz") | .name' release.json)
+
+            if [ -n "$ARM_OK" ] && [ -n "$X86_OK" ]; then
+              echo "✓ Both macOS assets found on attempt $attempt"
+              break
+            fi
+
+            if [ "$attempt" -eq 10 ]; then
+              echo "::error::macOS assets not found in release after 10 attempts"
+              echo "  ARM asset: ${ARM_OK:-MISSING}"
+              echo "  x86 asset: ${X86_OK:-MISSING}"
+              exit 1
+            fi
+
+            echo "Waiting for macOS assets to be uploaded... ($attempt/10)"
+            sleep 10
+          done
 
       - name: Generate formula
         run: |
@@ -474,94 +542,3 @@ jobs:
           git commit -m "chore: update formula to ${{ github.ref_name }}" || echo "No changes"
           git push
 
-  # ── Sync Installers to Website ─────────────────────────────────────────
-  sync_installers:
-    name: Sync Installers to Website
-    runs-on: ubuntu-latest
-    needs: [cli_mac, cli_linux, cli_musl, cli_windows]
-    steps:
-      - name: Check out source repo
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ github.ref_name }}
-          path: source
-
-      - name: Check out website repo
-        uses: actions/checkout@v6
-        with:
-          repository: librefang/librefang-website
-          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
-          path: website
-
-      - name: Fetch release metadata
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          curl -fsSL \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
-            > release.json
-
-          jq -e '.tag_name and (.assets | type == "array")' release.json >/dev/null
-
-      - name: Sync install scripts
-        run: |
-          cp source/scripts/install.sh website/install.sh
-          cp source/scripts/install.ps1 website/install.ps1
-
-      - name: Generate install manifest
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          jq \
-            --arg repo "${{ github.repository }}" \
-            --arg tag "$TAG" \
-            '
-            def artifact_for($target; $ext):
-              .assets[]
-              | select(.name == ("librefang-" + $target + "." + $ext))
-              | {
-                  name,
-                  target: $target,
-                  archive: $ext,
-                  url: .browser_download_url,
-                  checksum_url: (.browser_download_url + ".sha256")
-                };
-
-            {
-              repo: $repo,
-              version: $tag,
-              published_at: .published_at,
-              generated_from: ("https://github.com/" + $repo + "/releases/tag/" + $tag),
-              channels: {
-                stable: $tag
-              },
-              installers: {
-                shell: "/install.sh",
-                powershell: "/install.ps1"
-              },
-              assets: {
-                "x86_64-unknown-linux-gnu": artifact_for("x86_64-unknown-linux-gnu"; "tar.gz"),
-                "aarch64-unknown-linux-gnu": artifact_for("aarch64-unknown-linux-gnu"; "tar.gz"),
-                "x86_64-unknown-linux-musl": artifact_for("x86_64-unknown-linux-musl"; "tar.gz"),
-                "aarch64-unknown-linux-musl": artifact_for("aarch64-unknown-linux-musl"; "tar.gz"),
-                "x86_64-apple-darwin": artifact_for("x86_64-apple-darwin"; "tar.gz"),
-                "aarch64-apple-darwin": artifact_for("aarch64-apple-darwin"; "tar.gz"),
-                "x86_64-pc-windows-msvc": artifact_for("x86_64-pc-windows-msvc"; "zip"),
-                "aarch64-pc-windows-msvc": artifact_for("aarch64-pc-windows-msvc"; "zip")
-              }
-            }
-            ' release.json > website/install-manifest.json
-
-          cat website/install-manifest.json
-
-      - name: Commit and push
-        working-directory: website
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add install.sh install.ps1 install-manifest.json
-          git commit -m "chore: sync installers for ${{ github.ref_name }}" || echo "No changes"
-          git push

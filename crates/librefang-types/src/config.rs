@@ -180,6 +180,8 @@ pub struct ChannelOverrides {
     pub dm_policy: DmPolicy,
     /// Group message policy.
     pub group_policy: GroupPolicy,
+    /// Global rate limit for this channel (messages per minute, 0 = unlimited).
+    pub rate_limit_per_minute: u32,
     /// Per-user rate limit (messages per minute, 0 = unlimited).
     pub rate_limit_per_user: u32,
     /// Enable thread replies.
@@ -1241,6 +1243,11 @@ pub struct KernelConfig {
     /// API listen address (e.g., "0.0.0.0:4545").
     #[serde(alias = "listen_addr")]
     pub api_listen: String,
+    /// Allowed CORS origins. When non-empty, these origins are added to the
+    /// CORS allow list (in addition to localhost). Accepts exact origin strings
+    /// like `"https://dash.example.com"`.
+    #[serde(default)]
+    pub cors_origin: Vec<String>,
     /// Whether to enable the OFP network layer.
     pub network_enabled: bool,
     /// Default LLM provider configuration.
@@ -1403,6 +1410,15 @@ pub struct KernelConfig {
     /// Pluggable context engine configuration.
     #[serde(default)]
     pub context_engine: ContextEngineTomlConfig,
+    /// Audit log configuration.
+    #[serde(default)]
+    pub audit: AuditConfig,
+    /// Health check configuration.
+    #[serde(default)]
+    pub health_check: HealthCheckConfig,
+    /// Plugin registry configuration.
+    #[serde(default)]
+    pub plugins: PluginsConfig,
 }
 
 /// Vertex AI provider configuration.
@@ -1784,6 +1800,63 @@ fn default_max_cron_jobs() -> usize {
     500
 }
 
+/// Audit log configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [audit]
+/// retention_days = 90
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuditConfig {
+    /// How many days to retain audit log entries. Default: 90. Set to 0 for unlimited.
+    pub retention_days: u32,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self { retention_days: 90 }
+    }
+}
+
+/// Health check configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [health_check]
+/// health_check_interval_secs = 60
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HealthCheckConfig {
+    /// Interval in seconds between periodic health checks of LLM providers. Default: 60.
+    pub health_check_interval_secs: u64,
+}
+
+impl Default for HealthCheckConfig {
+    fn default() -> Self {
+        Self {
+            health_check_interval_secs: 60,
+        }
+    }
+}
+
+/// Plugin registry configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [plugins]
+/// plugin_registries = ["librefang/plugin-registry"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginsConfig {
+    /// Additional GitHub `owner/repo` plugin registries to search.
+    /// Merged with `context_engine.plugin_registries`.
+    pub plugin_registries: Vec<String>,
+}
+
 fn default_prompt_caching() -> bool {
     true
 }
@@ -1997,6 +2070,10 @@ impl Default for KernelConfig {
             tool_policy: crate::tool_policy::ToolPolicy::default(),
             proactive_memory: crate::memory::ProactiveMemoryConfig::default(),
             context_engine: ContextEngineTomlConfig::default(),
+            audit: AuditConfig::default(),
+            health_check: HealthCheckConfig::default(),
+            plugins: PluginsConfig::default(),
+            cors_origin: Vec::new(),
         }
     }
 }
@@ -2488,6 +2565,11 @@ pub struct WhatsAppConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Owner phone numbers for owner-routing mode (digits only, no '+' prefix).
+    /// When set, messages from non-owner numbers are forwarded to the first
+    /// owner number with sender context, and the sender receives an auto-ack.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub owner_numbers: Vec<String>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2504,6 +2586,7 @@ impl Default for WhatsAppConfig {
             allowed_users: vec![],
             account_id: None,
             default_agent: None,
+            owner_numbers: vec![],
             overrides: ChannelOverrides::default(),
         }
     }
@@ -2561,6 +2644,9 @@ pub struct MatrixConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Whether to auto-accept room invites (default: false).
+    #[serde(default)]
+    pub auto_accept_invites: bool,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2575,6 +2661,7 @@ impl Default for MatrixConfig {
             allowed_rooms: vec![],
             account_id: None,
             default_agent: None,
+            auto_accept_invites: false,
             overrides: ChannelOverrides::default(),
         }
     }

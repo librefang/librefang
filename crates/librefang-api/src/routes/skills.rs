@@ -650,6 +650,7 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "dashboard_metrics": d.dashboard.metrics.len(),
                 "has_settings": !d.settings.is_empty(),
                 "settings_count": d.settings.len(),
+                "metadata": d.metadata.clone().unwrap_or_default(),
             })
         })
         .collect();
@@ -767,6 +768,7 @@ pub async fn get_hand(
                         "format": m.format,
                     })).collect::<Vec<_>>(),
                     "settings": settings_status,
+                    "metadata": def.metadata.clone().unwrap_or_default(),
                 })),
             )
         }
@@ -1113,20 +1115,23 @@ pub async fn install_hand(
         );
     }
 
-    match state
-        .kernel
-        .hand_registry
-        .install_from_content(toml_content, skill_content)
-    {
-        Ok(def) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "id": def.id,
-                "name": def.name,
-                "description": def.description,
-                "category": format!("{:?}", def.category),
-            })),
-        ),
+    match state.kernel.hand_registry.install_from_content_persisted(
+        &state.kernel.config.home_dir,
+        toml_content,
+        skill_content,
+    ) {
+        Ok(def) => {
+            librefang_kernel::router::invalidate_hand_route_cache();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": def.id,
+                    "name": def.name,
+                    "description": def.description,
+                    "category": format!("{:?}", def.category),
+                })),
+            )
+        }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": format!("{e}")})),
@@ -2056,6 +2061,7 @@ fn upsert_mcp_server_config(
     config_path: &std::path::Path,
     entry: &librefang_types::config::McpServerConfigEntry,
 ) -> Result<(), String> {
+    validate_static_file_path(config_path, "config.toml")?;
     let mut table: toml::value::Table = if config_path.exists() {
         let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
         toml::from_str(&content).unwrap_or_default()
@@ -2091,6 +2097,7 @@ fn upsert_mcp_server_config(
 
 /// Remove an MCP server entry from config.toml's `[[mcp_servers]]` array by name.
 fn remove_mcp_server_config(config_path: &std::path::Path, name: &str) -> Result<(), String> {
+    validate_static_file_path(config_path, "config.toml")?;
     let mut table: toml::value::Table = if config_path.exists() {
         let content = std::fs::read_to_string(config_path).map_err(|e| e.to_string())?;
         toml::from_str(&content).unwrap_or_default()
@@ -2110,6 +2117,43 @@ fn remove_mcp_server_config(config_path: &std::path::Path, name: &str) -> Result
 
     let toml_string = toml::to_string_pretty(&table).map_err(|e| e.to_string())?;
     std::fs::write(config_path, toml_string).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn is_safe_component_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains("..")
+        && !name.contains('/')
+        && !name.contains('\\')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        && std::path::Path::new(name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            == Some(name)
+}
+
+fn validate_static_file_path(
+    path: &std::path::Path,
+    expected_file_name: &str,
+) -> Result<(), String> {
+    let actual = path.file_name().and_then(|name| name.to_str());
+    if actual != Some(expected_file_name) {
+        return Err(format!(
+            "invalid file path '{}': expected file '{}'",
+            path.display(),
+            expected_file_name
+        ));
+    }
+    if path.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err(format!("unsafe path '{}'", path.display()));
+    }
     Ok(())
 }
 
@@ -2137,10 +2181,7 @@ pub async fn create_skill(
     };
 
     // Validate name (alphanumeric + hyphens only)
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
+    if !is_safe_component_name(&name) {
         return (
             StatusCode::BAD_REQUEST,
             Json(
@@ -2276,6 +2317,8 @@ pub(crate) fn write_secret_env(
     key: &str,
     value: &str,
 ) -> Result<(), std::io::Error> {
+    validate_static_file_path(path, "secrets.env")
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     let mut lines: Vec<String> = if path.exists() {
         std::fs::read_to_string(path)?
             .lines()
@@ -2312,6 +2355,8 @@ pub(crate) fn write_secret_env(
 
 /// Remove a key from the secrets.env file.
 pub(crate) fn remove_secret_env(path: &std::path::Path, key: &str) -> Result<(), std::io::Error> {
+    validate_static_file_path(path, "secrets.env")
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
     if !path.exists() {
         return Ok(());
     }
@@ -2335,6 +2380,8 @@ pub(crate) fn upsert_channel_config(
     channel_name: &str,
     fields: &HashMap<String, (String, FieldType)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    validate_static_file_path(config_path, "config.toml")
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     let content = if config_path.exists() {
         std::fs::read_to_string(config_path)?
     } else {
@@ -2404,6 +2451,8 @@ pub(crate) fn remove_channel_config(
     config_path: &std::path::Path,
     channel_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    validate_static_file_path(config_path, "config.toml")
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     if !config_path.exists() {
         return Ok(());
     }

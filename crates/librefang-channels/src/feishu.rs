@@ -21,6 +21,7 @@ use crate::types::{
 use async_trait::async_trait;
 use chrono::Utc;
 use futures::Stream;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -432,6 +433,7 @@ impl FeishuAdapter {
     fn start_webhook(&self, tx: mpsc::Sender<ChannelMessage>) {
         let port = self.webhook_port;
         let verification_token = self.verification_token.clone();
+        let encrypt_key = self.encrypt_key.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = Arc::new(self.account_id.clone());
         let label = self.region.label();
@@ -439,22 +441,37 @@ impl FeishuAdapter {
 
         tokio::spawn(async move {
             let verification_token = Arc::new(verification_token);
+            let encrypt_key = Arc::new(encrypt_key);
             let tx = Arc::new(tx);
 
             let app = axum::Router::new().route(
                 "/feishu/webhook",
                 axum::routing::post({
                     let vt = Arc::clone(&verification_token);
+                    let ek = Arc::clone(&encrypt_key);
                     let tx = Arc::clone(&tx);
                     move |body: axum::extract::Json<serde_json::Value>| {
                         let vt = Arc::clone(&vt);
+                        let ek = Arc::clone(&ek);
                         let tx = Arc::clone(&tx);
                         async move {
+                            let payload =
+                                match decrypt_feishu_payload_if_needed(&body.0, ek.as_deref()) {
+                                    Ok(value) => value,
+                                    Err(err) => {
+                                        warn!("{label}: failed to decrypt webhook payload: {err}");
+                                        return (
+                                            axum::http::StatusCode::BAD_REQUEST,
+                                            axum::Json(serde_json::json!({})),
+                                        );
+                                    }
+                                };
+
                             // Handle URL verification challenge
-                            if let Some(challenge) = body.0.get("challenge") {
+                            if let Some(challenge) = payload.get("challenge") {
                                 // Verify token if configured
                                 if let Some(ref expected_token) = *vt {
-                                    let token = body.0["token"].as_str().unwrap_or("");
+                                    let token = payload["token"].as_str().unwrap_or("");
                                     if token != expected_token {
                                         warn!("{}: invalid verification token", label);
                                         return (
@@ -472,11 +489,11 @@ impl FeishuAdapter {
                             }
 
                             // Handle event callback
-                            if let Some(schema) = body.0["schema"].as_str() {
+                            if let Some(schema) = payload["schema"].as_str() {
                                 if schema == "2.0" {
                                     // V2 event format — try message first, then card action
-                                    let parsed = parse_feishu_event(&body.0, region)
-                                        .or_else(|| parse_card_action(&body.0, region));
+                                    let parsed = parse_feishu_event(&payload, region)
+                                        .or_else(|| parse_card_action(&payload, region));
                                     if let Some(mut msg) = parsed {
                                         // Inject account_id for multi-bot routing
                                         if let Some(ref aid) = *account_id {
@@ -490,7 +507,7 @@ impl FeishuAdapter {
                                 }
                             } else {
                                 // V1 event format (legacy)
-                                if let Some(mut msg) = parse_feishu_event_v1(&body.0, region) {
+                                if let Some(mut msg) = parse_feishu_event_v1(&payload, region) {
                                     if let Some(ref aid) = *account_id {
                                         msg.metadata.insert(
                                             "account_id".to_string(),
@@ -736,6 +753,57 @@ async fn get_token_static(
     *cached_token.write().await = Some((tenant_access_token.clone(), expiry));
 
     Ok(tenant_access_token)
+}
+
+fn decrypt_feishu_payload_if_needed(
+    payload: &serde_json::Value,
+    encrypt_key: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let Some(encrypted_payload) = payload.get("encrypt").and_then(serde_json::Value::as_str) else {
+        return Ok(payload.clone());
+    };
+
+    let Some(key) = encrypt_key.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Err(
+            "encrypted payload received but no Feishu encrypt_key is configured".to_string(),
+        );
+    };
+
+    decrypt_feishu_payload(encrypted_payload, key)
+}
+
+fn decrypt_feishu_payload(
+    encrypted_payload: &str,
+    encrypt_key: &str,
+) -> Result<serde_json::Value, String> {
+    use base64::Engine;
+    use cbc::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(encrypted_payload.trim())
+        .map_err(|error| format!("base64 decode error: {error}"))?;
+
+    if raw.len() < 16 {
+        return Err("encrypted payload too short".to_string());
+    }
+
+    let (iv, ciphertext) = raw.split_at(16);
+    if ciphertext.is_empty() {
+        return Err("encrypted payload ciphertext is empty".to_string());
+    }
+    if ciphertext.len() % 16 != 0 {
+        return Err("encrypted payload ciphertext is not block-aligned".to_string());
+    }
+
+    let mut buffer = ciphertext.to_vec();
+    let key = Sha256::digest(encrypt_key.as_bytes());
+    let decrypted = cbc::Decryptor::<aes::Aes256>::new_from_slices(&key, iv)
+        .map_err(|error| format!("decrypt init failed: {error}"))?
+        .decrypt_padded_mut::<Pkcs7>(&mut buffer)
+        .map_err(|error| format!("AES-CBC decrypt failed: {error}"))?;
+
+    serde_json::from_slice::<serde_json::Value>(decrypted)
+        .map_err(|error| format!("decrypted payload is not valid JSON: {error}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1186,6 +1254,8 @@ impl ChannelAdapter for FeishuAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+    use cbc::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
 
     #[test]
     fn test_feishu_adapter_creation() {
@@ -1239,6 +1309,63 @@ mod tests {
         );
         assert_eq!(adapter.verification_token, Some("verify-token".to_string()));
         assert_eq!(adapter.encrypt_key, Some("encrypt-key".to_string()));
+    }
+
+    fn encrypt_test_payload(payload: &serde_json::Value, encrypt_key: &str) -> String {
+        let key = Sha256::digest(encrypt_key.as_bytes());
+        let iv = [0x42; 16];
+        let plaintext = serde_json::to_vec(payload).unwrap();
+        let mut buffer = vec![0u8; plaintext.len() + 16];
+        buffer[..plaintext.len()].copy_from_slice(&plaintext);
+        let ciphertext = cbc::Encryptor::<aes::Aes256>::new_from_slices(&key, &iv)
+            .unwrap()
+            .encrypt_padded_mut::<Pkcs7>(&mut buffer, plaintext.len())
+            .unwrap()
+            .to_vec();
+
+        let mut raw = iv.to_vec();
+        raw.extend(ciphertext);
+        base64::engine::general_purpose::STANDARD.encode(raw)
+    }
+
+    #[test]
+    fn test_decrypt_feishu_payload_if_needed_plain_passthrough() {
+        let payload = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_type": "im.message.receive_v1"
+            }
+        });
+        let output = decrypt_feishu_payload_if_needed(&payload, None).unwrap();
+        assert_eq!(output, payload);
+    }
+
+    #[test]
+    fn test_decrypt_feishu_payload_if_needed_success() {
+        let expected = serde_json::json!({
+            "schema": "2.0",
+            "header": {
+                "event_type": "im.message.receive_v1"
+            },
+            "event": {
+                "message": {
+                    "message_type": "text",
+                    "content": "{\"text\":\"hello\"}"
+                }
+            }
+        });
+        let encrypted = encrypt_test_payload(&expected, "my-feishu-encrypt-key");
+        let payload = serde_json::json!({ "encrypt": encrypted });
+
+        let output =
+            decrypt_feishu_payload_if_needed(&payload, Some("my-feishu-encrypt-key")).unwrap();
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn test_decrypt_feishu_payload_if_needed_missing_key_rejected() {
+        let payload = serde_json::json!({ "encrypt": "ZmFrZQ==" });
+        assert!(decrypt_feishu_payload_if_needed(&payload, None).is_err());
     }
 
     #[test]

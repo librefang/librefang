@@ -28,7 +28,7 @@ Each file is a full translation of the root `README.md`. All translations follow
    ```
    Add a link for your new language to this bar in every file.
 
-4. Keep all relative links (e.g., `../CONTRIBUTING.md`, `../GOVERNANCE.md`) pointing to the English originals in the project root -- do not duplicate those files.
+4. Keep all relative links (e.g., `../docs/CONTRIBUTING.md`, `../docs/GOVERNANCE.md`) pointing to the English originals in `docs/` -- do not duplicate those files.
 
 5. Submit a PR with your changes.
 
@@ -53,13 +53,13 @@ This project uses full-document translations rather than key-value translation f
 ## How to Test Translations
 
 1. **Visual review:** Open the markdown file in a GitHub preview or any markdown viewer to verify formatting renders correctly.
-2. **Link check:** Verify all relative links (`../README.md`, `../CONTRIBUTING.md`, etc.) resolve correctly from the `i18n/` directory.
+2. **Link check:** Verify all relative links (`../README.md`, `../docs/CONTRIBUTING.md`, etc.) resolve correctly from the `i18n/` directory.
 3. **Badge check:** Ensure shield.io badges and image URLs display properly.
 4. **Navigation check:** Click through the multi-language navigation bar to confirm all language links work.
 5. **Diff comparison:** Compare your translation against the English original section by section to ensure nothing is missing.
 
 ## Related Documentation
 
-- [CONTRIBUTING.md](../CONTRIBUTING.md) — General contribution guidelines
-- [GOVERNANCE.md](../GOVERNANCE.md) — Project governance
+- [CONTRIBUTING.md](../docs/CONTRIBUTING.md) — General contribution guidelines
+- [GOVERNANCE.md](../docs/GOVERNANCE.md) — Project governance
 - [README.md](../README.md) — English original

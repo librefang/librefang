@@ -1,0 +1,512 @@
+# 使用示例
+
+LibreFang 常用场景的完整示例。
+
+---
+
+## 场景 1: 客户服务 Agent
+
+### 需求
+- 7x24 小时自动回复客户咨询
+- 接入 Telegram 和 Discord
+- 记住客户历史对话
+- 需要人工审批复杂问题
+
+### Agent 清单
+
+```toml
+# customer-support.toml
+name = "customer-support"
+version = "1.0.0"
+description = "Customer support agent with approval workflow"
+module = "builtin:chat"
+
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+
+[system_prompt]
+prompt = """你是一个专业的客服 agent。你的职责是：
+1. 礼貌回复客户咨询
+2. 提供准确的产品信息
+3. 复杂问题转人工
+4. 保持专业和友好"""
+
+[capabilities]
+tools = ["file_read", "web_fetch", "memory_recall", "memory_store"]
+memory_read = ["customer:*"]
+memory_write = ["customer:*"]
+network = ["*"]
+
+[resources]
+max_llm_tokens_per_hour = 50000
+
+[approval]
+required = true
+channels = ["telegram"]
+keywords = ["refund", "complaint", "manager"]
+```
+
+### 通道配置
+
+```toml
+[telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allowed_users = ["*"]
+
+[discord]
+bot_token_env = "DISCORD_BOT_TOKEN"
+guild_ids = ["123456789"]
+
+[channels.customer-support]
+system_prompt = "你是一个客服 agent，请礼貌专业地回复客户。"
+rate_limit = 20
+```
+
+---
+
+## 场景 2: 每日新闻摘要
+
+### 需求
+- 每天早上 8 点自动运行
+- 抓取多个新闻源
+- 生成摘要
+- 发送到 Slack
+
+### 工作流
+
+```json
+{
+  "name": "daily-news-digest",
+  "version": "1.0.0",
+  "trigger": {
+    "type": "schedule",
+    "cron": "0 8 * * *"
+  },
+  "steps": [
+    {
+      "id": "fetch-tech-news",
+      "type": "agent",
+      "agent": "researcher",
+      "input": "Fetch latest tech news from Hacker News and TechCrunch",
+      "output_var": "tech_news"
+    },
+    {
+      "id": "fetch-ai-news",
+      "type": "agent",
+      "agent": "researcher",
+      "input": "Fetch latest AI news from AI News and OpenAI blog",
+      "output_var": "ai_news"
+    },
+    {
+      "id": "summarize",
+      "type": "agent",
+      "agent": "writer",
+      "input": "Create a brief summary of these news items: {{tech_news}} and {{ai_news}}",
+      "output_var": "summary"
+    },
+    {
+      "id": "send-slack",
+      "type": "notification",
+      "channel": "slack",
+      "message": "📰 Daily News Digest\n\n{{summary}}"
+    }
+  ]
+}
+```
+
+---
+
+## 场景 3: 代码审查助手
+
+### 需求
+- 监听 GitHub PR
+- 自动进行代码审查
+- 提供改进建议
+
+### Agent 清单
+
+```toml
+# code-reviewer.toml
+name = "code-reviewer"
+version = "1.0.0"
+description = "Automated code review agent"
+module = "builtin:chat"
+
+[model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[system_prompt]
+prompt = """你是一个专业的代码审查专家。你的职责是：
+1. 检查代码质量和风格
+2. 识别潜在 bug 和安全问题
+3. 提供具体的改进建议
+4. 保持建设性和专业"""
+
+[capabilities]
+tools = ["file_read", "web_fetch", "git"]
+memory_read = ["review:*"]
+memory_write = ["review:*"]
+
+[schedule]
+enabled = true
+cron = "0 * * * *"
+```
+
+### Webhook 触发器
+
+```json
+{
+  "type": "webhook",
+  "path": "/webhook/github",
+  "events": ["pull_request"]
+}
+```
+
+---
+
+## 场景 4: 销售潜在客户挖掘
+
+### 需求
+- 每天自动挖掘潜在客户
+- 丰富公司信息
+- 评分和排序
+- 发送到 CRM
+
+### Hand 配置
+
+```toml
+[lead]
+icp = "B2B SaaS companies, 50-500 employees, Series A+"
+search_sources = ["linkedin", "crunchbase", "hunter"]
+score_criteria = [
+  "funding_stage: A+ = 30",
+  "employee_count: 50-500 = 20",
+  "tech_stack: contains(ai|ml) = 25",
+  "job_postings: recent = 15"
+]
+deduplicate = true
+crm_integration = "hubspot"
+
+[[lead.quality_thresholds]]
+score = 80
+action = "auto_add_to_crm"
+
+[[lead.quality_thresholds]]
+score = 50
+action = "require_approval"
+```
+
+### 工作流
+
+```json
+{
+  "name": "lead-generation",
+  "trigger": {
+    "type": "schedule",
+    "cron": "0 9 * * *"
+  },
+  "steps": [
+    {
+      "id": "discover",
+      "type": "agent",
+      "agent": "lead",
+      "input": "Find 50 companies matching our ICP"
+    },
+    {
+      "id": "enrich",
+      "type": "agent",
+      "agent": "collector",
+      "input": "Enrich company data: {{discover.companies}}"
+    },
+    {
+      "id": "score",
+      "type": "agent",
+      "agent": "classifier",
+      "input": "Score leads: {{enrich.leads}}"
+    },
+    {
+      "id": "notify",
+      "type": "notification",
+      "channel": "telegram",
+      "message": "Generated {{score.high_quality_count}} qualified leads"
+    }
+  ]
+}
+```
+
+---
+
+## 场景 5: 内容创作助手
+
+### 需求
+- 定期生成社交媒体内容
+- 支持多个平台
+- 审批工作流
+
+### Twitter Hand 配置
+
+```toml
+[twitter]
+content_formats = ["thread", "hot_take", "question"]
+topics = ["ai", "technology", "productivity"]
+approval_queue = true
+posting_times = ["9:00", "12:00", "18:00"]
+max_posts_per_day = 5
+
+[twitter.linkedin]
+enabled = true
+posting_times = ["10:00"]
+```
+
+### 内容审批工作流
+
+```json
+{
+  "name": "content-approval",
+  "steps": [
+    {
+      "id": "generate",
+      "type": "agent",
+      "agent": "twitter",
+      "input": "Generate 3 tweet ideas about AI"
+    },
+    {
+      "id": "create",
+      "type": "agent",
+      "agent": "writer",
+      "input": "Write a thread based on: {{generate.ideas[0]}}"
+    },
+    {
+      "id": "approve",
+      "type": "approval",
+      "channels": ["telegram"],
+      "timeout": "24h"
+    },
+    {
+      "id": "publish",
+      "type": "notification",
+      "channel": "twitter",
+      "message": "{{create.content}}"
+    }
+  ]
+}
+```
+
+---
+
+## 场景 6: 数据库助手
+
+### 需求
+- 回答数据库相关问题
+- 执行只读查询
+- 生成 SQL
+
+### Agent 清单
+
+```toml
+# db-assistant.toml
+name = "db-assistant"
+version = "1.0.0"
+module = "builtin:chat"
+
+[model]
+provider = "anthropic"
+model = "claude-sonnet-4-20250514"
+
+[system_prompt]
+prompt = """你是一个数据库助手。你可以：
+1. 回答关于数据库设计的问题
+2. 编写和优化 SQL 查询
+3. 解释查询执行计划
+注意：不要执行任何修改数据的操作。"""
+
+[capabilities]
+tools = ["file_read", "postgres_query"]
+memory_read = ["schema:*"]
+
+[security]
+read_only = true
+allowed_tables = ["users", "orders", "products", "analytics_*"]
+max_rows = 1000
+```
+
+---
+
+## 场景 7: 个人知识助手
+
+### 需求
+- 管理和检索个人笔记
+- 语义搜索
+- 自动整理
+
+### Agent 清单
+
+```toml
+# knowledge-assistant.toml
+name = "knowledge-assistant"
+version = "1.0.0"
+module = "builtin:chat"
+
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+
+[capabilities]
+tools = ["file_read", "file_write", "memory_recall", "memory_store"]
+memory_read = ["knowledge:*", "notes:*", "bookmarks:*"]
+memory_write = ["knowledge:*", "notes:*"]
+
+[memory]
+decay_rate = 0.02
+```
+
+### 使用示例
+
+```bash
+# 存储笔记
+librefang memory set --key "notes:meeting-2025-01-15" --value "Discussed project roadmap"
+
+# 语义搜索
+librefang memory search "project planning"
+
+# 知识图谱查询
+librefang kg query --from "person:alice" --relation "works_with"
+```
+
+---
+
+## 场景 8: CI/CD 监控助手
+
+### 需求
+- 监控 GitHub Actions
+- 失败时告警
+- 提供调试建议
+
+### 配置
+
+```toml
+[github]
+webhook_secret_env = "GITHUB_WEBHOOK_SECRET"
+
+[[triggers]]
+type = "webhook"
+path = "/webhook/github"
+events = ["workflow_run.completed", "workflow_run.failed"]
+
+[notifications]
+channels = ["slack", "telegram"]
+```
+
+### 工作流
+
+```json
+{
+  "name": "cicd-monitor",
+  "trigger": {
+    "type": "event",
+    "event": "workflow_run.failed"
+  },
+  "steps": [
+    {
+      "id": "analyze",
+      "type": "agent",
+      "agent": "debugger",
+      "input": "Analyze failed workflow: {{event.workflow_url}}"
+    },
+    {
+      "id": "notify",
+      "type": "notification",
+      "channel": "slack",
+      "message": "⚠️ Workflow Failed: {{event.workflow_name}}\n\n{{analyze.suggestion}}"
+    }
+  ]
+}
+```
+
+---
+
+## 场景 9: 智能家居控制
+
+### 需求
+- 通过聊天控制智能设备
+- 定时任务
+- 场景自动化
+
+### Agent 清单
+
+```toml
+# smart-home.toml
+name = "smart-home"
+version = "1.0.0"
+module = "builtin:chat"
+
+[model]
+provider = "groq"
+model = "llama-3.1-8b-instant"
+
+[capabilities]
+tools = ["shell_execute", "http_request"]
+
+[allowed_devices]
+lights = ["living_room", "bedroom", "kitchen"]
+thermostat = ["main"]
+locks = ["front_door", "back_door"]
+cameras = ["front_porch", "backyard"]
+```
+
+### 命令示例
+
+```
+用户: "帮我关掉客厅的灯"
+Agent: 已关闭客厅的灯 ✓
+
+用户: "设置下午 6 点的温度为 22 度"
+Agent: 已设置定时任务：18:00 温度调节至 22°C ✓
+
+用户: "如果有人在前门摄像头出现，就给我发 Telegram"
+Agent: 已创建自动化规则：摄像头检测 → Telegram 通知 ✓
+```
+
+---
+
+## 场景 10: 会议助手
+
+### 需求
+- 安排会议
+- 发送邀请
+- 会议纪要
+
+### Agent 清单
+
+```toml
+# meeting-assistant.toml
+name = "meeting-assistant"
+version = "1.0.0"
+module = "builtin:chat"
+
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+
+[capabilities]
+tools = ["calendar", "email", "file_write", "memory_recall"]
+memory_read = ["meeting:*", "contacts:*"]
+memory_write = ["meeting:*"]
+
+[calendar]
+provider = "google"
+timezone = "Asia/Shanghai"
+
+[email]
+smtp_host = "smtp.gmail.com"
+```
+
+### 功能
+
+- 自然语言安排会议
+- 自动查找空闲时间
+- 发送日历邀请
+- 会后生成纪要
+- 跟踪行动项目

@@ -4,13 +4,17 @@
 //! Supports: Anthropic, Gemini, OpenAI, Groq, OpenRouter, DeepSeek, Together,
 //! Mistral, Fireworks, Ollama, vLLM, Chutes.ai, and any OpenAI-compatible endpoint.
 
+pub mod aider;
 pub mod anthropic;
 pub mod chatgpt;
 pub mod claude_code;
+pub mod codex_cli;
 pub mod copilot;
 pub mod fallback;
 pub mod gemini;
+pub mod gemini_cli;
 pub mod openai;
+pub mod qwen_code;
 pub mod token_rotation;
 pub mod vertex_ai;
 
@@ -41,6 +45,14 @@ pub enum ApiFormat {
     Gemini,
     /// Claude Code CLI subprocess.
     ClaudeCode,
+    /// Qwen Code CLI subprocess.
+    QwenCode,
+    /// Gemini CLI subprocess.
+    GeminiCli,
+    /// Codex CLI subprocess.
+    CodexCli,
+    /// Aider CLI subprocess.
+    Aider,
     /// ChatGPT with session token authentication.
     ChatGpt,
     /// GitHub Copilot with automatic token exchange.
@@ -314,6 +326,46 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         hidden: false,
     },
     ProviderEntry {
+        name: "qwen-code",
+        aliases: &[],
+        base_url: "",
+        api_key_env: "",
+        key_required: false,
+        api_format: ApiFormat::QwenCode,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "gemini-cli",
+        aliases: &[],
+        base_url: "",
+        api_key_env: "",
+        key_required: false,
+        api_format: ApiFormat::GeminiCli,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "codex-cli",
+        aliases: &[],
+        base_url: "",
+        api_key_env: "",
+        key_required: false,
+        api_format: ApiFormat::CodexCli,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "aider",
+        aliases: &[],
+        base_url: "",
+        api_key_env: "",
+        key_required: false,
+        api_format: ApiFormat::Aider,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
         name: "moonshot",
         aliases: &["kimi", "kimi2"],
         base_url: MOONSHOT_BASE_URL,
@@ -547,6 +599,22 @@ fn create_driver_from_entry(
             config.base_url.clone(),
             config.skip_permissions,
         ))),
+        ApiFormat::QwenCode => Ok(Arc::new(qwen_code::QwenCodeDriver::new(
+            config.base_url.clone(),
+            config.skip_permissions,
+        ))),
+        ApiFormat::GeminiCli => Ok(Arc::new(gemini_cli::GeminiCliDriver::new(
+            config.base_url.clone(),
+            config.skip_permissions,
+        ))),
+        ApiFormat::CodexCli => Ok(Arc::new(codex_cli::CodexCliDriver::new(
+            config.base_url.clone(),
+            config.skip_permissions,
+        ))),
+        ApiFormat::Aider => Ok(Arc::new(aider::AiderDriver::new(
+            config.base_url.clone(),
+            config.skip_permissions,
+        ))),
         ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::new(api_key, base_url))),
         ApiFormat::Copilot => Ok(Arc::new(copilot::CopilotDriver::new(api_key, base_url))),
         ApiFormat::VertexAI => Ok(Arc::new(vertex_ai::VertexAiDriver::new(config)?)),
@@ -626,7 +694,8 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
              deepseek, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             chutes, venice, vertex-ai, nvidia-nim, codex, claude-code. Or set base_url for a custom OpenAI-compatible endpoint.",
+             chutes, venice, vertex-ai, nvidia-nim, codex, claude-code, qwen-code, \
+             gemini-cli, codex-cli, aider. Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
     })
@@ -698,6 +767,26 @@ pub fn known_providers() -> Vec<&'static str> {
         .filter(|p| !p.hidden)
         .map(|p| p.name)
         .collect()
+}
+
+/// Check if a CLI-based provider is available (binary on PATH or credentials exist).
+pub fn cli_provider_available(name: &str) -> bool {
+    match name {
+        "claude-code" => claude_code::claude_code_available(),
+        "qwen-code" => qwen_code::qwen_code_available(),
+        "gemini-cli" => gemini_cli::gemini_cli_available(),
+        "codex-cli" => codex_cli::codex_cli_available(),
+        "aider" => aider::aider_available(),
+        _ => false,
+    }
+}
+
+/// Check if a provider name refers to a CLI-subprocess-based provider.
+pub fn is_cli_provider(name: &str) -> bool {
+    matches!(
+        name,
+        "claude-code" | "qwen-code" | "gemini-cli" | "codex-cli" | "aider"
+    )
 }
 
 #[cfg(test)]
@@ -801,9 +890,13 @@ mod tests {
         assert!(providers.contains(&"volcengine"));
         assert!(providers.contains(&"chutes"));
         assert!(providers.contains(&"claude-code"));
+        assert!(providers.contains(&"qwen-code"));
+        assert!(providers.contains(&"gemini-cli"));
+        assert!(providers.contains(&"codex-cli"));
+        assert!(providers.contains(&"aider"));
         assert!(providers.contains(&"vertex-ai"));
         assert!(providers.contains(&"nvidia-nim"));
-        assert_eq!(providers.len(), 37);
+        assert_eq!(providers.len(), 41);
     }
 
     #[test]

@@ -47,6 +47,9 @@ pub enum HandCategory {
     Development,
     Communication,
     Data,
+    Finance,
+    #[serde(other)]
+    Other,
 }
 
 impl std::fmt::Display for HandCategory {
@@ -58,6 +61,8 @@ impl std::fmt::Display for HandCategory {
             Self::Development => write!(f, "Development"),
             Self::Communication => write!(f, "Communication"),
             Self::Data => write!(f, "Data"),
+            Self::Finance => write!(f, "Finance"),
+            Self::Other => write!(f, "Other"),
         }
     }
 }
@@ -340,18 +345,38 @@ pub struct HandDefinition {
     /// Dashboard metrics schema.
     #[serde(default)]
     pub dashboard: HandDashboard,
-    /// Routing keywords for the deterministic router.
+    /// Routing keywords for hand selection.
     #[serde(default)]
     pub routing: HandRouting,
     /// Bundled skill content (populated at load time, not in TOML).
     #[serde(skip)]
     pub skill_content: Option<String>,
+    /// Token consumption and activation metadata.
+    #[serde(default)]
+    pub metadata: Option<HandMetadata>,
+}
+
+/// Token consumption and activation metadata for user awareness.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HandMetadata {
+    /// How often the hand runs: continuous, periodic, on_demand
+    #[serde(default)]
+    pub frequency: String,
+    /// Relative token consumption: low, medium, high
+    #[serde(default)]
+    pub token_consumption: String,
+    /// Whether this hand is included in default activation
+    #[serde(default)]
+    pub default_active: bool,
+    /// Warning message shown when activating
+    #[serde(default)]
+    pub activation_warning: String,
 }
 
 /// Routing keywords for deterministic hand selection.
 ///
 /// Keywords are English-only. Cross-lingual matching is handled by
-/// semantic embedding fallback in the router, not by translating keywords.
+/// semantic embedding fallback, not by translating keywords.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HandRouting {
     /// Strong aliases — high-confidence intent signals (score ×3 each).

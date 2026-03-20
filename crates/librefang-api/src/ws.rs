@@ -504,7 +504,8 @@ async fn handle_text_message(
                 state.kernel.clone() as Arc<dyn KernelHandle>;
             match state
                 .kernel
-                .send_message_streaming(agent_id, &content, Some(kernel_handle))
+                .send_message_streaming_with_routing(agent_id, &content, Some(kernel_handle))
+                .await
             {
                 Ok((mut rx, handle)) => {
                     // Forward stream events to WebSocket with debouncing

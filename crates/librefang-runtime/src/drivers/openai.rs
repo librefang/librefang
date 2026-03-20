@@ -1157,8 +1157,13 @@ impl LlmDriver for OpenAIDriver {
 
                         // Text content delta — route through think filter to
                         // strip <think>...</think> tags before they reach the client.
+                        // Skip content when tool_calls are present in the same delta —
+                        // some providers (e.g. kimi-k2 via nvidia-nim) echo tool call
+                        // text in the content field, which would leak raw tool syntax
+                        // to the user.
+                        let has_tool_calls = delta["tool_calls"].is_array();
                         if let Some(text) = delta["content"].as_str() {
-                            if !text.is_empty() {
+                            if !text.is_empty() && !has_tool_calls {
                                 text_content.push_str(text);
                                 for action in think_filter.process(text) {
                                     match action {

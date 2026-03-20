@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://librefang.ai/">网站</a> &bull;
   <a href="https://docs.librefang.ai">文档</a> &bull;
-  <a href="../CONTRIBUTING.md">贡献</a> &bull;
+  <a href="../docs/CONTRIBUTING.md">贡献</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
@@ -37,7 +37,7 @@ LibreFang 是一个 **Agent 操作系统** — 用 Rust 从头构建的完整自
 
 传统智能体框架等待你的输入。LibreFang 运行**为你工作的智能体** — 按计划全天候运行，监控目标、生成线索、管理社交媒体，并向控制台报告。
 
-> LibreFang 是 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) 的社区分支，采用开放治理和合并优先的 PR 政策。详见 [GOVERNANCE.md](../GOVERNANCE.md)。
+> LibreFang 是 [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) 的社区分支，采用开放治理和合并优先的 PR 政策。详见 [GOVERNANCE.md](../docs/GOVERNANCE.md)。
 
 <p align="center">
   <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang 控制台" />
@@ -46,7 +46,10 @@ LibreFang 是一个 **Agent 操作系统** — 用 Rust 从头构建的完整自
 ## 快速开始
 
 ```bash
-# 安装
+# 安装 (Linux/macOS/WSL)
+curl -fsSL https://librefang.ai/install.sh | sh
+
+# 或通过 Cargo 安装
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
 # 初始化（引导你完成服务商配置）
@@ -77,7 +80,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 <details>
 <summary><strong>云部署</strong></summary>
 
-[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../infra/gcp/README.md)
+[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)
 
 </details>
 
@@ -141,7 +144,41 @@ xtask                 构建自动化
 
 **OpenAI 兼容 API** — 即插即用的 `/v1/chat/completions` 端点。140+ REST/WS/SSE 端点。[API 参考](../docs/api-reference.md)
 
-**客户端 SDK** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — 完整 REST 客户端，支持流式传输。
+**客户端 SDK** — 完整 REST 客户端，支持流式传输。
+
+```javascript
+// JavaScript/TypeScript
+npm install @librefang/sdk
+const { LibreFang } = require("@librefang/sdk");
+const client = new LibreFang("http://localhost:4545");
+const agent = await client.agents.create({ template: "assistant" });
+const reply = await client.agents.message(agent.id, "Hello!");
+```
+
+```python
+# Python
+pip install librefang
+from librefang import Client
+client = Client("http://localhost:4545")
+agent = client.agents.create(template="assistant")
+reply = client.agents.message(agent["id"], "Hello!")
+```
+
+```rust
+// Rust
+cargo add librefang
+use librefang::LibreFang;
+let client = LibreFang::new("http://localhost:4545");
+let agent = client.agents().create(CreateAgentRequest { template: Some("assistant".into()), .. }).await?;
+```
+
+```go
+// Go
+go get github.com/librefang/librefang/sdk/go
+import "github.com/librefang/librefang/sdk/go"
+client := librefang.New("http://localhost:4545")
+agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"})
+```
 
 **MCP 支持** — 内置 MCP 客户端和服务器。连接 IDE、扩展自定义工具、组合智能体管道。[详情](../docs/providers.md)
 
@@ -167,7 +204,7 @@ cargo fmt --all -- --check                               # 格式化检查
 ## 链接
 
 - [文档](https://docs.librefang.ai) &bull; [API 参考](../docs/api-reference.md) &bull; [入门指南](../docs/getting-started.md) &bull; [故障排除](../docs/troubleshooting.md)
-- [贡献](../CONTRIBUTING.md) &bull; [治理](../GOVERNANCE.md) &bull; [安全](../SECURITY.md)
+- [贡献](../docs/CONTRIBUTING.md) &bull; [治理](../docs/GOVERNANCE.md) &bull; [安全](../docs/SECURITY.md)
 - 讨论: [问答](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [用例展示](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [功能投票](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [公告](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## 贡献者
@@ -178,7 +215,7 @@ cargo fmt --all -- --check                               # 格式化检查
 
 <p align="center">
   我们欢迎各种形式的贡献 — 代码、文档、翻译、Bug 报告。<br/>
-  查看 <a href="../CONTRIBUTING.md">贡献指南</a>，从一个 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> 开始吧！
+  查看 <a href="../docs/CONTRIBUTING.md">贡献指南</a>，从一个 <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> 开始吧！
 </p>
 
 <p align="center">

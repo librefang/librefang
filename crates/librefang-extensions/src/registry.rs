@@ -34,8 +34,8 @@ impl IntegrationRegistry {
     }
 
     /// Load bundled templates (compile-time embedded). Returns count loaded.
-    pub fn load_bundled(&mut self) -> usize {
-        let bundled = crate::bundled::bundled_integrations();
+    pub fn load_bundled(&mut self, home_dir: &std::path::Path) -> usize {
+        let bundled = crate::bundled::bundled_integrations(home_dir);
         let count = bundled.len();
         for (id, toml_content) in bundled {
             match toml::from_str::<IntegrationTemplate>(toml_content) {
@@ -227,20 +227,39 @@ impl IntegrationRegistry {
 mod tests {
     use super::*;
 
+    /// Ensure registry content is available for tests.
+    /// If ~/.librefang/integrations/ is empty (CI), auto-syncs from the registry.
+    fn ensure_registry() {
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
+        if !home.join("integrations").exists()
+            || std::fs::read_dir(home.join("integrations"))
+                .map(|d| d.count() == 0)
+                .unwrap_or(true)
+        {
+            librefang_runtime::registry_sync::sync_registry(&home);
+        }
+    }
+
     #[test]
     fn registry_load_bundled() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
-        let count = reg.load_bundled();
-        assert_eq!(count, 25);
-        assert_eq!(reg.template_count(), 25);
+        let count =
+            reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        assert!(
+            count >= 20,
+            "Expected at least 20 integration templates, got {count}"
+        );
+        assert_eq!(reg.template_count(), count);
     }
 
     #[test]
     fn registry_get_template() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
-        reg.load_bundled();
+        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let gh = reg.get_template("github").unwrap();
         assert_eq!(gh.name, "GitHub");
         assert_eq!(gh.category, IntegrationCategory::DevTools);
@@ -248,18 +267,20 @@ mod tests {
 
     #[test]
     fn registry_search() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
-        reg.load_bundled();
+        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let results = reg.search("search");
         assert!(results.len() >= 2); // brave-search, exa-search
     }
 
     #[test]
     fn registry_install_uninstall() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
-        reg.load_bundled();
+        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
         let entry = InstalledIntegration {
             id: "github".to_string(),
@@ -288,9 +309,10 @@ mod tests {
 
     #[test]
     fn registry_to_mcp_configs() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
-        reg.load_bundled();
+        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
         let entry = InstalledIntegration {
             id: "github".to_string(),
@@ -308,9 +330,10 @@ mod tests {
 
     #[test]
     fn registry_save_load_roundtrip() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
-        reg.load_bundled();
+        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
         let entry = InstalledIntegration {
             id: "notion".to_string(),
@@ -323,7 +346,7 @@ mod tests {
 
         // Load from same path
         let mut reg2 = IntegrationRegistry::new(dir.path());
-        reg2.load_bundled();
+        reg2.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let count = reg2.load_installed().unwrap();
         assert_eq!(count, 1);
         assert!(reg2.is_installed("notion"));
@@ -331,9 +354,10 @@ mod tests {
 
     #[test]
     fn registry_list_by_category() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
-        reg.load_bundled();
+        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let devtools = reg.list_by_category(&IntegrationCategory::DevTools);
         assert_eq!(devtools.len(), 6);
     }
@@ -342,7 +366,7 @@ mod tests {
     fn registry_set_enabled() {
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
-        reg.load_bundled();
+        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
         let entry = InstalledIntegration {
             id: "github".to_string(),

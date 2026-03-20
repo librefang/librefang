@@ -6,7 +6,7 @@ Official Rust client for the LibreFang Agent OS REST API.
 
 ```toml
 [dependencies]
-librefang = "0.5"
+librefang = "0.6"
 tokio = { version = "1", features = ["full"] }
 ```
 

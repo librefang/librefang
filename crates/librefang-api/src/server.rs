@@ -8,7 +8,6 @@ use crate::webchat;
 use crate::ws;
 use axum::Router;
 use librefang_kernel::LibreFangKernel;
-use librefang_types::config::DEFAULT_API_PORT;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -808,14 +807,13 @@ pub async fn build_router(
         ),
     });
 
-    // CORS: allow localhost origins by default. If API key is set, the API
-    // is protected anyway. For development, permissive CORS is convenient.
-    let cors = if state.kernel.config.api_key.trim().is_empty() {
-        // No auth -> restrict CORS to localhost origins (include both 127.0.0.1 and localhost)
+    // CORS: allow localhost origins by default, plus any configured in cors_origin.
+    let cors = {
         let port = listen_addr.port();
         let mut origins: Vec<axum::http::HeaderValue> = vec![
             format!("http://{listen_addr}").parse().unwrap(),
             format!("http://localhost:{port}").parse().unwrap(),
+            format!("http://127.0.0.1:{port}").parse().unwrap(),
         ];
         // Also allow common dev ports
         for p in [3000u16, 8080] {
@@ -828,32 +826,12 @@ pub async fn build_router(
                 }
             }
         }
-        CorsLayer::new()
-            .allow_origin(origins)
-            .allow_methods(tower_http::cors::Any)
-            .allow_headers(tower_http::cors::Any)
-    } else {
-        // Auth enabled -> restrict CORS to localhost + configured origins.
-        // SECURITY: CorsLayer::permissive() is dangerous - any website could
-        // make cross-origin requests. Restrict to known origins instead.
-        let mut origins: Vec<axum::http::HeaderValue> = vec![
-            format!("http://{listen_addr}").parse().unwrap(),
-            format!("http://localhost:{DEFAULT_API_PORT}")
-                .parse()
-                .unwrap(),
-            format!("http://127.0.0.1:{DEFAULT_API_PORT}")
-                .parse()
-                .unwrap(),
-            "http://localhost:8080".parse().unwrap(),
-            "http://127.0.0.1:8080".parse().unwrap(),
-        ];
-        // Add the actual listen address variants
-        if listen_addr.port() != DEFAULT_API_PORT && listen_addr.port() != 8080 {
-            if let Ok(v) = format!("http://localhost:{}", listen_addr.port()).parse() {
+        // Add explicitly configured CORS origins from config.toml
+        for origin in &state.kernel.config.cors_origin {
+            if let Ok(v) = origin.parse::<axum::http::HeaderValue>() {
                 origins.push(v);
-            }
-            if let Ok(v) = format!("http://127.0.0.1:{}", listen_addr.port()).parse() {
-                origins.push(v);
+            } else {
+                tracing::warn!("Invalid CORS origin in config, skipping: {origin}");
             }
         }
         CorsLayer::new()
@@ -963,7 +941,7 @@ pub async fn run_daemon(
 
     let kernel = Arc::new(kernel);
     kernel.set_self_handle();
-    kernel.start_background_agents();
+    kernel.start_background_agents().await;
 
     // Config file hot-reload watcher (polls every 30 seconds)
     {
@@ -1042,14 +1020,16 @@ pub async fn run_daemon(
         let kernel = state.kernel.clone();
         tokio::spawn(async move {
             loop {
-                match librefang_runtime::catalog_sync::sync_catalog().await {
+                match librefang_runtime::catalog_sync::sync_catalog_to(&kernel.config.home_dir)
+                    .await
+                {
                     Ok(result) => {
                         info!(
                             "Model catalog synced: {} files downloaded",
                             result.files_downloaded
                         );
                         if let Ok(mut catalog) = kernel.model_catalog.write() {
-                            catalog.load_default_cached_catalog();
+                            catalog.load_cached_catalog_for(&kernel.config.home_dir);
                             catalog.detect_auth();
                         }
                     }

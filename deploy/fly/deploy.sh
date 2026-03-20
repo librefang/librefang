@@ -38,7 +38,7 @@ info "Creating Fly app: $APP_NAME (region: $REGION)..."
 flyctl apps create "$APP_NAME" --machines
 
 # Update fly.toml with generated app name
-sed -i.bak "s/^app = .*/app = \"$APP_NAME\"/" fly.toml && rm -f fly.toml.bak
+sed -i.bak "s/^app = .*/app = \"$APP_NAME\"/" deploy/fly/fly.toml && rm -f deploy/fly/fly.toml.bak
 
 # --- 5. Create persistent volume ---
 info "Creating 1GB persistent volume..."

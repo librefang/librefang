@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "0.5.7-20260318"
+    "version": "0.6.8-20260320"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -281,19 +281,70 @@
         "tags": [
           "agents"
         ],
-        "summary": "GET /api/agents — List all agents.",
+        "summary": "GET /api/agents — List agents with optional filtering, pagination, and sorting.",
+        "description": "Query parameters (all optional — omitting them returns all agents):\n  - `q`: free-text search across name and description (case-insensitive)\n  - `status`: filter by lifecycle state (e.g. \"running\", \"suspended\")\n  - `limit` / `offset`: pagination\n  - `sort`: field to sort by — \"name\", \"created_at\", \"last_active\", \"state\"\n  - `order`: \"asc\" (default) or \"desc\"",
         "operationId": "list_agents",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Free-text search on name/description",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Filter by agent state",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max items to return",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Items to skip",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "description": "Sort field: name, created_at, last_active, state",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "description": "Sort order: asc or desc",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
-            "description": "List all agents",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {}
-                }
-              }
-            }
+            "description": "Paginated list of agents"
           }
         }
       },
@@ -763,6 +814,51 @@
         "responses": {
           "200": {
             "description": "Write a workspace identity file",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "DELETE /api/agents/{id}/files/{filename} — Delete a workspace identity file.",
+        "operationId": "delete_agent_file",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "filename",
+            "in": "path",
+            "description": "Identity file name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "File deleted successfully",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "File not found",
             "content": {
               "application/json": {
                 "schema": {}
@@ -1654,12 +1750,12 @@
         "tags": [
           "approvals"
         ],
-        "summary": "GET /api/approvals — List pending approval requests.",
+        "summary": "GET /api/approvals — List pending and recent approval requests.",
         "description": "Transforms field names to match the dashboard template expectations:\n`action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.",
         "operationId": "list_approvals",
         "responses": {
           "200": {
-            "description": "List pending approvals",
+            "description": "List pending and recent approvals",
             "content": {
               "application/json": {
                 "schema": {
@@ -4026,6 +4122,38 @@
       }
     },
     "/api/mcp/servers/{name}": {
+      "get": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "GET /api/mcp/servers/{name} — Retrieve a single MCP server by name.",
+        "description": "Returns the configured server entry plus live connection status and tools\nif the server is currently connected.",
+        "operationId": "get_mcp_server",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Server name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "MCP server details",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "MCP server not found"
+          }
+        }
+      },
       "put": {
         "tags": [
           "mcp"
@@ -4083,6 +4211,296 @@
         "responses": {
           "200": {
             "description": "Remove an MCP server configuration",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory": {
+      "get": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "List all proactive memories, optionally filtered by category, with pagination.",
+        "operationId": "memory_list",
+        "parameters": [
+          {
+            "name": "category",
+            "in": "query",
+            "description": "Optional category filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Pagination offset (default 0)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 10, max 100)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated memory list",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Add memories from messages (uses extraction pipeline).",
+        "operationId": "memory_add",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Memories added",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/agents/{id}": {
+      "get": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "List memories for a specific agent with pagination.",
+        "operationId": "memory_list_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "category",
+            "in": "query",
+            "description": "Optional category filter",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Pagination offset (default 0)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size (default 10, max 100)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Paginated agent memory list",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Delete all proactive memories for a specific agent.",
+        "operationId": "memory_reset_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Memories reset",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/agents/{id}/consolidate": {
+      "post": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Consolidate memories for an agent: merge duplicates, cleanup stale entries.",
+        "operationId": "memory_consolidate",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Consolidation result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/agents/{id}/duplicates": {
+      "get": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Find duplicate/near-duplicate memories for an agent.",
+        "operationId": "memory_duplicates",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Duplicate memory groups",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/agents/{id}/export": {
+      "get": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Export all proactive memories for an agent as JSON.",
+        "operationId": "memory_export_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exported memories",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/agents/{id}/import": {
+      "post": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Import proactive memories for an agent from JSON.",
+        "operationId": "memory_import_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Import result",
             "content": {
               "application/json": {
                 "schema": {}
@@ -4234,6 +4652,329 @@
         "responses": {
           "200": {
             "description": "KV key deleted"
+          }
+        }
+      }
+    },
+    "/api/memory/agents/{id}/level/{level}": {
+      "delete": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Clear memories at a specific level (user/session/agent) for an agent.",
+        "operationId": "memory_clear_level",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "level",
+            "in": "path",
+            "description": "Memory level: user, session, or agent",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Memories cleared at level",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/agents/{id}/search": {
+      "get": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Search memories scoped to a specific agent.",
+        "operationId": "memory_search_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Search query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max results (default 10)",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/agents/{id}/stats": {
+      "get": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Get memory statistics for a specific agent.",
+        "operationId": "memory_stats_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent memory statistics",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/cleanup": {
+      "post": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Clean up expired session-level memories across all agents.",
+        "description": "Deletes session memories older than `session_ttl_hours` (default 24).\nOnly session-level memories are affected — user and agent memories are persistent.",
+        "operationId": "memory_cleanup",
+        "responses": {
+          "200": {
+            "description": "Cleanup result",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/items/{memory_id}": {
+      "put": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Update a memory's content by ID.",
+        "operationId": "memory_update",
+        "parameters": [
+          {
+            "name": "memory_id",
+            "in": "path",
+            "description": "Memory ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Memory updated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Delete a specific memory by ID.",
+        "operationId": "memory_delete",
+        "parameters": [
+          {
+            "name": "memory_id",
+            "in": "path",
+            "description": "Memory ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Memory deleted",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/items/{memory_id}/history": {
+      "get": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Get the version history of a specific memory.",
+        "operationId": "memory_history",
+        "parameters": [
+          {
+            "name": "memory_id",
+            "in": "path",
+            "description": "Memory ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Memory version history",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/search": {
+      "get": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Search proactive memories by semantic similarity.",
+        "operationId": "memory_search",
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Search query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Max results (default 10)",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Search results",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/stats": {
+      "get": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Get memory statistics across all agents.",
+        "operationId": "memory_stats",
+        "responses": {
+          "200": {
+            "description": "Memory statistics",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/memory/user/{user_id}": {
+      "get": {
+        "tags": [
+          "proactive-memory"
+        ],
+        "summary": "Get all memories for a specific user.",
+        "operationId": "memory_get_user",
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "description": "User ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "User memories",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
           }
         }
       }
@@ -4819,6 +5560,39 @@
                 "schema": {}
               }
             }
+          }
+        }
+      }
+    },
+    "/api/providers/{name}": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "GET /api/providers/{name} — Get details for a single provider.",
+        "operationId": "get_provider",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Provider identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Provider details",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Provider not found"
           }
         }
       }
@@ -5577,10 +6351,7 @@
             "description": "List triggers",
             "content": {
               "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {}
-                }
+                "schema": {}
               }
             }
           }
@@ -5866,6 +6637,76 @@
           },
           "400": {
             "description": "Invalid workflow definition"
+          }
+        }
+      }
+    },
+    "/api/workflows/{id}": {
+      "put": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "PUT /api/workflows/:id — Update an existing workflow.",
+        "operationId": "update_workflow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workflow ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Workflow updated",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid workflow definition"
+          },
+          "404": {
+            "description": "Workflow not found"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "workflows"
+        ],
+        "summary": "DELETE /api/workflows/:id — Remove a workflow.",
+        "operationId": "delete_workflow",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Workflow ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Workflow deleted"
+          },
+          "404": {
+            "description": "Workflow not found"
           }
         }
       }
@@ -6232,8 +7073,29 @@
             },
             "description": "Optional file attachments (uploaded via /upload endpoint)."
           },
+          "channel_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional channel type (e.g. \"whatsapp\", \"telegram\")."
+          },
           "message": {
             "type": "string"
+          },
+          "sender_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional sender ID (platform-specific user ID)."
+          },
+          "sender_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional sender display name."
           }
         }
       },
@@ -6268,6 +7130,25 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          },
+          "memories_saved": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Summaries of memories that were saved during this turn.\nEmpty when no new memories were extracted."
+          },
+          "memories_used": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Summaries of memories that were recalled and used as context.\nEmpty when no relevant memories were found."
+          },
+          "memory_conflicts": {
+            "type": "array",
+            "items": {},
+            "description": "Detected memory conflicts where new info contradicts existing memories.\nEmpty when no conflicts were detected."
           },
           "output_tokens": {
             "type": "integer",
@@ -6589,6 +7470,10 @@
     {
       "name": "memory",
       "description": "Agent key-value memory store"
+    },
+    {
+      "name": "proactive-memory",
+      "description": "Proactive memory system (mem0-style) — semantic memory that agents build automatically"
     },
     {
       "name": "approvals",

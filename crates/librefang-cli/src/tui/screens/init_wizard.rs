@@ -16,13 +16,17 @@ use crate::tui::theme;
 use librefang_runtime::model_catalog::ModelCatalog;
 use librefang_types::model_catalog::ModelTier;
 
+const INIT_WIZARD_CONFIG_TEMPLATE: &str =
+    include_str!("../../../templates/init_wizard_config.toml");
+const PROVIDER_DEFAULT_MODELS_TEMPLATE: &str =
+    include_str!("../../../templates/provider_default_models.toml");
+
 // ── Provider metadata ──────────────────────────────────────────────────────
 
 struct ProviderInfo {
     name: &'static str,
     display: &'static str,
     env_var: &'static str,
-    default_model: &'static str,
     needs_key: bool,
     hint: &'static str,
 }
@@ -32,7 +36,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "groq",
         display: "Groq",
         env_var: "GROQ_API_KEY",
-        default_model: "llama-3.3-70b-versatile",
         needs_key: true,
         hint: "free tier",
     },
@@ -40,7 +43,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "gemini",
         display: "Gemini",
         env_var: "GEMINI_API_KEY",
-        default_model: "gemini-2.5-flash",
         needs_key: true,
         hint: "free tier",
     },
@@ -48,7 +50,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "deepseek",
         display: "DeepSeek",
         env_var: "DEEPSEEK_API_KEY",
-        default_model: "deepseek-chat",
         needs_key: true,
         hint: "cheap",
     },
@@ -56,7 +57,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "anthropic",
         display: "Anthropic",
         env_var: "ANTHROPIC_API_KEY",
-        default_model: "claude-sonnet-4-20250514",
         needs_key: true,
         hint: "",
     },
@@ -64,7 +64,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "openai",
         display: "OpenAI",
         env_var: "OPENAI_API_KEY",
-        default_model: "gpt-4o",
         needs_key: true,
         hint: "",
     },
@@ -72,7 +71,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "openrouter",
         display: "OpenRouter",
         env_var: "OPENROUTER_API_KEY",
-        default_model: "openrouter/google/gemini-2.5-flash",
         needs_key: true,
         hint: "",
     },
@@ -80,7 +78,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "together",
         display: "Together",
         env_var: "TOGETHER_API_KEY",
-        default_model: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
         needs_key: true,
         hint: "",
     },
@@ -88,7 +85,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "mistral",
         display: "Mistral",
         env_var: "MISTRAL_API_KEY",
-        default_model: "mistral-large-latest",
         needs_key: true,
         hint: "",
     },
@@ -96,7 +92,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "fireworks",
         display: "Fireworks",
         env_var: "FIREWORKS_API_KEY",
-        default_model: "accounts/fireworks/models/llama-v3p3-70b-instruct",
         needs_key: true,
         hint: "",
     },
@@ -104,7 +99,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "xai",
         display: "xAI (Grok)",
         env_var: "XAI_API_KEY",
-        default_model: "grok-4-0709",
         needs_key: true,
         hint: "",
     },
@@ -112,7 +106,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "perplexity",
         display: "Perplexity",
         env_var: "PERPLEXITY_API_KEY",
-        default_model: "sonar-pro",
         needs_key: true,
         hint: "",
     },
@@ -120,7 +113,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "cohere",
         display: "Cohere",
         env_var: "COHERE_API_KEY",
-        default_model: "command-a-03-2025",
         needs_key: true,
         hint: "",
     },
@@ -128,7 +120,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "cerebras",
         display: "Cerebras",
         env_var: "CEREBRAS_API_KEY",
-        default_model: "llama-4-scout-17b-16e-instruct",
         needs_key: true,
         hint: "fast inference",
     },
@@ -136,7 +127,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "sambanova",
         display: "SambaNova",
         env_var: "SAMBANOVA_API_KEY",
-        default_model: "DeepSeek-R1",
         needs_key: true,
         hint: "fast inference",
     },
@@ -144,7 +134,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "qwen",
         display: "Qwen (Alibaba)",
         env_var: "QWEN_API_KEY",
-        default_model: "qwen-plus",
         needs_key: true,
         hint: "",
     },
@@ -152,7 +141,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "huggingface",
         display: "Hugging Face",
         env_var: "HUGGINGFACE_API_KEY",
-        default_model: "meta-llama/Llama-3.3-70B-Instruct",
         needs_key: true,
         hint: "",
     },
@@ -160,7 +148,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "github-copilot",
         display: "GitHub Copilot",
         env_var: "GITHUB_TOKEN",
-        default_model: "gpt-4o",
         needs_key: true,
         hint: "via PAT",
     },
@@ -168,7 +155,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "replicate",
         display: "Replicate",
         env_var: "REPLICATE_API_KEY",
-        default_model: "meta/meta-llama-3-70b-instruct",
         needs_key: true,
         hint: "",
     },
@@ -176,7 +162,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "venice",
         display: "Venice.ai",
         env_var: "VENICE_API_KEY",
-        default_model: "venice-uncensored",
         needs_key: true,
         hint: "uncensored",
     },
@@ -184,7 +169,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "ai21",
         display: "AI21",
         env_var: "AI21_API_KEY",
-        default_model: "jamba-1.5-large",
         needs_key: true,
         hint: "",
     },
@@ -192,7 +176,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "claude-code",
         display: "Claude Code",
         env_var: "",
-        default_model: "claude-code/sonnet",
         needs_key: false,
         hint: "no API key",
     },
@@ -200,7 +183,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "ollama",
         display: "Ollama",
         env_var: "OLLAMA_API_KEY",
-        default_model: "llama3.2",
         needs_key: false,
         hint: "local",
     },
@@ -208,7 +190,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "lmstudio",
         display: "LM Studio",
         env_var: "LMSTUDIO_API_KEY",
-        default_model: "local-model",
         needs_key: false,
         hint: "local",
     },
@@ -216,7 +197,6 @@ const PROVIDERS: &[ProviderInfo] = &[
         name: "vllm",
         display: "vLLM",
         env_var: "VLLM_API_KEY",
-        default_model: "local-model",
         needs_key: false,
         hint: "local",
     },
@@ -304,6 +284,8 @@ struct State {
     migration_choice_list: ListState,
     openclaw_path: Option<PathBuf>,
     openclaw_scan: Option<librefang_migrate::openclaw::ScanResult>,
+    openfang_path: Option<PathBuf>,
+    migrate_source: Option<librefang_migrate::MigrateSource>,
     migration_report: Option<librefang_migrate::report::MigrationReport>,
     migration_error: Option<String>,
     migration_done_at: Option<Instant>,
@@ -352,6 +334,8 @@ impl State {
             migration_choice_list: ListState::default(),
             openclaw_path: None,
             openclaw_scan: None,
+            openfang_path: None,
+            migrate_source: None,
             migration_report: None,
             migration_error: None,
             migration_done_at: None,
@@ -364,7 +348,7 @@ impl State {
             key_test: KeyTestState::Idle,
             key_test_started: None,
             model_input: String::new(),
-            model_catalog: ModelCatalog::new(),
+            model_catalog: ModelCatalog::default(),
             model_entries: Vec::new(),
             model_list: ListState::default(),
             routing_phase: RoutingPhase::Choice,
@@ -462,6 +446,7 @@ impl State {
         };
 
         let models = self.model_catalog.models_by_provider(p.name);
+        let default_model = default_model_for_provider(p.name, &self.model_catalog);
         let mut default_idx = 0usize;
 
         for (i, m) in models.iter().enumerate() {
@@ -472,7 +457,7 @@ impl State {
                 format!("${:.2}/${:.2}", m.input_cost_per_m, m.output_cost_per_m)
             };
 
-            if m.id == p.default_model {
+            if m.id == default_model {
                 default_idx = i;
             }
 
@@ -486,8 +471,8 @@ impl State {
 
         if self.model_entries.is_empty() {
             self.model_entries.push(ModelEntry {
-                id: p.default_model.to_string(),
-                display_name: p.default_model.to_string(),
+                id: default_model.clone(),
+                display_name: default_model,
                 tier: "default",
                 cost: String::new(),
             });
@@ -503,7 +488,7 @@ impl State {
             }
         }
         self.provider()
-            .map(|p| p.default_model.to_string())
+            .map(|p| default_model_for_provider(p.name, &self.model_catalog))
             .unwrap_or_default()
     }
 
@@ -580,6 +565,34 @@ fn tier_label(tier: ModelTier) -> &'static str {
     }
 }
 
+fn render_init_wizard_config(
+    provider: &str,
+    model: &str,
+    api_key_line: &str,
+    routing_section: &str,
+) -> String {
+    INIT_WIZARD_CONFIG_TEMPLATE
+        .replace("{{provider}}", provider)
+        .replace("{{model}}", model)
+        .replace("{{api_key_line}}", api_key_line)
+        .replace("{{routing_section}}", routing_section)
+}
+
+fn configured_default_model(provider: &str) -> Option<String> {
+    let parsed = toml::from_str::<toml::Value>(PROVIDER_DEFAULT_MODELS_TEMPLATE).ok()?;
+    parsed
+        .get("default_models")?
+        .get(provider)?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+fn default_model_for_provider(provider: &str, model_catalog: &ModelCatalog) -> String {
+    configured_default_model(provider)
+        .or_else(|| model_catalog.default_model_for_provider(provider))
+        .unwrap_or_else(|| "local-model".to_string())
+}
+
 // ── Entry point ────────────────────────────────────────────────────────────
 
 pub fn run() -> InitResult {
@@ -634,11 +647,8 @@ pub fn run() -> InitResult {
 
         // ── Migration detection (resolves in 1 frame) ──
         if state.step == Step::Migration && state.migration_phase == MigrationPhase::Detecting {
-            match librefang_migrate::openclaw::detect_openclaw_home() {
-                None => {
-                    // No OpenClaw found — skip migration entirely
-                    state.advance_to_provider();
-                }
+            // Check OpenClaw first (more complex migration with scan)
+            let openclaw_found = match librefang_migrate::openclaw::detect_openclaw_home() {
                 Some(path) => {
                     let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
                     let has_content = scan.has_config
@@ -649,12 +659,38 @@ pub fn run() -> InitResult {
                     if has_content {
                         state.openclaw_path = Some(path);
                         state.openclaw_scan = Some(scan);
-                        state.migration_phase = MigrationPhase::Offer;
+                        state.migrate_source = Some(librefang_migrate::MigrateSource::OpenClaw);
+                        true
                     } else {
-                        // Nothing useful to migrate
+                        false
+                    }
+                }
+                None => false,
+            };
+
+            // If no OpenClaw, check OpenFang
+            if !openclaw_found {
+                let openfang_home = dirs::home_dir().map(|h| h.join(".openfang"));
+                match openfang_home {
+                    Some(path) if path.exists() && path.is_dir() => {
+                        // OpenFang uses the same format — just check it has files
+                        let has_content = path.join("config.toml").exists()
+                            || path.join("agents").exists()
+                            || path.join("skills").exists();
+                        if has_content {
+                            state.openfang_path = Some(path);
+                            state.migrate_source = Some(librefang_migrate::MigrateSource::OpenFang);
+                            state.migration_phase = MigrationPhase::Offer;
+                        } else {
+                            state.advance_to_provider();
+                        }
+                    }
+                    _ => {
                         state.advance_to_provider();
                     }
                 }
+            } else {
+                state.migration_phase = MigrationPhase::Offer;
             }
         }
 
@@ -948,7 +984,15 @@ fn handle_migration_key(
                 let yes = state.migration_choice_list.selected() == Some(0);
                 if yes {
                     state.migration_phase = MigrationPhase::Running;
-                    let source_dir = state.openclaw_path.clone().unwrap_or_default();
+                    let migrate_source = state
+                        .migrate_source
+                        .unwrap_or(librefang_migrate::MigrateSource::OpenClaw);
+                    let source_dir = match migrate_source {
+                        librefang_migrate::MigrateSource::OpenFang => {
+                            state.openfang_path.clone().unwrap_or_default()
+                        }
+                        _ => state.openclaw_path.clone().unwrap_or_default(),
+                    };
                     let target_dir = if let Ok(h) = std::env::var("LIBREFANG_HOME") {
                         PathBuf::from(h)
                     } else {
@@ -959,7 +1003,7 @@ fn handle_migration_key(
                     let tx = migrate_tx.clone();
                     std::thread::spawn(move || {
                         let options = librefang_migrate::MigrateOptions {
-                            source: librefang_migrate::MigrateSource::OpenClaw,
+                            source: migrate_source,
                             source_dir,
                             target_dir,
                             dry_run: false,
@@ -1089,8 +1133,9 @@ fn save_config(state: &mut State) {
     let _ = std::fs::create_dir_all(librefang_dir.join("data"));
     crate::restrict_dir_permissions(&librefang_dir);
 
+    let default_model = default_model_for_provider(p.name, &state.model_catalog);
     let model = if state.model_input.is_empty() {
-        p.default_model
+        default_model.as_str()
     } else {
         &state.model_input
     };
@@ -1120,22 +1165,7 @@ complex_threshold = 500
         format!("api_key_env = \"{}\"", p.env_var)
     };
 
-    let config = format!(
-        r#"# LibreFang Agent OS configuration
-# See https://github.com/librefang/librefang for documentation
-
-api_listen = "127.0.0.1:4545"
-
-[default_model]
-provider = "{provider}"
-model = "{model}"
-{api_key_line}
-
-[memory]
-decay_rate = 0.05
-{routing_section}"#,
-        provider = p.name,
-    );
+    let config = render_init_wizard_config(p.name, model, &api_key_line, &routing_section);
 
     match std::fs::write(&config_path, &config) {
         Ok(()) => {
@@ -1370,76 +1400,97 @@ fn draw_migration_detecting(f: &mut Frame, area: Rect, state: &State) {
 }
 
 fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
-    let scan = match &state.openclaw_scan {
-        Some(s) => s,
-        None => return,
-    };
+    let is_openfang = matches!(
+        state.migrate_source,
+        Some(librefang_migrate::MigrateSource::OpenFang)
+    );
 
-    let path_display = state
-        .openclaw_path
-        .as_ref()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
+    // For OpenClaw we need the scan; for OpenFang we just need the path
+    if !is_openfang && state.openclaw_scan.is_none() {
+        return;
+    }
+
+    let path_display = if is_openfang {
+        state
+            .openfang_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    } else {
+        state
+            .openclaw_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default()
+    };
 
     // Count content lines to determine layout
     let mut content_lines: Vec<Line> = Vec::new();
 
-    if !scan.agents.is_empty() {
-        let names: Vec<&str> = scan.agents.iter().map(|a| a.name.as_str()).collect();
-        let names_str = names.join(", ");
+    if is_openfang {
+        // OpenFang uses the same format — just show a simple summary
         content_lines.push(Line::from(vec![
             Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::raw(format!("{} agents ({})", scan.agents.len(), names_str)),
+            Span::raw("OpenFang configuration and data"),
         ]));
-    } else {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2500} ", theme::dim_style()),
-            Span::styled("No agents", theme::dim_style()),
-        ]));
-    }
+    } else if let Some(scan) = &state.openclaw_scan {
+        if !scan.agents.is_empty() {
+            let names: Vec<&str> = scan.agents.iter().map(|a| a.name.as_str()).collect();
+            let names_str = names.join(", ");
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
+                Span::raw(format!("{} agents ({})", scan.agents.len(), names_str)),
+            ]));
+        } else {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2500} ", theme::dim_style()),
+                Span::styled("No agents", theme::dim_style()),
+            ]));
+        }
 
-    if !scan.channels.is_empty() {
-        let chan_str = scan.channels.join(", ");
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::raw(format!("{} channels ({})", scan.channels.len(), chan_str)),
-        ]));
-    } else {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2500} ", theme::dim_style()),
-            Span::styled("No channels", theme::dim_style()),
-        ]));
-    }
+        if !scan.channels.is_empty() {
+            let chan_str = scan.channels.join(", ");
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
+                Span::raw(format!("{} channels ({})", scan.channels.len(), chan_str)),
+            ]));
+        } else {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2500} ", theme::dim_style()),
+                Span::styled("No channels", theme::dim_style()),
+            ]));
+        }
 
-    if !scan.skills.is_empty() {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::raw(format!("{} skills", scan.skills.len())),
-        ]));
-    } else {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2500} ", theme::dim_style()),
-            Span::styled("No skills", theme::dim_style()),
-        ]));
-    }
+        if !scan.skills.is_empty() {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
+                Span::raw(format!("{} skills", scan.skills.len())),
+            ]));
+        } else {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2500} ", theme::dim_style()),
+                Span::styled("No skills", theme::dim_style()),
+            ]));
+        }
 
-    if scan.has_memory {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::raw("Memory files"),
-        ]));
-    } else {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2500} ", theme::dim_style()),
-            Span::styled("No memory files", theme::dim_style()),
-        ]));
-    }
+        if scan.has_memory {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
+                Span::raw("Memory files"),
+            ]));
+        } else {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2500} ", theme::dim_style()),
+                Span::styled("No memory files", theme::dim_style()),
+            ]));
+        }
 
-    if scan.has_config {
-        content_lines.push(Line::from(vec![
-            Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
-            Span::raw("Configuration"),
-        ]));
+        if scan.has_config {
+            content_lines.push(Line::from(vec![
+                Span::styled("  \u{2714} ", Style::default().fg(theme::GREEN)),
+                Span::raw("Configuration"),
+            ]));
+        }
     }
 
     let chunks = Layout::vertical([
@@ -1458,7 +1509,12 @@ fn draw_migration_offer(f: &mut Frame, area: Rect, state: &mut State) {
 
     f.render_widget(
         Paragraph::new(Line::from(vec![Span::styled(
-            "  OpenClaw Installation Detected",
+            match state.migrate_source {
+                Some(librefang_migrate::MigrateSource::OpenFang) => {
+                    "  OpenFang Installation Detected"
+                }
+                _ => "  OpenClaw Installation Detected",
+            },
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
@@ -1552,7 +1608,10 @@ fn draw_migration_running(f: &mut Frame, area: Rect, state: &State) {
         Paragraph::new(Line::from(vec![
             Span::raw("  "),
             Span::styled(spinner, Style::default().fg(theme::ACCENT)),
-            Span::raw(" Migrating from OpenClaw..."),
+            Span::raw(match state.migrate_source {
+                Some(librefang_migrate::MigrateSource::OpenFang) => " Migrating from OpenFang...",
+                _ => " Migrating from OpenClaw...",
+            }),
         ])),
         chunks[1],
     );
@@ -1881,7 +1940,8 @@ fn draw_model(f: &mut Frame, area: Rect, state: &mut State) {
         chunks[0],
     );
 
-    let items = build_model_list_items(&state.model_entries, Some(p.default_model));
+    let default_model = default_model_for_provider(p.name, &state.model_catalog);
+    let items = build_model_list_items(&state.model_entries, Some(default_model.as_str()));
     let list = List::new(items)
         .highlight_style(theme::selected_style())
         .highlight_symbol("\u{25b8} ");
@@ -2131,8 +2191,9 @@ fn draw_complete(f: &mut Frame, area: Rect, state: &mut State) {
         None => return,
     };
 
+    let default_model = default_model_for_provider(p.name, &state.model_catalog);
     let model = if state.model_input.is_empty() {
-        p.default_model
+        default_model.as_str()
     } else {
         &state.model_input
     };

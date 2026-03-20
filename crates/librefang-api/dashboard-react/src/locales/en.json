@@ -245,7 +245,7 @@
     "section": "Infrastructure", "title": "Model Catalog", "subtitle": "Browse all available LLM models across providers.",
     "search_placeholder": "Search models...", "all_providers": "All Providers", "all_tiers": "All",
     "available_only": "Available Only", "available": "available", "results": "models",
-    "free": "Free", "no_results": "No models match your filters.",
+    "free": "Free", "no_results": "No models match your filters.", "no_models": "No models loaded. Is the daemon running?", "load_error": "Failed to load models. Check if the daemon is running.",
     "col_model": "Model", "col_provider": "Provider", "col_tier": "Tier", "col_context": "Context", "col_input": "Input $/M"
   },
   "plugins": {

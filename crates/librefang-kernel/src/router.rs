@@ -3,140 +3,28 @@ use regex_lite::Regex;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-const ROUTING_EXCLUDED_TEMPLATES: &[&str] = &["assistant", "router"];
-// Keep this in sync with crates/librefang-cli/src/bundled_agents.rs so the kernel
-// can route against bundled templates even before they are written to disk.
-const BUNDLED_TEMPLATE_MANIFESTS: &[(&str, &str)] = &[
-    (
-        "analyst",
-        include_str!("../../../agents/analyst/agent.toml"),
-    ),
-    (
-        "architect",
-        include_str!("../../../agents/architect/agent.toml"),
-    ),
-    (
-        "assistant",
-        include_str!("../../../agents/assistant/agent.toml"),
-    ),
-    ("coder", include_str!("../../../agents/coder/agent.toml")),
-    (
-        "code-reviewer",
-        include_str!("../../../agents/code-reviewer/agent.toml"),
-    ),
-    (
-        "customer-support",
-        include_str!("../../../agents/customer-support/agent.toml"),
-    ),
-    (
-        "data-scientist",
-        include_str!("../../../agents/data-scientist/agent.toml"),
-    ),
-    (
-        "debugger",
-        include_str!("../../../agents/debugger/agent.toml"),
-    ),
-    (
-        "devops-lead",
-        include_str!("../../../agents/devops-lead/agent.toml"),
-    ),
-    (
-        "doc-writer",
-        include_str!("../../../agents/doc-writer/agent.toml"),
-    ),
-    (
-        "email-assistant",
-        include_str!("../../../agents/email-assistant/agent.toml"),
-    ),
-    (
-        "health-tracker",
-        include_str!("../../../agents/health-tracker/agent.toml"),
-    ),
-    (
-        "hello-world",
-        include_str!("../../../agents/hello-world/agent.toml"),
-    ),
-    (
-        "home-automation",
-        include_str!("../../../agents/home-automation/agent.toml"),
-    ),
-    (
-        "legal-assistant",
-        include_str!("../../../agents/legal-assistant/agent.toml"),
-    ),
-    (
-        "meeting-assistant",
-        include_str!("../../../agents/meeting-assistant/agent.toml"),
-    ),
-    ("ops", include_str!("../../../agents/ops/agent.toml")),
-    (
-        "orchestrator",
-        include_str!("../../../agents/orchestrator/agent.toml"),
-    ),
-    (
-        "personal-finance",
-        include_str!("../../../agents/personal-finance/agent.toml"),
-    ),
-    (
-        "planner",
-        include_str!("../../../agents/planner/agent.toml"),
-    ),
-    (
-        "recruiter",
-        include_str!("../../../agents/recruiter/agent.toml"),
-    ),
-    (
-        "recipe-assistant",
-        include_str!("../../../agents/recipe-assistant/agent.toml"),
-    ),
-    (
-        "researcher",
-        include_str!("../../../agents/researcher/agent.toml"),
-    ),
-    ("router", include_str!("../../../agents/router/agent.toml")),
-    (
-        "sales-assistant",
-        include_str!("../../../agents/sales-assistant/agent.toml"),
-    ),
-    (
-        "security-auditor",
-        include_str!("../../../agents/security-auditor/agent.toml"),
-    ),
-    (
-        "social-media",
-        include_str!("../../../agents/social-media/agent.toml"),
-    ),
-    (
-        "test-engineer",
-        include_str!("../../../agents/test-engineer/agent.toml"),
-    ),
-    (
-        "translator",
-        include_str!("../../../agents/translator/agent.toml"),
-    ),
-    (
-        "travel-planner",
-        include_str!("../../../agents/travel-planner/agent.toml"),
-    ),
-    ("tutor", include_str!("../../../agents/tutor/agent.toml")),
-    ("writer", include_str!("../../../agents/writer/agent.toml")),
-];
+const ROUTING_EXCLUDED_TEMPLATES: &[&str] = &["assistant"];
 const GENERIC_ENGLISH_WORDS: &[&str] = &[
     "a",
     "agent",
     "an",
+    "analysis",
     "and",
     "assistant",
+    "checking",
+    "create",
     "dedicated",
     "default",
+    "drafting",
     "expert",
     "for",
     "friendly",
     "general",
     "general-purpose",
+    "help",
     "helper",
     "helpful",
     "management",
@@ -145,10 +33,14 @@ const GENERIC_ENGLISH_WORDS: &[&str] = &[
     "of",
     "or",
     "planning",
+    "preparation",
     "professional",
     "productivity",
+    "research",
+    "review",
     "senior",
     "specialist",
+    "suggestions",
     "support",
     "system",
     "task",
@@ -158,6 +50,7 @@ const GENERIC_ENGLISH_WORDS: &[&str] = &[
     "to",
     "with",
     "workflow",
+    "writing",
 ];
 
 struct RouteRule {
@@ -190,15 +83,42 @@ pub struct TemplateSelection {
 #[derive(Debug, Clone)]
 struct ManifestRouteCandidate {
     template: String,
-    strong_phrases: Vec<String>,
+    /// User-configured aliases from [metadata.routing] — highest confidence.
+    explicit_aliases: Vec<String>,
+    /// Auto-generated phrases from name/description/tags — lower confidence.
+    generated_phrases: Vec<String>,
+    /// Weak aliases (explicit + generated from template name tokens).
     weak_phrases: Vec<String>,
 }
+
+/// Scoring weights for manifest routing.
+const EXPLICIT_ALIAS_WEIGHT: usize = 6;
+const GENERATED_PHRASE_WEIGHT: usize = 2;
+const WEAK_PHRASE_WEIGHT: usize = 1;
+/// Maximum semantic bonus points (scaled from 0.0–1.0 similarity).
+const MAX_SEMANTIC_BONUS: f32 = 5.0;
+/// Minimum semantic similarity to consider a semantic-only match.
+const SEMANTIC_ONLY_THRESHOLD: f32 = 0.55;
 
 // ── Hand routing: data-driven from HAND.toml ────────────────────────────
 
 /// Cached hand route candidates built from bundled HAND.toml definitions.
 /// Invalidated alongside `MANIFEST_CACHE` on hot-reload.
-static HAND_ROUTE_CACHE: OnceLock<Mutex<Option<Vec<HandRouteCandidate>>>> = OnceLock::new();
+#[derive(Debug, Clone)]
+struct HandRouteCacheEntry {
+    home_dir: Option<String>,
+    candidates: Vec<HandRouteCandidate>,
+}
+
+static HAND_ROUTE_CACHE: OnceLock<Mutex<Option<HandRouteCacheEntry>>> = OnceLock::new();
+static HAND_ROUTE_HOME_DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+/// Set the LibreFang home directory used for hand-route candidate loading.
+pub fn set_hand_route_home_dir(home_dir: &Path) {
+    let slot = HAND_ROUTE_HOME_DIR.get_or_init(|| Mutex::new(None));
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    *guard = Some(home_dir.to_path_buf());
+}
 
 /// Invalidate the hand route cache (call alongside `invalidate_manifest_cache`).
 pub fn invalidate_hand_route_cache() {
@@ -210,49 +130,111 @@ pub fn invalidate_hand_route_cache() {
 }
 
 fn hand_route_candidates() -> Vec<HandRouteCandidate> {
+    let home_dir = resolve_hand_route_home_dir();
+    let home_dir_key = Some(home_dir.to_string_lossy().to_string());
     let cache = HAND_ROUTE_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref cached) = *guard {
-        return cached.clone();
+        if cached.home_dir == home_dir_key {
+            return cached.candidates.clone();
+        }
     }
 
-    let candidates = build_hand_route_candidates();
-    *guard = Some(candidates.clone());
+    let candidates = build_hand_route_candidates(Some(&home_dir));
+    *guard = Some(HandRouteCacheEntry {
+        home_dir: home_dir_key,
+        candidates: candidates.clone(),
+    });
     candidates
 }
 
-fn build_hand_route_candidates() -> Vec<HandRouteCandidate> {
-    let mut candidates = Vec::new();
+fn resolve_hand_route_home_dir() -> PathBuf {
+    if let Some(slot) = HAND_ROUTE_HOME_DIR.get() {
+        let guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(home_dir) = guard.as_ref() {
+            return home_dir.clone();
+        }
+    }
 
-    // TODO: also scan ~/.librefang/hands/*/HAND.toml for user-installed hands
-    // once hand_route_candidates() receives the home_dir parameter.
-    for (id, toml_content, _skill) in librefang_hands::bundled::bundled_hands() {
+    if let Ok(home) = std::env::var("LIBREFANG_HOME") {
+        return PathBuf::from(home);
+    }
+
+    dirs::home_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".librefang")
+}
+
+fn build_hand_route_candidates(home_dir: Option<&Path>) -> Vec<HandRouteCandidate> {
+    let mut candidates_by_id: HashMap<String, HandRouteCandidate> = HashMap::new();
+
+    let bundled_home = home_dir.unwrap_or_else(|| std::path::Path::new(""));
+    for (id, toml_content, _skill) in librefang_hands::bundled::bundled_hands(bundled_home) {
         let Ok(def) = librefang_hands::bundled::parse_bundled(id, toml_content, "") else {
             continue;
         };
+        let candidate = hand_route_candidate_from_definition(def);
+        candidates_by_id.insert(candidate.hand_id.clone(), candidate);
+    }
 
-        // Strong: explicit aliases + description-derived phrases
-        let mut strong = def.routing.aliases.clone();
-        strong.extend(description_phrases(&def.description));
+    if let Some(home_dir) = home_dir {
+        for candidate in load_user_hand_route_candidates(home_dir) {
+            candidates_by_id.insert(candidate.hand_id.clone(), candidate);
+        }
+    }
 
-        // Weak: explicit weak_aliases + id-derived tokens
-        let mut weak = def.routing.weak_aliases.clone();
-        weak.extend(
-            def.id
-                .to_lowercase()
-                .split(['-', '_'])
-                .filter(|token| token.len() >= 3 && !GENERIC_ENGLISH_WORDS.contains(token))
-                .map(str::to_string),
-        );
+    let mut candidates: Vec<HandRouteCandidate> = candidates_by_id.into_values().collect();
+    candidates.sort_by(|a, b| a.hand_id.cmp(&b.hand_id));
+    candidates
+}
 
-        candidates.push(HandRouteCandidate {
-            hand_id: def.id,
-            strong_phrases: dedupe(strong),
-            weak_phrases: dedupe(weak),
-        });
+fn load_user_hand_route_candidates(home_dir: &Path) -> Vec<HandRouteCandidate> {
+    let hands_dir = home_dir.join("hands");
+    let Ok(entries) = fs::read_dir(&hands_dir) else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let hand_dir = entry.path();
+        if !hand_dir.is_dir() {
+            continue;
+        }
+        let hand_toml = hand_dir.join("HAND.toml");
+        let Ok(toml_content) = fs::read_to_string(&hand_toml) else {
+            continue;
+        };
+        let Ok(def) = librefang_hands::bundled::parse_bundled("custom", &toml_content, "") else {
+            continue;
+        };
+        candidates.push(hand_route_candidate_from_definition(def));
     }
 
     candidates
+}
+
+fn hand_route_candidate_from_definition(
+    def: librefang_hands::HandDefinition,
+) -> HandRouteCandidate {
+    // Strong: explicit aliases + description-derived phrases
+    let mut strong = def.routing.aliases.clone();
+    strong.extend(description_phrases(&def.description));
+
+    // Weak: explicit weak_aliases + id-derived tokens
+    let mut weak = def.routing.weak_aliases.clone();
+    weak.extend(
+        def.id
+            .to_lowercase()
+            .split(['-', '_'])
+            .filter(|token| token.len() >= 3 && !GENERIC_ENGLISH_WORDS.contains(token))
+            .map(str::to_string),
+    );
+
+    HandRouteCandidate {
+        hand_id: def.id,
+        strong_phrases: dedupe(strong),
+        weak_phrases: dedupe(weak),
+    }
 }
 
 const TEMPLATE_RULES: &[RouteRule] = &[
@@ -600,12 +582,13 @@ pub fn auto_select_hand(
             .filter(|phrase| phrase_matches(message, phrase))
             .cloned()
             .collect();
-        let mut score = strong_hits.len() * 3 + weak_hits.len();
+        let mut score =
+            strong_hits.len() * EXPLICIT_ALIAS_WEIGHT + weak_hits.len() * WEAK_PHRASE_WEIGHT;
 
-        // Blend semantic similarity when available (0.0–1.0 → 0–3 bonus points)
+        // Blend semantic similarity when available
         if let Some(scores) = semantic_scores {
             if let Some(&sim) = scores.get(&candidate.hand_id) {
-                let bonus = (sim * 3.0).round() as usize;
+                let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
                 score += bonus;
             }
         }
@@ -635,19 +618,48 @@ pub fn auto_select_hand(
     }
 }
 
-pub fn auto_select_template(message: &str, agents_dir: &Path) -> TemplateSelection {
+pub fn auto_select_template(
+    message: &str,
+    agents_dir: &Path,
+    semantic_scores: Option<&HashMap<String, f32>>,
+) -> TemplateSelection {
     let normalized = message.to_lowercase();
-    let metadata_match = auto_select_template_from_metadata(message, agents_dir);
+    let metadata_match = auto_select_template_from_metadata(message, agents_dir, semantic_scores);
     let mut scored: Vec<(usize, &'static str, Vec<&'static str>)> = Vec::new();
 
     for rule in TEMPLATE_RULES {
         let strong_hits = matched_labels(message, rule.strong);
         let weak_hits = matched_labels(message, rule.weak);
-        let score = strong_hits.len() * 3 + weak_hits.len();
+        // TEMPLATE_RULES are hand-curated (equivalent to explicit aliases)
+        let mut score =
+            strong_hits.len() * EXPLICIT_ALIAS_WEIGHT + weak_hits.len() * WEAK_PHRASE_WEIGHT;
+
+        // Blend semantic similarity when available
+        if let Some(scores) = semantic_scores {
+            if let Some(&sim) = scores.get(rule.target) {
+                let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
+                score += bonus;
+            }
+        }
+
         if score > 0 {
             let mut hits = strong_hits;
             hits.extend(weak_hits);
             scored.push((score, rule.target, hits));
+        }
+    }
+
+    // When keyword matching found nothing, try semantic-only candidates from TEMPLATE_RULES
+    if scored.is_empty() {
+        if let Some(scores) = semantic_scores {
+            for rule in TEMPLATE_RULES {
+                if let Some(&sim) = scores.get(rule.target) {
+                    if sim >= SEMANTIC_ONLY_THRESHOLD {
+                        let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
+                        scored.push((bonus, rule.target, vec![]));
+                    }
+                }
+            }
         }
     }
 
@@ -706,12 +718,19 @@ pub fn load_template_manifest(home_dir: &Path, template: &str) -> Result<AgentMa
 fn auto_select_template_from_metadata(
     message: &str,
     agents_dir: &Path,
+    semantic_scores: Option<&HashMap<String, f32>>,
 ) -> Option<TemplateSelection> {
     let mut scored: Vec<(usize, String, Vec<String>)> = Vec::new();
 
     for candidate in manifest_route_candidates(agents_dir) {
-        let strong_hits: Vec<String> = candidate
-            .strong_phrases
+        let explicit_hits: Vec<String> = candidate
+            .explicit_aliases
+            .iter()
+            .filter(|phrase| phrase_matches(message, phrase))
+            .cloned()
+            .collect();
+        let generated_hits: Vec<String> = candidate
+            .generated_phrases
             .iter()
             .filter(|phrase| phrase_matches(message, phrase))
             .cloned()
@@ -722,11 +741,37 @@ fn auto_select_template_from_metadata(
             .filter(|phrase| phrase_matches(message, phrase))
             .cloned()
             .collect();
-        let score = strong_hits.len() * 3 + weak_hits.len();
+        let mut score = explicit_hits.len() * EXPLICIT_ALIAS_WEIGHT
+            + generated_hits.len() * GENERATED_PHRASE_WEIGHT
+            + weak_hits.len() * WEAK_PHRASE_WEIGHT;
+
+        // Blend semantic similarity when available
+        if let Some(scores) = semantic_scores {
+            if let Some(&sim) = scores.get(candidate.template.as_str()) {
+                let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
+                score += bonus;
+            }
+        }
+
         if score > 0 {
-            let mut hits = strong_hits;
+            let mut hits = explicit_hits;
+            hits.extend(generated_hits);
             hits.extend(weak_hits);
             scored.push((score, candidate.template.clone(), hits));
+        }
+    }
+
+    // When keyword matching found nothing, try semantic-only candidates
+    if scored.is_empty() {
+        if let Some(scores) = semantic_scores {
+            for candidate in manifest_route_candidates(agents_dir) {
+                if let Some(&sim) = scores.get(candidate.template.as_str()) {
+                    if sim >= SEMANTIC_ONLY_THRESHOLD {
+                        let bonus = (sim * MAX_SEMANTIC_BONUS).round() as usize;
+                        scored.push((bonus, candidate.template.clone(), vec![]));
+                    }
+                }
+            }
         }
     }
 
@@ -761,6 +806,30 @@ pub fn invalidate_manifest_cache() {
     }
 }
 
+/// Returns (template_name, description) pairs for all routable templates.
+/// Used by the kernel to build template description embeddings for semantic routing.
+pub fn all_template_descriptions(agents_dir: &Path) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    for template in all_template_names(agents_dir) {
+        if ROUTING_EXCLUDED_TEMPLATES.contains(&template.as_str()) {
+            continue;
+        }
+        if let Ok(manifest) = load_template_manifest_at(agents_dir, &template) {
+            if !manifest.description.is_empty() {
+                // Combine name, description, and tags for richer embedding
+                let embed_text = format!(
+                    "{}: {}. Tags: {}",
+                    manifest.name,
+                    manifest.description,
+                    manifest.tags.join(", ")
+                );
+                result.push((template, embed_text));
+            }
+        }
+    }
+    result
+}
+
 fn manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandidate> {
     let cache = MANIFEST_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
@@ -787,19 +856,13 @@ fn build_manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandid
         let (routing_aliases, routing_weak_aliases, exclude_generated) =
             manifest_routing_config(&manifest);
 
-        let generated_strong = {
+        let generated = if exclude_generated {
+            Vec::new()
+        } else {
             let mut phrases = english_variants(&template);
             phrases.extend(tag_phrases(&manifest.tags));
             phrases.extend(description_phrases(&manifest.description));
             phrases
-        };
-
-        let strong_source = if exclude_generated {
-            routing_aliases
-        } else {
-            let mut values = routing_aliases;
-            values.extend(generated_strong);
-            values
         };
 
         let mut weak_source = routing_weak_aliases;
@@ -813,7 +876,8 @@ fn build_manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandid
 
         candidates.push(ManifestRouteCandidate {
             template,
-            strong_phrases: dedupe(strong_source),
+            explicit_aliases: dedupe(routing_aliases),
+            generated_phrases: dedupe(generated),
             weak_phrases: dedupe(weak_source),
         });
     }
@@ -822,6 +886,10 @@ fn build_manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandid
 }
 
 fn load_template_manifest_at(agents_dir: &Path, template: &str) -> Result<AgentManifest, String> {
+    if !is_safe_template_name(template) {
+        return Err(format!("invalid template name '{template}'"));
+    }
+
     let manifest_path = agents_dir.join(template).join("agent.toml");
     if manifest_path.exists() {
         let manifest_toml = fs::read_to_string(&manifest_path)
@@ -830,13 +898,8 @@ fn load_template_manifest_at(agents_dir: &Path, template: &str) -> Result<AgentM
             .map_err(|e| format!("failed to parse {}: {e}", manifest_path.display()));
     }
 
-    if let Some(manifest_toml) = bundled_template_manifest(template) {
-        return toml::from_str::<AgentManifest>(manifest_toml)
-            .map_err(|e| format!("failed to parse bundled manifest '{template}': {e}"));
-    }
-
     Err(format!(
-        "template '{template}' not found in {} or bundled manifests",
+        "template '{template}' not found in {}. Run `librefang init` to sync agents from the registry.",
         agents_dir.display()
     ))
 }
@@ -851,7 +914,9 @@ fn template_names_from_dir(root: &Path) -> Vec<String> {
         let path = entry.path();
         if path.is_dir() && path.join("agent.toml").exists() {
             if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
-                names.push(name.to_string());
+                if is_safe_template_name(name) {
+                    names.push(name.to_string());
+                }
             }
         }
     }
@@ -860,23 +925,17 @@ fn template_names_from_dir(root: &Path) -> Vec<String> {
 }
 
 fn all_template_names(agents_dir: &Path) -> Vec<String> {
-    let mut names: HashSet<String> = template_names_from_dir(agents_dir).into_iter().collect();
-    names.extend(
-        BUNDLED_TEMPLATE_MANIFESTS
-            .iter()
-            .map(|(name, _)| (*name).to_string()),
-    );
-
-    let mut ordered: Vec<String> = names.into_iter().collect();
-    ordered.sort();
-    ordered
+    let mut names = template_names_from_dir(agents_dir);
+    names.sort();
+    names.dedup();
+    names
 }
 
-fn bundled_template_manifest(template: &str) -> Option<&'static str> {
-    BUNDLED_TEMPLATE_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == template)
-        .map(|(_, manifest)| *manifest)
+fn is_safe_template_name(template: &str) -> bool {
+    !template.is_empty()
+        && template
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn matched_labels(message: &str, patterns: &[(&'static str, &'static str)]) -> Vec<&'static str> {
@@ -1128,14 +1187,47 @@ fn dedupe(values: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LibreFangKernel;
-    use librefang_types::config::KernelConfig;
-    use std::process::Command;
     use tempfile::tempdir;
 
     /// Helper: call auto_select_hand without semantic scores.
     fn hand(msg: &str) -> HandSelection {
         auto_select_hand(msg, None)
+    }
+
+    fn write_test_hand(home_dir: &Path, hand_id: &str, aliases: &[&str], weak_aliases: &[&str]) {
+        let hand_dir = home_dir.join("hands").join(hand_id);
+        fs::create_dir_all(&hand_dir).unwrap();
+
+        let aliases_toml = aliases
+            .iter()
+            .map(|alias| format!("\"{alias}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let weak_aliases_toml = weak_aliases
+            .iter()
+            .map(|alias| format!("\"{alias}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let hand_toml = format!(
+            r#"
+id = "{hand_id}"
+name = "Test {hand_id}"
+description = "Custom hand for tests"
+category = "data"
+
+[routing]
+aliases = [{aliases_toml}]
+weak_aliases = [{weak_aliases_toml}]
+
+[agent]
+name = "{hand_id}-agent"
+description = "Test hand agent"
+system_prompt = "Test prompt"
+"#
+        );
+
+        fs::write(hand_dir.join("HAND.toml"), hand_toml).unwrap();
     }
 
     #[test]
@@ -1147,9 +1239,13 @@ mod tests {
 
     #[test]
     fn test_auto_select_template_prefers_explicit_coder_rule() {
+        // Invalidate cache to ensure clean state for subsequent tests
+        invalidate_manifest_cache();
+
         let selection = auto_select_template(
             "请实现一个新的 Rust API 并补丁修复它",
             Path::new("/tmp/does-not-exist"),
+            None,
         );
         assert_eq!(selection.template, "coder");
         assert!(selection.score > 0);
@@ -1157,6 +1253,9 @@ mod tests {
 
     #[test]
     fn test_auto_select_template_can_use_manifest_metadata() {
+        // Invalidate manifest cache and force rebuild to ensure fresh scan
+        invalidate_manifest_cache();
+
         let tmp = tempdir().unwrap();
         let agents_dir = tmp.path().join("agents");
         let template_dir = agents_dir.join("release-notes");
@@ -1181,17 +1280,24 @@ weak_aliases = ["changelog"]
         )
         .unwrap();
 
-        let selection =
-            auto_select_template("Please draft release notes for version 1.2.3", &agents_dir);
+        let selection = auto_select_template(
+            "Please draft release notes for version 1.2.3",
+            &agents_dir,
+            None,
+        );
         assert_eq!(selection.template, "release-notes");
         assert!(selection.score > 0);
     }
 
     #[test]
     fn test_auto_select_template_routes_multi_domain_to_orchestrator() {
+        // Invalidate cache to ensure clean state for subsequent tests
+        invalidate_manifest_cache();
+
         let selection = auto_select_template(
             "请同时写代码并做深度调研，然后协作输出方案",
             Path::new("/tmp/does-not-exist"),
+            None,
         );
         assert_eq!(selection.template, "orchestrator");
         assert!(selection.score > 0);
@@ -1250,7 +1356,7 @@ weak_aliases = ["changelog"]
         ];
 
         for (message, expected) in cases {
-            let selection = auto_select_template(message, Path::new("/tmp/does-not-exist"));
+            let selection = auto_select_template(message, Path::new("/tmp/does-not-exist"), None);
             assert_eq!(selection.template, expected, "message: {message}");
             assert!(selection.score > 0, "message: {message}");
         }
@@ -1518,14 +1624,55 @@ weak_aliases = ["changelog"]
     }
 
     #[test]
-    fn test_load_template_manifest_falls_back_to_bundled_template() {
+    fn test_build_hand_route_candidates_loads_user_installed_hands() {
         let tmp = tempdir().unwrap();
-        let manifest = load_template_manifest(tmp.path(), "assistant").unwrap();
-        assert_eq!(manifest.name, "assistant");
+        write_test_hand(
+            tmp.path(),
+            "uptime-watcher",
+            &["uptime pulse monitor"],
+            &["uptime pulse"],
+        );
+
+        let candidates = build_hand_route_candidates(Some(tmp.path()));
+        let custom = candidates
+            .iter()
+            .find(|candidate| candidate.hand_id == "uptime-watcher")
+            .expect("user-installed hand should be loaded");
+
+        assert!(custom
+            .strong_phrases
+            .iter()
+            .any(|phrase| phrase == "uptime pulse monitor"));
+        assert!(custom
+            .weak_phrases
+            .iter()
+            .any(|phrase| phrase == "uptime pulse"));
     }
 
     #[test]
-    fn test_load_template_manifest_prefers_local_override() {
+    fn test_build_hand_route_candidates_ignores_invalid_user_hand_manifests() {
+        let tmp = tempdir().unwrap();
+        let hand_dir = tmp.path().join("hands").join("broken");
+        fs::create_dir_all(&hand_dir).unwrap();
+        fs::write(hand_dir.join("HAND.toml"), "not = valid = toml").unwrap();
+
+        let candidates = build_hand_route_candidates(Some(tmp.path()));
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.hand_id != "broken"),
+            "invalid HAND.toml should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_load_template_manifest_not_found_returns_error() {
+        let tmp = tempdir().unwrap();
+        assert!(load_template_manifest(tmp.path(), "nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_load_template_manifest_from_disk() {
         let tmp = tempdir().unwrap();
         let template_dir = tmp.path().join("agents").join("assistant");
         fs::create_dir_all(&template_dir).unwrap();
@@ -1548,75 +1695,7 @@ system_prompt = "override"
         assert_eq!(manifest.description, "Local override");
     }
 
-    #[tokio::test]
-    async fn test_builtin_router_spawns_metadata_template_and_cleans_up() {
-        if Command::new("python3").arg("--version").output().is_err()
-            && Command::new("python").arg("--version").output().is_err()
-        {
-            eprintln!("Python not available, skipping router execution test");
-            return;
-        }
-
-        let tmp = tempdir().unwrap();
-        let home_dir = tmp.path();
-        let agents_dir = home_dir.join("agents");
-        let template_dir = agents_dir.join("release-notes");
-        fs::create_dir_all(&template_dir).unwrap();
-        fs::write(
-            home_dir.join("router_worker.py"),
-            r#"#!/usr/bin/env python3
-import json
-import sys
-
-payload = json.loads(sys.stdin.readline())
-print(json.dumps({"type": "response", "text": f"ROUTED:{payload['message']}"}))
-"#,
-        )
-        .unwrap();
-        fs::write(
-            template_dir.join("agent.toml"),
-            r#"
-name = "release-notes"
-description = "Drafts release notes and changelogs."
-module = "python:router_worker.py"
-tags = ["release notes", "changelog"]
-
-[model]
-provider = "default"
-model = "default"
-system_prompt = "unused"
-
-[metadata.routing]
-aliases = ["release notes"]
-weak_aliases = ["changelog"]
-"#,
-        )
-        .unwrap();
-
-        let config = KernelConfig {
-            home_dir: home_dir.to_path_buf(),
-            data_dir: home_dir.join("data"),
-            ..KernelConfig::default()
-        };
-        let kernel = LibreFangKernel::boot_with_config(config).unwrap();
-
-        let router_id = kernel
-            .registry
-            .find_by_name("router")
-            .map(|entry| entry.id)
-            .expect("default router should exist");
-
-        let result = kernel
-            .send_message(router_id, "Please draft release notes for version 1.2.3")
-            .await
-            .unwrap();
-
-        assert_eq!(
-            result.response,
-            "ROUTED:Please draft release notes for version 1.2.3"
-        );
-        assert!(kernel.registry.find_by_name("release-notes").is_none());
-
-        kernel.shutdown();
-    }
+    // NOTE: builtin:router agent was removed. The test
+    // `test_builtin_router_spawns_metadata_template_and_cleans_up` was deleted.
+    // Assistant now handles routing directly via LLM tools.
 }

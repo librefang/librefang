@@ -8,6 +8,7 @@ function approvalsPage() {
     filterStatus: 'all',
     loading: true,
     loadError: '',
+    refreshTimer: null,
 
     _updateURL() {
       var params = [];
@@ -27,6 +28,16 @@ function approvalsPage() {
         if (params.get('filter')) self.filterStatus = params.get('filter');
       }
       this.$watch('filterStatus', function() { self._updateURL(); });
+      this.refreshTimer = setInterval(function() {
+        self.loadData();
+      }, 5000);
+    },
+
+    destroy() {
+      if (this.refreshTimer) {
+        clearInterval(this.refreshTimer);
+        this.refreshTimer = null;
+      }
     },
 
     interpolate(text, params) {

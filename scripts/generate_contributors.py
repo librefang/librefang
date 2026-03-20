@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -30,7 +31,7 @@ class Contributor:
     contributions: int
 
 
-def github_request(url: str) -> list[dict]:
+def github_request(url: str, retries: int = 3) -> list[dict]:
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": "librefang-contributors-generator",
@@ -38,9 +39,18 @@ def github_request(url: str) -> list[dict]:
     token = os.environ.get("GITHUB_TOKEN")
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        return json.loads(resp.read())
+    for attempt in range(retries):
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 403 and attempt < retries - 1:
+                wait = 2 ** attempt * 5
+                print(f"Rate limited, retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+            raise
 
 
 def fetch_contributors(repo: str) -> list[Contributor]:

@@ -1,0 +1,430 @@
+# 开发指南
+
+LibreFang 开发环境设置和贡献指南。
+
+---
+
+## 开发环境
+
+### 前置要求
+
+- **Rust** 1.75+
+- **Node.js** 18+ (用于桌面应用)
+- **pnpm** 8+ (用于文档站点)
+
+### 克隆仓库
+
+```bash
+git clone https://github.com/librefang/librefang.git
+cd librefang
+```
+
+### 构建
+
+```bash
+# 构建整个工作空间
+cargo build --workspace
+
+# 构建 CLI
+cargo build -p librefang-cli
+
+# 构建桌面应用
+cargo build -p librefang-desktop
+```
+
+### 测试
+
+```bash
+# 运行所有测试
+cargo test --workspace
+
+# 运行特定 crate
+cargo test -p librefang-kernel
+
+# 运行文档测试
+cargo test --doc
+```
+
+### 代码检查
+
+```bash
+# 必须零警告
+cargo clippy --workspace --all-targets -- -D warnings
+
+# 格式化检查
+cargo fmt --all -- --check
+```
+
+---
+
+## 项目结构
+
+```
+librefang/
+├── Cargo.lock
+├── Cargo.toml
+├── crates/
+│   ├── librefang-cli/          # CLI 工具
+│   ├── librefang-api/         # REST API 服务器
+│   ├── librefang-kernel/      # 核心内核
+│   ├── librefang-runtime/     # Agent 运行时
+│   ├── librefang-memory/      # 内存子系统
+│   ├── librefang-types/       # 共享类型
+│   ├── librefang-channels/    # 通道适配器
+│   ├── librefang-skills/      # 技能系统
+│   ├── librefang-hands/       # Hands 系统
+│   ├── librefang-wire/        # P2P 协议
+│   ├── librefang-desktop/     # 桌面应用
+│   ├── librefang-migrate/     # 迁移工具
+│   └── librefang-extensions/   # 扩展
+├── xtask/                      # 构建脚本
+├── docs/                       # 项目文档
+└── scripts/                    # 辅助脚本
+```
+
+---
+
+## 添加新通道
+
+### 1. 创建通道模块
+
+```rust
+// crates/librefang-channels/src/my_channel.rs
+
+use async_trait::async_trait;
+use crate::channel::{Channel, Message, ChannelConfig};
+
+pub struct MyChannel {
+    config: ChannelConfig,
+}
+
+#[async_trait]
+impl Channel for MyChannel {
+    async fn send(&self, message: Message) -> Result<(), Error> {
+        // 实现发送逻辑
+        Ok(())
+    }
+
+    async fn receive(&self) -> Result<Message, Error> {
+        // 实现接收逻辑
+        Ok(Message::default())
+    }
+}
+```
+
+### 2. 注册通道
+
+```rust
+// crates/librefang-channels/src/lib.rs
+
+pub mod my_channel;
+
+use crate::registry::ChannelRegistry;
+
+pub fn register_channels(registry: &mut ChannelRegistry) {
+    registry.register("my_channel", |config| {
+        Ok(Box::new(MyChannel::new(config)))
+    });
+}
+```
+
+### 3. 添加配置
+
+```rust
+// crates/librefang-types/src/config.rs
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MyChannelConfig {
+    pub api_key_env: String,
+    pub allowed_users: Option<Vec<String>>,
+}
+```
+
+---
+
+## 添加新技能
+
+### 1. 创建技能结构
+
+```toml
+# skills/my-skill/skill.toml
+name = "my-skill"
+version = "1.0.0"
+description = "My custom skill"
+
+[runtime]
+type = "python"
+entrypoint = "main.py"
+
+[tools]
+provided = ["my_tool"]
+
+[requirements]
+packages = ["requests"]
+```
+
+### 2. 实现代码
+
+```python
+# skills/my-skill/main.py
+
+def my_tool(param: str) -> str:
+    """My custom tool description"""
+    # 实现逻辑
+    return f"Result: {param}"
+
+# 注册工具
+TOOLS = [my_tool]
+```
+
+### 3. 编译技能
+
+```bash
+# 技能会自动编译到二进制中
+cargo build --workspace
+```
+
+---
+
+## 添加新工具
+
+### 1. 定义工具
+
+```rust
+// crates/librefang-runtime/src/tools/mod.rs
+
+use crate::tool::{Tool, ToolResult};
+
+pub struct MyTool;
+
+impl Tool for MyTool {
+    fn name(&self) -> &str {
+        "my_tool"
+    }
+
+    fn description(&self) -> &str {
+        "My custom tool description"
+    }
+
+    async fn execute(&self, params: Value) -> ToolResult {
+        // 实现工具逻辑
+        Ok(Value::String("result".to_string()))
+    }
+}
+```
+
+### 2. 注册工具
+
+```rust
+// crates/librefang-runtime/src/lib.rs
+
+pub fn register_tools(registry: &mut ToolRegistry) {
+    registry.register(MyTool::new());
+}
+```
+
+---
+
+## 添加新 LLM 提供商
+
+### 1. 实现驱动
+
+```rust
+// crates/librefang-runtime/src/llm/my_provider.rs
+
+use crate::llm::{LlmDriver, LlmResponse, LlmError};
+
+pub struct MyProvider {
+    api_key: String,
+    base_url: String,
+}
+
+#[async_trait]
+impl LlmDriver for MyProvider {
+    async fn complete(&self, prompt: &str) -> Result<LlmResponse, LlmError> {
+        // 调用 API
+        Ok(LlmResponse {
+            text: "response".to_string(),
+            tokens: 100,
+        })
+    }
+}
+```
+
+### 2. 添加到模型目录
+
+```rust
+// crates/librefang-types/src/models.rs
+
+pub fn get_provider(name: &str) -> Option<Box<dyn LlmDriver>> {
+    match name {
+        "my_provider" => Some(Box::new(MyProvider::new())),
+        _ => None,
+    }
+}
+```
+
+---
+
+## 代码风格
+
+### Rust 规范
+
+- 使用 `cargo fmt` 格式化
+- 使用 `cargo clippy` 检查
+- 遵循 Rust 命名约定
+- 添加文档注释 (`///`)
+
+### 提交规范
+
+```bash
+# 格式: <type>(<scope>): <description>
+
+git commit -m "feat(kernel): add new scheduling algorithm"
+git commit -m "fix(channels): resolve Slack rate limit"
+git commit -m "docs(api): update endpoint documentation"
+git commit -m "test(runtime): add tool execution tests"
+```
+
+### 类型
+
+| 类型 | 说明 |
+|------|------|
+| feat | 新功能 |
+| fix | Bug 修复 |
+| docs | 文档 |
+| style | 格式 |
+| refactor | 重构 |
+| test | 测试 |
+| chore | 维护 |
+
+---
+
+## 测试
+
+### 单元测试
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_my_function() {
+        assert_eq!(my_function(2), 4);
+    }
+}
+```
+
+### 集成测试
+
+```rust
+#[tokio::test]
+async fn test_agent_spawn() {
+    let kernel = Kernel::new().await;
+    let agent = kernel.spawn("test-agent").await;
+    assert!(agent.is_running());
+}
+```
+
+### 基准测试
+
+```rust
+#[tokio::bench]
+async fn benchmark_llm_call(b: &mut Bencher) {
+    b.iter(|| {
+        runtime.block_on(llm.complete("test prompt"))
+    })
+}
+```
+
+---
+
+## 调试
+
+### 日志
+
+```rust
+use tracing::{info, warn, error};
+
+info!("Starting agent {}", agent_id);
+warn!("Rate limit exceeded for channel {}", channel_id);
+error!("Failed to connect to provider: {}", error);
+```
+
+### 调试模式
+
+```bash
+# 启用详细日志
+RUST_LOG=debug cargo run
+
+# 只看特定模块
+RUST_LOG=librefang_kernel=trace cargo run
+```
+
+### 性能分析
+
+```bash
+# CPU  profiling
+cargo flamegraph --bin librefang-cli -- start
+
+# 内存分析
+cargo leptos --bin librefang-cli -- start
+```
+
+---
+
+## 发布
+
+### 版本号
+
+遵循语义化版本 (SemVer):
+
+- **主版本** - 不兼容的 API 变更
+- **次版本** - 向后兼容的新功能
+- **补丁版本** - 向后兼容的 bug 修复
+
+### 发布流程
+
+```bash
+# 1. 更新版本
+cargo version bump patch
+
+# 2. 更新 CHANGELOG
+vim CHANGELOG.md
+
+# 3. 创建 tag
+git tag v0.1.0
+
+# 4. 构建发布
+cargo build --release
+
+# 5. 发布到 crates.io
+cargo publish
+```
+
+---
+
+## 贡献
+
+### 贡献流程
+
+1. Fork 仓库
+2. 创建特性分支 (`git checkout -b feature/my-feature`)
+3. 提交更改 (`git commit -m "feat: add my feature"`)
+4. 推送分支 (`git push origin feature/my-feature`)
+5. 创建 Pull Request
+
+### 代码审查
+
+- 确保 `cargo clippy` 无警告
+- 确保 `cargo test` 通过
+- 添加测试覆盖新代码
+- 更新文档
+
+### 行为准则
+
+- 尊重他人
+- 欢迎新手
+- 专业沟通
+- 接受建设性批评

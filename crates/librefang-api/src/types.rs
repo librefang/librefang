@@ -42,6 +42,15 @@ pub struct MessageRequest {
     /// Optional file attachments (uploaded via /upload endpoint).
     #[serde(default)]
     pub attachments: Vec<AttachmentRef>,
+    /// Optional sender ID (platform-specific user ID).
+    #[serde(default)]
+    pub sender_id: Option<String>,
+    /// Optional sender display name.
+    #[serde(default)]
+    pub sender_name: Option<String>,
+    /// Optional channel type (e.g. "whatsapp", "telegram").
+    #[serde(default)]
+    pub channel_type: Option<String>,
 }
 
 /// Response from sending a message.
@@ -245,6 +254,31 @@ mod tests {
         let json = r#"{}"#;
         let result = serde_json::from_str::<ExtensionUninstallRequest>(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn message_request_sender_fields_default_to_none() {
+        let json = r#"{"message":"hello"}"#;
+        let req: MessageRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.message, "hello");
+        assert!(req.sender_id.is_none());
+        assert!(req.sender_name.is_none());
+        assert!(req.channel_type.is_none());
+    }
+
+    #[test]
+    fn message_request_sender_fields_deserialize() {
+        let json = r#"{
+            "message":"hello",
+            "sender_id":"user-123",
+            "sender_name":"Alice",
+            "channel_type":"whatsapp"
+        }"#;
+        let req: MessageRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.message, "hello");
+        assert_eq!(req.sender_id.as_deref(), Some("user-123"));
+        assert_eq!(req.sender_name.as_deref(), Some("Alice"));
+        assert_eq!(req.channel_type.as_deref(), Some("whatsapp"));
     }
 
     // Bulk operation type tests

@@ -1,11 +1,13 @@
-name: Update Contributors
+name: Update Contributors & Star History
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - 'public/assets/contributors.svg'
+  schedule:
+    - cron: "0 8 * * *"  # Daily 08:00 UTC
   workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
 
 concurrency:
   group: ${{ github.workflow }}
@@ -13,13 +15,11 @@ concurrency:
 
 jobs:
   update:
-    name: Refresh contributors
+    name: Refresh contributors and star history
     if: github.repository == 'librefang/librefang'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-        with:
-          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -28,21 +28,25 @@ jobs:
 
       - name: Generate contributors SVG
         env:
-          GITHUB_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
-        run: python3 scripts/generate_contributors.py librefang/librefang public/assets/contributors.svg
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/generate_contributors.py librefang/librefang web/public/assets/contributors.svg
 
-      - name: Create PR with updated SVG
+      - name: Generate star history SVG
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/generate_star_history.py librefang/librefang web/public/assets/star-history.svg
+
+      - name: Create PR with updated SVGs
         id: cpr
         uses: peter-evans/create-pull-request@v8
         with:
-          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
-          branch: chore/update-contributors
-          commit-message: "docs: update contributors"
-          title: "docs: update contributors"
+          branch: chore/update-contributors-star-history
+          commit-message: "docs: update contributors and star history"
+          title: "docs: update contributors and star history"
           delete-branch: true
 
       - name: Auto-merge PR
         if: steps.cpr.outputs.pull-request-number
         env:
-          GH_TOKEN: ${{ secrets.WEBSITE_REPO_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: gh pr merge ${{ steps.cpr.outputs.pull-request-number }} --squash --delete-branch
