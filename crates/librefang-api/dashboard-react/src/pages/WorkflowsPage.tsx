@@ -13,34 +13,34 @@ import {
 import { workflowTemplates, type WorkflowTemplate } from "../data/workflowTemplates";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
-import { Layers, RefreshCw, Trash2, FilePlus, Sparkles, Calendar, FileText, Activity, Bot } from "lucide-react";
+import {
+  Layers, RefreshCw, Trash2, FilePlus, Play, Search,
+  Calendar, FileText, Activity, Bot, ArrowRight, Loader2, Clock, ChevronRight
+} from "lucide-react";
 
-const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
-  Calendar,
-  FileText,
-  Activity,
-  Bot,
-};
-
+const iconMap: Record<string, React.ComponentType<{ className?: string }>> = { Calendar, FileText, Activity, Bot };
 const REFRESH_MS = 30000;
 
 export function WorkflowsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [showTemplates, setShowTemplates] = useState(false);
   const [selectedWorkflowId, setSelectedWorkflowId] = useState<string>("");
   const [runInput, setRunInput] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
 
   const workflowsQuery = useQuery({ queryKey: ["workflows", "list"], queryFn: listWorkflows, refetchInterval: REFRESH_MS });
   const runsQuery = useQuery({ queryKey: ["workflows", "runs", selectedWorkflowId], queryFn: () => listWorkflowRuns(selectedWorkflowId), enabled: Boolean(selectedWorkflowId) });
-
   const runMutation = useMutation({ mutationFn: ({ workflowId, input }: any) => runWorkflow(workflowId, input) });
   const deleteMutation = useMutation({ mutationFn: deleteWorkflow });
-  const createMutation = useMutation({ mutationFn: createWorkflow });
 
-  const workflows = useMemo(() => [...(workflowsQuery.data ?? [])].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? "")), [workflowsQuery.data]);
+  const workflows = useMemo(() =>
+    [...(workflowsQuery.data ?? [])]
+      .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
+      .filter(wf => !searchQuery || wf.name?.toLowerCase().includes(searchQuery.toLowerCase()) || wf.description?.toLowerCase().includes(searchQuery.toLowerCase())),
+    [workflowsQuery.data, searchQuery]
+  );
 
   const handleRun = async () => {
     if (!selectedWorkflowId) return;
@@ -51,28 +51,12 @@ export function WorkflowsPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (confirmDeleteId !== id) {
-      setConfirmDeleteId(id);
-      return;
-    }
+    if (confirmDeleteId !== id) { setConfirmDeleteId(id); return; }
     setConfirmDeleteId(null);
     try { await deleteMutation.mutateAsync(id); await queryClient.invalidateQueries({ queryKey: ["workflows"] }); } catch { /* ignore */ }
   };
 
-  const handleUseTemplate = async (template: WorkflowTemplate) => {
-    try {
-      await createMutation.mutateAsync({
-        name: t(template.name),
-        description: t(template.description),
-        steps: template.steps?.map((s: { name: string; prompt: string }) => ({ name: s.name, prompt: s.prompt })) ?? []
-      });
-      await queryClient.invalidateQueries({ queryKey: ["workflows"] });
-      setShowTemplates(false);
-    } catch { /* ignore */ }
-  };
-
   const handleNewWorkflow = (template?: WorkflowTemplate) => {
-    // 清除旧的画布缓存，确保新模板能正确加载
     sessionStorage.removeItem("canvasNodes");
     if (template) {
       sessionStorage.setItem("workflowTemplate", JSON.stringify({ nodes: template.nodes, edges: template.edges, name: template.name, description: template.description }));
@@ -82,152 +66,199 @@ export function WorkflowsPage() {
     navigate({ to: "/canvas", search: { t: Date.now() } });
   };
 
+  const openWorkflow = async (wfId: string) => {
+    try {
+      const detail = await getWorkflow(wfId);
+      let nodes, edges;
+      if (detail.layout?.nodes) {
+        nodes = detail.layout.nodes;
+        edges = detail.layout.edges || [];
+      } else {
+        const steps = Array.isArray(detail.steps) ? detail.steps : [];
+        nodes = steps.map((s: any, idx: number) => {
+          const p = s.prompt_template || s.prompt || "";
+          return { id: `node-${idx}`, type: "custom", position: { x: 50, y: idx * 80 },
+            data: { label: s.name, description: p.length > 40 ? p.slice(0, 40) + "..." : p, prompt: p, nodeType: "agent", agentId: s.agent?.agent_id, agentName: s.agent?.name } };
+        });
+        edges = nodes.slice(0, -1).map((_: any, i: number) => ({ id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}` }));
+      }
+      sessionStorage.removeItem("canvasNodes");
+      sessionStorage.setItem("workflowTemplate", JSON.stringify({ nodes, edges, name: detail.name, description: detail.description, workflowId: wfId }));
+      navigate({ to: "/canvas", search: { t: Date.now() } });
+    } catch (e) { console.error("Failed to load workflow:", e); }
+  };
+
+  const hasWorkflows = workflows.length > 0;
+
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
+      {/* Header */}
       <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
           <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
             <Layers className="h-4 w-4" />
             {t("workflows.automation_hub")}
           </div>
-          <h1 className="mt-2 text-3xl font-extrabold tracking-tight md:text-4xl">{t("workflows.title")}</h1>
-          <p className="mt-1 text-text-dim font-medium">{t("workflows.subtitle")}</p>
+          <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("workflows.title")}</h1>
+          <p className="mt-1 text-text-dim font-medium text-sm">{t("workflows.subtitle")}</p>
         </div>
-        <div className="flex gap-3">
-          <div className="relative">
-            <Button variant="primary" onClick={() => setShowTemplates(!showTemplates)}>
-              <FilePlus className="h-4 w-4" />
-              {t("common.symbols.expand")} {t("overview.new_workflow")}
-            </Button>
-            {showTemplates && (
-              <div className="absolute top-full mt-2 left-0 w-64 rounded-xl border border-border-subtle bg-surface shadow-xl z-50 overflow-hidden">
-                <div className="p-3 border-b border-border-subtle">
-                  <button onClick={() => handleNewWorkflow()} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-main transition-colors text-left">
-                    <div className="h-6 w-6 rounded-md bg-brand/20 flex items-center justify-center text-brand">
-                      <FilePlus className="h-3.5 w-3.5" />
-                    </div>
-                    <div>
-                      <p className="text-xs font-bold">{t("workflows.create_blank")}</p>
-                      <p className="text-[10px] text-text-dim">{t("workflows.use_template")}</p>
-                    </div>
-                  </button>
-                </div>
-                <div className="p-2 max-h-64 overflow-y-auto">
-                  {workflowTemplates.map(template => {
-                    const IconComponent = iconMap[template.icon];
-                    return (
-                    <button key={template.id} onClick={() => handleNewWorkflow(template)} className="w-full flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-main transition-colors text-left mb-1">
-                      <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-brand/20 to-brand/5 flex items-center justify-center">
-                        {IconComponent ? <IconComponent className="h-4 w-4 text-brand" /> : template.icon}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-bold truncate">{t(template.name)}</p>
-                        <p className="text-[10px] text-text-dim truncate">{t(template.description)}</p>
-                      </div>
-                    </button>
-                  );
-                })}
-                </div>
-                <div className="p-2 border-t border-border-subtle">
-                  <button onClick={() => handleUseTemplate(workflowTemplates[0])} className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-brand/10 text-brand transition-colors text-left">
-                    <Sparkles className="h-3.5 w-3.5" />
-                    <span className="text-xs font-bold">{t("workflows.use_template")}</span>
-                  </button>
-                </div>
-              </div>
-            )}
-          </div>
+        <div className="flex gap-2">
+          <Button variant="primary" onClick={() => handleNewWorkflow()}>
+            <FilePlus className="h-4 w-4" />
+            {t("workflows.create_blank")}
+          </Button>
           <Button variant="secondary" onClick={() => void workflowsQuery.refetch()}>
             <RefreshCw className={`h-3.5 w-3.5 ${workflowsQuery.isFetching ? "animate-spin" : ""}`} />
-            {t("common.refresh")}
           </Button>
         </div>
       </header>
 
-      <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
-        <Card padding="lg">
-          <h2 className="text-lg font-black tracking-tight mb-6">{t("workflows.all_workflows")}</h2>
-          <div className="grid gap-3 sm:grid-cols-2">
-            {workflows.map(wf => (
-              <Card key={wf.id} hover padding="sm" className={`cursor-pointer ${selectedWorkflowId === wf.id ? 'border-brand' : ''}`}
-                onClick={() => setSelectedWorkflowId(wf.id)}
-                onDoubleClick={async () => {
-                  try {
-                    const detail = await getWorkflow(wf.id);
-                    let nodes, edges;
-                    // 优先从后端 layout 恢复完整画布
-                    if (detail.layout?.nodes) {
-                      nodes = detail.layout.nodes;
-                      edges = detail.layout.edges || [];
-                    } else {
-                      // 降级：从 steps 重建
-                      const steps = Array.isArray(detail.steps) ? detail.steps : [];
-                      nodes = steps.map((s: any, idx: number) => {
-                        const fullPrompt = s.prompt_template || s.prompt || "";
-                        return {
-                          id: `node-${idx}`, type: "custom", position: { x: 50, y: idx * 80 },
-                          data: {
-                            label: s.name,
-                            description: fullPrompt.length > 40 ? fullPrompt.slice(0, 40) + "..." : fullPrompt,
-                            prompt: fullPrompt,
-                            nodeType: "agent",
-                            agentId: s.agent?.agent_id || s.agent?.id,
-                            agentName: s.agent?.name || s.agent_name,
-                          }
-                        };
-                      });
-                      edges = nodes.slice(0, -1).map((_: any, i: number) => ({
-                        id: `e-${i}`, source: `node-${i}`, target: `node-${i + 1}`
-                      }));
-                    }
-                    sessionStorage.removeItem("canvasNodes");
-                    sessionStorage.setItem("workflowTemplate", JSON.stringify({ nodes, edges, name: detail.name, description: detail.description, workflowId: wf.id }));
-                    navigate({ to: "/canvas", search: { t: Date.now() } });
-                  } catch (e) { console.error("Failed to load workflow:", e); }
-                }}>
-                <div className="flex justify-between items-start">
+      {/* 模板推荐区 — 始终显示 */}
+      <div>
+        <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("workflows.templates")}</h2>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {workflowTemplates.map(tmpl => {
+            const Icon = iconMap[tmpl.icon];
+            const nodeCount = tmpl.nodes.length;
+            return (
+              <button key={tmpl.id} onClick={() => handleNewWorkflow(tmpl)}
+                className="group text-left p-4 rounded-2xl border border-border-subtle bg-surface hover:border-brand/50 hover:shadow-md transition-all">
+                <div className="flex items-start gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 group-hover:bg-brand/20 transition-colors">
+                    {Icon ? <Icon className="w-5 h-5 text-brand" /> : <Layers className="w-5 h-5 text-brand" />}
+                  </div>
                   <div className="min-w-0 flex-1">
-                    <h3 className="text-sm font-black truncate group-hover:text-brand transition-colors">{wf.name}</h3>
-                    <p className="text-[10px] text-text-dim mt-1 line-clamp-1 italic">{wf.description || t("common.no_data")}</p>
-                    <div className="mt-3 flex items-center gap-3 text-[9px] font-bold text-text-dim/60 uppercase">
-                      <span>{t("workflows.steps_count", { count: wf.steps || 0 })}</span>
-                      <div className="h-1 w-1 rounded-full bg-border-subtle" />
-                      <span>{t("common.created")}: {new Date(wf.created_at || "").toLocaleDateString()}</span>
+                    <p className="text-sm font-bold truncate group-hover:text-brand transition-colors">{t(tmpl.name)}</p>
+                    <p className="text-[10px] text-text-dim mt-0.5 line-clamp-2">{t(tmpl.description)}</p>
+                    <div className="flex items-center gap-2 mt-2 text-[9px] font-semibold text-text-dim/50">
+                      <span>{nodeCount} nodes</span>
+                      <ArrowRight className="w-3 h-3 text-brand/50 group-hover:translate-x-0.5 transition-transform" />
                     </div>
                   </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* 搜索栏 */}
+      {hasWorkflows && (
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-dim/40" />
+          <input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+            placeholder={t("workflows.search_placeholder")}
+            className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-border-subtle bg-surface text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
+        </div>
+      )}
+
+      {/* 主内容区 */}
+      {hasWorkflows ? (
+        <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
+          {/* 工作流列表 */}
+          <div className="space-y-2">
+            <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-1">
+              {t("workflows.all_workflows")} ({workflows.length})
+            </h2>
+            {workflows.map(wf => (
+              <div key={wf.id}
+                onClick={() => setSelectedWorkflowId(wf.id)}
+                onDoubleClick={() => openWorkflow(wf.id)}
+                className={`group flex items-center gap-4 p-4 rounded-2xl border cursor-pointer transition-all ${
+                  selectedWorkflowId === wf.id
+                    ? "border-brand bg-brand/5 shadow-sm"
+                    : "border-border-subtle bg-surface hover:border-brand/30 hover:shadow-sm"
+                }`}>
+                {/* 图标 */}
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                  selectedWorkflowId === wf.id ? "bg-brand text-white" : "bg-main text-brand"
+                }`}>
+                  <Layers className="w-5 h-5" />
+                </div>
+                {/* 信息 */}
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-sm font-bold truncate">{wf.name}</h3>
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-semibold shrink-0">
+                      {wf.steps || 0} steps
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-text-dim mt-0.5 truncate">{wf.description || t("common.no_data")}</p>
+                  <div className="flex items-center gap-2 mt-1.5 text-[9px] text-text-dim/50">
+                    <Clock className="w-3 h-3" />
+                    <span>{new Date(wf.created_at || "").toLocaleDateString()}</span>
+                  </div>
+                </div>
+                {/* 操作 */}
+                <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
+                  <button onClick={() => openWorkflow(wf.id)}
+                    className="p-2 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-all"
+                    title={t("canvas.ctx_edit")}>
+                    <ChevronRight className="w-4 h-4" />
+                  </button>
                   {confirmDeleteId === wf.id ? (
-                    <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
-                      <button onClick={() => handleDelete(wf.id)} className="px-2 py-0.5 rounded-md bg-error text-white text-[10px] font-bold hover:bg-error/80">{t("common.confirm")}</button>
-                      <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-0.5 rounded-md bg-main text-text-dim text-[10px] font-bold hover:bg-main/80">{t("common.cancel")}</button>
+                    <div className="flex items-center gap-1">
+                      <button onClick={() => handleDelete(wf.id)} className="px-2 py-1 rounded-lg bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
+                      <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-lg bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
                     </div>
                   ) : (
-                    <button onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }} className="p-1.5 rounded-lg text-text-dim/40 hover:text-error transition-all">
-                      <Trash2 className="h-3.5 w-3.5" />
+                    <button onClick={() => handleDelete(wf.id)}
+                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}
                 </div>
-              </Card>
+              </div>
             ))}
           </div>
-        </Card>
 
-        <div className="flex flex-col gap-6">
-          <Card padding="lg">
-            <h3 className="text-xs font-black uppercase tracking-widest text-text-dim mb-4">{t("workflows.run_workflow")}</h3>
-            <select value={selectedWorkflowId} onChange={(e) => setSelectedWorkflowId(e.target.value)} className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm mb-3 outline-none focus:border-brand">
-              <option value="">{t("workflows.select_workflow")}</option>
-              {workflows.map(wf => <option key={wf.id} value={wf.id}>{wf.name}</option>)}
-            </select>
-            <textarea value={runInput} onChange={e => setRunInput(e.target.value)} placeholder={t("chat.transmit_command")} rows={3} className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm mb-4 outline-none focus:border-brand resize-none" />
-            <Button variant="primary" className="w-full bg-success border-success hover:bg-success/90" disabled={!selectedWorkflowId || runMutation.isPending} onClick={handleRun}>{t("scheduler.run_now")}</Button>
-          </Card>
+          {/* 右侧面板：选中工作流后显示 */}
+          {selectedWorkflowId && (
+            <div className="space-y-4">
+              <Card padding="lg" className="sticky top-4">
+                <h3 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-4">{t("workflows.run_workflow")}</h3>
+                <textarea value={runInput} onChange={e => setRunInput(e.target.value)}
+                  placeholder={t("canvas.run_input_placeholder")} rows={4}
+                  className="w-full rounded-xl border border-border-subtle bg-main px-4 py-2.5 text-sm mb-3 outline-none focus:border-brand resize-none" />
+                <Button variant="primary" className="w-full" disabled={runMutation.isPending} onClick={handleRun}>
+                  {runMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-2" /> : <Play className="w-4 h-4 mr-2" />}
+                  {t("canvas.run_now")}
+                </Button>
 
-          <Card padding="lg">
-            <h3 className="text-xs font-black uppercase tracking-widest text-text-dim mb-4">{t("workflows.recent_runs")}</h3>
-            <p className="text-[10px] text-text-dim italic text-center py-8">{selectedWorkflowId ? t("workflows.no_runs") : t("workflows.select_workflow_hint")}</p>
-          </Card>
+                {/* 运行结果 */}
+                {runMutation.data && (
+                  <div className="mt-4 p-3 rounded-xl bg-success/5 border border-success/20">
+                    <p className="text-[10px] font-bold text-success mb-1">{t("canvas.run_result")}</p>
+                    <pre className="text-xs text-text whitespace-pre-wrap max-h-40 overflow-y-auto">
+                      {(runMutation.data as any).output || (runMutation.data as any).message || JSON.stringify(runMutation.data)}
+                    </pre>
+                  </div>
+                )}
+                {runMutation.error && (
+                  <div className="mt-4 p-3 rounded-xl bg-error/5 border border-error/20">
+                    <p className="text-xs text-error">{(runMutation.error as any)?.message || String(runMutation.error)}</p>
+                  </div>
+                )}
+              </Card>
+            </div>
+          )}
         </div>
-      </div>
+      ) : (
+        /* 空状态 */
+        !workflowsQuery.isLoading && (
+          <div className="text-center py-16">
+            <div className="w-16 h-16 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">
+              <Layers className="w-8 h-8 text-brand" />
+            </div>
+            <h3 className="text-lg font-bold">{t("workflows.empty_title")}</h3>
+            <p className="text-sm text-text-dim mt-1 mb-6">{t("workflows.empty_desc")}</p>
+            <Button variant="primary" onClick={() => handleNewWorkflow()}>
+              <FilePlus className="w-4 h-4" />
+              {t("workflows.create_blank")}
+            </Button>
+          </div>
+        )
+      )}
     </div>
   );
 }
