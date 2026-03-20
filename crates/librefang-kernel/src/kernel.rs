@@ -952,7 +952,7 @@ impl LibreFangKernel {
         let mut skill_registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
 
         // Load bundled skills first (compile-time embedded)
-        let bundled_count = skill_registry.load_bundled();
+        let bundled_count = skill_registry.load_bundled(&config.home_dir);
         if bundled_count > 0 {
             info!("Loaded {bundled_count} bundled skill(s)");
         }
@@ -976,7 +976,7 @@ impl LibreFangKernel {
         // Initialize hand registry (curated autonomous packages)
         let hand_registry = librefang_hands::registry::HandRegistry::new();
         router::set_hand_route_home_dir(&config.home_dir);
-        let hand_count = hand_registry.load_bundled();
+        let hand_count = hand_registry.load_bundled(&config.home_dir);
         if hand_count > 0 {
             info!("Loaded {hand_count} bundled hand(s)");
         }
@@ -984,7 +984,7 @@ impl LibreFangKernel {
         // Initialize extension/integration registry
         let mut extension_registry =
             librefang_extensions::registry::IntegrationRegistry::new(&config.home_dir);
-        let ext_bundled = extension_registry.load_bundled();
+        let ext_bundled = extension_registry.load_bundled(&config.home_dir);
         match extension_registry.load_installed() {
             Ok(count) => {
                 if count > 0 {
@@ -2039,6 +2039,19 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
+        self.send_message_streaming_with_sender(agent_id, message, kernel_handle, None)
+    }
+
+    fn send_message_streaming_with_sender(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_context: Option<&SenderContext>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
         // Enforce quota before spawning the streaming task
         self.scheduler
             .check_quota(agent_id)
@@ -2239,9 +2252,9 @@ system_prompt = "You are a helpful assistant."
                         .and_then(|(s, _)| s)
                 },
                 user_name,
-                channel_type: None,
-                sender_user_id: None,
-                sender_display_name: None,
+                channel_type: sender_context.map(|s| s.channel.clone()),
+                sender_user_id: sender_context.map(|s| s.user_id.clone()),
+                sender_display_name: sender_context.and_then(|s| s.display_name.clone()),
                 is_subagent: manifest
                     .metadata
                     .get("is_subagent")
@@ -2781,7 +2794,12 @@ system_prompt = "You are a helpful assistant."
         let effective_id = self
             .resolve_assistant_target(agent_id, message, sender_context)
             .await?;
-        self.send_message_streaming(effective_id, message, kernel_handle)
+        self.send_message_streaming_with_sender(
+            effective_id,
+            message,
+            kernel_handle,
+            sender_context,
+        )
     }
 
     async fn resolve_assistant_target(
@@ -2932,8 +2950,9 @@ system_prompt = "You are a helpful assistant."
     fn assistant_route_key(agent_id: AgentId, sender_context: Option<&SenderContext>) -> String {
         match sender_context {
             Some(sender) => format!(
-                "{agent_id}:{}:{}:{}",
+                "{agent_id}:{}:{}:{}:{}",
                 sender.channel,
+                sender.account_id.as_deref().unwrap_or_default(),
                 sender.user_id,
                 sender.thread_id.as_deref().unwrap_or_default()
             ),
@@ -6154,7 +6173,7 @@ system_prompt = "You are a helpful assistant."
         }
         let skills_dir = self.config.home_dir.join("skills");
         let mut fresh = librefang_skills::registry::SkillRegistry::new(skills_dir);
-        let bundled = fresh.load_bundled();
+        let bundled = fresh.load_bundled(&self.config.home_dir);
         let user = fresh.load_all().unwrap_or(0);
         info!(bundled, user, "Skill registry hot-reloaded");
         *registry = fresh;

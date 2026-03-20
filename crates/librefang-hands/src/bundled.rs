@@ -7,12 +7,14 @@ use crate::{HandDefinition, HandError};
 
 /// Returns all hand definitions found on disk as (id, HAND.toml content, SKILL.md content).
 ///
-/// Scans the hands directory under LIBREFANG_HOME (default: ~/.librefang/hands/).
-/// Falls back to the bundled/ directory relative to the crate for dev builds.
-pub fn bundled_hands() -> Vec<(&'static str, &'static str, &'static str)> {
+/// Scans `home_dir/hands/` for subdirectories containing HAND.toml.
+/// The caller passes the authoritative home directory (typically `config.home_dir`).
+pub fn bundled_hands(
+    home_dir: &std::path::Path,
+) -> Vec<(&'static str, &'static str, &'static str)> {
     // Leak strings into 'static to preserve the existing API contract.
     // This is called once at boot and cached, so the leak is bounded.
-    disk_hands()
+    disk_hands(home_dir)
         .into_iter()
         .map(|(id, toml, skill)| {
             let id: &'static str = Box::leak(id.into_boxed_str());
@@ -23,18 +25,9 @@ pub fn bundled_hands() -> Vec<(&'static str, &'static str, &'static str)> {
         .collect()
 }
 
-fn disk_hands() -> Vec<(String, String, String)> {
+fn disk_hands(home_dir: &std::path::Path) -> Vec<(String, String, String)> {
     let mut results = Vec::new();
-
-    // Primary: ~/.librefang/hands/
-    let home = std::env::var("LIBREFANG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".librefang")
-        });
-    let hands_dir = home.join("hands");
+    let hands_dir = home_dir.join("hands");
 
     if let Ok(entries) = std::fs::read_dir(&hands_dir) {
         for entry in entries.flatten() {

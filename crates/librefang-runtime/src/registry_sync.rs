@@ -98,6 +98,8 @@ pub fn needs_sync(home_dir: &Path) -> bool {
     !home_dir.join("providers").exists()
         || !home_dir.join("hands").exists()
         || !home_dir.join("agents").exists()
+        || !home_dir.join("skills").exists()
+        || !home_dir.join("integrations").exists()
 }
 
 /// Sync flat .toml files (e.g. integrations/, providers/).

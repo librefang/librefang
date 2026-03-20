@@ -8,9 +8,10 @@ use crate::SkillManifest;
 
 /// Return all skills found on disk as (name, raw SKILL.md content) pairs.
 ///
-/// Scans ~/.librefang/skills/ for subdirectories containing SKILL.md.
-pub fn bundled_skills() -> Vec<(&'static str, &'static str)> {
-    disk_skills()
+/// Scans `home_dir/skills/` for subdirectories containing SKILL.md.
+/// The caller passes the authoritative home directory (typically `config.home_dir`).
+pub fn bundled_skills(home_dir: &std::path::Path) -> Vec<(&'static str, &'static str)> {
+    disk_skills(home_dir)
         .into_iter()
         .map(|(name, content)| {
             let name: &'static str = Box::leak(name.into_boxed_str());
@@ -20,17 +21,9 @@ pub fn bundled_skills() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-fn disk_skills() -> Vec<(String, String)> {
+fn disk_skills(home_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut results = Vec::new();
-
-    let home = std::env::var("LIBREFANG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".librefang")
-        });
-    let skills_dir = home.join("skills");
+    let skills_dir = home_dir.join("skills");
 
     if let Ok(entries) = std::fs::read_dir(&skills_dir) {
         for entry in entries.flatten() {

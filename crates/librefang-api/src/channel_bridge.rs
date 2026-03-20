@@ -303,11 +303,14 @@ fn start_stream_text_bridge(
                     iter_buf.push_str(&text);
                 }
                 StreamEvent::ContentComplete { .. } => {
+                    // Flush buffered text. Only suppress when ToolUseStart
+                    // was seen in this iteration (the text is the tool call
+                    // echoed as content). Do NOT apply heuristic filtering
+                    // here — normal replies that demonstrate tool syntax
+                    // (e.g. "use `web_search {…}`") must not be discarded.
                     if !iter_buf.is_empty() {
                         if saw_tool_use {
                             debug!("Streaming bridge: filtered tool-use-adjacent text");
-                        } else if looks_like_tool_call(&iter_buf) {
-                            debug!("Streaming bridge: filtered leaked tool call text");
                         } else if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
                             break;
                         }

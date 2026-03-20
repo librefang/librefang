@@ -3781,7 +3781,7 @@ fn cmd_doctor(json: bool, repair: bool) {
         }
         let skills_dir = cli_librefang_home().join("skills");
         let mut skill_reg = librefang_skills::registry::SkillRegistry::new(skills_dir.clone());
-        skill_reg.load_bundled();
+        skill_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let bundled_count = skill_reg.count();
         if !json {
             ui::check_ok(&format!("Bundled skills loaded: {bundled_count}"));
@@ -3855,7 +3855,7 @@ fn cmd_doctor(json: bool, repair: bool) {
         let librefang_dir = cli_librefang_home();
         let mut ext_registry =
             librefang_extensions::registry::IntegrationRegistry::new(&librefang_dir);
-        ext_registry.load_bundled();
+        ext_registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let _ = ext_registry.load_installed();
         let template_count = ext_registry.template_count();
         let installed_count = ext_registry.installed_count();
@@ -6374,7 +6374,7 @@ pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
 fn cmd_integration_add(name: &str, key: Option<&str>) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
+    registry.load_bundled(&librefang_dir);
     let _ = registry.load_installed();
 
     // Check template exists
@@ -6460,7 +6460,7 @@ fn cmd_integration_add(name: &str, key: Option<&str>) {
 fn cmd_integration_remove(name: &str) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
+    registry.load_bundled(&librefang_dir);
     let _ = registry.load_installed();
 
     match librefang_extensions::installer::remove_integration(&mut registry, name) {
@@ -6484,7 +6484,7 @@ fn cmd_integration_remove(name: &str) {
 fn cmd_integrations_list(query: Option<&str>) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
+    registry.load_bundled(&librefang_dir);
     let _ = registry.load_installed();
 
     let dotenv_path = home.join(".env");
@@ -9110,7 +9110,8 @@ mod tests {
     fn test_doctor_skill_registry_loads_bundled() {
         let skills_dir = std::env::temp_dir().join("librefang-doctor-test-skills");
         let mut skill_reg = librefang_skills::registry::SkillRegistry::new(skills_dir);
-        let count = skill_reg.load_bundled();
+        let count =
+            skill_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         // Skills are loaded from disk at runtime; count depends on registry files being present
         assert_eq!(skill_reg.count(), count);
     }
@@ -9120,7 +9121,8 @@ mod tests {
         let tmp = std::env::temp_dir().join("librefang-doctor-test-ext");
         let _ = std::fs::create_dir_all(&tmp);
         let mut ext_reg = librefang_extensions::registry::IntegrationRegistry::new(&tmp);
-        let count = ext_reg.load_bundled();
+        let count =
+            ext_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         // Integrations are loaded from disk at runtime; count depends on registry files being present
         assert_eq!(ext_reg.template_count(), count);
     }

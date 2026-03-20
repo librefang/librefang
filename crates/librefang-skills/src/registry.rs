@@ -58,8 +58,8 @@ impl SkillRegistry {
     /// Called before `load_all()` so that user-installed skills with the same name
     /// can override bundled ones. Runs prompt injection scan even on bundled skills
     /// as a defense-in-depth measure.
-    pub fn load_bundled(&mut self) -> usize {
-        let bundled = bundled::bundled_skills();
+    pub fn load_bundled(&mut self, home_dir: &std::path::Path) -> usize {
+        let bundled = bundled::bundled_skills(home_dir);
         let mut count = 0;
 
         for (name, content) in &bundled {

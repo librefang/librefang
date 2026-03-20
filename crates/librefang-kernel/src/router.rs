@@ -168,7 +168,8 @@ fn resolve_hand_route_home_dir() -> PathBuf {
 fn build_hand_route_candidates(home_dir: Option<&Path>) -> Vec<HandRouteCandidate> {
     let mut candidates_by_id: HashMap<String, HandRouteCandidate> = HashMap::new();
 
-    for (id, toml_content, _skill) in librefang_hands::bundled::bundled_hands() {
+    let bundled_home = home_dir.unwrap_or_else(|| std::path::Path::new(""));
+    for (id, toml_content, _skill) in librefang_hands::bundled::bundled_hands(bundled_home) {
         let Ok(def) = librefang_hands::bundled::parse_bundled(id, toml_content, "") else {
             continue;
         };

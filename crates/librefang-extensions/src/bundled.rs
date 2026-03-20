@@ -4,8 +4,11 @@
 //! the registry via `librefang init`). No compile-time embedding.
 
 /// Returns all integration templates found on disk as (id, TOML content) pairs.
-pub fn bundled_integrations() -> Vec<(&'static str, &'static str)> {
-    disk_integrations()
+///
+/// Scans `home_dir/integrations/` for .toml files.
+/// The caller passes the authoritative home directory (typically `config.home_dir`).
+pub fn bundled_integrations(home_dir: &std::path::Path) -> Vec<(&'static str, &'static str)> {
+    disk_integrations(home_dir)
         .into_iter()
         .map(|(id, content)| {
             let id: &'static str = Box::leak(id.into_boxed_str());
@@ -15,17 +18,9 @@ pub fn bundled_integrations() -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-fn disk_integrations() -> Vec<(String, String)> {
+fn disk_integrations(home_dir: &std::path::Path) -> Vec<(String, String)> {
     let mut results = Vec::new();
-
-    let home = std::env::var("LIBREFANG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".librefang")
-        });
-    let integrations_dir = home.join("integrations");
+    let integrations_dir = home_dir.join("integrations");
 
     if let Ok(entries) = std::fs::read_dir(&integrations_dir) {
         for entry in entries.flatten() {

@@ -3907,6 +3907,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "dirs 6.0.0",
+ "librefang-runtime",
  "librefang-types",
  "serde",
  "serde_json",

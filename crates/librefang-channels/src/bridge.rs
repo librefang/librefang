@@ -425,6 +425,11 @@ fn build_sender_context(message: &ChannelMessage) -> SenderContext {
         display_name: message.sender.display_name.clone(),
         is_group: message.is_group,
         thread_id: message.thread_id.clone(),
+        account_id: message
+            .metadata
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     }
 }
 
