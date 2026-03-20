@@ -227,17 +227,35 @@ impl IntegrationRegistry {
 mod tests {
     use super::*;
 
+    /// Ensure registry content is available for tests.
+    /// If ~/.librefang/integrations/ is empty (CI), auto-syncs from the registry.
+    fn ensure_registry() {
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
+        if !home.join("integrations").exists()
+            || std::fs::read_dir(home.join("integrations"))
+                .map(|d| d.count() == 0)
+                .unwrap_or(true)
+        {
+            librefang_runtime::registry_sync::sync_registry(&home);
+        }
+    }
+
     #[test]
     fn registry_load_bundled() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
         let count = reg.load_bundled();
-        assert_eq!(count, 25);
-        assert_eq!(reg.template_count(), 25);
+        assert!(
+            count >= 20,
+            "Expected at least 20 integration templates, got {count}"
+        );
+        assert_eq!(reg.template_count(), count);
     }
 
     #[test]
     fn registry_get_template() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
         reg.load_bundled();
@@ -248,6 +266,7 @@ mod tests {
 
     #[test]
     fn registry_search() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
         reg.load_bundled();
@@ -257,6 +276,7 @@ mod tests {
 
     #[test]
     fn registry_install_uninstall() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
         reg.load_bundled();
@@ -288,6 +308,7 @@ mod tests {
 
     #[test]
     fn registry_to_mcp_configs() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
         reg.load_bundled();
@@ -308,6 +329,7 @@ mod tests {
 
     #[test]
     fn registry_save_load_roundtrip() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
         reg.load_bundled();
@@ -331,6 +353,7 @@ mod tests {
 
     #[test]
     fn registry_list_by_category() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut reg = IntegrationRegistry::new(dir.path());
         reg.load_bundled();

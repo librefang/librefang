@@ -83,6 +83,17 @@ pub fn sync_registry(home_dir: &Path) {
 ///
 /// Returns `false` if any critical directories are missing, meaning
 /// auto-sync should run.
+/// Resolve the default home directory (for tests and standalone usage).
+pub fn resolve_home_dir_for_tests() -> std::path::PathBuf {
+    std::env::var("LIBREFANG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".librefang")
+        })
+}
+
 pub fn needs_sync(home_dir: &Path) -> bool {
     !home_dir.join("providers").exists()
         || !home_dir.join("hands").exists()

@@ -300,8 +300,20 @@ mod tests {
     use super::*;
     use crate::registry::IntegrationRegistry;
 
+    fn ensure_registry() {
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
+        if !home.join("integrations").exists()
+            || std::fs::read_dir(home.join("integrations"))
+                .map(|d| d.count() == 0)
+                .unwrap_or(true)
+        {
+            librefang_runtime::registry_sync::sync_registry(&home);
+        }
+    }
+
     #[test]
     fn install_and_remove() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
         registry.load_bundled();
@@ -325,6 +337,7 @@ mod tests {
 
     #[test]
     fn install_with_key() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
         registry.load_bundled();
@@ -341,6 +354,7 @@ mod tests {
 
     #[test]
     fn install_already_installed() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
         registry.load_bundled();
@@ -355,6 +369,7 @@ mod tests {
 
     #[test]
     fn remove_not_installed() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
         registry.load_bundled();
@@ -364,13 +379,14 @@ mod tests {
 
     #[test]
     fn list_integrations_all() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
         registry.load_bundled();
         let resolver = CredentialResolver::new(None, None);
 
         let list = list_integrations(&registry, &resolver);
-        assert_eq!(list.len(), 25);
+        assert!(list.len() >= 20);
         assert!(list
             .iter()
             .all(|e| e.status == IntegrationStatus::Available));
@@ -378,6 +394,7 @@ mod tests {
 
     #[test]
     fn search_integrations_query() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
         registry.load_bundled();
