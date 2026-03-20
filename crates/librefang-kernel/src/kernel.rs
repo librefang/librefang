@@ -2254,7 +2254,7 @@ system_prompt = "You are a helpful assistant."
                 user_name,
                 channel_type: sender_context.map(|s| s.channel.clone()),
                 sender_user_id: sender_context.map(|s| s.user_id.clone()),
-                sender_display_name: sender_context.and_then(|s| s.display_name.clone()),
+                sender_display_name: sender_context.map(|s| s.display_name.clone()),
                 is_subagent: manifest
                     .metadata
                     .get("is_subagent")
@@ -7758,6 +7758,7 @@ mod tests {
             display_name: "Alice".to_string(),
             is_group: true,
             thread_id: Some("thread-9".to_string()),
+            account_id: None,
         };
 
         let with_sender = LibreFangKernel::assistant_route_key(agent_id, Some(&sender));

@@ -6374,7 +6374,7 @@ pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
 fn cmd_integration_add(name: &str, key: Option<&str>) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled(&librefang_dir);
+    registry.load_bundled(&home);
     let _ = registry.load_installed();
 
     // Check template exists
@@ -6460,7 +6460,7 @@ fn cmd_integration_add(name: &str, key: Option<&str>) {
 fn cmd_integration_remove(name: &str) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled(&librefang_dir);
+    registry.load_bundled(&home);
     let _ = registry.load_installed();
 
     match librefang_extensions::installer::remove_integration(&mut registry, name) {
@@ -6484,7 +6484,7 @@ fn cmd_integration_remove(name: &str) {
 fn cmd_integrations_list(query: Option<&str>) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled(&librefang_dir);
+    registry.load_bundled(&home);
     let _ = registry.load_installed();
 
     let dotenv_path = home.join(".env");
