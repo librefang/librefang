@@ -29,53 +29,81 @@ import {
   Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight
 } from "lucide-react";
 
-// 节点类型配置
+// 节点类型配置 — n8n 风格配色
 const NODE_TYPES = [
-  // 触发器（视觉标记，不参与执行）
-  { type: "start", labelKey: "canvas.node_types.start", color: "#22c55e", icon: "S", descKey: "canvas.node_types.start_desc" },
-  { type: "end", labelKey: "canvas.node_types.end", color: "#ef4444", icon: "E", descKey: "canvas.node_types.end_desc" },
-  { type: "schedule", labelKey: "canvas.node_types.schedule", color: "#f59e0b", icon: "⏱", descKey: "canvas.node_types.schedule_desc" },
-  { type: "webhook", labelKey: "canvas.node_types.webhook", color: "#3b82f6", icon: "↗", descKey: "canvas.node_types.webhook_desc" },
-  { type: "channel", labelKey: "canvas.node_types.channel", color: "#8b5cf6", icon: "📢", descKey: "canvas.node_types.channel_desc" },
-  // 逻辑控制（绑 agent 后参与执行）
-  { type: "condition", labelKey: "canvas.node_types.condition", color: "#f59e0b", icon: "?", descKey: "canvas.node_types.condition_desc" },
-  { type: "loop", labelKey: "canvas.node_types.loop", color: "#8b5cf6", icon: "↻", descKey: "canvas.node_types.loop_desc" },
-  { type: "parallel", labelKey: "canvas.node_types.parallel", color: "#f59e0b", icon: "⫸", descKey: "canvas.node_types.parallel_desc" },
-  { type: "collect", labelKey: "canvas.node_types.collect", color: "#22c55e", icon: "⫷", descKey: "canvas.node_types.collect_desc" },
-  { type: "wait", labelKey: "canvas.node_types.wait", color: "#6b7280", icon: "⏸", descKey: "canvas.node_types.wait_desc" },
-  // 动作（核心执行节点）
-  { type: "respond", labelKey: "canvas.node_types.respond", color: "#22c55e", icon: "↩", descKey: "canvas.node_types.respond_desc" },
-  { type: "agent", labelKey: "canvas.node_types.agent", color: "#3b82f6", icon: "A", descKey: "canvas.node_types.agent_desc" },
+  // 触发器（视觉标记）
+  { type: "start", labelKey: "canvas.node_types.start", color: "#10b981", bg: "#ecfdf5", icon: "▶", descKey: "canvas.node_types.start_desc" },
+  { type: "end", labelKey: "canvas.node_types.end", color: "#ef4444", bg: "#fef2f2", icon: "■", descKey: "canvas.node_types.end_desc" },
+  { type: "schedule", labelKey: "canvas.node_types.schedule", color: "#f59e0b", bg: "#fffbeb", icon: "⏱", descKey: "canvas.node_types.schedule_desc" },
+  { type: "webhook", labelKey: "canvas.node_types.webhook", color: "#6366f1", bg: "#eef2ff", icon: "⚡", descKey: "canvas.node_types.webhook_desc" },
+  { type: "channel", labelKey: "canvas.node_types.channel", color: "#8b5cf6", bg: "#f5f3ff", icon: "📢", descKey: "canvas.node_types.channel_desc" },
+  // 逻辑控制
+  { type: "condition", labelKey: "canvas.node_types.condition", color: "#f59e0b", bg: "#fffbeb", icon: "◇", descKey: "canvas.node_types.condition_desc" },
+  { type: "loop", labelKey: "canvas.node_types.loop", color: "#8b5cf6", bg: "#f5f3ff", icon: "↻", descKey: "canvas.node_types.loop_desc" },
+  { type: "parallel", labelKey: "canvas.node_types.parallel", color: "#f59e0b", bg: "#fffbeb", icon: "⫸", descKey: "canvas.node_types.parallel_desc" },
+  { type: "collect", labelKey: "canvas.node_types.collect", color: "#10b981", bg: "#ecfdf5", icon: "⫷", descKey: "canvas.node_types.collect_desc" },
+  { type: "wait", labelKey: "canvas.node_types.wait", color: "#6b7280", bg: "#f9fafb", icon: "⏸", descKey: "canvas.node_types.wait_desc" },
+  // 动作
+  { type: "respond", labelKey: "canvas.node_types.respond", color: "#10b981", bg: "#ecfdf5", icon: "↩", descKey: "canvas.node_types.respond_desc" },
+  { type: "agent", labelKey: "canvas.node_types.agent", color: "#3b82f6", bg: "#eff6ff", icon: "🤖", descKey: "canvas.node_types.agent_desc" },
 ];
 
-// 自定义节点组件
+// 自定义节点组件 — n8n 风格
 function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t: (key: string) => string }) {
-  const config = NODE_TYPES.find(n => n.type === (data.nodeType || nodeTypeKey)) || NODE_TYPES[10];
+  const config = NODE_TYPES.find(n => n.type === (data.nodeType || nodeTypeKey)) || NODE_TYPES[11];
   const isStart = data.nodeType === "start";
   const isEnd = data.nodeType === "end";
-  // runState: "running" | "done" | undefined
   const runState = data._runState as string | undefined;
-  const borderClass = runState === "running"
-    ? "border-warning shadow-warning/30 shadow-lg animate-pulse"
+
+  const ringStyle = runState === "running"
+    ? { boxShadow: `0 0 0 3px ${config.color}40, 0 8px 24px ${config.color}30` }
     : runState === "done"
-    ? "border-success shadow-success/20 shadow-md"
-    : "border-border-subtle";
+    ? { boxShadow: `0 0 0 3px #10b98140, 0 4px 12px #10b98120` }
+    : { boxShadow: "0 2px 8px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06)" };
+
   return (
-    <div className={`rounded-lg border-2 bg-surface min-w-[80px] overflow-hidden relative transition-all duration-300 ${borderClass}`}>
-      {!isStart && <Handle type="target" position={Position.Top} className="!w-2 !h-2 !bg-border-subtle !border-surface" />}
-      <div className="flex items-center gap-1 px-2 py-1" style={{ backgroundColor: config.color }}>
-        {runState === "running" && <Loader2 className="w-3 h-3 text-white animate-spin shrink-0" />}
-        {runState === "done" && <span className="text-xs text-white shrink-0">✓</span>}
-        {!runState && <span className="text-xs font-bold text-white">{config.icon}</span>}
-        <span className="text-xs font-bold text-white truncate">{data.label || t(config.labelKey)}</span>
+    <div
+      className={`rounded-2xl bg-surface min-w-[140px] max-w-[200px] overflow-hidden relative transition-all duration-300 ${
+        runState === "running" ? "animate-pulse" : ""
+      }`}
+      style={{ border: `2px solid ${runState === "done" ? "#10b981" : runState === "running" ? config.color : "transparent"}`, ...ringStyle }}
+    >
+      {/* Target Handle */}
+      {!isStart && (
+        <Handle type="target" position={Position.Top}
+          className="!w-3 !h-3 !rounded-full !border-2 !border-surface"
+          style={{ backgroundColor: config.color }} />
+      )}
+
+      {/* Header: icon circle + label */}
+      <div className="flex items-center gap-2.5 px-3 py-2.5" style={{ backgroundColor: (config as any).bg || "#f8fafc" }}>
+        <div
+          className="w-8 h-8 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0 transition-all"
+          style={{ backgroundColor: config.color }}
+        >
+          {runState === "running" ? <Loader2 className="w-4 h-4 animate-spin" /> :
+           runState === "done" ? "✓" : config.icon}
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="text-xs font-bold text-text truncate leading-tight">{data.label || t(config.labelKey)}</p>
+          <p className="text-[9px] text-text-dim truncate leading-tight mt-0.5">{data.description || t(config.descKey)}</p>
+        </div>
       </div>
-      <div className="px-2 py-1 bg-surface">
-        <p className="text-[8px] font-medium text-text-dim leading-tight">{data.description || t(config.descKey)}</p>
-        {data.agentName && (
-          <p className="text-[8px] font-bold text-brand mt-0.5">{data.agentName}</p>
-        )}
-      </div>
-      {!isEnd && <Handle type="source" position={Position.Bottom} className="!w-2 !h-2 !bg-border-subtle !border-surface" />}
+
+      {/* Agent badge */}
+      {data.agentName && (
+        <div className="px-3 py-1.5 border-t border-border-subtle/50 flex items-center gap-1.5">
+          <div className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
+          <span className="text-[9px] font-semibold text-text-dim truncate">{data.agentName}</span>
+        </div>
+      )}
+
+      {/* Source Handle */}
+      {!isEnd && (
+        <Handle type="source" position={Position.Bottom}
+          className="!w-3 !h-3 !rounded-full !border-2 !border-surface"
+          style={{ backgroundColor: config.color }} />
+      )}
     </div>
   );
 }
@@ -539,12 +567,24 @@ export function CanvasPage() {
   }, [setNodes, t]);
 
   // 连线
+  const edgeColor = theme === "dark" ? "#525252" : "#cbd5e1";
+  const edgeColorActive = theme === "dark" ? "#818cf8" : "#6366f1";
+
+  const defaultEdgeOptions = useMemo(() => ({
+    type: "smoothstep" as const,
+    animated: false,
+    style: { stroke: edgeColor, strokeWidth: 2 },
+    markerEnd: { type: MarkerType.ArrowClosed, color: edgeColor, width: 16, height: 16 },
+  }), [edgeColor]);
+
   const onConnect = useCallback((params: Connection) => {
     setEdges((eds) => addEdge({
       ...params,
-      markerEnd: { type: MarkerType.ArrowClosed, color: theme === "dark" ? "#fff" : "#000" },
+      type: "smoothstep",
+      style: { stroke: edgeColorActive, strokeWidth: 2 },
+      markerEnd: { type: MarkerType.ArrowClosed, color: edgeColorActive, width: 16, height: 16 },
     }, eds));
-  }, [setEdges, theme]);
+  }, [setEdges, edgeColorActive]);
 
   // 节点点击 → 打开配置面板
   const onNodeClick = useCallback((_: any, node: Node) => {
@@ -951,47 +991,30 @@ export function CanvasPage() {
         )}
 
         {/* 节点库 */}
-        <Card padding="md" className="w-48 border-r border-border-subtle bg-main/30 overflow-y-auto rounded-none">
-          <h3 className="text-[10px] font-black uppercase text-text-dim/60 mb-4">{t("canvas.node_library")}</h3>
-          <div className="space-y-4">
-            <div>
-              <p className="text-[10px] font-bold text-brand uppercase mb-2">{t("canvas.triggers")}</p>
-              <div className="grid gap-2">
-                {NODE_TYPES.slice(0, 5).map(n => (
+        <div className="w-52 border-r border-border-subtle bg-surface/50 backdrop-blur overflow-y-auto p-3 space-y-5">
+          <h3 className="text-[10px] font-black uppercase tracking-wider text-text-dim/50">{t("canvas.node_library")}</h3>
+          {[
+            { label: t("canvas.triggers"), items: NODE_TYPES.slice(0, 5) },
+            { label: t("canvas.logic"), items: NODE_TYPES.slice(5, 10) },
+            { label: t("canvas.actions"), items: NODE_TYPES.slice(10) },
+          ].map(group => (
+            <div key={group.label}>
+              <p className="text-[9px] font-bold uppercase tracking-widest text-text-dim/40 mb-2">{group.label}</p>
+              <div className="grid gap-1.5">
+                {group.items.map(n => (
                   <button key={n.type} onClick={() => addNode(n.type)}
-                    className="flex items-center gap-2 p-2 rounded-lg border border-border-subtle bg-surface hover:border-brand transition-all text-left">
-                    <div className="h-7 w-7 rounded flex items-center justify-center text-white text-xs font-black" style={{ backgroundColor: n.color }}>{n.icon}</div>
-                    <span className="text-xs font-bold truncate">{t(n.labelKey)}</span>
+                    className="flex items-center gap-2.5 px-2.5 py-2 rounded-xl bg-surface hover:bg-main border border-transparent hover:border-border-subtle hover:shadow-sm transition-all text-left group">
+                    <div className="w-7 h-7 rounded-lg flex items-center justify-center text-sm shrink-0 transition-transform group-hover:scale-110"
+                      style={{ backgroundColor: (n as any).bg, color: n.color }}>
+                      {n.icon}
+                    </div>
+                    <span className="text-[11px] font-semibold text-text truncate">{t(n.labelKey)}</span>
                   </button>
                 ))}
               </div>
             </div>
-            <div>
-              <p className="text-[10px] font-bold text-warning uppercase mb-2">{t("canvas.logic")}</p>
-              <div className="grid gap-2">
-                {NODE_TYPES.slice(5, 10).map(n => (
-                  <button key={n.type} onClick={() => addNode(n.type)}
-                    className="flex items-center gap-2 p-2 rounded-lg border border-border-subtle bg-surface hover:border-brand transition-all text-left">
-                    <div className="h-7 w-7 rounded flex items-center justify-center text-white text-xs font-black" style={{ backgroundColor: n.color }}>{n.icon}</div>
-                    <span className="text-xs font-bold truncate">{t(n.labelKey)}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div>
-              <p className="text-[10px] font-bold text-accent uppercase mb-2">{t("canvas.actions")}</p>
-              <div className="grid gap-2">
-                {NODE_TYPES.slice(10).map(n => (
-                  <button key={n.type} onClick={() => addNode(n.type)}
-                    className="flex items-center gap-2 p-2 rounded-lg border border-border-subtle bg-surface hover:border-brand transition-all text-left">
-                    <div className="h-7 w-7 rounded flex items-center justify-center text-white text-xs font-black" style={{ backgroundColor: n.color }}>{n.icon}</div>
-                    <span className="text-xs font-bold truncate">{t(n.labelKey)}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </Card>
+          ))}
+        </div>
 
         {/* 画布 */}
         <main className="flex-1 relative">
@@ -1049,13 +1072,21 @@ export function CanvasPage() {
             onSelectionChange={onSelectionChange}
             onNodeDragStart={onNodeDragStart} onNodeDrag={onNodeDrag}
             nodeTypes={nodeTypes} colorMode={theme}
+            defaultEdgeOptions={defaultEdgeOptions}
             defaultViewport={{ x: 50, y: 80, zoom: 1 }}
-            minZoom={0.1} maxZoom={2} className="bg-main/20"
+            minZoom={0.1} maxZoom={2}
+            className="!bg-transparent"
+            connectionLineStyle={{ stroke: edgeColorActive, strokeWidth: 2 }}
+            connectionLineType="smoothstep"
           >
-            <Background color={theme === "dark" ? "#333" : "#ccc"} gap={20} />
-            <Controls className="!bg-surface !border-border-subtle" />
-            <MiniMap className="!bg-surface !border-border-subtle"
-              nodeColor={(n) => NODE_TYPES.find(t => t.type === n.type)?.color || "#3b82f6"} />
+            <Background color={theme === "dark" ? "#333" : "#e2e8f0"} gap={24} size={1.5} />
+            <Controls className="!bg-surface !border-border-subtle !rounded-xl !shadow-lg" />
+            <MiniMap className="!bg-surface/80 !border-border-subtle !rounded-xl !shadow-lg"
+              nodeColor={(n) => {
+                const cfg = NODE_TYPES.find(t => t.type === (n.data as any)?.nodeType);
+                return cfg?.color || "#3b82f6";
+              }}
+              maskColor={theme === "dark" ? "rgba(0,0,0,0.3)" : "rgba(0,0,0,0.08)"} />
           </ReactFlow>
 
           {/* 运行结果面板 */}
