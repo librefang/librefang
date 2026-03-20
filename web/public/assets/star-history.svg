@@ -23,19 +23,19 @@
   <rect x="12" y="12" width="776" height="296" rx="14" class="panel" />
   <text x="30" y="52" class="title">Star History</text>
   <text x="30" y="74" class="subtitle">librefang/librefang</text>
-  <text x="770" y="52" class="value" text-anchor="end">85</text>
-  <text x="770" y="74" class="subtitle" text-anchor="end">Updated 2026-03-20 08:09 UTC</text>
+  <text x="770" y="52" class="value" text-anchor="end">86</text>
+  <text x="770" y="74" class="subtitle" text-anchor="end">Updated 2026-03-20 08:32 UTC</text>
   <line x1="68" y1="274.00" x2="772" y2="274.00" class="grid" />
-<line x1="68" y1="190.00" x2="772" y2="190.00" class="grid" />
+<line x1="68" y1="189.00" x2="772" y2="189.00" class="grid" />
 <line x1="68" y1="104.00" x2="772" y2="104.00" class="grid" />
   <line x1="68" y1="274" x2="772" y2="274" class="axis" />
   <line x1="68" y1="104" x2="68" y2="274" class="axis" />
-  <path d="M 84,274 L 84.00,274.00 L 160.44,266.00 L 236.89,260.00 L 313.33,252.00 L 389.78,242.00 L 466.22,240.00 L 542.67,234.00 L 619.11,156.00 L 695.56,112.00 L 772.00,104.00 L 772,274 Z" class="area" />
-  <polyline points="84.00,274.00 160.44,266.00 236.89,260.00 313.33,252.00 389.78,242.00 466.22,240.00 542.67,234.00 619.11,156.00 695.56,112.00 772.00,104.00" class="line" />
+  <path d="M 84,274 L 84.00,274.00 L 160.44,266.09 L 236.89,260.16 L 313.33,252.26 L 389.78,242.37 L 466.22,240.40 L 542.67,234.47 L 619.11,157.37 L 695.56,113.88 L 772.00,104.00 L 772,274 Z" class="area" />
+  <polyline points="84.00,274.00 160.44,266.09 236.89,260.16 313.33,252.26 389.78,242.37 466.22,240.40 542.67,234.47 619.11,157.37 695.56,113.88 772.00,104.00" class="line" />
   <text x="84.00" y="306" class="axis-label" text-anchor="start">2026-03-11</text>
 <text x="389.78" y="306" class="axis-label" text-anchor="middle">2026-03-15</text>
 <text x="772.00" y="306" class="axis-label" text-anchor="end">2026-03-20</text>
   <text x="58" y="278.00" class="axis-label" text-anchor="end">0</text>
-<text x="58" y="194.00" class="axis-label" text-anchor="end">42</text>
-<text x="58" y="108.00" class="axis-label" text-anchor="end">85</text>
+<text x="58" y="193.00" class="axis-label" text-anchor="end">43</text>
+<text x="58" y="108.00" class="axis-label" text-anchor="end">86</text>
 </svg>
