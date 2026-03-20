@@ -15,14 +15,24 @@ use librefang_channels::types::{ChannelAdapter, SenderContext};
 /// forwarded to the user through streaming channels.
 fn looks_like_tool_call(text: &str) -> bool {
     let trimmed = text.trim();
+    // JSON array of tool calls
     trimmed.starts_with("[{")
         || trimmed.starts_with("functions.")
         || trimmed.starts_with("{\"name\":")
         || trimmed.starts_with("{\"type\":\"function\"")
         || (trimmed.starts_with('[') && trimmed.contains("'type': 'text'"))
-        // XML-style tool calls recovered by recover_text_tool_calls()
+        // Patterns 1-2: <function=TOOL>...</function>, <function>TOOL...</function>
         || trimmed.starts_with("<function=")
         || trimmed.starts_with("<function>")
+        || trimmed.starts_with("<function ")
+        // Pattern 3: <tool>TOOL...</tool>
+        || trimmed.starts_with("<tool>")
+        // Pattern 6: [TOOL_CALL]...[/TOOL_CALL]
+        || trimmed.starts_with("[TOOL_CALL]")
+        // Pattern 7: <tool_call>...</tool_call>
+        || trimmed.starts_with("<tool_call>")
+        // Pattern 4: markdown code block with tool call
+        || (trimmed.starts_with("```") && trimmed.contains('{'))
 }
 
 // Feature-gated adapter imports
