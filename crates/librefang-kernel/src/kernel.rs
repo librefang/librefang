@@ -2288,7 +2288,7 @@ system_prompt = "You are a helpful assistant."
                 user_name,
                 channel_type: sender_context.map(|s| s.channel.clone()),
                 sender_user_id: sender_context.map(|s| s.user_id.clone()),
-                sender_display_name: sender_context.and_then(|s| s.display_name.clone()),
+                sender_display_name: sender_context.map(|s| s.display_name.clone()),
                 is_subagent: manifest
                     .metadata
                     .get("is_subagent")

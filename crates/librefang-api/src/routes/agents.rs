@@ -1016,6 +1016,7 @@ fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
         display_name: req.sender_name.clone().unwrap_or_else(|| sender_id.clone()),
         is_group: false,
         thread_id: None,
+        account_id: None,
     })
 }
 
