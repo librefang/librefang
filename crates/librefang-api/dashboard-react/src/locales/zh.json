@@ -116,6 +116,12 @@
     "timeout": "超时时间（秒）", "output_var": "输出变量名", "output_var_hint": "（后续步骤用 {{变量名}} 引用）",
     "create_group": "创建分组", "new_group": "分组",
     "ctx_edit": "编辑节点", "ctx_copy": "复制", "ctx_duplicate": "复制节点", "ctx_add_agent": "添加智能体节点", "ctx_paste": "粘贴", "ctx_select_all": "全选", "ctx_auto_layout": "自动排列",
+    "click_to_assign": "点击绑定智能体", "saved": "已保存", "exported": "已导出", "imported": "已导入", "import_error": "无效的工作流文件",
+    "shortcuts_title": "快捷键",
+    "sc_undo": "撤销", "sc_redo": "重做", "sc_copy": "复制", "sc_paste": "粘贴", "sc_duplicate": "复制节点",
+    "sc_select_all": "全选", "sc_group": "创建分组", "sc_ungroup": "解散分组", "sc_fit_view": "适配视口",
+    "sc_export": "导出 JSON", "sc_import": "导入 JSON", "sc_delete": "删除", "sc_pan": "平移画布",
+    "sc_select": "框选", "sc_context": "右键菜单", "sc_help": "快捷键帮助",
     "node_types": {
       "start": "开始", "start_desc": "工作流入口", "end": "结束", "end_desc": "工作流终止",
       "schedule": "定时", "schedule_desc": "时间触发器", "webhook": "Webhook", "webhook_desc": "HTTP webhook 触发器",

@@ -117,6 +117,12 @@
     "timeout": "Timeout (seconds)", "output_var": "Output Variable", "output_var_hint": "(use {{name}} in later steps)",
     "create_group": "Group Selected", "new_group": "Group",
     "ctx_edit": "Edit Node", "ctx_copy": "Copy", "ctx_duplicate": "Duplicate", "ctx_add_agent": "Add Agent Node", "ctx_paste": "Paste", "ctx_select_all": "Select All", "ctx_auto_layout": "Auto Layout",
+    "click_to_assign": "Click to assign agent", "saved": "Saved", "exported": "Exported", "imported": "Imported", "import_error": "Invalid workflow file",
+    "shortcuts_title": "Keyboard Shortcuts",
+    "sc_undo": "Undo", "sc_redo": "Redo", "sc_copy": "Copy", "sc_paste": "Paste", "sc_duplicate": "Duplicate",
+    "sc_select_all": "Select All", "sc_group": "Group", "sc_ungroup": "Ungroup", "sc_fit_view": "Fit View",
+    "sc_export": "Export JSON", "sc_import": "Import JSON", "sc_delete": "Delete", "sc_pan": "Pan Canvas",
+    "sc_select": "Box Select", "sc_context": "Context Menu", "sc_help": "Toggle Help",
     "node_types": {
       "start": "Start", "start_desc": "Workflow entry point", "end": "End", "end_desc": "Workflow termination",
       "schedule": "Schedule", "schedule_desc": "Time-based trigger", "webhook": "Webhook", "webhook_desc": "HTTP webhook trigger",

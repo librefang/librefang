@@ -18,6 +18,8 @@ import {
   Handle,
   Position,
   type OnSelectionChangeParams,
+  useReactFlow,
+  ReactFlowProvider,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, type AgentItem, type WorkflowItem } from "../api";
@@ -28,7 +30,8 @@ import { useUIStore } from "../lib/store";
 import {
   Play, Save, Trash2, Plus, FolderOpen, Loader2,
   Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight,
-  Copy, ClipboardPaste, Undo2, Redo2, LayoutGrid
+  Copy, ClipboardPaste, Undo2, Redo2, LayoutGrid,
+  Download, Upload, HelpCircle, Scan, Check
 } from "lucide-react";
 
 // 节点类型配置 — n8n 风格配色
@@ -50,17 +53,28 @@ const NODE_TYPES = [
   { type: "agent", labelKey: "canvas.node_types.agent", color: "#3b82f6", bg: "#eff6ff", icon: "A", descKey: "canvas.node_types.agent_desc" },
 ];
 
+// 需要绑定 agent 的节点类型
+const AGENT_NODE_TYPES_SET = new Set(["agent", "channel", "respond", "condition", "loop", "parallel", "collect"]);
+
 // 自定义节点组件 — n8n 风格
 function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t: (key: string) => string }) {
   const config = NODE_TYPES.find(n => n.type === (data.nodeType || nodeTypeKey)) || NODE_TYPES[11];
   const isStart = data.nodeType === "start";
   const isEnd = data.nodeType === "end";
   const runState = data._runState as string | undefined;
+  const needsAgent = AGENT_NODE_TYPES_SET.has(data.nodeType);
+  const missingAgent = needsAgent && !data.agentId;
 
+  const borderColor = runState === "done" ? "#10b981"
+    : runState === "running" ? config.color
+    : missingAgent ? "#f59e0b"
+    : "transparent";
   const ringStyle = runState === "running"
     ? { boxShadow: `0 0 0 3px ${config.color}40, 0 8px 24px ${config.color}30` }
     : runState === "done"
     ? { boxShadow: `0 0 0 3px #10b98140, 0 4px 12px #10b98120` }
+    : missingAgent
+    ? { boxShadow: "0 0 0 2px #f59e0b30" }
     : { boxShadow: "0 2px 8px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06)" };
 
   return (
@@ -68,7 +82,7 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
       className={`rounded-2xl bg-surface min-w-[140px] max-w-[200px] overflow-hidden relative transition-all duration-300 ${
         runState === "running" ? "animate-pulse" : ""
       }`}
-      style={{ border: `2px solid ${runState === "done" ? "#10b981" : runState === "running" ? config.color : "transparent"}`, ...ringStyle }}
+      style={{ border: `2px ${missingAgent ? "dashed" : "solid"} ${borderColor}`, ...ringStyle }}
     >
       {/* Target Handle */}
       {!isStart && (
@@ -92,13 +106,17 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
         </div>
       </div>
 
-      {/* Agent badge */}
-      {data.agentName && (
+      {/* Agent badge / missing warning */}
+      {data.agentName ? (
         <div className="px-3 py-1.5 border-t border-border-subtle/50 flex items-center gap-1.5">
           <div className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />
           <span className="text-[9px] font-semibold text-text-dim truncate">{data.agentName}</span>
         </div>
-      )}
+      ) : missingAgent ? (
+        <div className="px-3 py-1 border-t border-warning/30 flex items-center gap-1.5">
+          <span className="text-[9px] font-semibold text-warning">{t("canvas.click_to_assign")}</span>
+        </div>
+      ) : null}
 
       {/* Source Handle */}
       {!isEnd && (
@@ -382,10 +400,19 @@ function NodeConfigPanel({
 }
 
 export function CanvasPage() {
+  return (
+    <ReactFlowProvider>
+      <CanvasPageInner />
+    </ReactFlowProvider>
+  );
+}
+
+function CanvasPageInner() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const { t: routeTimestamp } = useSearch({ from: "/canvas" });
   const { theme } = useUIStore();
+  const { fitView } = useReactFlow();
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
   const [agents, setAgents] = useState<AgentItem[]>([]);
@@ -515,6 +542,58 @@ export function CanvasPage() {
     });
   }, [nodes, pushHistory, setNodes, recalcGroupBounds]);
 
+  // Toast 提示
+  const [toast, setToast] = useState<string | null>(null);
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 2000);
+  }, []);
+
+  // 快捷键帮助
+  const [showHelp, setShowHelp] = useState(false);
+
+  // 导出工作流 JSON
+  const exportWorkflow = useCallback(() => {
+    const data = { nodes, edges, name: workflowName, description: workflowDescription };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${workflowName || "workflow"}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast(t("canvas.exported"));
+  }, [nodes, edges, workflowName, workflowDescription, showToast, t]);
+
+  // 导入工作流 JSON
+  const importWorkflow = useCallback(() => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".json";
+    input.onchange = (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const data = JSON.parse(reader.result as string);
+          if (data.nodes) { pushHistory(); setNodes(data.nodes); }
+          if (data.edges) setEdges(data.edges);
+          if (data.name) setWorkflowName(data.name);
+          if (data.description) setWorkflowDescription(data.description);
+          showToast(t("canvas.imported"));
+        } catch { showError(t("canvas.import_error")); }
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  }, [pushHistory, setNodes, setEdges, showToast, showError, t]);
+
+  // 连线验证：阻止 source→source 或 target→target
+  const isValidConnection = useCallback((connection: Connection) => {
+    return connection.source !== connection.target;
+  }, []);
+
   // 快捷键 refs
   const createGroupRef = useRef<() => void>(() => {});
   const ungroupRef = useRef<(id: string) => void>(() => {});
@@ -549,12 +628,20 @@ export function CanvasPage() {
         const groupNode = nodes.find(n => selectedNodeIds.has(n.id) && n.type === "groupNode");
         if (groupNode) ungroupRef.current(groupNode.id);
       }
+      // Cmd+1：适配视口
+      if (e.code === "Digit1" && mod) { e.preventDefault(); fitView({ padding: 0.2, duration: 300 }); }
+      // Cmd+E：导出
+      if (e.code === "KeyE" && mod) { e.preventDefault(); exportWorkflow(); }
+      // Cmd+I：导入
+      if (e.code === "KeyI" && mod) { e.preventDefault(); importWorkflow(); }
+      // ?：快捷键帮助
+      if (e.code === "Slash" && e.shiftKey && !mod) { e.preventDefault(); setShowHelp(h => !h); }
     };
     const up = (e: KeyboardEvent) => { if (e.code === "Space") setSpacePressed(false); };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
     return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
-  }, [nodes, selectedNodeIds, undo, redo, copySelected, paste, duplicate, selectAll]);
+  }, [nodes, selectedNodeIds, undo, redo, copySelected, paste, duplicate, selectAll, fitView, exportWorkflow, importWorkflow]);
 
   // 折叠/展开分组
   const toggleGroup = useCallback((groupId: string) => {
@@ -670,7 +757,7 @@ export function CanvasPage() {
   }), [t, toggleGroup, ungroupNodes, deleteGroupAndChildren]);
 
   // 需要 agent 的节点类型（后端所有 step 都需要 agent）
-  const AGENT_NODE_TYPES = new Set(["agent", "channel", "respond", "condition", "loop", "parallel", "collect"]);
+  const AGENT_NODE_TYPES = AGENT_NODE_TYPES_SET;
 
   // 加载模板数据（传入 agents 列表以便自动分配）
   const loadTemplate = useCallback((availableAgents: AgentItem[]) => {
@@ -1012,10 +1099,11 @@ export function CanvasPage() {
         if (newest) setSelectedWorkflow(newest);
       }
       setErrorMsg(null);
+      showToast(t("canvas.saved"));
     } catch (e: any) {
       showError(e?.message || String(e));
     }
-  }, [workflowName, workflowDescription, selectedWorkflow, nodes, buildSteps, t, showError]);
+  }, [workflowName, workflowDescription, selectedWorkflow, nodes, edges, buildSteps, t, showError, showToast]);
 
   // 点击运行 → 弹出输入框
   const handleRunClick = useCallback((id?: string) => {
@@ -1064,6 +1152,8 @@ export function CanvasPage() {
     setRunningWorkflowId(workflowId);
     setErrorMsg(null);
     setRunResult(null);
+    // 运行时边动画
+    setEdges(eds => eds.map(e => ({ ...e, animated: true })));
 
     // 逐步点亮节点动画
     const agentNodeIds = nodes.filter(n => (n.data as any).agentId).map(n => n.id);
@@ -1115,14 +1205,16 @@ export function CanvasPage() {
         status: (resp as any).status || "completed",
         run_id: (resp as any).run_id || "",
       });
-      // 3秒后清除 done 状态
+      // 3秒后清除 done 状态和边动画
       setTimeout(() => {
         setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
+        setEdges(eds => eds.map(e => ({ ...e, animated: false })));
       }, 3000);
     } catch (e: any) {
       if (stepTimer) clearInterval(stepTimer);
-      // 错误：清除所有状态
+      // 错误：清除所有状态和边动画
       setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
+      setEdges(eds => eds.map(e => ({ ...e, animated: false })));
       showError(e?.message || String(e));
     } finally {
       setRunningWorkflowId(null);
@@ -1236,6 +1328,18 @@ export function CanvasPage() {
           </Button>
           <Button variant="secondary" onClick={() => { setNodes([]); setEdges([]); setEditingNode(null); }}>
             {t("common.clear")}
+          </Button>
+          <Button variant="secondary" onClick={exportWorkflow} title="Cmd+E">
+            <Download className="w-4 h-4" />
+          </Button>
+          <Button variant="secondary" onClick={importWorkflow} title="Cmd+I">
+            <Upload className="w-4 h-4" />
+          </Button>
+          <Button variant="secondary" onClick={() => fitView({ padding: 0.2, duration: 300 })} title="Cmd+1">
+            <Scan className="w-4 h-4" />
+          </Button>
+          <Button variant="secondary" onClick={() => setShowHelp(true)} title="?">
+            <HelpCircle className="w-4 h-4" />
           </Button>
           <Button variant="primary" onClick={handleSave} disabled={!workflowName.trim() || agentStepCount === 0}>
             <Save className="w-4 h-4 mr-1" />
@@ -1369,6 +1473,7 @@ export function CanvasPage() {
             className={`!bg-transparent ${spacePressed ? "!cursor-grab" : ""}`}
             connectionLineStyle={{ stroke: edgeColorActive, strokeWidth: 2 }}
             connectionLineType="smoothstep"
+            isValidConnection={isValidConnection}
           >
             <Background variant={BackgroundVariant.Dots} color={theme === "dark" ? "#444" : "#cbd5e1"} gap={24} size={1.5} />
             <Controls className="!bg-surface !border-border-subtle !rounded-xl !shadow-lg" />
@@ -1446,6 +1551,50 @@ export function CanvasPage() {
           )}
         </main>
       </div>
+
+      {/* Toast */}
+      {toast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-text text-surface text-xs font-bold shadow-lg animate-bounce-in">
+          <Check className="w-3.5 h-3.5 inline mr-1.5" />{toast}
+        </div>
+      )}
+
+      {/* 快捷键帮助面板 */}
+      {showHelp && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowHelp(false)}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[420px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
+              <h3 className="text-sm font-bold">{t("canvas.shortcuts_title")}</h3>
+              <button onClick={() => setShowHelp(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-5 space-y-1 text-xs">
+              {[
+                ["Cmd/Ctrl+Z", t("canvas.sc_undo")],
+                ["Cmd/Ctrl+Shift+Z", t("canvas.sc_redo")],
+                ["Cmd/Ctrl+C", t("canvas.sc_copy")],
+                ["Cmd/Ctrl+V", t("canvas.sc_paste")],
+                ["Cmd/Ctrl+D", t("canvas.sc_duplicate")],
+                ["Cmd/Ctrl+A", t("canvas.sc_select_all")],
+                ["Cmd/Ctrl+B", t("canvas.sc_group")],
+                ["Shift+Cmd/Ctrl+B", t("canvas.sc_ungroup")],
+                ["Cmd/Ctrl+1", t("canvas.sc_fit_view")],
+                ["Cmd/Ctrl+E", t("canvas.sc_export")],
+                ["Cmd/Ctrl+I", t("canvas.sc_import")],
+                ["Delete", t("canvas.sc_delete")],
+                ["Space + Drag", t("canvas.sc_pan")],
+                ["Drag", t("canvas.sc_select")],
+                ["Right Click", t("canvas.sc_context")],
+                ["?", t("canvas.sc_help")],
+              ].map(([key, desc]) => (
+                <div key={key} className="flex items-center justify-between py-1.5 border-b border-border-subtle/30">
+                  <span className="text-text-dim">{desc}</span>
+                  <kbd className="px-2 py-0.5 rounded-md bg-main text-text font-mono text-[10px]">{key}</kbd>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
