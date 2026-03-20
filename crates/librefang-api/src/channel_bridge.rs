@@ -1452,6 +1452,7 @@ pub async fn start_channel_bridge_with_config(
                     mx_config.user_id.clone(),
                     token,
                     mx_config.allowed_rooms.clone(),
+                    mx_config.auto_accept_invites,
                 )
                 .with_account_id(mx_config.account_id.clone()),
             );
