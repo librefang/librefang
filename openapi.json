@@ -1750,12 +1750,12 @@
         "tags": [
           "approvals"
         ],
-        "summary": "GET /api/approvals — List pending approval requests.",
+        "summary": "GET /api/approvals — List pending and recent approval requests.",
         "description": "Transforms field names to match the dashboard template expectations:\n`action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.",
         "operationId": "list_approvals",
         "responses": {
           "200": {
-            "description": "List pending approvals",
+            "description": "List pending and recent approvals",
             "content": {
               "application/json": {
                 "schema": {

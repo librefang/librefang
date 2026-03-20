@@ -160,11 +160,19 @@ impl ModelCatalog {
         &self.models
     }
 
-    /// Find a model by its canonical ID or by alias.
+    /// Find a model by its canonical ID, display name, or alias.
     pub fn find_model(&self, id_or_alias: &str) -> Option<&ModelCatalogEntry> {
         let lower = id_or_alias.to_lowercase();
         // Direct ID match first
         if let Some(entry) = self.models.iter().find(|m| m.id.to_lowercase() == lower) {
+            return Some(entry);
+        }
+        // Display-name match for dashboard/UI payloads that send labels.
+        if let Some(entry) = self
+            .models
+            .iter()
+            .find(|m| m.display_name.to_lowercase() == lower)
+        {
             return Some(entry);
         }
         // Alias resolution

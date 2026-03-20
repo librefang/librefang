@@ -2644,6 +2644,9 @@ pub struct MatrixConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Whether to auto-accept room invites (default: false).
+    #[serde(default)]
+    pub auto_accept_invites: bool,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2658,6 +2661,7 @@ impl Default for MatrixConfig {
             allowed_rooms: vec![],
             account_id: None,
             default_agent: None,
+            auto_accept_invites: false,
             overrides: ChannelOverrides::default(),
         }
     }

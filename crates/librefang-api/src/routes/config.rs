@@ -1017,7 +1017,10 @@ pub async fn migrate_scan(Json(req): Json<MigrateScanRequest>) -> impl IntoRespo
         (status = 200, description = "Run migration from another agent framework", body = serde_json::Value)
     )
 )]
-pub async fn run_migrate(Json(req): Json<MigrateRequest>) -> impl IntoResponse {
+pub async fn run_migrate(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MigrateRequest>,
+) -> impl IntoResponse {
     let source = match req.source.as_str() {
         "openclaw" => librefang_migrate::MigrateSource::OpenClaw,
         "langchain" => librefang_migrate::MigrateSource::LangChain,
@@ -1032,10 +1035,16 @@ pub async fn run_migrate(Json(req): Json<MigrateRequest>) -> impl IntoResponse {
         }
     };
 
+    let target_dir = if req.target_dir.trim().is_empty() {
+        state.kernel.config.home_dir.clone()
+    } else {
+        std::path::PathBuf::from(req.target_dir.trim())
+    };
+
     let options = librefang_migrate::MigrateOptions {
         source,
-        source_dir: std::path::PathBuf::from(&req.source_dir),
-        target_dir: std::path::PathBuf::from(&req.target_dir),
+        source_dir: std::path::PathBuf::from(req.source_dir.trim()),
+        target_dir,
         dry_run: req.dry_run,
     };
 

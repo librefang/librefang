@@ -436,6 +436,83 @@ async fn test_build_router_unauthorized_responses_include_api_version_header() {
 }
 
 #[tokio::test]
+async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
+    let harness = start_full_router("").await;
+
+    let source_dir = harness.state.kernel.config.home_dir.join("openclaw-source");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(
+        source_dir.join("openclaw.json"),
+        r#"{
+          agents: {
+            list: [
+              { id: "main", name: "Main Agent" }
+            ],
+            defaults: {
+              model: "anthropic/claude-sonnet-4-20250514"
+            }
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": source_dir.display().to_string(),
+                "target_dir": "",
+                "dry_run": false
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "completed");
+    assert_eq!(json["dry_run"], false);
+
+    let config_path = harness.state.kernel.config.home_dir.join("config.toml");
+    let agent_path = harness
+        .state
+        .kernel
+        .config
+        .home_dir
+        .join("agents")
+        .join("main")
+        .join("agent.toml");
+    let report_path = harness
+        .state
+        .kernel
+        .config
+        .home_dir
+        .join("migration_report.md");
+
+    assert!(
+        config_path.exists(),
+        "config.toml should be written to daemon home"
+    );
+    assert!(
+        agent_path.exists(),
+        "agent.toml should be written to daemon home"
+    );
+    assert!(
+        report_path.exists(),
+        "migration_report.md should be written to daemon home"
+    );
+}
+
+#[tokio::test]
 async fn test_config_reload_reports_proxy_changes_require_restart() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
