@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useEffect, useMemo, useRef } from "react";
+import { useCallback, useState, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
@@ -10,7 +10,6 @@ import {
   addEdge,
   useNodesState,
   useEdgesState,
-  getNodesBounds,
   type Node,
   type Edge,
   type Connection,
@@ -20,6 +19,8 @@ import {
   type OnSelectionChangeParams,
   useReactFlow,
   ReactFlowProvider,
+  SelectionMode,
+  ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, type AgentItem, type WorkflowItem } from "../api";
@@ -30,7 +31,7 @@ import { useUIStore } from "../lib/store";
 import {
   Play, Save, Trash2, Plus, FolderOpen, Loader2,
   Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight,
-  Copy, ClipboardPaste, Undo2, Redo2, LayoutGrid,
+  Copy, ClipboardPaste, LayoutGrid,
   Download, Upload, HelpCircle, Scan, Check
 } from "lucide-react";
 
@@ -624,7 +625,7 @@ function CanvasPageInner() {
   }, [pushHistory, setNodes, setEdges, showToast, showError, t]);
 
   // 连线验证：阻止 source→source 或 target→target
-  const isValidConnection = useCallback((connection: Connection) => {
+  const isValidConnection = useCallback((connection: Edge | Connection) => {
     return connection.source !== connection.target;
   }, []);
 
@@ -1287,6 +1288,9 @@ function CanvasPageInner() {
   // 有效 agent 步骤数量
   const agentStepCount = useMemo(() => buildSteps(nodes).length, [nodes, buildSteps]);
 
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [, setZoomLevel] = useState(100);
+
   return (
     <div className={`flex flex-col transition-all duration-300 ${isFullscreen ? "fixed inset-0 z-50 bg-main" : "h-[calc(100vh-140px)]"}`}>
       <header className="flex justify-between items-end pb-4">
@@ -1392,30 +1396,42 @@ function CanvasPageInner() {
             isRunning={runningWorkflowId} t={t} />
         )}
 
-        {/* 节点库 */}
-        <div className="w-52 border-r border-border-subtle bg-surface/50 backdrop-blur overflow-y-auto p-3 space-y-5">
-          <h3 className="text-[10px] font-black uppercase tracking-wider text-text-dim/50">{t("canvas.node_library")}</h3>
-          {[
-            { label: t("canvas.triggers"), items: NODE_TYPES.slice(0, 5) },
-            { label: t("canvas.logic"), items: NODE_TYPES.slice(5, 10) },
-            { label: t("canvas.actions"), items: NODE_TYPES.slice(10) },
-          ].map(group => (
-            <div key={group.label}>
-              <p className="text-[9px] font-bold uppercase tracking-widest text-text-dim/40 mb-2">{group.label}</p>
-              <div className="grid gap-1.5">
-                {group.items.map(n => (
-                  <button key={n.type} onClick={() => addNode(n.type)}
-                    className="flex items-center gap-2.5 px-2.5 py-2 rounded-xl bg-surface hover:bg-main border border-transparent hover:border-border-subtle hover:shadow-sm transition-all text-left group">
-                    <div className="w-7 h-7 rounded-lg flex items-center justify-center text-sm shrink-0 transition-transform group-hover:scale-110"
-                      style={{ backgroundColor: (n as any).bg, color: n.color }}>
-                      {n.icon}
-                    </div>
-                    <span className="text-[11px] font-semibold text-text truncate">{t(n.labelKey)}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))}
+        {/* 节点库（可折叠） */}
+        <div className={`border-r border-border-subtle bg-surface/50 backdrop-blur overflow-y-auto transition-all duration-200 ${
+          sidebarCollapsed ? "w-10 px-1 py-2" : "w-52 p-3 space-y-4"
+        }`}>
+          <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
+            className="w-full flex items-center justify-center p-1.5 rounded-lg hover:bg-main transition-colors mb-1">
+            {sidebarCollapsed
+              ? <ChevronRight className="w-3.5 h-3.5 text-text-dim" />
+              : <ChevronDown className="w-3.5 h-3.5 text-text-dim" />}
+          </button>
+          {!sidebarCollapsed && (
+            <>
+              <h3 className="text-[10px] font-black uppercase tracking-wider text-text-dim/50">{t("canvas.node_library")}</h3>
+              {[
+                { label: t("canvas.triggers"), items: NODE_TYPES.slice(0, 5) },
+                { label: t("canvas.logic"), items: NODE_TYPES.slice(5, 10) },
+                { label: t("canvas.actions"), items: NODE_TYPES.slice(10) },
+              ].map(group => (
+                <div key={group.label}>
+                  <p className="text-[9px] font-bold uppercase tracking-widest text-text-dim/40 mb-2">{group.label}</p>
+                  <div className="grid gap-1.5">
+                    {group.items.map(n => (
+                      <button key={n.type} onClick={() => addNode(n.type)}
+                        className="flex items-center gap-2.5 px-2.5 py-2 rounded-xl bg-surface hover:bg-main border border-transparent hover:border-border-subtle hover:shadow-sm transition-all text-left group">
+                        <div className="w-7 h-7 rounded-lg flex items-center justify-center text-sm shrink-0 transition-transform group-hover:scale-110"
+                          style={{ backgroundColor: `${n.color}15`, color: n.color }}>
+                          {n.icon}
+                        </div>
+                        <span className="text-[11px] font-semibold text-text truncate">{t(n.labelKey)}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
         </div>
 
         {/* 画布 */}
@@ -1475,6 +1491,7 @@ function CanvasPageInner() {
             onNodesDelete={onNodesDelete}
             onSelectionChange={onSelectionChange}
             onNodeDragStart={onNodeDragStart} onNodeDrag={onNodeDrag}
+            onMoveEnd={(_, vp) => setZoomLevel(Math.round(vp.zoom * 100))}
             onPaneClick={() => { setContextMenu(null); setEditingNode(null); }}
             onPaneContextMenu={(e) => {
               e.preventDefault();
@@ -1493,15 +1510,18 @@ function CanvasPageInner() {
             panOnDrag={spacePressed}
             selectionOnDrag={!spacePressed}
             panOnScroll
-            selectionMode={1 /* SelectionMode.Partial */}
+            selectionMode={SelectionMode.Partial}
             zoomOnScroll
             className={`!bg-transparent ${spacePressed ? "!cursor-grab" : ""}`}
             connectionLineStyle={{ stroke: edgeColorActive, strokeWidth: 2 }}
-            connectionLineType="smoothstep"
+            connectionLineType={ConnectionLineType.SmoothStep}
             isValidConnection={isValidConnection}
           >
             <Background variant={BackgroundVariant.Dots} color={theme === "dark" ? "#444" : "#cbd5e1"} gap={24} size={1.5} />
             <Controls className="!bg-surface !border-border-subtle !rounded-xl !shadow-lg" />
+            <div className="react-flow__panel !bottom-2 !left-14">
+              <span className="text-[10px] font-mono text-text-dim/50 bg-surface/80 px-1.5 py-0.5 rounded">{zoomLevel}%</span>
+            </div>
             <MiniMap className="!bg-surface/80 !border-border-subtle !rounded-xl !shadow-lg"
               nodeColor={(n) => {
                 const cfg = NODE_TYPES.find(t => t.type === (n.data as any)?.nodeType);
@@ -1509,6 +1529,19 @@ function CanvasPageInner() {
               }}
               maskColor={theme === "dark" ? "rgba(0,0,0,0.3)" : "rgba(0,0,0,0.08)"} />
           </ReactFlow>
+
+          {/* 空画布引导 */}
+          {nodes.length === 0 && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+              <div className="text-center pointer-events-auto">
+                <div className="w-12 h-12 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-3">
+                  <Plus className="w-6 h-6 text-brand" />
+                </div>
+                <p className="text-sm font-bold text-text-dim">{t("canvas.empty_title")}</p>
+                <p className="text-xs text-text-dim/60 mt-1">{t("canvas.empty_hint")}</p>
+              </div>
+            </div>
+          )}
 
           {/* 右键上下文菜单 */}
           {contextMenu && (
