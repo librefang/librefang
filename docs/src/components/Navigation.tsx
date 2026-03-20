@@ -310,13 +310,13 @@ export const navigation = zhNavigation;
 
 export function Navigation(props: React.ComponentPropsWithoutRef<'nav'>) {
 	const pathname = usePathname();
-	const isEn = pathname?.startsWith('/en');
-	const navigation = isEn ? enNavigation : zhNavigation;
+	const isZh = pathname?.startsWith('/zh');
+	const navigation = isZh ? zhNavigation : enNavigation;
 
 	return (
 		<nav {...props}>
 			<ul>
-				<TopLevelNavItem href={isEn ? withPrefix('/en') : withPrefix('/')}>{isEn ? 'Docs' : '文档'}</TopLevelNavItem>
+				<TopLevelNavItem href={isZh ? withPrefix('/zh') : withPrefix('/')}>{isZh ? '文档' : 'Docs'}</TopLevelNavItem>
 				<TopLevelNavItem href='https://github.com/librefang/librefang'>GitHub</TopLevelNavItem>
 				{navigation.map((group, groupIndex) => (
 					<NavigationGroup key={group.title} group={group} className={groupIndex === 0 ? 'md:mt-0' : ''} />
