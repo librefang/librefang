@@ -57,7 +57,7 @@ docker pull ghcr.io/librefang/librefang:latest
 
 docker run -d \
   --name librefang \
-  -p 4200:4200 \
+  -p 4545:4545 \
   -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
   -v librefang-data:/data \
   ghcr.io/librefang/librefang:latest
@@ -130,7 +130,7 @@ api_key_env = "GROQ_API_KEY"           # Env var holding the API key
 decay_rate = 0.05                      # Memory confidence decay rate
 
 [network]
-listen_addr = "127.0.0.1:4200"        # OFP listen address
+listen_addr = "127.0.0.1:4545"        # OFP listen address
 ```
 
 ### Verify Your Setup
@@ -269,15 +269,15 @@ Output:
 
 ```
 Starting LibreFang daemon...
-LibreFang daemon running on http://127.0.0.1:4200
+LibreFang daemon running on http://127.0.0.1:4545
 Press Ctrl+C to stop.
 ```
 
 The daemon provides:
-- **REST API** at `http://127.0.0.1:4200/api/`
-- **WebSocket** endpoint at `ws://127.0.0.1:4200/api/agents/{id}/ws`
-- **WebChat UI** at `http://127.0.0.1:4200/`
-- **OFP networking** on port 4200
+- **REST API** at `http://127.0.0.1:4545/api/`
+- **WebSocket** endpoint at `ws://127.0.0.1:4545/api/agents/{id}/ws`
+- **WebChat UI** at `http://127.0.0.1:4545/`
+- **OFP networking** on port 4545
 
 ### Check Status
 
@@ -290,7 +290,7 @@ librefang status
 Press `Ctrl+C` in the terminal running the daemon, or:
 
 ```bash
-curl -X POST http://127.0.0.1:4200/api/shutdown
+curl -X POST http://127.0.0.1:4545/api/shutdown
 ```
 
 ---
@@ -300,7 +300,7 @@ curl -X POST http://127.0.0.1:4200/api/shutdown
 With the daemon running, open your browser to:
 
 ```
-http://127.0.0.1:4200/
+http://127.0.0.1:4545/
 ```
 
 The embedded WebChat UI allows you to:

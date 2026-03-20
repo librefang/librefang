@@ -47,7 +47,7 @@ decay_rate = 0.05
 sqlite_path = "~/.librefang/data/librefang.db"
 
 [network]
-listen_addr = "127.0.0.1:4200"
+listen_addr = "127.0.0.1:4545"
 shared_secret = "your-secret"
 
 [compaction]
@@ -103,7 +103,7 @@ role = "admin"
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `api_key` | String | - | Bearer 认证令牌 |
-| `api_listen` | String | "127.0.0.1:4200" | API 监听地址 |
+| `api_listen` | String | "127.0.0.1:4545" | API 监听地址 |
 
 ### [default_model]
 
@@ -127,7 +127,7 @@ role = "admin"
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `listen_addr` | String | "127.0.0.1:4200" | OFP 监听地址 |
+| `listen_addr` | String | "127.0.0.1:4545" | OFP 监听地址 |
 | `shared_secret` | String | - | P2P 认证共享密钥 |
 
 ### [compaction]

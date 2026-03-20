@@ -42,8 +42,8 @@ librefang status
 ### Check Health via API
 
 ```bash
-curl http://127.0.0.1:4200/api/health
-curl http://127.0.0.1:4200/api/health/detail  # Requires auth
+curl http://127.0.0.1:4545/api/health
+curl http://127.0.0.1:4545/api/health/detail  # Requires auth
 ```
 
 ### View Logs
@@ -92,7 +92,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 **Common causes**:
 - No API key provided: `docker run -e GROQ_API_KEY=... ghcr.io/librefang/librefang`
-- Port already in use: change the port mapping `-p 3001:4200`
+- Port already in use: change the port mapping `-p 3001:4545`
 - Permission denied on volume mount: check directory permissions
 
 ---
@@ -146,9 +146,9 @@ Common issues:
 
 # Or find and kill the process using the port
 # Linux/macOS:
-lsof -i :4200
+lsof -i :4545
 # Windows:
-netstat -aon | findstr :4200
+netstat -aon | findstr :4545
 ```
 
 ---
@@ -168,7 +168,7 @@ netstat -aon | findstr :4200
 echo $GROQ_API_KEY
 
 # Test the provider
-curl http://127.0.0.1:4200/api/providers/groq/test -X POST
+curl http://127.0.0.1:4545/api/providers/groq/test -X POST
 ```
 
 ### "Rate limited" / 429 errors
@@ -199,7 +199,7 @@ model = "llama-3.1-8b-instant"  # Fast, small model
 
 **Fix**: Check available models:
 ```bash
-curl http://127.0.0.1:4200/api/models
+curl http://127.0.0.1:4545/api/models
 ```
 
 Or use an alias:
@@ -210,7 +210,7 @@ model = "llama"  # Alias for llama-3.3-70b-versatile
 
 See the full alias list:
 ```bash
-curl http://127.0.0.1:4200/api/models/aliases
+curl http://127.0.0.1:4545/api/models/aliases
 ```
 
 ### Ollama / local models not connecting
@@ -290,7 +290,7 @@ RUST_LOG=librefang_channels=debug librefang start
 
 **Manual fix**: Cancel the agent's current run:
 ```bash
-curl -X POST http://127.0.0.1:4200/api/agents/{id}/stop
+curl -X POST http://127.0.0.1:4545/api/agents/{id}/stop
 ```
 
 Or via chat command: `/stop`
@@ -301,7 +301,7 @@ Or via chat command: `/stop`
 
 **Fix**: Compact the session:
 ```bash
-curl -X POST http://127.0.0.1:4200/api/agents/{id}/session/compact
+curl -X POST http://127.0.0.1:4545/api/agents/{id}/session/compact
 ```
 
 Or via chat command: `/compact`
@@ -347,7 +347,7 @@ tools = ["file_read", "web_fetch", "shell_exec"]  # Must list each tool
 
 **Fix**: Include the Bearer token:
 ```bash
-curl -H "Authorization: Bearer your-api-key" http://127.0.0.1:4200/api/agents
+curl -H "Authorization: Bearer your-api-key" http://127.0.0.1:4545/api/agents
 ```
 
 ### 429 Too Many Requests

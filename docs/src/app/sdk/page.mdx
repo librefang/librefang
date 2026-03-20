@@ -33,7 +33,7 @@ import { LibreFang } from '@librefang/sdk';
 // Create client
 const client = new LibreFang({
   apiKey: 'your-api-key',
-  baseUrl: 'http://127.0.0.1:4200'
+  baseUrl: 'http://127.0.0.1:4545'
 });
 
 // List Agents
@@ -98,7 +98,7 @@ from librefang import LibreFang
 # Create client
 client = LibreFang(
     api_key="your-api-key",
-    base_url="http://127.0.0.1:4200"
+    base_url="http://127.0.0.1:4545"
 )
 
 # List Agents
@@ -118,7 +118,7 @@ for chunk in client.agents.stream_message("agent-id", message="Tell me a story")
 # Client configuration
 client = LibreFang(
     api_key: str,
-    base_url: str = "http://127.0.0.1:4200",
+    base_url: str = "http://127.0.0.1:4545",
     timeout: int = 60
 )
 
@@ -156,7 +156,7 @@ librefang = { version = "0.1", features = ["client"] }
 use librefang::Client;
 
 // Create client
-let client = Client::new("http://127.0.0.1:4200")
+let client = Client::new("http://127.0.0.1:4545")
     .api_key("your-api-key");
 
 // List Agents
@@ -177,13 +177,13 @@ LibreFang provides an OpenAI-compatible API that can be used directly with OpenA
 ### Endpoint
 
 ```
-Base URL: http://127.0.0.1:4200/v1
+Base URL: http://127.0.0.1:4545/v1
 ```
 
 ### Chat Completions
 
 ```bash
-curl -X POST http://127.0.0.1:4200/v1/chat/completions \
+curl -X POST http://127.0.0.1:4545/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-api-key" \
   -d '{
@@ -202,7 +202,7 @@ from openai import OpenAI
 
 client = OpenAI(
     api_key="your-api-key",  # LibreFang API key
-    base_url="http://127.0.0.1:4200/v1"
+    base_url="http://127.0.0.1:4545/v1"
 )
 
 response = client.chat.completions.create(
@@ -218,7 +218,7 @@ import OpenAI from 'openai';
 
 const client = new OpenAI({
   apiKey: 'your-api-key',
-  baseURL: 'http://127.0.0.1:4200/v1'
+  baseURL: 'http://127.0.0.1:4545/v1'
 });
 
 const response = await client.chat.completions.create({
@@ -239,7 +239,7 @@ Models available via OpenAI compatible API:
 ### Streaming Response
 
 ```bash
-curl -X POST http://127.0.0.1:4200/v1/chat/completions \
+curl -X POST http://127.0.0.1:4545/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-api-key" \
   -d '{
@@ -256,7 +256,7 @@ curl -X POST http://127.0.0.1:4200/v1/chat/completions \
 ### Connection
 
 ```javascript
-const ws = new WebSocket('ws://127.0.0.1:4200/api/agents/{agent-id}/ws');
+const ws = new WebSocket('ws://127.0.0.1:4545/api/agents/{agent-id}/ws');
 ws.onmessage = (event) => {
   const data = JSON.parse(event.data);
   console.log(data);
@@ -292,7 +292,7 @@ ws.send(JSON.stringify({ message: 'Hello!' }));
 ### Connection
 
 ```bash
-curl -N http://127.0.0.1:4200/api/agents/{agent-id}/stream \
+curl -N http://127.0.0.1:4545/api/agents/{agent-id}/stream \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer your-api-key" \
   -d '{"message": "Hello!"}'

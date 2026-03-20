@@ -674,7 +674,7 @@ The LibreFang Protocol (OFP) enables peer-to-peer agent communication across mac
 Machine A                          Machine B
 +-----------+                      +-----------+
 | PeerNode  | ---TCP (JSON)------> | PeerNode  |
-| port 4200 | <---TCP (JSON)------ | port 4200 |
+| port 4545 | <---TCP (JSON)------ | port 4545 |
 +-----------+                      +-----------+
 | PeerRegistry |                   | PeerRegistry |
 | - Known peers |                  | - Known peers |

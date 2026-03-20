@@ -16,12 +16,12 @@ Spawn via the REST API:
 
 ```bash
 # Spawn from a built-in template name
-curl -X POST http://localhost:4200/api/agents \
+curl -X POST http://localhost:4545/api/agents \
   -H "Content-Type: application/json" \
   -d '{"template": "coder"}'
 
 # Spawn with overrides
-curl -X POST http://localhost:4200/api/agents \
+curl -X POST http://localhost:4545/api/agents \
   -H "Content-Type: application/json" \
   -d '{"template": "writer", "model": "gemini-2.5-flash"}'
 ```
@@ -29,7 +29,7 @@ curl -X POST http://localhost:4200/api/agents \
 Send a message to a running agent:
 
 ```bash
-curl -X POST http://localhost:4200/api/agents/{id}/message \
+curl -X POST http://localhost:4545/api/agents/{id}/message \
   -H "Content-Type: application/json" \
   -d '{"content": "Write unit tests for the auth module"}'
 ```

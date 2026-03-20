@@ -67,7 +67,7 @@ docker pull ghcr.io/librefang/librefang:latest
 
 docker run -d \
   --name librefang \
-  -p 4200:4200 \
+  -p 4545:4545 \
   -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
   -v librefang-data:/data \
   ghcr.io/librefang/librefang:latest
@@ -117,7 +117,7 @@ model = "llama-3.3-70b-versatile"
 api_key_env = "GROQ_API_KEY"
 
 [network]
-listen_addr = "127.0.0.1:4200"
+listen_addr = "127.0.0.1:4545"
 ```
 
 ### 4. 启动守护进程
@@ -126,7 +126,7 @@ listen_addr = "127.0.0.1:4200"
 librefang start
 ```
 
-启动后访问 http://127.0.0.1:4200/ 查看仪表板。
+启动后访问 http://127.0.0.1:4545/ 查看仪表板。
 
 ### 5. 激活 Hand
 
@@ -342,7 +342,7 @@ Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Together, Mistral, Firewo
 ## OpenAI 兼容 API
 
 ```bash
-curl -X POST localhost:4200/v1/chat/completions \
+curl -X POST localhost:4545/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "researcher",

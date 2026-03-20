@@ -119,7 +119,7 @@ librefang start [--config <PATH>]
 
 - Checks if a daemon is already running; exits with an error if so.
 - Boots the LibreFang kernel (loads config, initializes SQLite database, loads agents, connects MCP servers, starts background tasks).
-- Starts the HTTP API server on the address specified in `config.toml` (default: `127.0.0.1:4200`).
+- Starts the HTTP API server on the address specified in `config.toml` (default: `127.0.0.1:4545`).
 - Writes `daemon.json` to `~/.librefang/` so other CLI commands can discover the running daemon.
 - Blocks until interrupted with `Ctrl+C`.
 
@@ -134,8 +134,8 @@ librefang start [--config <PATH>]
   [ok] 50 models available
   [ok] 3 agent(s) loaded
 
-  API:        http://127.0.0.1:4200
-  Dashboard:  http://127.0.0.1:4200/
+  API:        http://127.0.0.1:4545
+  Dashboard:  http://127.0.0.1:4545/
   Provider:   groq
   Model:      llama-3.3-70b-versatile
 
@@ -205,7 +205,7 @@ librefang doctor [--json] [--repair]
 2. **.env file** -- exists and has correct permissions (0600 on Unix)
 3. **Config TOML syntax** -- `config.toml` parses without errors
 4. **Daemon status** -- whether a daemon is running
-5. **Port 4200 availability** -- if daemon is not running, checks if the port is free
+5. **Port 4545 availability** -- if daemon is not running, checks if the port is free
 6. **Stale daemon.json** -- leftover `daemon.json` from a crashed daemon
 7. **Database file** -- SQLite magic bytes validation
 8. **Disk space** -- warns if less than 100MB available (Unix only)
@@ -238,7 +238,7 @@ librefang dashboard
 **Behavior:**
 
 - Requires a running daemon.
-- Opens the daemon URL (e.g. `http://127.0.0.1:4200/`) in the system browser.
+- Opens the daemon URL (e.g. `http://127.0.0.1:4545/`) in the system browser.
 - Copies the URL to the system clipboard (uses PowerShell on Windows, `pbcopy` on macOS, `xclip`/`xsel` on Linux).
 
 **Example:**
@@ -849,7 +849,7 @@ librefang config get default_model.provider
 # groq
 
 librefang config get api_listen
-# 127.0.0.1:4200
+# 127.0.0.1:4545
 
 librefang config get memory.decay_rate
 # 0.05
@@ -879,7 +879,7 @@ librefang config set <KEY> <VALUE>
 ```bash
 librefang config set default_model.provider anthropic
 librefang config set default_model.model claude-sonnet-4-20250514
-librefang config set api_listen "0.0.0.0:4200"
+librefang config set api_listen "0.0.0.0:4545"
 ```
 
 ---
@@ -1099,7 +1099,7 @@ Add to your MCP client configuration:
 
 The CLI uses a two-step mechanism to detect a running daemon:
 
-1. **Read `daemon.json`:** On startup, the daemon writes `~/.librefang/daemon.json` containing the listen address (e.g. `127.0.0.1:4200`). The CLI reads this file to learn where the daemon is.
+1. **Read `daemon.json`:** On startup, the daemon writes `~/.librefang/daemon.json` containing the listen address (e.g. `127.0.0.1:4545`). The CLI reads this file to learn where the daemon is.
 
 2. **Health check:** The CLI sends `GET http://<listen_addr>/api/health` with a 2-second timeout. If the health check succeeds, the daemon is considered running and the CLI uses HTTP to communicate with it.
 

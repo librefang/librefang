@@ -116,7 +116,7 @@ A2A 协议支持 LibreFang agents 之间的通信。
 {
   "name": "researcher",
   "description": "Deep research agent",
-  "url": "http://localhost:4200/a2a",
+  "url": "http://localhost:4545/a2a",
   "version": "1.0.0",
   "capabilities": {
     "streaming": true,
@@ -140,7 +140,7 @@ A2A 协议支持 LibreFang agents 之间的通信。
 ### 发送任务
 
 ```bash
-curl -X POST http://localhost:4200/a2a/tasks \
+curl -X POST http://localhost:4545/a2a/tasks \
   -H "Content-Type: application/json" \
   -d '{
     "id": "task-123",
@@ -155,10 +155,10 @@ curl -X POST http://localhost:4200/a2a/tasks \
 
 ```bash
 # 轮询
-curl http://localhost:4200/a2a/tasks/task-123
+curl http://localhost:4545/a2a/tasks/task-123
 
 # 或使用 SSE
-curl -N http://localhost:4200/a2a/tasks/task-123/events
+curl -N http://localhost:4545/a2a/tasks/task-123/events
 ```
 
 ---

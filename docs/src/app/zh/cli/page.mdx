@@ -538,18 +538,18 @@ librefang mcp
 
 ```bash
 # 健康检查
-curl http://127.0.0.1:4200/api/health
+curl http://127.0.0.1:4545/api/health
 
 # 列出 agent
-curl http://127.0.0.1:4200/api/agents
+curl http://127.0.0.1:4545/api/agents
 
 # 发送消息
-curl -X POST http://127.0.0.1:4200/api/agents/<id>/message \
+curl -X POST http://127.0.0.1:4545/api/agents/<id>/message \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello!"}'
 
 # OpenAI 兼容 API
-curl -X POST http://127.0.0.1:4200/v1/chat/completions \
+curl -X POST http://127.0.0.1:4545/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model": "researcher", "messages": [{"role": "user", "content": "Hello"}]}'
 ```

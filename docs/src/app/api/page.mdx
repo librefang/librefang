@@ -1,6 +1,6 @@
 # API Reference
 
-LibreFang exposes a REST API, WebSocket endpoints, and SSE streaming when the daemon is running. The default listen address is `http://127.0.0.1:4200`.
+LibreFang exposes a REST API, WebSocket endpoints, and SSE streaming when the daemon is running. The default listen address is `http://127.0.0.1:4545`.
 
 All responses include security headers (CSP, X-Frame-Options, X-Content-Type-Options, HSTS) and are protected by a GCRA cost-aware rate limiter with per-IP token bucket tracking and automatic stale entry cleanup. LibreFang implements 16 security systems including Merkle audit trails, taint tracking, WASM dual metering, Ed25519 manifest signing, SSRF protection, subprocess sandboxing, and secret zeroization.
 
@@ -770,7 +770,7 @@ Retrieve current kernel configuration (secrets are redacted).
   "data_dir": "/home/user/.librefang/data",
   "default_provider": "groq",
   "default_model": "llama-3.3-70b-versatile",
-  "listen_addr": "127.0.0.1:4200",
+  "listen_addr": "127.0.0.1:4545",
   "api_key_set": true,
   "channels_configured": 2,
   "mcp_servers": 1
@@ -1337,7 +1337,7 @@ A2A agent card discovery endpoint. Returns the server's A2A agent card, which de
 {
   "name": "LibreFang",
   "description": "LibreFang Agent Operating System",
-  "url": "http://127.0.0.1:4200",
+  "url": "http://127.0.0.1:4545",
   "version": "0.1.0",
   "capabilities": {
     "streaming": true,

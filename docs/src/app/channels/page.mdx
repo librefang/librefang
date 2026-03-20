@@ -537,7 +537,7 @@ The email adapter polls the IMAP inbox at the configured interval. New emails ar
 The WebChat UI is embedded in the daemon and requires no configuration. When the daemon is running:
 
 ```
-http://127.0.0.1:4200/
+http://127.0.0.1:4545/
 ```
 
 Features:

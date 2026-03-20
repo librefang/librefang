@@ -1,6 +1,6 @@
 # API 参考
 
-LibreFang 暴露 REST API、WebSocket 端点和 SSE 流式传输。默认监听地址 `http://127.0.0.1:4200`。
+LibreFang 暴露 REST API、WebSocket 端点和 SSE 流式传输。默认监听地址 `http://127.0.0.1:4545`。
 
 ## 目录
 
@@ -403,12 +403,12 @@ api_key = "your-secret-api-key"
 
 ## WebSocket 协议
 
-### ws://127.0.0.1:4200/api/agents/\{id\}/ws
+### ws://127.0.0.1:4545/api/agents/\{id\}/ws
 
 WebSocket 实时聊天。
 
 ```javascript
-const ws = new WebSocket('ws://127.0.0.1:4200/api/agents/\{id\}/ws');
+const ws = new WebSocket('ws://127.0.0.1:4545/api/agents/\{id\}/ws');
 
 ws.onmessage = (event) => {
   console.log(event.data);
@@ -426,7 +426,7 @@ ws.send(JSON.stringify({ message: "Hello!" }));
 SSE 流式响应。
 
 ```bash
-curl -N http://127.0.0.1:4200/api/agents/\{id\}/stream \
+curl -N http://127.0.0.1:4545/api/agents/\{id\}/stream \
   -H "Content-Type: application/json" \
   -d '{"message": "Hello!"}'
 ```
@@ -440,7 +440,7 @@ curl -N http://127.0.0.1:4200/api/agents/\{id\}/stream \
 OpenAI 兼容聊天完成端点。
 
 ```bash
-curl -X POST http://127.0.0.1:4200/v1/chat/completions \
+curl -X POST http://127.0.0.1:4545/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "researcher",
@@ -454,7 +454,7 @@ curl -X POST http://127.0.0.1:4200/v1/chat/completions \
 列出可用模型。
 
 ```bash
-curl http://127.0.0.1:4200/v1/models
+curl http://127.0.0.1:4545/v1/models
 ```
 
 ---

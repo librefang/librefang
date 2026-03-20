@@ -234,7 +234,7 @@ librefang usage
 librefang cost
 
 # API 端点
-curl http://127.0.0.1:4200/api/usage
+curl http://127.0.0.1:4545/api/usage
 ```
 
 ---
@@ -245,7 +245,7 @@ curl http://127.0.0.1:4200/api/usage
 
 ```bash
 # 检查端口是否被占用
-lsof -i :4200
+lsof -i :4545
 
 # 查看详细错误
 RUST_LOG=debug librefang start
@@ -318,7 +318,7 @@ LibreFang 本身是开源免费的。您只需支付 LLM 提供商的 API 费用
 librefang cost
 
 # 按提供商查看
-curl http://127.0.0.1:4200/api/usage/providers
+curl http://127.0.0.1:4545/api/usage/providers
 ```
 
 ### Q: 如何设置预算限制？

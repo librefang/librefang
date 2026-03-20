@@ -43,7 +43,7 @@ api_key_env = "GROQ_API_KEY"
 
 # 网络
 [network]
-listen_addr = "127.0.0.1:4200"
+listen_addr = "127.0.0.1:4545"
 ```
 
 ### 推荐配置
@@ -100,10 +100,10 @@ sudo systemctl start librefang
 
 ```bash
 # 健康检查
-curl http://127.0.0.1:4200/api/health
+curl http://127.0.0.1:4545/api/health
 
 # 列出 agent
-curl http://127.0.0.1:4200/api/agents
+curl http://127.0.0.1:4545/api/agents
 ```
 
 ---
@@ -124,10 +124,10 @@ grep ERROR ~/.librefang/logs/librefang.log
 
 ```bash
 # 预算使用
-curl http://127.0.0.1:4200/api/budget
+curl http://127.0.0.1:4545/api/budget
 
 # 通道状态
-curl http://127.0.0.1:4200/api/channels
+curl http://127.0.0.1:4545/api/channels
 ```
 
 ---
@@ -228,7 +228,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/example.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:4200;
+        proxy_pass http://127.0.0.1:4545;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection 'upgrade';

@@ -234,7 +234,7 @@ librefang usage
 librefang cost
 
 # API endpoint
-curl http://127.0.0.1:4200/api/usage
+curl http://127.0.0.1:4545/api/usage
 ```
 
 ---
@@ -245,7 +245,7 @@ curl http://127.0.0.1:4200/api/usage
 
 ```bash
 # Check if port is in use
-lsof -i :4200
+lsof -i :4545
 
 # View detailed errors
 RUST_LOG=debug librefang start
@@ -318,7 +318,7 @@ LibreFang itself is open source and free. You only pay for LLM provider API fees
 librefang cost
 
 # View by provider
-curl http://127.0.0.1:4200/api/usage/providers
+curl http://127.0.0.1:4545/api/usage/providers
 ```
 
 ### Q: How to set budget limits?
