@@ -22,13 +22,17 @@ fn looks_like_tool_call(text: &str) -> bool {
         || t.starts_with("{\"type\":\"function\"")
         || (t.starts_with('[') && t.contains("'type': 'text'"))
         // Tag-based patterns — use contains() because tool call tags may
-        // appear after natural language preamble (e.g. "Let me search for that.\n<function=...")
+        // appear after natural language preamble
         || t.contains("<function=")
         || t.contains("<function>")
         || t.contains("<function ")
         || t.contains("<tool>")
         || t.contains("[TOOL_CALL]")
         || t.contains("<tool_call>")
+        // Pattern 4: markdown code block containing a tool call
+        || t.contains("```")
+        // Pattern 5: backtick-wrapped tool call
+        || (t.contains('`') && t.contains('{'))
 }
 
 // Feature-gated adapter imports
