@@ -296,7 +296,7 @@ async fn test_status_endpoint() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "running");
-    assert_eq!(body["agent_count"], 1); // default router auto-spawned
+    assert_eq!(body["agent_count"], 1); // default assistant auto-spawned
     assert!(body["uptime_seconds"].is_number());
     assert_eq!(body["default_provider"], "ollama");
     assert_eq!(body["agents"].as_array().unwrap().len(), 1);
@@ -501,7 +501,7 @@ async fn test_spawn_list_kill_agent() {
     let agent_id = body["agent_id"].as_str().unwrap().to_string();
     assert!(!agent_id.is_empty());
 
-    // --- List (2 agents: default router + test-agent) ---
+    // --- List (2 agents: default assistant + test-agent) ---
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
         .send()
@@ -525,7 +525,7 @@ async fn test_spawn_list_kill_agent() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "killed");
 
-    // --- List (only default router remains) ---
+    // --- List (only default assistant remains) ---
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
         .send()
@@ -535,7 +535,7 @@ async fn test_spawn_list_kill_agent() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 1);
-    assert_eq!(agents[0]["name"], "router");
+    assert_eq!(agents[0]["name"], "assistant");
 }
 
 #[tokio::test]
@@ -935,7 +935,7 @@ memory_write = ["self.*"]
         ids.push(body["agent_id"].as_str().unwrap().to_string());
     }
 
-    // List should show 4 (3 spawned + default router)
+    // List should show 4 (3 spawned + default assistant)
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
         .send()
@@ -962,7 +962,7 @@ memory_write = ["self.*"]
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    // List should show 3 (2 spawned + default router)
+    // List should show 3 (2 spawned + default assistant)
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
         .send()
@@ -981,7 +981,7 @@ memory_write = ["self.*"]
             .unwrap();
     }
 
-    // List should have only default router
+    // List should have only default assistant
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
         .send()

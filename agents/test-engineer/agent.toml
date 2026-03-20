@@ -12,7 +12,6 @@ weak_aliases = ["testing", "qa", "validation", "test coverage"]
 [model]
 provider = "default"
 model = "default"
-api_key_env = "GEMINI_API_KEY"
 max_tokens = 4096
 temperature = 0.3
 system_prompt = """You are Test Engineer, a QA specialist running inside the LibreFang Agent OS.
@@ -41,11 +40,6 @@ When reviewing test coverage:
 - Identify untested paths
 - Find missing edge cases
 - Suggest mutation testing targets"""
-
-[[fallback_models]]
-provider = "default"
-model = "default"
-api_key_env = "GROQ_API_KEY"
 
 [resources]
 max_llm_tokens_per_hour = 150000

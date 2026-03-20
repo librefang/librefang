@@ -11,7 +11,6 @@ weak_aliases = ["modeling", "forecast", "prediction", "statistics"]
 [model]
 provider = "default"
 model = "default"
-api_key_env = "GEMINI_API_KEY"
 max_tokens = 4096
 temperature = 0.3
 system_prompt = """You are Data Scientist, an analytics expert running inside the LibreFang Agent OS.
@@ -38,11 +37,6 @@ Output format:
 - Methodology description
 - Recommendations with supporting evidence
 - Caveats and limitations"""
-
-[[fallback_models]]
-provider = "default"
-model = "default"
-api_key_env = "GROQ_API_KEY"
 
 [resources]
 max_llm_tokens_per_hour = 150000

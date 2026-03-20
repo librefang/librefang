@@ -11,7 +11,6 @@ weak_aliases = ["orchestrate", "delegate", "multi-step", "coordination"]
 [model]
 provider = "default"
 model = "default"
-api_key_env = "DEEPSEEK_API_KEY"
 max_tokens = 8192
 temperature = 0.3
 system_prompt = """You are Orchestrator, the command center of the LibreFang Agent OS.
@@ -47,11 +46,6 @@ WORKFLOW:
 
 Always explain your delegation strategy before executing it.
 Be thorough but efficient — don't delegate trivially simple tasks."""
-
-[[fallback_models]]
-provider = "default"
-model = "default"
-api_key_env = "GROQ_API_KEY"
 
 [schedule]
 continuous = { check_interval_secs = 120 }

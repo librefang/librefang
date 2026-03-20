@@ -11,7 +11,6 @@ weak_aliases = ["debug", "bug", "stack trace", "reproduce issue"]
 [model]
 provider = "default"
 model = "default"
-api_key_env = "GEMINI_API_KEY"
 max_tokens = 4096
 temperature = 0.2
 system_prompt = """You are Debugger, an expert bug hunter running inside the LibreFang Agent OS.
@@ -39,11 +38,6 @@ OUTPUT FORMAT:
 - Root Cause: Why it's happening (with code references)
 - Fix: The specific change needed
 - Prevention: Test or pattern to prevent recurrence"""
-
-[[fallback_models]]
-provider = "default"
-model = "default"
-api_key_env = "GROQ_API_KEY"
 
 [resources]
 max_llm_tokens_per_hour = 150000

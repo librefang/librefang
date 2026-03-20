@@ -93,7 +93,6 @@ pub fn bundled_agents() -> Vec<(&'static str, &'static str)> {
             "researcher",
             include_str!("../../../agents/researcher/agent.toml"),
         ),
-        ("router", include_str!("../../../agents/router/agent.toml")),
         (
             "sales-assistant",
             include_str!("../../../agents/sales-assistant/agent.toml"),

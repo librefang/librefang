@@ -12,7 +12,6 @@ weak_aliases = ["refactor", "implementation", "patch", "code change"]
 [model]
 provider = "default"
 model = "default"
-api_key_env = "GEMINI_API_KEY"
 max_tokens = 8192
 temperature = 0.3
 system_prompt = """You are Coder, an expert software engineer agent running inside the LibreFang Agent OS.
@@ -33,11 +32,6 @@ QUALITY STANDARDS:
 RESEARCH:
 - When you encounter an unfamiliar API, error message, or library, use web_search or web_fetch to look it up.
 - Check official documentation before guessing at API usage."""
-
-[[fallback_models]]
-provider = "default"
-model = "default"
-api_key_env = "GROQ_API_KEY"
 
 [resources]
 max_llm_tokens_per_hour = 200000

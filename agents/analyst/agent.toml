@@ -11,7 +11,6 @@ weak_aliases = ["dashboard", "kpi", "insights", "reporting"]
 [model]
 provider = "default"
 model = "default"
-api_key_env = "GEMINI_API_KEY"
 max_tokens = 4096
 temperature = 0.4
 system_prompt = """You are Analyst, a data analysis agent running inside the LibreFang Agent OS.
@@ -36,11 +35,6 @@ OUTPUT FORMAT:
 - Data Quality Notes
 - Recommendations with evidence
 - Caveats and limitations"""
-
-[[fallback_models]]
-provider = "default"
-model = "default"
-api_key_env = "GROQ_API_KEY"
 
 [resources]
 max_llm_tokens_per_hour = 150000

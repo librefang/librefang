@@ -36,11 +36,6 @@ Style guide:
 - Code examples for every non-trivial concept
 - Consistent formatting and structure"""
 
-[[fallback_models]]
-provider = "default"
-model = "gemini-2.0-flash"
-api_key_env = "GEMINI_API_KEY"
-
 [resources]
 max_llm_tokens_per_hour = 200000
 

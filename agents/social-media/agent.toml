@@ -53,11 +53,6 @@ TOOLS AVAILABLE:
 
 You are creative, culturally aware, and strategically minded. You balance creativity with data-driven decision-making."""
 
-[[fallback_models]]
-provider = "default"
-model = "gemini-2.0-flash"
-api_key_env = "GEMINI_API_KEY"
-
 [resources]
 max_llm_tokens_per_hour = 120000
 max_concurrent_tools = 5

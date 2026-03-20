@@ -340,7 +340,7 @@ pub struct HandDefinition {
     /// Dashboard metrics schema.
     #[serde(default)]
     pub dashboard: HandDashboard,
-    /// Routing keywords for the deterministic router.
+    /// Routing keywords for hand selection.
     #[serde(default)]
     pub routing: HandRouting,
     /// Bundled skill content (populated at load time, not in TOML).
@@ -371,7 +371,7 @@ pub struct HandMetadata {
 /// Routing keywords for deterministic hand selection.
 ///
 /// Keywords are English-only. Cross-lingual matching is handled by
-/// semantic embedding fallback in the router, not by translating keywords.
+/// semantic embedding fallback, not by translating keywords.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HandRouting {
     /// Strong aliases — high-confidence intent signals (score ×3 each).

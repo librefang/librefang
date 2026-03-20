@@ -171,36 +171,69 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     ) -> Result<mpsc::Receiver<String>, String> {
         let (mut event_rx, kernel_handle) = self
             .kernel
-            .send_message_streaming(agent_id, message, None)
+            .send_message_streaming_with_routing(agent_id, message, None)
+            .await
             .map_err(|e| format!("{e}"))?;
 
         // Bridge StreamEvent -> text-only mpsc channel for the adapter.
         let (tx, rx) = mpsc::channel::<String>(64);
 
         let bridge_handle = tokio::spawn(async move {
+            // Buffer text per iteration. Some providers emit tool call syntax
+            // as plain text (recovered by agent_loop later). We hold text until
+            // ContentComplete, then flush only if it doesn't look like a raw
+            // tool call or content-block array.
+            let mut iter_buf = String::new();
+            let mut saw_tool_use = false;
+
             while let Some(event) = event_rx.recv().await {
                 match event {
                     StreamEvent::TextDelta { text } => {
-                        if tx.send(text).await.is_err() {
-                            break; // receiver dropped
-                        }
+                        iter_buf.push_str(&text);
                     }
                     StreamEvent::ContentComplete { .. } => {
-                        // Do NOT break here. ContentComplete fires at the end of each
-                        // LLM turn (iteration), not at the end of the entire agent loop.
-                        // In a multi-iteration scenario — e.g. the router agent's first
-                        // turn is a tool call (no text) and the second turn contains the
-                        // actual text response — breaking here would cause us to exit
-                        // before the text-bearing iteration is even reached.
-                        //
-                        // The loop naturally terminates when `event_rx.recv()` returns
-                        // `None`, which happens when the kernel drops the sender after
-                        // the full agent loop completes.
+                        // Flush buffered text if it's real user-facing content.
+                        // Discard if it looks like leaked tool call syntax.
+                        if !iter_buf.is_empty() && !saw_tool_use {
+                            let trimmed = iter_buf.trim();
+                            let looks_like_tool_call = trimmed.starts_with("[{")
+                                || trimmed.starts_with("functions.")
+                                || trimmed.starts_with("{\"name\":")
+                                || trimmed.starts_with("{\"type\":\"function\"")
+                                || (trimmed.starts_with('[') && trimmed.contains("'type': 'text'"));
+                            if !looks_like_tool_call {
+                                if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
+                                    break;
+                                }
+                            } else {
+                                debug!("Streaming bridge: filtered leaked tool call text");
+                            }
+                        }
+                        iter_buf.clear();
+                        saw_tool_use = false;
+                    }
+                    StreamEvent::ToolUseStart { .. } => {
+                        // Mark this iteration as having tool use — any buffered
+                        // text is likely the tool call echoed as content.
+                        saw_tool_use = true;
                     }
                     _ => {
-                        // ToolUseStart, ToolInputDelta, ThinkingDelta, etc. — skip
-                        debug!("Streaming bridge: skipping non-text event");
+                        // ToolInputDelta, ThinkingDelta, etc. — skip
                     }
+                }
+            }
+
+            // Flush any remaining text after the stream ends (final iteration
+            // may not get a ContentComplete if the sender drops first).
+            if !iter_buf.is_empty() && !saw_tool_use {
+                let trimmed = iter_buf.trim();
+                let looks_like_tool_call = trimmed.starts_with("[{")
+                    || trimmed.starts_with("functions.")
+                    || trimmed.starts_with("{\"name\":")
+                    || trimmed.starts_with("{\"type\":\"function\"")
+                    || (trimmed.starts_with('[') && trimmed.contains("'type': 'text'"));
+                if !looks_like_tool_call {
+                    let _ = tx.send(iter_buf).await;
                 }
             }
         });

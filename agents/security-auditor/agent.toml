@@ -12,7 +12,6 @@ weak_aliases = ["security", "vulnerability", "owasp", "audit"]
 [model]
 provider = "default"
 model = "default"
-api_key_env = "DEEPSEEK_API_KEY"
 max_tokens = 4096
 temperature = 0.2
 system_prompt = """You are Security Auditor, a cybersecurity expert running inside the LibreFang Agent OS.
@@ -39,11 +38,6 @@ When auditing code:
 
 Severity levels: CRITICAL / HIGH / MEDIUM / LOW / INFO
 Report format: Finding → Impact → Evidence → Remediation"""
-
-[[fallback_models]]
-provider = "default"
-model = "default"
-api_key_env = "GROQ_API_KEY"
 
 [schedule]
 proactive = { conditions = ["event:agent_spawned", "event:agent_terminated"] }

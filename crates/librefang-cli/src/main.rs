@@ -5099,7 +5099,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
                 return;
             }
 
-            let config_block = "\n[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("telegram", config_block);
 
             // Save token to .env
@@ -5157,7 +5157,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let app_token = prompt_input("  Paste your App Token (xapp-...): ");
             let bot_token = prompt_input("  Paste your Bot Token (xoxb-...): ");
 
-            let config_block = "\n[channels.slack]\napp_token_env = \"SLACK_APP_TOKEN\"\nbot_token_env = \"SLACK_BOT_TOKEN\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.slack]\napp_token_env = \"SLACK_APP_TOKEN\"\nbot_token_env = \"SLACK_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("slack", config_block);
 
             if !app_token.is_empty() {
@@ -5192,7 +5192,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let access_token = prompt_input("  Access Token: ");
             let verify_token = prompt_input("  Verify Token: ");
 
-            let config_block = "\n[channels.whatsapp]\nmode = \"cloud_api\"\nphone_number_id_env = \"WA_PHONE_ID\"\naccess_token_env = \"WA_ACCESS_TOKEN\"\nverify_token_env = \"WA_VERIFY_TOKEN\"\nwebhook_port = 8443\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.whatsapp]\nmode = \"cloud_api\"\nphone_number_id_env = \"WA_PHONE_ID\"\naccess_token_env = \"WA_ACCESS_TOKEN\"\nverify_token_env = \"WA_VERIFY_TOKEN\"\nwebhook_port = 8443\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("whatsapp", config_block);
 
             for (key, val) in [
@@ -5228,7 +5228,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let password = prompt_input("  App password (or Enter to set later): ");
 
             let config_block = format!(
-                "\n[channels.email]\nimap_host = \"imap.gmail.com\"\nimap_port = 993\nsmtp_host = \"smtp.gmail.com\"\nsmtp_port = 587\nusername = \"{username}\"\npassword_env = \"EMAIL_PASSWORD\"\npoll_interval = 30\ndefault_agent = \"router\"\n"
+                "\n[channels.email]\nimap_host = \"imap.gmail.com\"\nimap_port = 993\nsmtp_host = \"smtp.gmail.com\"\nsmtp_port = 587\nusername = \"{username}\"\npassword_env = \"EMAIL_PASSWORD\"\npoll_interval = 30\ndefault_agent = \"assistant\"\n"
             );
             maybe_write_channel_config("email", &config_block);
 
@@ -5263,7 +5263,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
 
             let phone = prompt_input("  Your phone number (+1XXXX, or Enter to skip): ");
 
-            let config_block = "\n[channels.signal]\nphone_env = \"SIGNAL_PHONE\"\nsocket_path = \"/tmp/signal-cli.sock\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.signal]\nphone_env = \"SIGNAL_PHONE\"\nsocket_path = \"/tmp/signal-cli.sock\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("signal", config_block);
 
             if !phone.is_empty() {
@@ -5297,7 +5297,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             };
             let token = prompt_input("  Access token: ");
 
-            let config_block = "\n[channels.matrix]\nhomeserver_env = \"MATRIX_HOMESERVER\"\naccess_token_env = \"MATRIX_ACCESS_TOKEN\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.matrix]\nhomeserver_env = \"MATRIX_HOMESERVER\"\naccess_token_env = \"MATRIX_ACCESS_TOKEN\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("matrix", config_block);
 
             let _ = dotenv::save_env_key("MATRIX_HOMESERVER", &homeserver);
