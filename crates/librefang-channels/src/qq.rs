@@ -245,9 +245,6 @@ impl ChannelAdapter for QqAdapter {
     > {
         info!("Starting QQ adapter for app_id={}", self.app_id);
 
-        // Ensure rustls CryptoProvider is installed for WSS connections.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
         *self.started_at.write().await = Some(chrono::Utc::now());
 
         let (tx, rx) = mpsc::channel::<ChannelMessage>(256);
