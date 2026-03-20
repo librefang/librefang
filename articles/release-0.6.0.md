@@ -86,4 +86,4 @@ pip install librefang-sdk
 - [GitHub Release](https://github.com/librefang/librefang/releases/tag/v0.6.0-20260318)
 - [GitHub](https://github.com/librefang/librefang)
 - [Discord](https://discord.gg/DzTYqAZZmc)
-- [Contributing Guide](https://github.com/librefang/librefang/blob/main/CONTRIBUTING.md)
+- [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)

@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://librefang.ai/">Webseite</a> &bull;
   <a href="https://docs.librefang.ai">Dokumentation</a> &bull;
-  <a href="../CONTRIBUTING.md">Mitwirken</a> &bull;
+  <a href="../docs/CONTRIBUTING.md">Mitwirken</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
@@ -37,7 +37,7 @@ LibreFang ist ein **Agenten-Betriebssystem** — eine vollständige Plattform zu
 
 Herkömmliche Agenten-Frameworks warten auf Ihre Eingabe. LibreFang führt **Agenten aus, die für Sie arbeiten** — nach Zeitplan, 24/7, Ziele überwachen, Leads generieren, Social Media verwalten und an Ihr Dashboard berichten.
 
-> LibreFang ist ein Community-Fork von [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) mit offener Governance und Merge-First PR-Policy. Siehe [GOVERNANCE.md](../GOVERNANCE.md) für Details.
+> LibreFang ist ein Community-Fork von [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) mit offener Governance und Merge-First PR-Policy. Siehe [GOVERNANCE.md](../docs/GOVERNANCE.md) für Details.
 
 <p align="center">
   <img src="../public/assets/dashboard.jpg" width="800" alt="LibreFang Dashboard" />
@@ -46,7 +46,10 @@ Herkömmliche Agenten-Frameworks warten auf Ihre Eingabe. LibreFang führt **Age
 ## Schnellstart
 
 ```bash
-# Installieren
+# Installieren (Linux/macOS/WSL)
+curl -fsSL https://librefang.ai/install.sh | sh
+
+# Oder per Cargo installieren
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
 # Initialisieren (führt durch die Provider-Einrichtung)
@@ -77,7 +80,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 <details>
 <summary><strong>Cloud-Deployment</strong></summary>
 
-[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../infra/gcp/README.md)
+[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](../deploy/gcp/README.md)
 
 </details>
 
@@ -167,7 +170,7 @@ Siehe [docs/comparison.md](../docs/comparison.md) für Benchmarks und Feature-Ve
 ## Links
 
 - [Dokumentation](https://docs.librefang.ai) &bull; [API-Referenz](../docs/api-reference.md) &bull; [Erste Schritte](../docs/getting-started.md) &bull; [Fehlerbehebung](../docs/troubleshooting.md)
-- [Mitwirken](../CONTRIBUTING.md) &bull; [Governance](../GOVERNANCE.md) &bull; [Sicherheit](../SECURITY.md)
+- [Mitwirken](../docs/CONTRIBUTING.md) &bull; [Governance](../docs/GOVERNANCE.md) &bull; [Sicherheit](../docs/SECURITY.md)
 - Diskussionen: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [Anwendungsfälle](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [Feature-Abstimmungen](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [Ankündigungen](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## Mitwirkende
@@ -178,7 +181,7 @@ Siehe [docs/comparison.md](../docs/comparison.md) für Benchmarks und Feature-Ve
 
 <p align="center">
   Wir freuen uns über Beiträge jeder Art — Code, Dokumentation, Übersetzungen, Fehlerberichte.<br/>
-  Schau dir den <a href="../CONTRIBUTING.md">Leitfaden für Mitwirkende</a> an und wähle ein <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> zum Einstieg!
+  Schau dir den <a href="../docs/CONTRIBUTING.md">Leitfaden für Mitwirkende</a> an und wähle ein <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> zum Einstieg!
 </p>
 
 <p align="center">

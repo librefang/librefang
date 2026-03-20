@@ -666,11 +666,18 @@ enum ChannelCommands {
     },
     /// Test a channel by sending a test message.
     #[command(
-        long_about = "Send a test message through a configured channel to verify connectivity.\n\nExamples:\n  librefang channel test telegram\n  librefang channel test slack"
+        long_about = "Send a test message through a configured channel to verify connectivity.\n\nExamples:\n  librefang channel test telegram\n  librefang channel test telegram --chat-id 123456789\n  librefang channel test discord --channel 123456789\n  librefang channel test slack --channel C1234567890"
     )]
     Test {
         /// Channel name.
-        channel: String,
+        #[arg(value_name = "NAME")]
+        name: String,
+        /// Target channel ID for Discord or Slack live message tests.
+        #[arg(long = "channel", conflicts_with = "chat_id")]
+        channel_id: Option<String>,
+        /// Target chat ID for Telegram live message tests.
+        #[arg(long, conflicts_with = "channel_id")]
+        chat_id: Option<String>,
     },
     /// Enable a channel.
     #[command(
@@ -1500,7 +1507,11 @@ fn main() {
         Some(Commands::Channel(sub)) => match sub {
             ChannelCommands::List => cmd_channel_list(),
             ChannelCommands::Setup { channel } => cmd_channel_setup(channel.as_deref()),
-            ChannelCommands::Test { channel } => cmd_channel_test(&channel),
+            ChannelCommands::Test {
+                name,
+                channel_id,
+                chat_id,
+            } => cmd_channel_test(&name, channel_id.as_deref(), chat_id.as_deref()),
             ChannelCommands::Enable { channel } => cmd_channel_toggle(&channel, true),
             ChannelCommands::Disable { channel } => cmd_channel_toggle(&channel, false),
         },
@@ -3105,18 +3116,14 @@ fn cmd_doctor(json: bool, repair: bool) {
                             ui::check_ok(".env file (permissions fixed to 0600)");
                         }
                         repaired = true;
-                    } else {
-                        if !json {
-                            ui::check_warn(&format!(
-                                ".env file has loose permissions ({:o}), should be 0600",
-                                mode
-                            ));
-                        }
+                    } else if !json {
+                        ui::check_warn(&format!(
+                            ".env file has loose permissions ({:o}), should be 0600",
+                            mode
+                        ));
                     }
-                } else {
-                    if !json {
-                        ui::check_ok(".env file");
-                    }
+                } else if !json {
+                    ui::check_ok(".env file");
                 }
             }
             #[cfg(not(unix))]
@@ -5369,21 +5376,40 @@ fn notify_daemon_restart() {
     }
 }
 
-fn cmd_channel_test(channel: &str) {
+fn channel_test_request_body(
+    channel_id: Option<&str>,
+    chat_id: Option<&str>,
+) -> Option<serde_json::Value> {
+    channel_id
+        .map(|id| serde_json::json!({ "channel_id": id }))
+        .or_else(|| chat_id.map(|id| serde_json::json!({ "chat_id": id })))
+}
+
+fn cmd_channel_test(channel: &str, channel_id: Option<&str>, chat_id: Option<&str>) {
     if let Some(base) = find_daemon() {
         let client = daemon_client();
-        let body = daemon_json(
-            client
-                .post(format!("{base}/api/channels/{channel}/test"))
-                .send(),
-        );
-        if body.get("status").is_some() {
-            println!("Test message sent to {channel}!");
+        let request = client.post(format!("{base}/api/channels/{channel}/test"));
+        let body = if let Some(payload) = channel_test_request_body(channel_id, chat_id) {
+            daemon_json(request.json(&payload).send())
+        } else {
+            daemon_json(request.send())
+        };
+        if body["status"].as_str() == Some("ok") {
+            println!(
+                "{}",
+                body["message"]
+                    .as_str()
+                    .unwrap_or("Channel test completed successfully.")
+            );
         } else {
             eprintln!(
                 "Failed: {}",
-                body["error"].as_str().unwrap_or("Unknown error")
+                body["message"]
+                    .as_str()
+                    .or_else(|| body["error"].as_str())
+                    .unwrap_or("Unknown error")
             );
+            std::process::exit(1);
         }
     } else {
         eprintln!("Channel test requires a running daemon. Start with: librefang start");
@@ -8835,11 +8861,12 @@ fn remove_self_binary(exe_path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::{
-        compare_release_tag, daemon_log_path_for_config, daemon_log_path_for_home,
-        detached_daemon_args, normalize_release_tag, parse_version_core, resolve_hand_instance,
-        Cli, Commands, GatewayCommands, ReleaseComparison,
+        channel_test_request_body, compare_release_tag, daemon_log_path_for_config,
+        daemon_log_path_for_home, detached_daemon_args, normalize_release_tag, parse_version_core,
+        resolve_hand_instance, ChannelCommands, Cli, Commands, GatewayCommands, ReleaseComparison,
     };
     use clap::Parser;
+    use serde_json::json;
     use std::ffi::OsString;
     use std::fs;
     use std::path::Path;
@@ -8950,6 +8977,90 @@ mod tests {
             }
             _ => panic!("unexpected command"),
         }
+    }
+
+    #[test]
+    fn test_channel_test_accepts_target_channel_flag() {
+        let cli = Cli::parse_from([
+            "librefang",
+            "channel",
+            "test",
+            "discord",
+            "--channel",
+            "123456789",
+        ]);
+        match cli.command {
+            Some(Commands::Channel(ChannelCommands::Test {
+                name,
+                channel_id,
+                chat_id,
+            })) => {
+                assert_eq!(name, "discord");
+                assert_eq!(channel_id.as_deref(), Some("123456789"));
+                assert!(chat_id.is_none());
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_channel_test_accepts_chat_id_flag() {
+        let cli = Cli::parse_from([
+            "librefang",
+            "channel",
+            "test",
+            "telegram",
+            "--chat-id",
+            "999",
+        ]);
+        match cli.command {
+            Some(Commands::Channel(ChannelCommands::Test {
+                name,
+                channel_id,
+                chat_id,
+            })) => {
+                assert_eq!(name, "telegram");
+                assert!(channel_id.is_none());
+                assert_eq!(chat_id.as_deref(), Some("999"));
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_channel_test_rejects_both_target_flags() {
+        let cli = Cli::try_parse_from([
+            "librefang",
+            "channel",
+            "test",
+            "discord",
+            "--channel",
+            "123",
+            "--chat-id",
+            "456",
+        ]);
+        assert!(cli.is_err());
+    }
+
+    #[test]
+    fn test_channel_test_request_body_prefers_channel_id() {
+        assert_eq!(
+            channel_test_request_body(Some("C123"), None),
+            Some(json!({ "channel_id": "C123" }))
+        );
+    }
+
+    #[test]
+    fn test_channel_test_request_body_supports_chat_id() {
+        assert_eq!(
+            channel_test_request_body(None, Some("42")),
+            Some(json!({ "chat_id": "42" }))
+        );
+    }
+
+    #[test]
+    fn test_channel_test_request_body_empty_when_no_target() {
+        assert_eq!(channel_test_request_body(None, None), None);
     }
 
     #[test]

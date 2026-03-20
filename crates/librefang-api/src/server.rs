@@ -951,7 +951,7 @@ pub async fn run_daemon(
 
     let kernel = Arc::new(kernel);
     kernel.set_self_handle();
-    kernel.start_background_agents();
+    kernel.start_background_agents().await;
 
     // Config file hot-reload watcher (polls every 30 seconds)
     {

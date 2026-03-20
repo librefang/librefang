@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://librefang.ai/">Website</a> &bull;
   <a href="https://docs.librefang.ai">Docs</a> &bull;
-  <a href="CONTRIBUTING.md">Contributing</a> &bull;
+  <a href="docs/CONTRIBUTING.md">Contributing</a> &bull;
   <a href="https://discord.gg/DzTYqAZZmc">Discord</a>
 </p>
 
@@ -37,7 +37,7 @@ LibreFang is an **Agent Operating System** — a full platform for running auton
 
 Traditional agent frameworks wait for you to type something. LibreFang runs **agents that work for you** — on schedules, 24/7, monitoring targets, generating leads, managing social media, and reporting to your dashboard.
 
-> LibreFang is a community fork of [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) with open governance and a merge-first PR policy. See [GOVERNANCE.md](GOVERNANCE.md) for details.
+> LibreFang is a community fork of [`RightNow-AI/openfang`](https://github.com/RightNow-AI/openfang) with open governance and a merge-first PR policy. See [GOVERNANCE.md](docs/GOVERNANCE.md) for details.
 
 <p align="center">
   <img src="public/assets/dashboard.jpg" width="800" alt="LibreFang Dashboard" />
@@ -46,7 +46,10 @@ Traditional agent frameworks wait for you to type something. LibreFang runs **ag
 ## Quick Start
 
 ```bash
-# Install
+# Install (Linux/macOS/WSL)
+curl -fsSL https://librefang.ai/install.sh | sh
+
+# Or install via Cargo
 cargo install --git https://github.com/librefang/librefang librefang-cli
 
 # Initialize (walks you through provider setup)
@@ -77,7 +80,7 @@ docker run -p 4545:4545 ghcr.io/librefang/librefang
 <details>
 <summary><strong>Cloud Deploy</strong></summary>
 
-[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](infra/gcp/README.md)
+[![Deploy Hub](https://img.shields.io/badge/Deploy%20Hub-000?style=for-the-badge&logo=rocket)](https://deploy.librefang.ai) [![Fly.io](https://img.shields.io/badge/Fly.io-purple?style=for-the-badge&logo=fly.io)](https://deploy.librefang.ai) [![Render](https://img.shields.io/badge/Render-46E3B7?style=for-the-badge&logo=render)](https://render.com/deploy?repo=https://github.com/librefang/librefang) [![Railway](https://img.shields.io/badge/Railway-0B0D0E?style=for-the-badge&logo=railway)](https://railway.app/template/librefang) [![GCP](https://img.shields.io/badge/GCP-4285F4?style=for-the-badge&logo=googlecloud)](deploy/gcp/README.md)
 
 </details>
 
@@ -167,7 +170,7 @@ See [docs/comparison.md](docs/comparison.md) for benchmarks and feature-by-featu
 ## Links
 
 - [Documentation](https://docs.librefang.ai) &bull; [API Reference](docs/api-reference.md) &bull; [Getting Started](docs/getting-started.md) &bull; [Troubleshooting](docs/troubleshooting.md)
-- [Contributing](CONTRIBUTING.md) &bull; [Governance](GOVERNANCE.md) &bull; [Security](SECURITY.md)
+- [Contributing](docs/CONTRIBUTING.md) &bull; [Governance](docs/GOVERNANCE.md) &bull; [Security](docs/SECURITY.md)
 - Discussions: [Q&A](https://github.com/librefang/librefang/discussions/categories/q-a) &bull; [Use Cases](https://github.com/librefang/librefang/discussions/categories/show-and-tell) &bull; [Feature Votes](https://github.com/librefang/librefang/discussions/categories/ideas) &bull; [Announcements](https://github.com/librefang/librefang/discussions/categories/announcements) &bull; [Discord](https://discord.gg/DzTYqAZZmc)
 
 ## Contributors
@@ -178,7 +181,7 @@ See [docs/comparison.md](docs/comparison.md) for benchmarks and feature-by-featu
 
 <p align="center">
   We welcome contributions of all kinds — code, docs, translations, bug reports.<br/>
-  Check the <a href="CONTRIBUTING.md">Contributing Guide</a> and pick a <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> to get started!
+  Check the <a href="docs/CONTRIBUTING.md">Contributing Guide</a> and pick a <a href="https://github.com/librefang/librefang/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22">good first issue</a> to get started!
 </p>
 
 <p align="center">

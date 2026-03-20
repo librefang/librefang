@@ -650,6 +650,7 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "dashboard_metrics": d.dashboard.metrics.len(),
                 "has_settings": !d.settings.is_empty(),
                 "settings_count": d.settings.len(),
+                "metadata": d.metadata.clone().unwrap_or_default(),
             })
         })
         .collect();
@@ -767,6 +768,7 @@ pub async fn get_hand(
                         "format": m.format,
                     })).collect::<Vec<_>>(),
                     "settings": settings_status,
+                    "metadata": def.metadata.clone().unwrap_or_default(),
                 })),
             )
         }

@@ -266,6 +266,8 @@ pub struct LibreFangKernel {
     hand_desc_embeddings: tokio::sync::RwLock<Option<std::collections::HashMap<String, Vec<f32>>>>,
     /// Pluggable context engine for memory recall, assembly, and compaction.
     pub context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>>,
+    /// Runtime config passed to context-engine lifecycle hooks.
+    context_engine_config: librefang_runtime::context_engine::ContextEngineConfig,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
     /// Whether we've already logged the "no provider" audit entry (prevents spam).
@@ -1156,26 +1158,21 @@ impl LibreFangKernel {
         );
 
         // Build the pluggable context engine from config
+        let context_engine_config = librefang_runtime::context_engine::ContextEngineConfig {
+            context_window_tokens: 200_000, // default, overridden per-agent at call time
+            stable_prefix_mode: config.stable_prefix_mode,
+            max_recall_results: 5,
+        };
         let context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>> = {
-            let ce_config = librefang_runtime::context_engine::ContextEngineConfig {
-                context_window_tokens: 200_000, // default, overridden per-agent at call time
-                stable_prefix_mode: config.stable_prefix_mode,
-                max_recall_results: 5,
-            };
             let emb_arc: Option<
                 Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>,
             > = embedding_driver.as_ref().map(Arc::clone);
             let engine = librefang_runtime::context_engine::build_context_engine(
                 &config.context_engine,
-                ce_config,
+                context_engine_config.clone(),
                 memory.clone(),
                 emb_arc,
             );
-            // TODO: Call engine.bootstrap(&ce_config).await here once Kernel::new
-            // is made async. Currently Kernel::new is synchronous so we cannot
-            // invoke the async bootstrap(). ScriptableContextEngine validates
-            // hook script paths in bootstrap — without this call, validation is
-            // deferred until the first hook invocation.
             Some(engine)
         };
 
@@ -1234,6 +1231,7 @@ impl LibreFangKernel {
             command_queue,
             hand_desc_embeddings: tokio::sync::RwLock::new(None),
             context_engine,
+            context_engine_config,
             self_handle: OnceLock::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
         };
@@ -4589,22 +4587,17 @@ impl LibreFangKernel {
     /// Iterates the agent registry and starts background tasks for agents with
     /// `Continuous`, `Periodic`, or `Proactive` schedules.
     /// Hands activated on first boot when no `hand_state.json` exists yet.
-    /// These provide a useful out-of-the-box experience without requiring
-    /// extra API keys or manual setup.
+    /// By default, NO hands are activated to prevent unexpected token consumption.
+    /// Users can manually activate hands as needed using:
+    ///   librefang hand activate <hand-id>
+    ///
+    /// Hands are designed for specific tasks (trading, prediction, lead generation, etc.)
+    /// and should only be activated when the user explicitly needs them.
     const DEFAULT_HANDS: &'static [&'static str] = &[
-        "researcher",
-        "browser",
-        "collector",
-        "analytics",
-        "strategist",
-        "lead",
-        "predictor",
-        "trader",
-        "devops",
-        "apitester",
+        // Empty by default - all hands opt-in
     ];
 
-    pub fn start_background_agents(self: &Arc<Self>) {
+    pub async fn start_background_agents(self: &Arc<Self>) {
         // Restore previously active hands from persisted state
         let state_path = self.config.home_dir.join("hand_state.json");
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
@@ -4673,6 +4666,15 @@ impl LibreFangKernel {
                 }
             }
             self.persist_hand_state();
+        }
+
+        // Context-engine bootstrap is async; run it at daemon startup so hook
+        // script/path validation fails early instead of on first hook call.
+        if let Some(engine) = self.context_engine.as_deref() {
+            match engine.bootstrap(&self.context_engine_config).await {
+                Ok(()) => info!("Context engine bootstrap complete"),
+                Err(e) => warn!("Context engine bootstrap failed: {e}"),
+            }
         }
 
         // ── Startup API key health check ──────────────────────────────────
