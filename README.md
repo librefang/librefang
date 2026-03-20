@@ -210,7 +210,7 @@ See [docs/comparison.md](docs/comparison.md) for benchmarks and feature-by-featu
 ## Contributors
 
 <a href="https://github.com/librefang/librefang/graphs/contributors">
-  <img src="public/assets/contributors.svg" alt="Contributors" />
+  <img src="web/public/assets/contributors.svg" alt="Contributors" />
 </a>
 
 <p align="center">
@@ -220,7 +220,7 @@ See [docs/comparison.md](docs/comparison.md) for benchmarks and feature-by-featu
 
 <p align="center">
   <a href="https://github.com/librefang/librefang/stargazers">
-    <img src="public/assets/star-history.svg" alt="Star History" />
+    <img src="web/public/assets/star-history.svg" alt="Star History" />
   </a>
 </p>
 

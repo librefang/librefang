@@ -8,7 +8,7 @@ use crate::SkillError;
 use reqwest::StatusCode;
 use serde_json::json;
 use std::io::{Cursor, Read, Write};
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use tracing::info;
 
 fn urlencoded(s: &str) -> String {
@@ -176,7 +176,7 @@ impl MarketplaceClient {
             .unwrap_or("unknown")
             .to_string();
 
-        let skill_dir = target_dir.join(skill_name);
+        let skill_dir = resolve_skill_dir(target_dir, skill_name)?;
         if skill_dir.exists() {
             std::fs::remove_dir_all(&skill_dir)?;
         }
@@ -202,8 +202,9 @@ impl MarketplaceClient {
             "source_kind": source_kind,
             "installed_at": chrono::Utc::now().to_rfc3339(),
         });
+        let meta_path = resolve_skill_child_path(&skill_dir, Path::new("marketplace_meta.json"))?;
         std::fs::write(
-            skill_dir.join("marketplace_meta.json"),
+            meta_path,
             serde_json::to_string_pretty(&meta).unwrap_or_default(),
         )?;
 
@@ -472,7 +473,7 @@ fn extract_bundle_zip_bytes(bytes: &[u8], skill_dir: &Path) -> Result<(), SkillE
             continue;
         }
 
-        let out_path = skill_dir.join(&relative_path);
+        let out_path = resolve_skill_child_path(skill_dir, &relative_path)?;
         if file.is_dir() {
             std::fs::create_dir_all(&out_path)?;
             continue;
@@ -507,6 +508,40 @@ fn sanitize_zip_path(name: &str) -> Option<std::path::PathBuf> {
     } else {
         Some(clean)
     }
+}
+
+fn is_safe_component(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn resolve_skill_dir(target_dir: &Path, skill_name: &str) -> Result<PathBuf, SkillError> {
+    if !is_safe_component(skill_name) {
+        return Err(SkillError::InvalidManifest(format!(
+            "Invalid skill name '{skill_name}'"
+        )));
+    }
+    Ok(target_dir.join(skill_name))
+}
+
+fn resolve_skill_child_path(skill_dir: &Path, relative: &Path) -> Result<PathBuf, SkillError> {
+    if relative.is_absolute() {
+        return Err(SkillError::InvalidManifest(
+            "Absolute paths are not allowed in skill bundles".to_string(),
+        ));
+    }
+    if relative
+        .components()
+        .any(|c| !matches!(c, Component::Normal(_)))
+    {
+        return Err(SkillError::InvalidManifest(format!(
+            "Unsafe path component in bundle entry '{}'",
+            relative.display()
+        )));
+    }
+    Ok(skill_dir.join(relative))
 }
 
 fn detect_shared_root(paths: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {

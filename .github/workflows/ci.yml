@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 # Prevent multiple CI runs from competing for runner resources
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -99,9 +102,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Syntax-check shell installer
-        run: bash -n scripts/install.sh
+        run: |
+          sh -n web/public/install.sh
+          bash -n web/public/install.sh
+      - name: Run shell installer regression tests
+        run: sh scripts/tests/install_sh_test.sh
       - name: Parse PowerShell installer
-        run: pwsh -NoProfile -Command "Get-Content scripts/install.ps1 | Out-Null"
+        run: pwsh -NoProfile -Command '$tokens=$null; $errors=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("web/public/install.ps1",[ref]$tokens,[ref]$errors); if ($errors) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }'
 
   # ── Rust compilation check (single platform sufficient) ──────────────────────────────────
   check:

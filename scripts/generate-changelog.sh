@@ -87,7 +87,7 @@ MAP = {
 }
 
 SKIP_PATTERNS = [
-    r'update star history',
+    r'Update contributors and star history',
     r'^v?\d+\.\d+\.\d+',
     r'^release:',
 ]

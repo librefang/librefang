@@ -2023,6 +2023,37 @@ pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoRespon
     Json(serde_json::json!({"backups": backups, "total": total}))
 }
 
+fn is_invalid_backup_filename(filename: &str) -> bool {
+    if filename.is_empty() {
+        return true;
+    }
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return true;
+    }
+    std::path::Path::new(filename)
+        .file_name()
+        .and_then(|name| name.to_str())
+        != Some(filename)
+}
+
+fn find_backup_path(
+    backups_dir: &std::path::Path,
+    filename: &str,
+) -> std::io::Result<Option<std::path::PathBuf>> {
+    let entries = std::fs::read_dir(backups_dir)?;
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("zip") {
+            continue;
+        }
+        if entry.file_name().to_str() == Some(filename) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 /// DELETE /api/backups/{filename} — Delete a specific backup.
 #[utoipa::path(delete, path = "/api/backups/{filename}", tag = "system", params(("filename" = String, Path, description = "Backup filename")), responses((status = 200, description = "Backup deleted")))]
 pub async fn delete_backup(
@@ -2032,7 +2063,7 @@ pub async fn delete_backup(
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
     // Sanitize filename to prevent path traversal
-    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+    if is_invalid_backup_filename(&filename) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": t.t("api-error-backup-invalid-filename")})),
@@ -2045,13 +2076,30 @@ pub async fn delete_backup(
         );
     }
 
-    let backup_path = state.kernel.config.home_dir.join("backups").join(&filename);
-    if !backup_path.exists() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
-        );
-    }
+    let backups_dir = state.kernel.config.home_dir.join("backups");
+    let backup_path = match find_backup_path(&backups_dir, &filename) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-backup-delete-failed", &[("error", &e.to_string())])}),
+                ),
+            );
+        }
+    };
 
     if let Err(e) = std::fs::remove_file(&backup_path) {
         return (
@@ -2094,21 +2142,44 @@ pub async fn restore_backup(
     };
 
     // Sanitize
-    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+    if is_invalid_backup_filename(&filename) {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": t.t("api-error-backup-invalid-filename")})),
         );
     }
-
-    let home_dir = &state.kernel.config.home_dir;
-    let backup_path = home_dir.join("backups").join(&filename);
-    if !backup_path.exists() {
+    if !filename.ends_with(".zip") {
         return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": t.t("api-error-backup-must-be-zip")})),
         );
     }
+
+    let home_dir = &state.kernel.config.home_dir;
+    let backups_dir = home_dir.join("backups");
+    let backup_path = match find_backup_path(&backups_dir, &filename) {
+        Ok(Some(path)) => path,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
+            );
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": t.t("api-error-backup-not-found")})),
+            );
+        }
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(
+                    serde_json::json!({"error": t.t_args("api-error-backup-open-failed", &[("error", &e.to_string())])}),
+                ),
+            );
+        }
+    };
 
     // Open zip
     let file = match std::fs::File::open(&backup_path) {

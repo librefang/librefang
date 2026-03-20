@@ -5,6 +5,86 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.6.4-20260320] - 2026-03-20
+
+### Added
+
+- Add image pipeline and subprocess management (#1223) (@f-liva)
+- Add Qwen Code CLI as LLM provider (#1224) (@f-liva)
+- Align init defaults with OpenRouter Stepfun (#1262) (@houko)
+- Replace all icons with new LibreFang branding (#1263) (@f-liva)
+
+### Fixed
+
+- Web deployment issues (#1236) (@houko)
+- Web deployment issues (#1237) (@houko)
+- Create web/public/assets directory (#1238) (@houko)
+- Web deployment and CI fixes (#1239) (@houko)
+- Web deployment and CI fixes (#1243) (@houko)
+- Repair install smoke script and drop update-star-history workflow (#1255) (@houko)
+- Use web/public installer source and harden curl|sh install flow (#1259) (@houko)
+- Address code-scanning path-injection findings (follow-up) (#1260) (@houko)
+
+### Documentation
+
+- Update star history (#1228) (@houko)
+- Add SDK usage examples to all README files (#1229) (@houko)
+
+### Maintenance
+
+- Use .nvmrc for web Node.js version and fix Dockerfile path (#1234) (@houko)
+
+### Other
+
+- Fix/webui chat input line break failed (#1245) (@aimlyo)
+
+## [0.6.4] - 2026-03-20
+
+### Added
+
+- Add image pipeline and subprocess management (#1223) (@f-liva)
+- Add Qwen Code CLI as LLM provider (#1224) (@f-liva)
+- Align init defaults with OpenRouter Stepfun (#1262) (@houko)
+- Replace all icons with new LibreFang branding (#1263) (@f-liva)
+
+### Fixed
+
+- Web deployment issues (#1236) (@houko)
+- Web deployment issues (#1237) (@houko)
+- Create web/public/assets directory (#1238) (@houko)
+- Web deployment and CI fixes (#1239) (@houko)
+- Web deployment and CI fixes (#1243) (@houko)
+- Repair install smoke script and drop update-star-history workflow (#1255) (@houko)
+- Use web/public installer source and harden curl|sh install flow (#1259) (@houko)
+- Address code-scanning path-injection findings (follow-up) (#1260) (@houko)
+
+### Documentation
+
+- Add SDK usage examples to all README files (#1229) (@houko)
+- Update contributors (#1240) (@app/github-actions)
+- Update contributors and star history (#1244) (@app/github-actions)
+- Update contributors and star history (#1246) (@app/github-actions)
+- Update contributors and star history (#1247) (@app/github-actions)
+- Update contributors and star history (#1248) (@app/github-actions)
+- Update contributors and star history (#1250) (@app/github-actions)
+- Update contributors and star history (#1251) (@app/github-actions)
+- Update contributors and star history (#1253) (@app/github-actions)
+- Update contributors and star history (#1256) (@app/github-actions)
+- Update contributors and star history (#1257) (@app/github-actions)
+- Update contributors and star history (#1258) (@app/github-actions)
+- Update contributors and star history (#1261) (@app/github-actions)
+- Update contributors and star history (#1264) (@app/github-actions)
+- Update contributors and star history (#1265) (@app/github-actions)
+- Update contributors and star history (#1267) (@app/github-actions)
+
+### Maintenance
+
+- Use .nvmrc for web Node.js version and fix Dockerfile path (#1234) (@houko)
+
+### Other
+
+- Fix/webui chat input line break failed (#1245) (@aimlyo)
+
 ## [0.6.3] - 2026-03-19
 
 ### Added

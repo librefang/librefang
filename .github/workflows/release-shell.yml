@@ -474,24 +474,14 @@ jobs:
           git commit -m "chore: update formula to ${{ github.ref_name }}" || echo "No changes"
           git push
 
-  # ── Sync Installers to Website ─────────────────────────────────────────
+  # ── Sync Installers to Web ────────────────────────────────────────────
   sync_installers:
-    name: Sync Installers to Website
+    name: Sync Installers to Web
     runs-on: ubuntu-latest
-    needs: [cli_mac, cli_linux, cli_musl, cli_windows]
+    needs: [cli_mac, cli_linux, cli_linux_mini, cli_musl, cli_windows, cli_mac_mini, cli_windows_mini]
     steps:
       - name: Check out source repo
         uses: actions/checkout@v6
-        with:
-          ref: ${{ github.ref_name }}
-          path: source
-
-      - name: Check out website repo
-        uses: actions/checkout@v6
-        with:
-          repository: librefang/librefang-website
-          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
-          path: website
 
       - name: Fetch release metadata
         env:
@@ -505,11 +495,6 @@ jobs:
             > release.json
 
           jq -e '.tag_name and (.assets | type == "array")' release.json >/dev/null
-
-      - name: Sync install scripts
-        run: |
-          cp source/scripts/install.sh website/install.sh
-          cp source/scripts/install.ps1 website/install.ps1
 
       - name: Generate install manifest
         env:
@@ -525,6 +510,17 @@ jobs:
               | {
                   name,
                   target: $target,
+                  archive: $ext,
+                  url: .browser_download_url,
+                  checksum_url: (.browser_download_url + ".sha256")
+                };
+
+            def mini_artifact_for($target; $ext):
+              .assets[]
+              | select(.name == ("librefang-" + $target + "-mini." + $ext))
+              | {
+                  name,
+                  target: ($target + "-mini"),
                   archive: $ext,
                   url: .browser_download_url,
                   checksum_url: (.browser_download_url + ".sha256")
@@ -550,18 +546,10 @@ jobs:
                 "x86_64-apple-darwin": artifact_for("x86_64-apple-darwin"; "tar.gz"),
                 "aarch64-apple-darwin": artifact_for("aarch64-apple-darwin"; "tar.gz"),
                 "x86_64-pc-windows-msvc": artifact_for("x86_64-pc-windows-msvc"; "zip"),
-                "aarch64-pc-windows-msvc": artifact_for("aarch64-pc-windows-msvc"; "zip")
+                "aarch64-pc-windows-msvc": artifact_for("aarch64-pc-windows-msvc"; "zip"),
+                "x86_64-unknown-linux-gnu-mini": mini_artifact_for("x86_64-unknown-linux-gnu"; "tar.gz"),
+                "x86_64-apple-darwin-mini": mini_artifact_for("x86_64-apple-darwin"; "tar.gz"),
+                "x86_64-pc-windows-msvc-mini": mini_artifact_for("x86_64-pc-windows-msvc"; "zip")
               }
             }
-            ' release.json > website/install-manifest.json
-
-          cat website/install-manifest.json
-
-      - name: Commit and push
-        working-directory: website
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add install.sh install.ps1 install-manifest.json
-          git commit -m "chore: sync installers for ${{ github.ref_name }}" || echo "No changes"
-          git push
+            ' release.json > web/install-manifest.json
