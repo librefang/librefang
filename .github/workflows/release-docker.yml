@@ -52,6 +52,7 @@ jobs:
   docker:
     name: Docker / ${{ matrix.platform }}
     needs: [wait_for_release]
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

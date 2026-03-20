@@ -325,20 +325,42 @@ jobs:
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
 
-      - name: Fetch release metadata
+      - name: Fetch release metadata (with retry for asset availability)
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
 
-          curl -fsSL \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
-            > release.json
+          # Retry up to 10 times (100s total) to allow asset uploads to complete
+          for attempt in $(seq 1 10); do
+            curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+              > release.json
 
-          jq -e '.tag_name and (.assets | type == "array")' release.json >/dev/null
+            jq -e '.tag_name and (.assets | type == "array")' release.json >/dev/null
+
+            # Check that both macOS assets exist
+            ARM_OK=$(jq -r '.assets[] | select(.name == "librefang-aarch64-apple-darwin.tar.gz") | .name' release.json)
+            X86_OK=$(jq -r '.assets[] | select(.name == "librefang-x86_64-apple-darwin.tar.gz") | .name' release.json)
+
+            if [ -n "$ARM_OK" ] && [ -n "$X86_OK" ]; then
+              echo "✓ Both macOS assets found on attempt $attempt"
+              break
+            fi
+
+            if [ "$attempt" -eq 10 ]; then
+              echo "::error::macOS assets not found in release after 10 attempts"
+              echo "  ARM asset: ${ARM_OK:-MISSING}"
+              echo "  x86 asset: ${X86_OK:-MISSING}"
+              exit 1
+            fi
+
+            echo "Waiting for macOS assets to be uploaded... ($attempt/10)"
+            sleep 10
+          done
 
       - name: Generate formula
         run: |
