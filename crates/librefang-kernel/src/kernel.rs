@@ -1280,12 +1280,25 @@ impl LibreFangKernel {
                     // Check if TOML on disk is newer/different — if so, update from file
                     let mut entry = entry;
                     let toml_path = entry.source_toml_path.clone().unwrap_or_else(|| {
-                        kernel
+                        let agents_path = kernel
                             .config
                             .home_dir
                             .join("agents")
                             .join(&name)
-                            .join("agent.toml")
+                            .join("agent.toml");
+                        if agents_path.exists() {
+                            return agents_path;
+                        }
+                        let hands_path = kernel
+                            .config
+                            .home_dir
+                            .join("hands")
+                            .join(&name)
+                            .join("agent.toml");
+                        if hands_path.exists() {
+                            return hands_path;
+                        }
+                        agents_path // fallback
                     });
                     if toml_path.exists() {
                         match std::fs::read_to_string(&toml_path) {
