@@ -432,6 +432,8 @@ function CanvasPageInner() {
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [spacePressed, setSpacePressed] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId?: string } | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const [showHelp, setShowHelp] = useState(false);
 
   // 撤销/重做历史
   const historyRef = useRef<{ nodes: Node[]; edges: Edge[] }[]>([]);
@@ -514,6 +516,11 @@ function CanvasPageInner() {
     paste();
   }, [copySelected, paste]);
 
+  const showError = useCallback((msg: string) => {
+    setErrorMsg(msg);
+    setTimeout(() => setErrorMsg(null), 5000);
+  }, []);
+
   // 重新计算分组边框以包含所有子节点（提前声明，autoLayout 需要）
   const NODE_W = 200;
   const NODE_H = 80;
@@ -574,14 +581,10 @@ function CanvasPageInner() {
   }, [nodes, pushHistory, setNodes, recalcGroupBounds]);
 
   // Toast 提示
-  const [toast, setToast] = useState<string | null>(null);
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2000);
   }, []);
-
-  // 快捷键帮助
-  const [showHelp, setShowHelp] = useState(false);
 
   // 导出工作流 JSON
   const exportWorkflow = useCallback(() => {
@@ -1063,11 +1066,6 @@ function CanvasPageInner() {
         if (d.outputVar) step.output_var = d.outputVar;
         return step;
       });
-  }, []);
-
-  const showError = useCallback((msg: string) => {
-    setErrorMsg(msg);
-    setTimeout(() => setErrorMsg(null), 5000);
   }, []);
 
   // 保存工作流
