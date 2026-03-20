@@ -29,10 +29,7 @@ fn item_kind_for_path(rel: &Path) -> ItemKind {
         "channels" => ItemKind::Channel,
         _ => {
             // Check specific filenames at the root level.
-            let file_name = rel
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("");
+            let file_name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if file_name == "secrets.env" || file_name.ends_with(".env") {
                 ItemKind::Secret
             } else if file_name == "config.toml" {
@@ -46,10 +43,7 @@ fn item_kind_for_path(rel: &Path) -> ItemKind {
 
 /// Returns true if the file's content should be rewritten (openfang → librefang).
 fn should_rewrite(path: &Path) -> bool {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     matches!(ext, "toml" | "env")
 }
 
@@ -81,9 +75,7 @@ pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError
             Ok(e) => e,
             Err(e) => {
                 warn!("Error walking source directory: {}", e);
-                report
-                    .warnings
-                    .push(format!("Failed to read entry: {e}"));
+                report.warnings.push(format!("Failed to read entry: {e}"));
                 continue;
             }
         };
@@ -118,11 +110,7 @@ pub fn migrate(options: &MigrateOptions) -> Result<MigrationReport, MigrateError
         }
 
         if options.dry_run {
-            info!(
-                "Would copy {} -> {}",
-                display_name,
-                dest_path.display()
-            );
+            info!("Would copy {} -> {}", display_name, dest_path.display());
             report.imported.push(MigrateItem {
                 kind,
                 name: display_name,
@@ -176,11 +164,7 @@ mod tests {
         .unwrap();
 
         // secrets.env
-        std::fs::write(
-            dir.join("secrets.env"),
-            "OPENFANG_API_KEY=secret123\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("secrets.env"), "OPENFANG_API_KEY=secret123\n").unwrap();
 
         // agents subdirectory
         let agents = dir.join("agents").join("coder");
@@ -194,11 +178,7 @@ mod tests {
         // skills subdirectory
         let skills = dir.join("skills").join("web-search");
         std::fs::create_dir_all(&skills).unwrap();
-        std::fs::write(
-            skills.join("skill.toml"),
-            "name = \"web-search\"\n",
-        )
-        .unwrap();
+        std::fs::write(skills.join("skill.toml"), "name = \"web-search\"\n").unwrap();
 
         // a binary file that should be copied as-is
         let data = dir.join("data");
@@ -229,30 +209,25 @@ mod tests {
         assert!(report.warnings.is_empty());
 
         // Verify config.toml was rewritten
-        let config_content =
-            std::fs::read_to_string(dst.path().join("config.toml")).unwrap();
+        let config_content = std::fs::read_to_string(dst.path().join("config.toml")).unwrap();
         assert!(config_content.contains("librefang"));
         assert!(config_content.contains("LIBREFANG"));
         assert!(!config_content.contains("openfang"));
         assert!(!config_content.contains("OPENFANG"));
 
         // Verify secrets.env was rewritten
-        let secrets_content =
-            std::fs::read_to_string(dst.path().join("secrets.env")).unwrap();
+        let secrets_content = std::fs::read_to_string(dst.path().join("secrets.env")).unwrap();
         assert!(secrets_content.contains("LIBREFANG_API_KEY"));
         assert!(!secrets_content.contains("OPENFANG_API_KEY"));
 
         // Verify agent.toml was rewritten
-        let agent_content = std::fs::read_to_string(
-            dst.path().join("agents/coder/agent.toml"),
-        )
-        .unwrap();
+        let agent_content =
+            std::fs::read_to_string(dst.path().join("agents/coder/agent.toml")).unwrap();
         assert!(agent_content.contains("librefang"));
         assert!(!agent_content.contains("openfang"));
 
         // Verify binary file was copied as-is
-        let db_content =
-            std::fs::read(dst.path().join("data/index.db")).unwrap();
+        let db_content = std::fs::read(dst.path().join("data/index.db")).unwrap();
         assert_eq!(db_content, b"binary-content");
     }
 
@@ -288,11 +263,7 @@ mod tests {
         setup_openfang_dir(src.path());
 
         // Pre-create a file at the destination
-        std::fs::write(
-            dst.path().join("config.toml"),
-            "existing content\n",
-        )
-        .unwrap();
+        std::fs::write(dst.path().join("config.toml"), "existing content\n").unwrap();
 
         let options = MigrateOptions {
             source: MigrateSource::OpenFang,
@@ -309,8 +280,7 @@ mod tests {
         assert_eq!(report.skipped[0].reason, "already exists");
 
         // The existing content should be preserved
-        let content =
-            std::fs::read_to_string(dst.path().join("config.toml")).unwrap();
+        let content = std::fs::read_to_string(dst.path().join("config.toml")).unwrap();
         assert_eq!(content, "existing content\n");
     }
 
@@ -326,7 +296,10 @@ mod tests {
 
         let result = migrate(&options);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), MigrateError::SourceNotFound(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            MigrateError::SourceNotFound(_)
+        ));
     }
 
     #[test]
