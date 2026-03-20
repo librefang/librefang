@@ -705,6 +705,22 @@ pub fn detect_available_provider() -> Option<(&'static str, &'static str, &'stat
     None
 }
 
+/// Unified CLI provider availability check.
+/// Returns `true` if the named CLI provider is detected on PATH or has credentials.
+/// Returns `false` for non-CLI providers.
+pub fn cli_provider_available(name: &str) -> bool {
+    match name {
+        "claude-code" => claude_code::claude_code_available(),
+        "qwen-code" => qwen_code::qwen_code_available(),
+        _ => false,
+    }
+}
+
+/// Returns `true` if the named provider is CLI-based (no HTTP base URL).
+pub fn is_cli_provider(name: &str) -> bool {
+    matches!(name, "claude-code" | "qwen-code")
+}
+
 /// List all known provider names.
 ///
 /// Returns canonical names from the provider registry, excluding hidden

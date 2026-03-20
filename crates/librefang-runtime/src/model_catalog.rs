@@ -107,21 +107,10 @@ impl ModelCatalog {
     /// Only checks presence — never reads or stores the actual secret.
     pub fn detect_auth(&mut self) {
         for provider in &mut self.providers {
-            // Claude Code is special: no API key needed, but we probe for CLI
+            // CLI-based providers: no API key needed, but we probe for CLI
             // installation so the dashboard shows "Configured" vs "Not Installed".
-            if provider.id == "claude-code" {
-                provider.auth_status = if crate::drivers::claude_code::claude_code_available() {
-                    AuthStatus::Configured
-                } else {
-                    AuthStatus::Missing
-                };
-                continue;
-            }
-
-            // Qwen Code is special: no API key needed, but we probe for CLI
-            // installation so the dashboard shows "Configured" vs "Not Installed".
-            if provider.id == "qwen-code" {
-                provider.auth_status = if crate::drivers::qwen_code::qwen_code_available() {
+            if crate::drivers::is_cli_provider(&provider.id) {
+                provider.auth_status = if crate::drivers::cli_provider_available(&provider.id) {
                     AuthStatus::Configured
                 } else {
                     AuthStatus::Missing

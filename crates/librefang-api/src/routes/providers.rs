@@ -853,11 +853,7 @@ pub async fn test_provider(
 
     // ── CLI-based providers (no HTTP base URL) ──
     if base_url.is_empty() {
-        let cli_ok = match name.as_str() {
-            "claude-code" => librefang_runtime::drivers::claude_code::claude_code_available(),
-            "qwen-code" => librefang_runtime::drivers::qwen_code::qwen_code_available(),
-            _ => false,
-        };
+        let cli_ok = librefang_runtime::drivers::cli_provider_available(name.as_str());
         return if cli_ok {
             (
                 StatusCode::OK,

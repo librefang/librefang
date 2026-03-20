@@ -221,10 +221,10 @@ impl WizardState {
         self.provider_order.clear();
         // Detected providers first
         for (i, p) in PROVIDERS.iter().enumerate() {
-            let detected = match p.name {
-                "claude-code" => librefang_runtime::drivers::claude_code::claude_code_available(),
-                "qwen-code" => librefang_runtime::drivers::qwen_code::qwen_code_available(),
-                _ => !p.env_var.is_empty() && std::env::var(p.env_var).is_ok(),
+            let detected = if librefang_runtime::drivers::is_cli_provider(p.name) {
+                librefang_runtime::drivers::cli_provider_available(p.name)
+            } else {
+                !p.env_var.is_empty() && std::env::var(p.env_var).is_ok()
             };
             if detected {
                 self.provider_order.push(i);
@@ -232,10 +232,10 @@ impl WizardState {
         }
         // Then the rest
         for (i, p) in PROVIDERS.iter().enumerate() {
-            let detected = match p.name {
-                "claude-code" => librefang_runtime::drivers::claude_code::claude_code_available(),
-                "qwen-code" => librefang_runtime::drivers::qwen_code::qwen_code_available(),
-                _ => !p.env_var.is_empty() && std::env::var(p.env_var).is_ok(),
+            let detected = if librefang_runtime::drivers::is_cli_provider(p.name) {
+                librefang_runtime::drivers::cli_provider_available(p.name)
+            } else {
+                !p.env_var.is_empty() && std::env::var(p.env_var).is_ok()
             };
             if !detected {
                 self.provider_order.push(i);
