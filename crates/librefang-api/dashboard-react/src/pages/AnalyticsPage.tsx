@@ -128,8 +128,8 @@ export function AnalyticsPage() {
             {(!daily?.days || daily.days.length === 0) ? (
               <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
             ) : (
-              <div className="space-y-2">
-                {(daily.days || []).slice(-14).map((d, i) => {
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {(daily.days || []).slice(-30).map((d, i) => {
                   const maxDay = Math.max(...(daily.days || []).map(x => x.cost_usd || 0), 0.001);
                   const pct = ((d.cost_usd || 0) / maxDay) * 100;
                   return (
