@@ -889,6 +889,13 @@ impl LibreFangKernel {
             info!("RBAC enabled with {} users", auth.user_count());
         }
 
+        // Auto-sync registry content on first boot or after upgrade when
+        // critical directories (providers/, hands/) are missing.
+        if librefang_runtime::registry_sync::needs_sync(&config.home_dir) {
+            info!("Registry content missing — running auto-sync from librefang-registry");
+            librefang_runtime::registry_sync::sync_registry(&config.home_dir);
+        }
+
         // Initialize model catalog, detect provider auth, and apply URL overrides
         let mut model_catalog = librefang_runtime::model_catalog::ModelCatalog::new();
         model_catalog.detect_auth();

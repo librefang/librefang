@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "0.6.3-20260319"
+    "version": "0.6.8-20260320"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -7073,8 +7073,29 @@
             },
             "description": "Optional file attachments (uploaded via /upload endpoint)."
           },
+          "channel_type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional channel type (e.g. \"whatsapp\", \"telegram\")."
+          },
           "message": {
             "type": "string"
+          },
+          "sender_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional sender ID (platform-specific user ID)."
+          },
+          "sender_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional sender display name."
           }
         }
       },

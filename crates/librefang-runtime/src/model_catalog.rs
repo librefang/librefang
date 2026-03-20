@@ -16,11 +16,57 @@ pub struct ModelCatalog {
 }
 
 impl ModelCatalog {
-    /// Create a new catalog populated with builtin models and providers.
+    /// Create a new catalog populated from the default disk location
+    /// (`LIBREFANG_HOME` or `~/.librefang/providers/`).
     pub fn new() -> Self {
-        let models = builtin_models();
-        let mut aliases = builtin_aliases();
-        let mut providers = builtin_providers();
+        let sources = load_provider_sources();
+        let aliases_source = load_aliases_source();
+        Self::from_sources(&sources, aliases_source.as_deref())
+    }
+
+    /// Create a catalog by loading all `*.toml` files from a specific directory.
+    ///
+    /// Also loads `aliases.toml` from the parent of `providers_dir` if present.
+    pub fn new_from_dir(providers_dir: &std::path::Path) -> Self {
+        let mut sources = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(providers_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "toml") {
+                    if let Ok(content) = std::fs::read_to_string(&path) {
+                        sources.push(content);
+                    }
+                }
+            }
+        }
+        let aliases_source = providers_dir
+            .parent()
+            .and_then(|p| std::fs::read_to_string(p.join("aliases.toml")).ok());
+        Self::from_sources(&sources, aliases_source.as_deref())
+    }
+
+    /// Build a catalog from pre-loaded TOML source strings.
+    fn from_sources(sources: &[String], aliases_source: Option<&str>) -> Self {
+        let mut models: Vec<ModelCatalogEntry> = Vec::new();
+        let mut providers: Vec<ProviderInfo> = Vec::new();
+        for source in sources {
+            if let Ok(file) = toml::from_str::<ModelCatalogFile>(source) {
+                if let Some(p) = file.provider {
+                    providers.push(p.into());
+                }
+                models.extend(file.models);
+            }
+        }
+
+        let mut aliases: HashMap<String, String> = aliases_source
+            .and_then(|s| toml::from_str::<AliasesCatalogFile>(s).ok())
+            .map(|f| {
+                f.aliases
+                    .into_iter()
+                    .map(|(k, v)| (k.to_lowercase(), v))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         // Auto-register aliases defined on model entries
         for model in &models {
@@ -606,130 +652,43 @@ pub fn read_codex_credential() -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Builtin data — loaded from embedded TOML catalog files at compile time
+// Provider catalog — loaded from ~/.librefang/providers/ at runtime.
+// Synced from the registry via `librefang init` or auto-sync at boot.
 // ---------------------------------------------------------------------------
 
-const BUILTIN_AI21: &str = include_str!("../../../catalog/providers/ai21.toml");
-const BUILTIN_ANTHROPIC: &str = include_str!("../../../catalog/providers/anthropic.toml");
-const BUILTIN_BEDROCK: &str = include_str!("../../../catalog/providers/bedrock.toml");
-const BUILTIN_CEREBRAS: &str = include_str!("../../../catalog/providers/cerebras.toml");
-const BUILTIN_CHATGPT: &str = include_str!("../../../catalog/providers/chatgpt.toml");
-const BUILTIN_CHUTES: &str = include_str!("../../../catalog/providers/chutes.toml");
-const BUILTIN_CLAUDE_CODE: &str = include_str!("../../../catalog/providers/claude-code.toml");
-const BUILTIN_COHERE: &str = include_str!("../../../catalog/providers/cohere.toml");
-const BUILTIN_DEEPSEEK: &str = include_str!("../../../catalog/providers/deepseek.toml");
-const BUILTIN_FIREWORKS: &str = include_str!("../../../catalog/providers/fireworks.toml");
-const BUILTIN_GEMINI: &str = include_str!("../../../catalog/providers/gemini.toml");
-const BUILTIN_GITHUB_COPILOT: &str = include_str!("../../../catalog/providers/github-copilot.toml");
-const BUILTIN_GROQ: &str = include_str!("../../../catalog/providers/groq.toml");
-const BUILTIN_HUGGINGFACE: &str = include_str!("../../../catalog/providers/huggingface.toml");
-const BUILTIN_KIMI_CODING: &str = include_str!("../../../catalog/providers/kimi-coding.toml");
-const BUILTIN_LEMONADE: &str = include_str!("../../../catalog/providers/lemonade.toml");
-const BUILTIN_LMSTUDIO: &str = include_str!("../../../catalog/providers/lmstudio.toml");
-const BUILTIN_MINIMAX: &str = include_str!("../../../catalog/providers/minimax.toml");
-const BUILTIN_MINIMAX_CN: &str = include_str!("../../../catalog/providers/minimax-cn.toml");
-const BUILTIN_MISTRAL: &str = include_str!("../../../catalog/providers/mistral.toml");
-const BUILTIN_MOONSHOT: &str = include_str!("../../../catalog/providers/moonshot.toml");
-const BUILTIN_NVIDIA_NIM: &str = include_str!("../../../catalog/providers/nvidia-nim.toml");
-const BUILTIN_OLLAMA: &str = include_str!("../../../catalog/providers/ollama.toml");
-const BUILTIN_OPENAI: &str = include_str!("../../../catalog/providers/openai.toml");
-const BUILTIN_OPENROUTER: &str = include_str!("../../../catalog/providers/openrouter.toml");
-const BUILTIN_PERPLEXITY: &str = include_str!("../../../catalog/providers/perplexity.toml");
-const BUILTIN_QIANFAN: &str = include_str!("../../../catalog/providers/qianfan.toml");
-const BUILTIN_QWEN_CODE: &str = include_str!("../../../catalog/providers/qwen-code.toml");
-const BUILTIN_QWEN: &str = include_str!("../../../catalog/providers/qwen.toml");
-const BUILTIN_REPLICATE: &str = include_str!("../../../catalog/providers/replicate.toml");
-const BUILTIN_SAMBANOVA: &str = include_str!("../../../catalog/providers/sambanova.toml");
-const BUILTIN_TOGETHER: &str = include_str!("../../../catalog/providers/together.toml");
-const BUILTIN_VENICE: &str = include_str!("../../../catalog/providers/venice.toml");
-const BUILTIN_VERTEX_AI: &str = include_str!("../../../catalog/providers/vertex-ai.toml");
-const BUILTIN_VLLM: &str = include_str!("../../../catalog/providers/vllm.toml");
-const BUILTIN_VOLCENGINE_CODING: &str =
-    include_str!("../../../catalog/providers/volcengine-coding.toml");
-const BUILTIN_VOLCENGINE: &str = include_str!("../../../catalog/providers/volcengine.toml");
-const BUILTIN_XAI: &str = include_str!("../../../catalog/providers/xai.toml");
-const BUILTIN_ZAI_CODING: &str = include_str!("../../../catalog/providers/zai-coding.toml");
-const BUILTIN_ZAI: &str = include_str!("../../../catalog/providers/zai.toml");
-const BUILTIN_ZHIPU_CODING: &str = include_str!("../../../catalog/providers/zhipu-coding.toml");
-const BUILTIN_ZHIPU: &str = include_str!("../../../catalog/providers/zhipu.toml");
+fn load_provider_sources() -> Vec<String> {
+    let home = std::env::var("LIBREFANG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".librefang")
+        });
+    let providers_dir = home.join("providers");
 
-const BUILTIN_ALIASES: &str = include_str!("../../../catalog/aliases.toml");
-
-/// All builtin provider TOML sources.
-const BUILTIN_PROVIDER_SOURCES: &[&str] = &[
-    BUILTIN_AI21,
-    BUILTIN_ANTHROPIC,
-    BUILTIN_BEDROCK,
-    BUILTIN_CEREBRAS,
-    BUILTIN_CHATGPT,
-    BUILTIN_CHUTES,
-    BUILTIN_CLAUDE_CODE,
-    BUILTIN_COHERE,
-    BUILTIN_DEEPSEEK,
-    BUILTIN_FIREWORKS,
-    BUILTIN_GEMINI,
-    BUILTIN_GITHUB_COPILOT,
-    BUILTIN_GROQ,
-    BUILTIN_HUGGINGFACE,
-    BUILTIN_KIMI_CODING,
-    BUILTIN_LEMONADE,
-    BUILTIN_LMSTUDIO,
-    BUILTIN_MINIMAX,
-    BUILTIN_MINIMAX_CN,
-    BUILTIN_MISTRAL,
-    BUILTIN_MOONSHOT,
-    BUILTIN_NVIDIA_NIM,
-    BUILTIN_OLLAMA,
-    BUILTIN_OPENAI,
-    BUILTIN_OPENROUTER,
-    BUILTIN_PERPLEXITY,
-    BUILTIN_QIANFAN,
-    BUILTIN_QWEN_CODE,
-    BUILTIN_QWEN,
-    BUILTIN_REPLICATE,
-    BUILTIN_SAMBANOVA,
-    BUILTIN_TOGETHER,
-    BUILTIN_VENICE,
-    BUILTIN_VERTEX_AI,
-    BUILTIN_VLLM,
-    BUILTIN_VOLCENGINE_CODING,
-    BUILTIN_VOLCENGINE,
-    BUILTIN_XAI,
-    BUILTIN_ZAI_CODING,
-    BUILTIN_ZAI,
-    BUILTIN_ZHIPU_CODING,
-    BUILTIN_ZHIPU,
-];
-
-fn builtin_providers() -> Vec<ProviderInfo> {
-    let mut providers = Vec::new();
-    for source in BUILTIN_PROVIDER_SOURCES {
-        let file: ModelCatalogFile =
-            toml::from_str(source).expect("builtin provider TOML is invalid");
-        if let Some(p) = file.provider {
-            providers.push(p.into());
+    let mut sources = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&providers_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "toml") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    sources.push(content);
+                }
+            }
         }
     }
-    providers
+    sources
 }
 
-fn builtin_aliases() -> HashMap<String, String> {
-    let file: AliasesCatalogFile =
-        toml::from_str(BUILTIN_ALIASES).expect("builtin aliases TOML is invalid");
-    file.aliases
-        .into_iter()
-        .map(|(k, v)| (k.to_lowercase(), v))
-        .collect()
-}
-
-fn builtin_models() -> Vec<ModelCatalogEntry> {
-    let mut models = Vec::new();
-    for source in BUILTIN_PROVIDER_SOURCES {
-        let file: ModelCatalogFile =
-            toml::from_str(source).expect("builtin model catalog TOML is invalid");
-        models.extend(file.models);
-    }
-    models
+fn load_aliases_source() -> Option<String> {
+    let home = std::env::var("LIBREFANG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".librefang")
+        });
+    std::fs::read_to_string(home.join("aliases.toml")).ok()
 }
 
 #[cfg(test)]
@@ -737,21 +696,34 @@ mod tests {
     use super::*;
     use librefang_types::model_catalog::{LMSTUDIO_BASE_URL, OLLAMA_BASE_URL};
 
+    /// Build a catalog from the in-repo catalog/providers/ directory.
+    /// This ensures tests work in CI without ~/.librefang/providers/.
+    fn test_catalog() -> ModelCatalog {
+        let providers_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("catalog")
+            .join("providers");
+        ModelCatalog::new_from_dir(&providers_dir)
+    }
+
     #[test]
     fn test_catalog_has_models() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         assert!(catalog.list_models().len() >= 30);
     }
 
     #[test]
     fn test_catalog_has_providers() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         assert_eq!(catalog.list_providers().len(), 42);
     }
 
     #[test]
     fn test_find_model_by_id() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let entry = catalog.find_model("claude-sonnet-4-20250514").unwrap();
         assert_eq!(entry.display_name, "Claude Sonnet 4");
         assert_eq!(entry.provider, "anthropic");
@@ -760,27 +732,27 @@ mod tests {
 
     #[test]
     fn test_find_model_by_alias() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let entry = catalog.find_model("sonnet").unwrap();
         assert_eq!(entry.id, "claude-sonnet-4-6");
     }
 
     #[test]
     fn test_find_model_case_insensitive() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         assert!(catalog.find_model("Claude-Sonnet-4-20250514").is_some());
         assert!(catalog.find_model("SONNET").is_some());
     }
 
     #[test]
     fn test_find_model_not_found() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         assert!(catalog.find_model("nonexistent-model").is_none());
     }
 
     #[test]
     fn test_resolve_alias() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         assert_eq!(catalog.resolve_alias("sonnet"), Some("claude-sonnet-4-6"));
         assert_eq!(
             catalog.resolve_alias("haiku"),
@@ -791,7 +763,7 @@ mod tests {
 
     #[test]
     fn test_models_by_provider() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let anthropic = catalog.models_by_provider("anthropic");
         assert_eq!(anthropic.len(), 7);
         assert!(anthropic.iter().all(|m| m.provider == "anthropic"));
@@ -799,7 +771,7 @@ mod tests {
 
     #[test]
     fn test_models_by_tier() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let frontier = catalog.models_by_tier(ModelTier::Frontier);
         assert!(frontier.len() >= 3); // At least opus, gpt-4.1, gemini-2.5-pro
         assert!(frontier.iter().all(|m| m.tier == ModelTier::Frontier));
@@ -807,7 +779,7 @@ mod tests {
 
     #[test]
     fn test_pricing_lookup() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let (input, output) = catalog.pricing("claude-sonnet-4-20250514").unwrap();
         assert!((input - 3.0).abs() < 0.001);
         assert!((output - 15.0).abs() < 0.001);
@@ -815,7 +787,7 @@ mod tests {
 
     #[test]
     fn test_pricing_via_alias() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let (input, output) = catalog.pricing("sonnet").unwrap();
         assert!((input - 3.0).abs() < 0.001);
         assert!((output - 15.0).abs() < 0.001);
@@ -823,13 +795,13 @@ mod tests {
 
     #[test]
     fn test_pricing_not_found() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         assert!(catalog.pricing("nonexistent").is_none());
     }
 
     #[test]
     fn test_detect_auth_local_providers() {
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         catalog.detect_auth();
         // Local providers should be NotRequired
         let ollama = catalog.get_provider("ollama").unwrap();
@@ -840,7 +812,7 @@ mod tests {
 
     #[test]
     fn test_available_models_includes_local() {
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         catalog.detect_auth();
         let available = catalog.available_models();
         // Local providers (ollama, vllm, lmstudio) should always be available
@@ -849,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_provider_model_counts() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let anthropic = catalog.get_provider("anthropic").unwrap();
         assert_eq!(anthropic.model_count, 7);
         let groq = catalog.get_provider("groq").unwrap();
@@ -858,7 +830,7 @@ mod tests {
 
     #[test]
     fn test_list_aliases() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let aliases = catalog.list_aliases();
         assert!(aliases.len() >= 20);
         assert_eq!(aliases.get("sonnet").unwrap(), "claude-sonnet-4-6");
@@ -869,7 +841,7 @@ mod tests {
 
     #[test]
     fn test_find_grok_by_alias() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let entry = catalog.find_model("grok").unwrap();
         assert_eq!(entry.id, "grok-4-0709");
         assert_eq!(entry.provider, "xai");
@@ -877,7 +849,7 @@ mod tests {
 
     #[test]
     fn test_add_alias() {
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         assert!(catalog.add_alias("my-sonnet", "claude-sonnet-4-6"));
         assert_eq!(
             catalog.resolve_alias("my-sonnet").unwrap(),
@@ -891,7 +863,7 @@ mod tests {
 
     #[test]
     fn test_remove_alias() {
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         catalog.add_alias("temp-alias", "gpt-4o");
         assert!(catalog.remove_alias("temp-alias"));
         assert!(catalog.resolve_alias("temp-alias").is_none());
@@ -904,7 +876,7 @@ mod tests {
 
     #[test]
     fn test_new_providers_in_catalog() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         assert!(catalog.get_provider("perplexity").is_some());
         assert!(catalog.get_provider("cohere").is_some());
         assert!(catalog.get_provider("ai21").is_some());
@@ -917,7 +889,7 @@ mod tests {
 
     #[test]
     fn test_xai_models() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let xai = catalog.models_by_provider("xai");
         assert_eq!(xai.len(), 9);
         assert!(xai.iter().any(|m| m.id == "grok-4-0709"));
@@ -933,14 +905,14 @@ mod tests {
 
     #[test]
     fn test_perplexity_models() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let pp = catalog.models_by_provider("perplexity");
         assert_eq!(pp.len(), 4);
     }
 
     #[test]
     fn test_cohere_models() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let co = catalog.models_by_provider("cohere");
         assert_eq!(co.len(), 4);
     }
@@ -954,7 +926,7 @@ mod tests {
 
     #[test]
     fn test_merge_adds_new_models() {
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         let before = catalog.models_by_provider("ollama").len();
         catalog.merge_discovered_models(
             "ollama",
@@ -970,7 +942,7 @@ mod tests {
 
     #[test]
     fn test_merge_skips_existing() {
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         // "llama3.2" is already a builtin Ollama model
         let before = catalog.list_models().len();
         catalog.merge_discovered_models("ollama", &["llama3.2".to_string()]);
@@ -980,7 +952,7 @@ mod tests {
 
     #[test]
     fn test_merge_updates_model_count() {
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         let before_count = catalog.get_provider("ollama").unwrap().model_count;
         catalog.merge_discovered_models("ollama", &["new-model:latest".to_string()]);
         let after_count = catalog.get_provider("ollama").unwrap().model_count;
@@ -989,7 +961,7 @@ mod tests {
 
     #[test]
     fn test_chinese_providers_in_catalog() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         assert!(catalog.get_provider("qwen").is_some());
         assert!(catalog.get_provider("minimax").is_some());
         assert!(catalog.get_provider("zhipu").is_some());
@@ -1004,7 +976,7 @@ mod tests {
 
     #[test]
     fn test_zai_models() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         // Z.AI chat models
         let glm5 = catalog.find_model("zai/glm-5-20250605").unwrap();
         assert_eq!(glm5.provider, "zai");
@@ -1026,7 +998,7 @@ mod tests {
 
     #[test]
     fn test_kimi2_models() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         // Kimi K2 and K2.5 models
         let k2 = catalog.find_model("kimi-k2").unwrap();
         assert_eq!(k2.provider, "moonshot");
@@ -1040,7 +1012,7 @@ mod tests {
 
     #[test]
     fn test_chinese_model_aliases() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         assert!(catalog.find_model("kimi").is_some());
         assert!(catalog.find_model("glm").is_some());
         assert!(catalog.find_model("codegeex").is_some());
@@ -1070,14 +1042,14 @@ mod tests {
 
     #[test]
     fn test_bedrock_models() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let bedrock = catalog.models_by_provider("bedrock");
         assert_eq!(bedrock.len(), 8);
     }
 
     #[test]
     fn test_set_provider_url() {
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         let old_url = catalog.get_provider("ollama").unwrap().base_url.clone();
         assert_eq!(old_url, OLLAMA_BASE_URL);
 
@@ -1091,7 +1063,7 @@ mod tests {
 
     #[test]
     fn test_set_provider_url_unknown() {
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         let initial_count = catalog.list_providers().len();
         let updated = catalog.set_provider_url("my-custom-llm", "http://localhost:9999");
         // Unknown providers are now auto-registered as custom entries
@@ -1105,7 +1077,7 @@ mod tests {
 
     #[test]
     fn test_apply_url_overrides() {
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         let mut overrides = HashMap::new();
         overrides.insert("ollama".to_string(), "http://10.0.0.5:11434/v1".to_string());
         overrides.insert("vllm".to_string(), "http://10.0.0.6:8000/v1".to_string());
@@ -1131,7 +1103,7 @@ mod tests {
     #[test]
     fn test_codex_models_under_openai() {
         // Codex models are now merged under the "openai" provider
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let models = catalog.models_by_provider("openai");
         assert!(models.iter().any(|m| m.id == "codex/gpt-4.1"));
         assert!(models.iter().any(|m| m.id == "codex/o4-mini"));
@@ -1139,14 +1111,14 @@ mod tests {
 
     #[test]
     fn test_codex_aliases() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let entry = catalog.find_model("codex").unwrap();
         assert_eq!(entry.id, "codex/gpt-4.1");
     }
 
     #[test]
     fn test_claude_code_provider() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let cc = catalog.get_provider("claude-code").unwrap();
         assert_eq!(cc.display_name, "Claude Code");
         assert!(!cc.key_required);
@@ -1154,7 +1126,7 @@ mod tests {
 
     #[test]
     fn test_claude_code_models() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let models = catalog.models_by_provider("claude-code");
         assert_eq!(models.len(), 3);
         assert!(models.iter().any(|m| m.id == "claude-code/opus"));
@@ -1164,7 +1136,7 @@ mod tests {
 
     #[test]
     fn test_claude_code_aliases() {
-        let catalog = ModelCatalog::new();
+        let catalog = test_catalog();
         let entry = catalog.find_model("claude-code").unwrap();
         assert_eq!(entry.id, "claude-code/sonnet");
     }
@@ -1194,7 +1166,7 @@ supports_streaming = true
 aliases = ["tm1"]
 "#;
         let file: ModelCatalogFile = toml::from_str(toml_content).unwrap();
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         let initial_models = catalog.list_models().len();
         let initial_providers = catalog.list_providers().len();
 
@@ -1239,7 +1211,7 @@ aliases = []
         let file: ModelCatalogFile = toml::from_str(toml_content).unwrap();
         assert!(file.provider.is_none());
 
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         let added = catalog.merge_catalog_file(file);
         assert_eq!(added, 1);
 
@@ -1265,7 +1237,7 @@ supports_streaming = true
 aliases = []
 "#;
         let file: ModelCatalogFile = toml::from_str(toml_content).unwrap();
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         let initial_models = catalog.list_models().len();
 
         let added = catalog.merge_catalog_file(file);
@@ -1300,7 +1272,7 @@ aliases = []
 "#;
         std::fs::write(dir.path().join("cached.toml"), toml_content).unwrap();
 
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         let added = catalog.load_cached_catalog(dir.path()).unwrap();
         assert_eq!(added, 1);
 
@@ -1380,7 +1352,7 @@ aliases = ["trm1"]
         assert_eq!(file.models.len(), 1);
         assert!(file.models[0].provider.is_empty());
 
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         let added = catalog.merge_catalog_file(file);
         assert_eq!(added, 1);
 

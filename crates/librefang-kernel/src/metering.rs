@@ -556,6 +556,18 @@ mod tests {
         MeteringEngine::new(store)
     }
 
+    /// Build a catalog from the in-repo catalog/providers/ directory.
+    fn test_catalog() -> librefang_runtime::model_catalog::ModelCatalog {
+        let providers_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("catalog")
+            .join("providers");
+        librefang_runtime::model_catalog::ModelCatalog::new_from_dir(&providers_dir)
+    }
+
     #[test]
     fn test_record_and_check_quota_under() {
         let engine = setup();
@@ -787,7 +799,7 @@ mod tests {
 
     #[test]
     fn test_estimate_cost_with_catalog() {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = test_catalog();
         // Sonnet: $3/M input, $15/M output
         let cost = MeteringEngine::estimate_cost_with_catalog(
             &catalog,
@@ -800,7 +812,7 @@ mod tests {
 
     #[test]
     fn test_estimate_cost_with_catalog_alias() {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = test_catalog();
         // "sonnet" alias should resolve to same pricing
         let cost =
             MeteringEngine::estimate_cost_with_catalog(&catalog, "sonnet", 1_000_000, 1_000_000);
@@ -809,7 +821,7 @@ mod tests {
 
     #[test]
     fn test_estimate_cost_with_catalog_unknown_uses_default() {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = test_catalog();
         // Unknown model falls back to $1/$3
         let cost = MeteringEngine::estimate_cost_with_catalog(
             &catalog,
@@ -822,7 +834,7 @@ mod tests {
 
     #[test]
     fn test_estimate_cost_with_catalog_chatgpt_zero_price_uses_legacy_budget_rate() {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = test_catalog();
         let cost = MeteringEngine::estimate_cost_with_catalog(
             &catalog,
             "gpt-5.1-codex-mini",
@@ -834,7 +846,7 @@ mod tests {
 
     #[test]
     fn test_estimate_cost_with_catalog_local_zero_price_stays_zero() {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = test_catalog();
         let cost =
             MeteringEngine::estimate_cost_with_catalog(&catalog, "llama3.2", 1_000_000, 1_000_000);
         assert!(cost.abs() < f64::EPSILON);
