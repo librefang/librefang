@@ -6,6 +6,10 @@ import os
 import sys
 from email.header import decode_header
 
+IMAP_SERVER = os.environ.get("IMAP_SERVER", "imap.gmail.com")
+IMAP_PORT = int(os.environ.get("IMAP_PORT", "993"))
+
+
 def decode_str(s, enc=None):
     if isinstance(s, bytes):
         return s.decode(enc or "utf-8", errors="ignore")
@@ -52,6 +56,7 @@ def search_folder(mail, folder, sender):
         ids = msgs[0].split() if msgs[0] else []
         return ids
     except Exception as e:
+        print(f"WARNING: failed to search {folder}: {e}", file=sys.stderr)
         return []
 
 def main():
@@ -64,7 +69,7 @@ def main():
         sys.exit(1)
 
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com", 993)
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
         mail.login(username, password)
     except Exception as e:
         print(f"ERROR: IMAP login failed: {e}")
