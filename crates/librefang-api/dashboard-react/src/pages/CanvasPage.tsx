@@ -885,10 +885,17 @@ function CanvasPageInner() {
   const addNode = useCallback((type: string) => {
     const config = NODE_TYPES.find(n => n.type === type) || NODE_TYPES[10];
     const defaultMode = NODE_MODE_MAP[type];
+    // 放在现有节点下方，不重叠
+    const existingNodes = nodes.filter(n => n.type === "custom" && !n.hidden);
+    let maxY = 0;
+    for (const n of existingNodes) {
+      const bottom = n.position.y + (n.measured?.height || 80);
+      if (bottom > maxY) maxY = bottom;
+    }
     const newNode: Node = {
       id: `${type}-${Date.now()}`,
       type: "custom",
-      position: { x: 50 + Math.random() * 50, y: 30 + Math.random() * 30 },
+      position: { x: 100, y: existingNodes.length === 0 ? 80 : maxY + 40 },
       data: {
         label: t(config.labelKey),
         description: t(config.descKey),
