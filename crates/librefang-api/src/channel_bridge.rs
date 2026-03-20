@@ -33,6 +33,8 @@ fn looks_like_tool_call(text: &str) -> bool {
         || trimmed.starts_with("<tool_call>")
         // Pattern 4: markdown code block with tool call
         || (trimmed.starts_with("```") && trimmed.contains('{'))
+        // Pattern 5: backtick-wrapped tool call — `tool_name {"key":"value"}`
+        || (trimmed.starts_with('`') && !trimmed.starts_with("```") && trimmed.contains('{'))
 }
 
 // Feature-gated adapter imports
