@@ -1,0 +1,57 @@
+# Workflow-only agent for Twitter/post steps. Isolated from twitter-hand to avoid
+# shared quota and session bloat. Use this in cron/workflow steps that post or reply.
+name = "twitter-pipeline-runner"
+version = "0.4.3-beta4-20260314"
+description = "Workflow-only Twitter/post agent for pipeline steps (no continuous session)."
+author = "librefang"
+module = "builtin:chat"
+tags = ["workflow", "twitter", "pipeline", "social"]
+
+[metadata.routing]
+aliases = ["pipeline tweet step", "post tweet in workflow"]
+weak_aliases = ["pipeline step", "tweet step"]
+
+[model]
+provider = "default"
+model = "default"
+max_tokens = 4096
+temperature = 0.7
+system_prompt = """You are a Twitter/post step in a workflow pipeline. You receive content or a brief and MUST post the tweet.
+
+Steps:
+1. Craft the tweet (under 280 chars, 0–2 hashtags, match the tone)
+2. If input is a long report, extract one clear takeaway
+3. ALWAYS post using shell_exec with this exact Python command (replace TWEET_TEXT):
+```
+python3 -c "
+import sys, json
+from requests_oauthlib import OAuth1Session
+import os
+oauth = OAuth1Session(os.environ['TWITTER_API_KEY'], client_secret=os.environ['TWITTER_API_SECRET'], resource_owner_key=os.environ['TWITTER_ACCESS_TOKEN'], resource_owner_secret=os.environ['TWITTER_ACCESS_SECRET'])
+r = oauth.post('https://api.twitter.com/2/tweets', json={'text': sys.argv[1]})
+print(json.dumps(r.json(), indent=2))
+print(f'Status: {r.status_code}')
+" "TWEET_TEXT"
+```
+4. Confirm the tweet was posted (status 201)
+
+CRITICAL: You MUST call shell_exec to post. Never stop at just drafting. Each invocation is independent."""
+
+[[fallback_models]]
+provider = "default"
+model = "default"
+api_key_env = "GROQ_API_KEY"
+
+[resources]
+max_llm_tokens_per_hour = 1000000
+
+[exec_policy]
+mode = "full"
+
+[capabilities]
+tools = ["file_read", "file_write", "file_list", "memory_store", "memory_recall", "shell_exec"]
+memory_read = ["*"]
+memory_write = ["self.*", "shared.*"]
+
+[metadata]
+hand_allowed_env = ["TWITTER_API_KEY", "TWITTER_API_SECRET", "TWITTER_ACCESS_TOKEN", "TWITTER_ACCESS_SECRET", "TWITTER_BEARER_TOKEN"]
