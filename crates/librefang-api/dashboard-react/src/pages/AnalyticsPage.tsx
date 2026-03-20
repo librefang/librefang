@@ -127,54 +127,25 @@ export function AnalyticsPage() {
             </h2>
             {(!daily?.days || daily.days.length === 0) ? (
               <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
-            ) : (() => {
-              const days = (daily.days || []).slice(-30);
-              const maxCost = Math.max(...days.map(d => d.cost_usd || 0), 0.001);
-              const w = 800, h = 140, px = 40, py = 10;
-              const cw = w - px, ch = h - py * 2;
-              const points = days.map((d, i) => ({
-                x: px + (days.length === 1 ? cw / 2 : (i / (days.length - 1)) * cw),
-                y: py + ch - ((d.cost_usd || 0) / maxCost) * ch,
-                ...d
-              }));
-              const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${p.x},${p.y}`).join(" ");
-              const area = `${line} L${points[points.length - 1].x},${h - py} L${points[0].x},${h - py} Z`;
-              return (
-                <div className="relative">
-                  <svg viewBox={`0 0 ${w} ${h + 20}`} className="w-full h-auto">
-                    {/* Grid lines */}
-                    {[0, 0.25, 0.5, 0.75, 1].map(f => (
-                      <line key={f} x1={px} y1={py + ch * (1 - f)} x2={w} y2={py + ch * (1 - f)} stroke="currentColor" className="text-border-subtle" strokeWidth="0.5" strokeDasharray="4 4" />
-                    ))}
-                    {/* Area fill */}
-                    <path d={area} fill="url(#areaGrad)" opacity="0.3" />
-                    {/* Line */}
-                    <path d={line} fill="none" stroke="var(--brand-color, #3b82f6)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-                    {/* Dots */}
-                    {points.map((p, i) => (
-                      <g key={i}>
-                        <circle cx={p.x} cy={p.y} r="4" fill="var(--brand-color, #3b82f6)" stroke="white" strokeWidth="2" className="dark:stroke-surface" />
-                        <title>{`${p.date}: $${(p.cost_usd || 0).toFixed(2)} (${p.calls || 0} calls)`}</title>
-                      </g>
-                    ))}
-                    {/* X labels */}
-                    {points.filter((_, i) => days.length <= 10 || i % Math.ceil(days.length / 8) === 0 || i === days.length - 1).map((p, i) => (
-                      <text key={i} x={p.x} y={h + 12} textAnchor="middle" className="fill-text-dim/40 text-[9px]">{(p.date || "").slice(5)}</text>
-                    ))}
-                    {/* Y labels */}
-                    {[0, 0.5, 1].map(f => (
-                      <text key={f} x={px - 4} y={py + ch * (1 - f) + 3} textAnchor="end" className="fill-text-dim/40 text-[8px]">${(maxCost * f).toFixed(0)}</text>
-                    ))}
-                    <defs>
-                      <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="0%" stopColor="var(--brand-color, #3b82f6)" />
-                        <stop offset="100%" stopColor="var(--brand-color, #3b82f6)" stopOpacity="0" />
-                      </linearGradient>
-                    </defs>
-                  </svg>
-                </div>
-              );
-            })()}
+            ) : (
+              <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.min((daily.days || []).length, 14)}, 1fr)` }}>
+                {(daily.days || []).slice(-14).map((d, i) => {
+                  const maxDay = Math.max(...(daily.days || []).map(x => x.cost_usd || 0), 0.001);
+                  const pct = ((d.cost_usd || 0) / maxDay) * 100;
+                  return (
+                    <div key={d.date || i} className="flex flex-col items-center gap-1">
+                      <span className="text-[9px] font-mono text-text-dim">${(d.cost_usd || 0).toFixed(0)}</span>
+                      <div className="w-full h-24 rounded-lg bg-main overflow-hidden flex flex-col justify-end">
+                        <div className="w-full rounded-lg bg-gradient-to-t from-brand to-brand/40 transition-all"
+                          style={{ height: `${Math.max(pct, 5)}%` }}
+                          title={`${d.date}: $${(d.cost_usd || 0).toFixed(2)} | ${d.calls || 0} calls | ${((d.tokens || 0) / 1000).toFixed(0)}K tok`} />
+                      </div>
+                      <span className="text-[8px] text-text-dim/50">{(d.date || "").slice(5)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </Card>
 
           {/* Budget */}
