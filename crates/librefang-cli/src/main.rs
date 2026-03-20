@@ -315,7 +315,7 @@ enum Commands {
     /// Authenticate with a provider (chatgpt) [*].
     #[command(
         subcommand,
-        long_about = "Authenticate with external providers.\n\nExamples:\n  librefang auth chatgpt   # Browser-based ChatGPT session token flow"
+        long_about = "Authenticate with external providers.\n\nExamples:\n  librefang auth chatgpt\n  librefang auth chatgpt --device-auth"
     )]
     Auth(AuthCommands),
     /// Manage the credential vault (init, set, list, remove) [*].
@@ -520,11 +520,15 @@ enum VaultCommands {
 
 #[derive(Subcommand)]
 enum AuthCommands {
-    /// Authenticate with ChatGPT (browser-based session token flow).
+    /// Authenticate with ChatGPT using browser or device auth.
     #[command(
-        long_about = "Authenticate with ChatGPT using a browser-based session token flow.\n\nOpens a browser window for you to log in and extract a session token.\n\nExamples:\n  librefang auth chatgpt"
+        long_about = "Authenticate with ChatGPT using the OpenAI Codex login flow.\n\nBy default this opens a browser and waits for the localhost callback.\nUse --device-auth for headless or remote environments. If device auth is\nnot enabled for the current OpenAI account or workspace, LibreFang falls\nback to the standard browser login flow.\n\nExamples:\n  librefang auth chatgpt\n  librefang auth chatgpt --device-auth"
     )]
-    Chatgpt,
+    Chatgpt {
+        /// Use the OpenAI device auth flow before falling back to browser auth.
+        #[arg(long)]
+        device_auth: bool,
+    },
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -1558,7 +1562,7 @@ fn main() {
         Some(Commands::Remove { name }) => cmd_integration_remove(&name),
         Some(Commands::Integrations { query }) => cmd_integrations_list(query.as_deref()),
         Some(Commands::Auth(sub)) => match sub {
-            AuthCommands::Chatgpt => cmd_auth_chatgpt(),
+            AuthCommands::Chatgpt { device_auth } => cmd_auth_chatgpt(device_auth),
         },
         Some(Commands::Vault(sub)) => match sub {
             VaultCommands::Init => cmd_vault_init(),
@@ -6557,102 +6561,151 @@ fn cmd_integrations_list(query: Option<&str>) {
 // Auth commands (librefang auth chatgpt)
 // ---------------------------------------------------------------------------
 
-fn cmd_auth_chatgpt() {
+enum DeviceAuthNextStep {
+    ContinueDevice(librefang_runtime::chatgpt_oauth::DeviceAuthPrompt),
+    FallbackToBrowser(String),
+}
+
+fn resolve_device_auth_start(
+    result: Result<
+        librefang_runtime::chatgpt_oauth::DeviceAuthPrompt,
+        librefang_runtime::chatgpt_oauth::DeviceAuthFlowError,
+    >,
+) -> Result<DeviceAuthNextStep, String> {
+    match result {
+        Ok(prompt) => Ok(DeviceAuthNextStep::ContinueDevice(prompt)),
+        Err(librefang_runtime::chatgpt_oauth::DeviceAuthFlowError::BrowserFallback { message }) => {
+            Ok(DeviceAuthNextStep::FallbackToBrowser(message))
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+async fn authenticate_chatgpt(
+    device_auth: bool,
+) -> Result<librefang_runtime::chatgpt_oauth::ChatGptAuthResult, String> {
     use librefang_runtime::chatgpt_oauth;
 
-    println!("Starting ChatGPT OAuth authentication flow...\n");
+    if device_auth {
+        match resolve_device_auth_start(chatgpt_oauth::start_device_auth_flow().await)? {
+            DeviceAuthNextStep::ContinueDevice(prompt) => {
+                println!("Device authentication requested.");
+                println!(
+                    "Open this URL in any browser:\n  {}\n",
+                    chatgpt_oauth::DEVICE_AUTH_URL
+                );
+                println!("Enter this one-time code:\n  {}\n", prompt.user_code);
+                println!("Do not share this code.");
+                println!("Waiting for authorization...");
+                return chatgpt_oauth::poll_device_auth_flow(&prompt).await;
+            }
+            DeviceAuthNextStep::FallbackToBrowser(message) => {
+                println!("{message}");
+                println!("\nSwitching to the standard browser login flow...\n");
+            }
+        }
+    }
+
+    let (auth_url, port, code_verifier, state) = chatgpt_oauth::start_oauth_flow().await?;
+
+    println!("Opening browser for OpenAI authentication...");
+    println!("If the browser does not open, visit:\n  {auth_url}\n");
+
+    if let Err(e) = open::that(&auth_url) {
+        eprintln!("Could not open browser automatically: {e}");
+        eprintln!("Please open manually: {auth_url}");
+    }
+
+    let code = chatgpt_oauth::run_oauth_callback_server(port, &state).await?;
+    chatgpt_oauth::exchange_code_for_tokens(&code, &code_verifier, port).await
+}
+
+async fn persist_chatgpt_auth(
+    auth_result: librefang_runtime::chatgpt_oauth::ChatGptAuthResult,
+) -> Result<(), String> {
+    use librefang_runtime::chatgpt_oauth;
+
+    let home = librefang_home();
+    std::fs::create_dir_all(&home)
+        .map_err(|e| format!("Failed to create LibreFang home directory: {e}"))?;
+
+    let secrets_path = home.join("secrets.env");
+    let access_token = auth_result.access_token;
+    let refresh_token = auth_result.refresh_token;
+
+    let mut env_vars: Vec<(String, String)> = vec![(
+        "CHATGPT_SESSION_TOKEN".to_string(),
+        access_token.to_string(),
+    )];
+    if let Some(ref rt) = refresh_token {
+        env_vars.push(("CHATGPT_REFRESH_TOKEN".to_string(), rt.to_string()));
+    }
+
+    let existing = std::fs::read_to_string(&secrets_path).unwrap_or_default();
+    let mut lines: Vec<String> = existing
+        .lines()
+        .filter(|l| {
+            !l.starts_with("CHATGPT_SESSION_TOKEN=") && !l.starts_with("CHATGPT_REFRESH_TOKEN=")
+        })
+        .map(|l| l.to_string())
+        .collect();
+
+    for (key, val) in &env_vars {
+        lines.push(format!("{key}={val}"));
+    }
+
+    let mut updated = lines.join("\n");
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+
+    std::fs::write(&secrets_path, updated)
+        .map_err(|e| format!("Failed to write secrets.env: {e}"))?;
+
+    println!("\nChatGPT tokens saved to {}", secrets_path.display());
+
+    println!("Detecting best available model...");
+    let best_model = chatgpt_oauth::fetch_best_codex_model(&access_token).await;
+    println!("Selected model: {best_model}");
+
+    let config_path = home.join("config.toml");
+    let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc = if config_str.trim().is_empty() {
+        toml_edit::DocumentMut::new()
+    } else {
+        config_str
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| format!("Failed to parse config.toml: {e}"))?
+    };
+
+    let dm = doc
+        .entry("default_model")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or("default_model is not a table")?;
+    dm.insert("provider", toml_edit::value("chatgpt"));
+    dm.insert("api_key_env", toml_edit::value("CHATGPT_SESSION_TOKEN"));
+    dm.insert("model", toml_edit::value(&best_model));
+    dm.insert(
+        "base_url",
+        toml_edit::value(chatgpt_oauth::CHATGPT_BASE_URL),
+    );
+
+    std::fs::write(&config_path, doc.to_string())
+        .map_err(|e| format!("Failed to write config.toml: {e}"))?;
+
+    println!("config.toml updated: provider = \"chatgpt\", model = \"{best_model}\"");
+    Ok(())
+}
+
+fn cmd_auth_chatgpt(device_auth: bool) {
+    println!("Starting ChatGPT authentication flow...\n");
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
 
     let result: Result<(), String> = rt.block_on(async {
-        // Start OAuth flow: bind local server, generate PKCE, build auth URL.
-        let (auth_url, port, code_verifier, state) = chatgpt_oauth::start_oauth_flow().await?;
-
-        println!("Opening browser for OpenAI authentication...");
-        println!("If the browser does not open, visit:\n  {auth_url}\n");
-
-        // Open the authorization URL in the default browser.
-        if let Err(e) = open::that(&auth_url) {
-            eprintln!("Could not open browser automatically: {e}");
-            eprintln!("Please open manually: {auth_url}");
-        }
-
-        // Wait for the OAuth callback with the authorization code.
-        let code = chatgpt_oauth::run_oauth_callback_server(port, &state).await?;
-
-        // Exchange the authorization code for tokens.
-        let auth_result =
-            chatgpt_oauth::exchange_code_for_tokens(&code, &code_verifier, port).await?;
-
-        // Save tokens to secrets.env
-        let home = librefang_home();
-        let secrets_path = home.join("secrets.env");
-
-        let access_token = auth_result.access_token;
-        let refresh_token = auth_result.refresh_token;
-
-        let mut env_vars: Vec<(String, String)> = vec![(
-            "CHATGPT_SESSION_TOKEN".to_string(),
-            access_token.to_string(),
-        )];
-        if let Some(ref rt) = refresh_token {
-            env_vars.push(("CHATGPT_REFRESH_TOKEN".to_string(), rt.to_string()));
-        }
-
-        let existing = std::fs::read_to_string(&secrets_path).unwrap_or_default();
-        let mut lines: Vec<String> = existing
-            .lines()
-            .filter(|l| {
-                !l.starts_with("CHATGPT_SESSION_TOKEN=") && !l.starts_with("CHATGPT_REFRESH_TOKEN=")
-            })
-            .map(|l| l.to_string())
-            .collect();
-
-        for (key, val) in &env_vars {
-            lines.push(format!("{key}={val}"));
-        }
-
-        let mut updated = lines.join("\n");
-        if !updated.ends_with('\n') {
-            updated.push('\n');
-        }
-
-        std::fs::write(&secrets_path, updated)
-            .map_err(|e| format!("Failed to write secrets.env: {e}"))?;
-
-        println!("\nChatGPT tokens saved to {}", secrets_path.display());
-
-        // Auto-detect best available Codex model using the fresh access token.
-        println!("Detecting best available model...");
-        let best_model = chatgpt_oauth::fetch_best_codex_model(&access_token).await;
-        println!("Selected model: {best_model}");
-
-        // Auto-update config.toml to use chatgpt provider
-        let config_path = home.join("config.toml");
-        let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
-        let mut doc = config_str
-            .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| format!("Failed to parse config.toml: {e}"))?;
-
-        let dm = doc
-            .entry("default_model")
-            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
-            .as_table_mut()
-            .ok_or("default_model is not a table")?;
-        dm.insert("provider", toml_edit::value("chatgpt"));
-        dm.insert("api_key_env", toml_edit::value("CHATGPT_SESSION_TOKEN"));
-        dm.insert("model", toml_edit::value(&best_model));
-        // ChatGPT OAuth tokens use the Responses API at the backend-api endpoint.
-        dm.insert(
-            "base_url",
-            toml_edit::value("https://chatgpt.com/backend-api"),
-        );
-
-        std::fs::write(&config_path, doc.to_string())
-            .map_err(|e| format!("Failed to write config.toml: {e}"))?;
-
-        println!("config.toml updated: provider = \"chatgpt\", model = \"{best_model}\"");
-        Ok(())
+        let auth_result = authenticate_chatgpt(device_auth).await?;
+        persist_chatgpt_auth(auth_result).await
     });
 
     match result {
@@ -8848,7 +8901,8 @@ mod tests {
     use super::{
         channel_test_request_body, compare_release_tag, daemon_log_path_for_config,
         daemon_log_path_for_home, detached_daemon_args, normalize_release_tag, parse_version_core,
-        resolve_hand_instance, ChannelCommands, Cli, Commands, GatewayCommands, ReleaseComparison,
+        resolve_device_auth_start, resolve_hand_instance, AuthCommands, ChannelCommands, Cli,
+        Commands, DeviceAuthNextStep, GatewayCommands, ReleaseComparison,
     };
     use clap::Parser;
     use serde_json::json;
@@ -9046,6 +9100,43 @@ mod tests {
     #[test]
     fn test_channel_test_request_body_empty_when_no_target() {
         assert_eq!(channel_test_request_body(None, None), None);
+    }
+
+    #[test]
+    fn test_auth_chatgpt_accepts_device_auth_flag() {
+        let cli = Cli::parse_from(["librefang", "auth", "chatgpt", "--device-auth"]);
+        match cli.command {
+            Some(Commands::Auth(AuthCommands::Chatgpt { device_auth })) => {
+                assert!(device_auth);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_device_auth_start_continues_device_path() {
+        let prompt = librefang_runtime::chatgpt_oauth::DeviceAuthPrompt {
+            device_auth_id: "device-1".to_string(),
+            user_code: "ABCD-EFGH".to_string(),
+            interval_secs: 9,
+        };
+
+        match resolve_device_auth_start(Ok(prompt.clone())).unwrap() {
+            DeviceAuthNextStep::ContinueDevice(actual) => assert_eq!(actual, prompt),
+            DeviceAuthNextStep::FallbackToBrowser(_) => panic!("unexpected fallback"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_device_auth_start_requests_browser_fallback_on_unsupported_error() {
+        let err = librefang_runtime::chatgpt_oauth::DeviceAuthFlowError::BrowserFallback {
+            message: "fallback".to_string(),
+        };
+
+        match resolve_device_auth_start(Err(err)).unwrap() {
+            DeviceAuthNextStep::FallbackToBrowser(message) => assert_eq!(message, "fallback"),
+            DeviceAuthNextStep::ContinueDevice(_) => panic!("unexpected device continuation"),
+        }
     }
 
     #[test]
