@@ -4,7 +4,7 @@
     "core": "核心", "automation": "自动化", "resources": "资源", "system": "系统",
     "overview": "概览", "canvas": "画布", "chat": "对话", "sessions": "会话", "approvals": "审批",
     "workflows": "工作流", "scheduler": "调度器", "goals": "目标", "agents": "智能体",
-    "providers": "供应商", "channels": "通道", "skills": "技能", "hands": "Hands", "plugins": "插件",
+    "providers": "供应商", "channels": "通道", "skills": "技能", "hands": "Hands", "plugins": "插件", "models": "模型",
     "analytics": "分析", "memory": "记忆", "comms": "通信", "runtime": "运行时", "logs": "日志", "settings": "设置"
   },
   "common": {
@@ -220,6 +220,13 @@
   },
   "wizard": {
     "welcome": "欢迎", "step_1": "第一步", "connect_provider": "连接供应商"
+  },
+  "models": {
+    "section": "基础设施", "title": "模型目录", "subtitle": "浏览所有供应商的可用 LLM 模型。",
+    "search_placeholder": "搜索模型...", "all_providers": "所有供应商", "all_tiers": "全部",
+    "available_only": "仅可用", "available": "可用", "results": "个模型",
+    "free": "免费", "no_results": "没有匹配的模型。",
+    "col_model": "模型", "col_provider": "供应商", "col_tier": "等级", "col_context": "上下文", "col_input": "输入 $/M"
   },
   "plugins": {
     "section": "扩展", "title": "插件", "subtitle": "通过自定义插件扩展智能体能力。",

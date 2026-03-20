@@ -4,7 +4,7 @@
     "core": "Core", "automation": "Automation", "resources": "Resources", "system": "System",
     "overview": "Overview", "canvas": "Canvas", "chat": "Chat", "sessions": "Sessions", "approvals": "Approvals",
     "workflows": "Workflows", "scheduler": "Scheduler", "goals": "Goals", "agents": "Agents",
-    "providers": "Providers", "channels": "Channels", "skills": "Skills", "hands": "Hands", "plugins": "Plugins",
+    "providers": "Providers", "channels": "Channels", "skills": "Skills", "hands": "Hands", "plugins": "Plugins", "models": "Models",
     "analytics": "Analytics", "memory": "Memory", "comms": "Comms", "runtime": "Runtime", "logs": "Logs", "settings": "Settings"
   },
   "common": {
@@ -220,6 +220,13 @@
   },
   "wizard": {
     "welcome": "Welcome", "step_1": "Step 1", "connect_provider": "Connect Provider"
+  },
+  "models": {
+    "section": "Infrastructure", "title": "Model Catalog", "subtitle": "Browse all available LLM models across providers.",
+    "search_placeholder": "Search models...", "all_providers": "All Providers", "all_tiers": "All",
+    "available_only": "Available Only", "available": "available", "results": "models",
+    "free": "Free", "no_results": "No models match your filters.",
+    "col_model": "Model", "col_provider": "Provider", "col_tier": "Tier", "col_context": "Context", "col_input": "Input $/M"
   },
   "plugins": {
     "section": "Extensions", "title": "Plugins", "subtitle": "Extend agent capabilities with custom plugins.",

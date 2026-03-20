@@ -610,6 +610,30 @@ export async function testProvider(providerId: string): Promise<ApiActionRespons
   return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/test`, {});
 }
 
+export interface ModelItem {
+  id: string;
+  display_name?: string;
+  provider: string;
+  tier?: string;
+  context_window?: number;
+  max_output_tokens?: number;
+  input_cost_per_m?: number;
+  output_cost_per_m?: number;
+  supports_tools?: boolean;
+  supports_vision?: boolean;
+  supports_streaming?: boolean;
+  available?: boolean;
+}
+
+export async function listModels(params?: { provider?: string; tier?: string; available?: boolean }): Promise<{ models: ModelItem[]; total: number; available: number }> {
+  const query = new URLSearchParams();
+  if (params?.provider) query.set("provider", params.provider);
+  if (params?.tier) query.set("tier", params.tier);
+  if (params?.available !== undefined) query.set("available", String(params.available));
+  const qs = query.toString();
+  return get<{ models: ModelItem[]; total: number; available: number }>(`/api/models${qs ? `?${qs}` : ""}`);
+}
+
 export async function setProviderKey(providerId: string, key: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/providers/${encodeURIComponent(providerId)}/key`, { key });
 }

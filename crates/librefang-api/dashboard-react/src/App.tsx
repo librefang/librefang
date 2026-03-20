@@ -1,7 +1,7 @@
 import { Link, Outlet } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle } from "lucide-react";
+import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 
@@ -49,6 +49,7 @@ export function App() {
       items: [
         { to: "/agents", label: t("nav.agents"), icon: Users },
         { to: "/providers", label: t("nav.providers"), icon: Server },
+        { to: "/models", label: t("nav.models"), icon: Cpu },
         { to: "/channels", label: t("nav.channels"), icon: Network },
         { to: "/skills", label: t("nav.skills"), icon: Bell },
         { to: "/hands", label: t("nav.hands"), icon: Hand },

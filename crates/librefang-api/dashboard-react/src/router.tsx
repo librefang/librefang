@@ -22,6 +22,7 @@ import { SkillsPage } from "./pages/SkillsPage";
 import { WizardPage } from "./pages/WizardPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { PluginsPage } from "./pages/PluginsPage";
+import { ModelsPage } from "./pages/ModelsPage";
 
 const rootRoute = createRootRoute({
   component: App
@@ -159,6 +160,12 @@ const goalsRoute = createRoute({
   component: GoalsPage
 });
 
+const modelsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/models",
+  component: ModelsPage
+});
+
 const pluginsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/plugins",
@@ -187,7 +194,8 @@ const routeTree = rootRoute.addChildren([
   commsRoute,
   handsRoute,
   goalsRoute,
-  pluginsRoute
+  pluginsRoute,
+  modelsRoute
 ]);
 
 export const router = createRouter({
