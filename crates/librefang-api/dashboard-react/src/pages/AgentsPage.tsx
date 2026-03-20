@@ -66,6 +66,62 @@ export function AgentsPage() {
   const coreAgents = filteredAgents.filter(a => !a.name.includes("-hand"));
   const handAgents = filteredAgents.filter(a => a.name.includes("-hand"));
 
+  const renderAgentCard = (agent: any) => {
+    const isSuspended = (agent.state || "").toLowerCase() === "suspended";
+    const isHand = agent.name.includes("-hand");
+    return (
+      <Card key={agent.id} hover padding="lg" className={`cursor-pointer ${isSuspended ? "opacity-60" : ""}`} onClick={async () => {
+        setDetailLoading(true);
+        try { const d = await getAgentDetail(agent.id); setDetailAgent(d); } catch { setDetailAgent({ name: agent.name, id: agent.id }); }
+        setDetailLoading(false);
+      }}>
+        <div className="flex items-start justify-between gap-4 mb-6">
+          <div className="flex items-center gap-4 min-w-0">
+            <Avatar fallback={agent.name} size="lg" />
+            <div className="min-w-0">
+              <h2 className="text-lg font-black tracking-tight truncate">{agent.name}</h2>
+              <div className="flex items-center gap-2">
+                <p className="text-[10px] font-mono text-text-dim/60 truncate">{agent.id.slice(0, 8)}</p>
+                {isHand && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400 font-bold">HAND</span>}
+              </div>
+            </div>
+          </div>
+          <Badge variant={getStatusVariant(agent.state)}>
+            {agent.state ? t(`common.${agent.state.toLowerCase()}`, { defaultValue: agent.state }) : t("common.idle")}
+          </Badge>
+        </div>
+        <div className="space-y-3 mb-6">
+          <div className="flex justify-between items-center text-xs">
+            <span className="text-text-dim font-bold uppercase tracking-wider text-[10px]">{t("agents.model")}</span>
+            <span className="font-black text-slate-700 dark:text-slate-300">{agent.model_name || t("common.unknown")}</span>
+          </div>
+          <div className="flex justify-between items-center text-xs">
+            <span className="text-text-dim font-bold uppercase tracking-wider text-[10px]">{t("agents.provider")}</span>
+            <span className="font-black text-brand">{agent.model_provider || t("common.local")}</span>
+          </div>
+          <div className="flex justify-between items-center text-xs">
+            <span className="text-text-dim font-bold uppercase tracking-wider text-[10px]">{t("agents.last_active")}</span>
+            <span className="font-mono text-[10px]">{agent.last_active ? new Date(agent.last_active).toLocaleTimeString() : t("common.never")}</span>
+          </div>
+        </div>
+        <div className="pt-4 border-t border-border-subtle/30 flex gap-2">
+          {isSuspended ? (
+            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); await resumeAgent(agent.id); agentsQuery.refetch(); }}>
+              <Play className="h-3.5 w-3.5 mr-1" /> {t("agents.resume")}
+            </Button>
+          ) : (
+            <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => { e.stopPropagation(); await suspendAgent(agent.id); agentsQuery.refetch(); }}>
+              <Pause className="h-3.5 w-3.5 mr-1" /> {t("agents.suspend")}
+            </Button>
+          )}
+          <Button variant="primary" size="sm" className="flex-1" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
+            <MessageCircle className="h-3.5 w-3.5 mr-1" /> {t("common.interact")}
+          </Button>
+        </div>
+      </Card>
+    );
+  };
+
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
       <div className="flex justify-between items-end">
@@ -128,78 +184,6 @@ export function AgentsPage() {
           )}
         </div>
       )}
-    </div>
-  );
-
-  function renderAgentCard(agent: any) {
-            const isSuspended = (agent.state || "").toLowerCase() === "suspended";
-            const isHand = agent.name.includes("-hand");
-            return (
-            <Card key={agent.id} hover padding="lg" className={`cursor-pointer ${isSuspended ? "opacity-60" : ""}`} onClick={async () => {
-              setDetailLoading(true);
-              try { const d = await getAgentDetail(agent.id); setDetailAgent(d); } catch { setDetailAgent({ name: agent.name, id: agent.id }); }
-              setDetailLoading(false);
-            }}>
-              <div className="flex items-start justify-between gap-4 mb-6">
-                <div className="flex items-center gap-4 min-w-0">
-                  <Avatar fallback={agent.name} size="lg" />
-                  <div className="min-w-0">
-                    <h2 className="text-lg font-black tracking-tight truncate group-hover:text-brand transition-colors">{agent.name}</h2>
-                    <div className="flex items-center gap-2">
-                      <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 truncate">{agent.id.slice(0, 8)}</p>
-                      {isHand && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400 font-bold">HAND</span>}
-                    </div>
-                  </div>
-                </div>
-                <Badge variant={getStatusVariant(agent.state)}>
-                  {agent.state ? t(`common.${agent.state.toLowerCase()}`, { defaultValue: agent.state }) : t("common.idle")}
-                </Badge>
-              </div>
-
-              <div className="space-y-3 mb-6">
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-text-dim font-bold uppercase tracking-wider text-[10px]">{t("agents.model")}</span>
-                  <span className="font-black text-slate-700 dark:text-slate-300">{agent.model_name || t("common.unknown")}</span>
-                </div>
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-text-dim font-bold uppercase tracking-wider text-[10px]">{t("agents.provider")}</span>
-                  <span className="font-black text-brand">{agent.model_provider || t("common.local")}</span>
-                </div>
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-text-dim font-bold uppercase tracking-wider text-[10px]">{t("agents.last_active")}</span>
-                  <span className="font-mono text-[10px]">{agent.last_active ? new Date(agent.last_active).toLocaleTimeString() : t("common.never")}</span>
-                </div>
-              </div>
-
-              <div className="pt-4 border-t border-border-subtle/30 flex gap-2">
-                {(agent.state || "").toLowerCase() === "suspended" ? (
-                  <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => {
-                    e.stopPropagation();
-                    await resumeAgent(agent.id);
-                    agentsQuery.refetch();
-                  }}>
-                    <Play className="h-3.5 w-3.5 mr-1" />
-                    {t("agents.resume")}
-                  </Button>
-                ) : (
-                  <Button variant="secondary" size="sm" className="flex-1" onClick={async (e) => {
-                    e.stopPropagation();
-                    await suspendAgent(agent.id);
-                    agentsQuery.refetch();
-                  }}>
-                    <Pause className="h-3.5 w-3.5 mr-1" />
-                    {t("agents.suspend")}
-                  </Button>
-                )}
-                <Button variant="primary" size="sm" className="flex-1" onClick={(e) => { e.stopPropagation(); navigate({ to: "/chat", search: { agentId: agent.id } }); }}>
-                  <MessageCircle className="h-3.5 w-3.5 mr-1" />
-                  {t("common.interact")}
-                </Button>
-              </div>
-            </Card>
-            );
-  }
-
       {/* Agent Detail Modal */}
       {detailAgent && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setDetailAgent(null)}>
