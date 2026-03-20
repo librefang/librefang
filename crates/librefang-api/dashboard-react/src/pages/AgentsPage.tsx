@@ -50,11 +50,21 @@ export function AgentsPage() {
   const filteredAgents = agents
     .filter(a => a.name.toLowerCase().includes(search.toLowerCase()) || a.id.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
-      // Running first, Suspended last
-      const aRunning = (a.state || "").toLowerCase() === "running" ? 0 : 1;
-      const bRunning = (b.state || "").toLowerCase() === "running" ? 0 : 1;
-      return aRunning - bRunning || a.name.localeCompare(b.name);
+      // 1. Suspended last
+      const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
+      const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
+      if (aSusp !== bSusp) return aSusp - bSusp;
+      // 2. Core agents first, hands second
+      const aHand = a.name.includes("-hand") ? 1 : 0;
+      const bHand = b.name.includes("-hand") ? 1 : 0;
+      if (aHand !== bHand) return aHand - bHand;
+      // 3. Alphabetical
+      return a.name.localeCompare(b.name);
     });
+
+  // 分组：core agents 和 hands
+  const coreAgents = filteredAgents.filter(a => !a.name.includes("-hand"));
+  const handAgents = filteredAgents.filter(a => a.name.includes("-hand"));
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -97,8 +107,31 @@ export function AgentsPage() {
           />
         )
       ) : (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {filteredAgents.map((agent) => {
+        <div className="space-y-6">
+          {/* Core Agents */}
+          {coreAgents.length > 0 && (
+            <div>
+              <h3 className="text-[10px] font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("agents.core_agents")}</h3>
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {coreAgents.map(agent => renderAgentCard(agent))}
+              </div>
+            </div>
+          )}
+          {/* Hands */}
+          {handAgents.length > 0 && (
+            <div>
+              <h3 className="text-[10px] font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("agents.hands")} ({handAgents.length})</h3>
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {handAgents.map(agent => renderAgentCard(agent))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+
+  function renderAgentCard(agent: any) {
             const isSuspended = (agent.state || "").toLowerCase() === "suspended";
             const isHand = agent.name.includes("-hand");
             return (
@@ -165,9 +198,7 @@ export function AgentsPage() {
               </div>
             </Card>
             );
-          })}
-        </div>
-      )}
+  }
 
       {/* Agent Detail Modal */}
       {detailAgent && (

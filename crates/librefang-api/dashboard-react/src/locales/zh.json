@@ -40,7 +40,7 @@
     "template_name": "模板名称", "template_placeholder": "例如：default, researcher, coder",
     "template_hint": "模板从 ~/.librefang/agents/{name}/agent.toml 加载",
     "manifest_toml": "智能体清单 (TOML)",
-    "suspend": "暂停", "resume": "恢复"
+    "suspend": "暂停", "resume": "恢复", "core_agents": "核心智能体", "hands": "Hands"
   },
   "providers": {
     "title": "供应商", "subtitle": "管理 LLM API 连接并监控健康状况。",
