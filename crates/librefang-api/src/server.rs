@@ -1015,7 +1015,7 @@ pub async fn run_daemon(
                             result.files_downloaded
                         );
                         if let Ok(mut catalog) = kernel.model_catalog.write() {
-                            catalog.load_default_cached_catalog();
+                            catalog.load_cached_catalog_for(&kernel.config.home_dir);
                             catalog.detect_auth();
                         }
                     }

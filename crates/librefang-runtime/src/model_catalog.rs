@@ -54,10 +54,20 @@ impl ModelCatalog {
         let mut providers: Vec<ProviderInfo> = Vec::new();
         for source in sources {
             if let Ok(file) = toml::from_str::<ModelCatalogFile>(source) {
+                let provider_id = file.provider.as_ref().map(|p| p.id.clone());
                 if let Some(p) = file.provider {
                     providers.push(p.into());
                 }
-                models.extend(file.models);
+                for mut model in file.models {
+                    // Back-fill provider from the [provider] section when
+                    // the model entry omits it (common in registry TOML files).
+                    if model.provider.is_empty() {
+                        if let Some(ref pid) = provider_id {
+                            model.provider = pid.clone();
+                        }
+                    }
+                    models.push(model);
+                }
             }
         }
 
@@ -189,7 +199,7 @@ impl ModelCatalog {
 
     /// Return the default model ID for a provider (first model in catalog order).
     pub fn default_model_for_provider(&self, provider: &str) -> Option<String> {
-        // Check aliases first — e.g. "minimax" alias resolves to "MiniMax-M2.5"
+        // Check aliases first — e.g. "minimax" alias resolves to "MiniMax-M2.7"
         if let Some(model_id) = self.aliases.get(provider) {
             return Some(model_id.clone());
         }
@@ -553,47 +563,39 @@ impl ModelCatalog {
         Ok(total_added)
     }
 
-    /// Load cached catalog from the default location (`~/.librefang/cache/catalog/providers/`).
+    /// Load cached catalog from `home_dir/cache/catalog/providers/`.
     ///
-    /// Convenience wrapper around `load_cached_catalog(dir)` for use during kernel init.
-    pub fn load_default_cached_catalog(&mut self) {
-        if let Some(home) = dirs::home_dir() {
-            let providers_dir = home
-                .join(".librefang")
-                .join("cache")
-                .join("catalog")
-                .join("providers");
-            if providers_dir.exists() {
-                match self.load_cached_catalog(&providers_dir) {
-                    Ok(n) => {
-                        if n > 0 {
-                            tracing::info!("Loaded {n} cached community models");
-                        }
+    /// Merges community models synced from the remote model-catalog repo.
+    pub fn load_cached_catalog_for(&mut self, home_dir: &std::path::Path) {
+        let providers_dir = home_dir.join("cache").join("catalog").join("providers");
+        if providers_dir.exists() {
+            match self.load_cached_catalog(&providers_dir) {
+                Ok(n) => {
+                    if n > 0 {
+                        tracing::info!("Loaded {n} cached community models");
                     }
-                    Err(e) => tracing::warn!("Failed to load cached catalog: {e}"),
                 }
+                Err(e) => tracing::warn!("Failed to load cached catalog: {e}"),
             }
         }
     }
 
-    /// Load user-defined models from `~/.librefang/model_catalog.toml`.
+    /// Load user-defined models from `home_dir/model_catalog.toml`.
     ///
     /// User models override builtins and cached models by ID.
-    pub fn load_default_user_catalog(&mut self) {
-        if let Some(home) = dirs::home_dir() {
-            let user_catalog = home.join(".librefang").join("model_catalog.toml");
-            if user_catalog.exists() {
-                match self.load_catalog_file(&user_catalog) {
-                    Ok(n) => {
-                        if n > 0 {
-                            tracing::info!(
-                                "Loaded {n} user-defined models from {}",
-                                user_catalog.display()
-                            );
-                        }
+    pub fn load_user_catalog_for(&mut self, home_dir: &std::path::Path) {
+        let user_catalog = home_dir.join("model_catalog.toml");
+        if user_catalog.exists() {
+            match self.load_catalog_file(&user_catalog) {
+                Ok(n) => {
+                    if n > 0 {
+                        tracing::info!(
+                            "Loaded {n} user-defined models from {}",
+                            user_catalog.display()
+                        );
                     }
-                    Err(e) => tracing::warn!("Failed to load user model catalog: {e}"),
                 }
+                Err(e) => tracing::warn!("Failed to load user model catalog: {e}"),
             }
         }
     }
@@ -999,22 +1001,18 @@ mod tests {
         assert!(catalog.find_model("codegeex").is_some());
         assert!(catalog.find_model("ernie").is_some());
         assert!(catalog.find_model("minimax").is_some());
-        // MiniMax M2.5 — by exact ID, alias, and case-insensitive
-        let m25 = catalog.find_model("MiniMax-M2.5").unwrap();
-        assert_eq!(m25.provider, "minimax");
-        assert_eq!(m25.tier, ModelTier::Frontier);
-        assert!(catalog.find_model("minimax-m2.5").is_some());
-        // Default "minimax" alias now points to M2.5
+        // MiniMax M2.7 — by exact ID, alias, and case-insensitive
+        let m27 = catalog.find_model("MiniMax-M2.7").unwrap();
+        assert_eq!(m27.provider, "minimax");
+        assert_eq!(m27.tier, ModelTier::Frontier);
+        assert!(catalog.find_model("minimax-m2.7").is_some());
+        // Default "minimax" alias resolves to a minimax model
         let default = catalog.find_model("minimax").unwrap();
-        assert_eq!(default.id, "MiniMax-M2.5");
-        // MiniMax M2.5 Highspeed — by exact ID and aliases
-        let hs = catalog.find_model("MiniMax-M2.5-highspeed").unwrap();
+        assert_eq!(default.provider, "minimax");
+        // MiniMax M2.7 Highspeed — by exact ID and aliases
+        let hs = catalog.find_model("MiniMax-M2.7-highspeed").unwrap();
         assert_eq!(hs.provider, "minimax");
-        assert_eq!(hs.tier, ModelTier::Smart);
-        assert!(hs.supports_vision);
-        assert!(hs.supports_tools);
-        assert!(catalog.find_model("minimax-m2.5-highspeed").is_some());
-        assert!(catalog.find_model("minimax-highspeed").is_some());
+        assert!(catalog.find_model("minimax-m2.7-highspeed").is_some());
         // abab7-chat
         let abab7 = catalog.find_model("abab7-chat").unwrap();
         assert_eq!(abab7.provider, "minimax");

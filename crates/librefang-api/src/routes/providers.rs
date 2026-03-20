@@ -1309,7 +1309,7 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
                     .model_catalog
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
-                catalog.load_default_cached_catalog();
+                catalog.load_cached_catalog_for(&state.kernel.config.home_dir);
                 catalog.detect_auth();
             }
             (

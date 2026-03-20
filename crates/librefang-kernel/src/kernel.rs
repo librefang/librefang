@@ -908,7 +908,7 @@ impl LibreFangKernel {
             );
         }
         // Load cached catalog from remote sync (overrides builtins)
-        model_catalog.load_default_cached_catalog();
+        model_catalog.load_cached_catalog_for(&config.home_dir);
         // Load user's custom models from ~/.librefang/custom_models.json (highest priority)
         let custom_models_path = config.home_dir.join("custom_models.json");
         model_catalog.load_custom_models(&custom_models_path);

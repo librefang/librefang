@@ -220,10 +220,21 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
             // Flush any remaining text after the stream ends (final iteration
             // may not get a ContentComplete if the sender drops first).
-            // Only suppress when ToolUseStart was seen — same logic as
-            // the ContentComplete handler above.
+            // Here we must filter by content pattern because
+            // recover_text_tool_calls() emits tool calls as plain text
+            // without a ToolUseStart event.
             if !iter_buf.is_empty() && !saw_tool_use {
-                let _ = tx.send(iter_buf).await;
+                let trimmed = iter_buf.trim();
+                let looks_like_tool_call = trimmed.starts_with("[{")
+                    || trimmed.starts_with("functions.")
+                    || trimmed.starts_with("{\"name\":")
+                    || trimmed.starts_with("{\"type\":\"function\"")
+                    || (trimmed.starts_with('[') && trimmed.contains("'type': 'text'"));
+                if !looks_like_tool_call {
+                    let _ = tx.send(iter_buf).await;
+                } else {
+                    debug!("Streaming bridge: filtered leaked tool call text in final flush");
+                }
             }
         });
 
