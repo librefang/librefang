@@ -5,10 +5,10 @@
 //! or the `LIBREFANG_VAULT_KEY` env var for headless/CI environments.
 
 use crate::{ExtensionError, ExtensionResult};
+use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::Argon2;
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
 // sha2 is used only in non-test keyring functions
 #[cfg(not(test))]
