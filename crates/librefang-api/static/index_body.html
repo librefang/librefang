@@ -4290,8 +4290,15 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             <div class="card mb-4" x-show="migStep === 'manual'" style="border-left:3px solid var(--accent)">
               <div class="font-bold" style="font-size:14px;margin-bottom:8px" data-i18n="settingsPage.specifySourcePath">Specify Source Path</div>
               <div class="form-group">
+                <label data-i18n="settingsPage.sourceFramework">Source Framework</label>
+                <select class="form-input" x-model="detectedSource" style="font-size:12px">
+                  <option value="openclaw">OpenClaw</option>
+                  <option value="openfang">OpenFang</option>
+                </select>
+              </div>
+              <div class="form-group">
                 <label data-i18n="settingsPage.sourceHomeDirectory">Source Home Directory</label>
-                <input class="form-input" type="text" x-model="sourcePath" placeholder="~/.openclaw or ~/.openfang" style="font-family:monospace;font-size:12px">
+                <input class="form-input" type="text" x-model="sourcePath" :placeholder="detectedSource === 'openfang' ? '~/.openfang' : '~/.openclaw'" style="font-family:monospace;font-size:12px">
               </div>
               <div class="form-group mt-2">
                 <label data-i18n="settingsPage.libreFangTargetDirectory">LibreFang Target Directory</label>
@@ -4325,7 +4332,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <span x-show="migrating" data-i18n="settingsPage.migrating">Migrating...</span>
                 </button>
                 <button class="btn btn-ghost" @click="runMigration(true)" :disabled="migrating" data-i18n="settingsPage.dryRun">Dry Run</button>
-                <button class="btn btn-ghost" @click="migStep = 'intro'; scanResult = null; detectedSource = ''" data-i18n="settingsPage.startOver">Start Over</button>
+                <button class="btn btn-ghost" @click="migStep = 'intro'; scanResult = null; detectedSource = 'openclaw'" data-i18n="settingsPage.startOver">Start Over</button>
               </div>
             </div>
 
