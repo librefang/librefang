@@ -2488,6 +2488,11 @@ pub struct WhatsAppConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Owner phone numbers for owner-routing mode (digits only, no '+' prefix).
+    /// When set, messages from non-owner numbers are forwarded to the first
+    /// owner number with sender context, and the sender receives an auto-ack.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub owner_numbers: Vec<String>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2504,6 +2509,7 @@ impl Default for WhatsAppConfig {
             allowed_users: vec![],
             account_id: None,
             default_agent: None,
+            owner_numbers: vec![],
             overrides: ChannelOverrides::default(),
         }
     }

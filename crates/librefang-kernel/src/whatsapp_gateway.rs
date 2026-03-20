@@ -161,6 +161,12 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::LibreFangKernel>
         .unwrap_or("router")
         .to_string();
 
+    // Owner routing: pass the first owner number to the gateway process
+    let owner_jid: Option<String> = wa_config.owner_numbers.first().cloned();
+    if let Some(ref jid) = owner_jid {
+        info!("WhatsApp owner routing configured for {jid}");
+    }
+
     // Auto-set the env var so the rest of the system finds the gateway
     std::env::set_var(
         "WHATSAPP_WEB_GATEWAY_URL",
@@ -180,15 +186,21 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::LibreFangKernel>
 
             info!("Starting WhatsApp Web gateway (attempt {})", restarts + 1);
 
-            let child = tokio::process::Command::new(node_cmd)
-                .arg("index.js")
+            let mut cmd = tokio::process::Command::new(node_cmd);
+            cmd.arg("index.js")
                 .current_dir(&gateway_path)
                 .env("WHATSAPP_GATEWAY_PORT", port.to_string())
                 .env("LIBREFANG_URL", &librefang_url)
                 .env("LIBREFANG_DEFAULT_AGENT", &default_agent)
                 .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .spawn();
+                .stderr(std::process::Stdio::inherit());
+
+            // Pass owner number from config (first entry) for owner-routing mode
+            if let Some(owner) = owner_jid.as_deref() {
+                cmd.env("WHATSAPP_OWNER_JID", owner);
+            }
+
+            let child = cmd.spawn();
 
             let mut child = match child {
                 Ok(c) => c,
