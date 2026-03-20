@@ -5,7 +5,8 @@ import { getUsageSummary, listUsageByAgent, listUsageByModel, getUsageDaily, get
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
-import { BarChart3, DollarSign, Shield, Save, Loader2, RefreshCw, Cpu, Users, Zap, TrendingUp, Clock } from "lucide-react";
+import { BarChart3, DollarSign, Shield, Save, Loader2, RefreshCw, Cpu, Users, Zap, TrendingUp } from "lucide-react";
+import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from "recharts";
 
 const REFRESH_MS = 30000;
 
@@ -77,46 +78,38 @@ export function AnalyticsPage() {
               <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
                 <Users className="w-4 h-4 text-brand" /> {t("analytics.usage_by_agent")}
               </h2>
-              <div className="space-y-2 max-h-64 overflow-y-auto">
-                {usageByAgent.length === 0 ? (
-                  <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
-                ) : usageByAgent.slice(0, 10).map((u, i) => {
-                  const maxCost = Math.max(...usageByAgent.map(x => x.total_cost ?? 0), 0.001);
-                  const pct = ((u.total_cost ?? 0) / maxCost) * 100;
-                  return (
-                    <div key={u.agent_id || i} className="flex items-center gap-3">
-                      <span className="text-xs font-bold w-28 truncate shrink-0">{u.name || u.agent_id?.slice(0, 8)}</span>
-                      <div className="flex-1 h-2 rounded-full bg-main overflow-hidden">
-                        <div className="h-full bg-brand rounded-full" style={{ width: `${pct}%` }} />
-                      </div>
-                      <span className="text-[10px] font-mono text-text-dim w-16 text-right shrink-0">${(u.total_cost ?? 0).toFixed(4)}</span>
-                    </div>
-                  );
-                })}
-              </div>
+              {usageByAgent.length === 0 ? (
+                <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
+              ) : (
+                <ResponsiveContainer width="100%" height={Math.max(usageByAgent.slice(0, 8).length * 36, 100)}>
+                  <BarChart data={usageByAgent.slice(0, 8).map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.total_cost ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                    <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
+                    <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
+                    <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={100} axisLine={false} tickLine={false} />
+                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: number) => [`$${v.toFixed(4)}`, "Cost"]} />
+                    <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#3b82f6" />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
             </Card>
 
             <Card padding="lg">
               <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
                 <Cpu className="w-4 h-4 text-purple-500" /> {t("analytics.usage_by_model")}
               </h2>
-              <div className="space-y-2 max-h-64 overflow-y-auto">
-                {usageByModel.length === 0 ? (
-                  <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
-                ) : usageByModel.slice(0, 10).map((m, i) => {
-                  const maxCost = Math.max(...usageByModel.map(x => x.total_cost_usd ?? 0), 0.001);
-                  const pct = ((m.total_cost_usd ?? 0) / maxCost) * 100;
-                  return (
-                    <div key={m.model || i} className="flex items-center gap-3">
-                      <span className="text-xs font-bold w-32 truncate shrink-0">{m.model}</span>
-                      <div className="flex-1 h-2 rounded-full bg-main overflow-hidden">
-                        <div className="h-full bg-purple-500 rounded-full" style={{ width: `${pct}%` }} />
-                      </div>
-                      <span className="text-[10px] font-mono text-text-dim w-16 text-right shrink-0">${(m.total_cost_usd ?? 0).toFixed(4)}</span>
-                    </div>
-                  );
-                })}
-              </div>
+              {usageByModel.length === 0 ? (
+                <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
+              ) : (
+                <ResponsiveContainer width="100%" height={Math.max(usageByModel.slice(0, 8).length * 36, 100)}>
+                  <BarChart data={usageByModel.slice(0, 8).map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                    <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
+                    <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
+                    <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
+                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: number) => [`$${v.toFixed(4)}`, "Cost"]} />
+                    <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#a855f7" />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
             </Card>
           </div>
 
@@ -128,23 +121,25 @@ export function AnalyticsPage() {
             {(!daily?.days || daily.days.length === 0) ? (
               <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
             ) : (
-              <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${Math.min((daily.days || []).length, 14)}, 1fr)` }}>
-                {(daily.days || []).slice(-14).map((d, i) => {
-                  const maxDay = Math.max(...(daily.days || []).map(x => x.cost_usd || 0), 0.001);
-                  const pct = ((d.cost_usd || 0) / maxDay) * 100;
-                  return (
-                    <div key={d.date || i} className="flex flex-col items-center gap-1">
-                      <span className="text-[9px] font-mono text-text-dim">${(d.cost_usd || 0).toFixed(0)}</span>
-                      <div className="w-full h-24 rounded-lg bg-main overflow-hidden flex flex-col justify-end">
-                        <div className="w-full rounded-lg bg-gradient-to-t from-brand to-brand/40 transition-all"
-                          style={{ height: `${Math.max(pct, 5)}%` }}
-                          title={`${d.date}: $${(d.cost_usd || 0).toFixed(2)} | ${d.calls || 0} calls | ${((d.tokens || 0) / 1000).toFixed(0)}K tok`} />
-                      </div>
-                      <span className="text-[8px] text-text-dim/50">{(d.date || "").slice(5)}</span>
-                    </div>
-                  );
-                })}
-              </div>
+              <ResponsiveContainer width="100%" height={200}>
+                <AreaChart data={(daily.days || []).slice(-30).map(d => ({ ...d, date: (d.date || "").slice(5), cost: d.cost_usd || 0 }))}>
+                  <defs>
+                    <linearGradient id="costGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" opacity={0.3} />
+                  <XAxis dataKey="date" tick={{ fontSize: 10 }} tickLine={false} axisLine={false} />
+                  <YAxis tick={{ fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} width={50} />
+                  <Tooltip
+                    contentStyle={{ borderRadius: 12, border: "1px solid #e5e7eb", fontSize: 12, boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }}
+                    formatter={(v: number) => [`$${v.toFixed(2)}`, t("analytics.total_cost")]}
+                    labelFormatter={l => `${t("analytics.daily_trend")}: ${l}`}
+                  />
+                  <Area type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2.5} fill="url(#costGrad)" dot={{ r: 3, fill: "#3b82f6", strokeWidth: 2, stroke: "white" }} activeDot={{ r: 5 }} />
+                </AreaChart>
+              </ResponsiveContainer>
             )}
           </Card>
 
