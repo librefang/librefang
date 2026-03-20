@@ -84,6 +84,8 @@
     "runtime": "Runtime Status", "runtime_desc": "Core system execution metrics.",
     "active_agents": "Active Agents", "configured_channels": "Configured Channels", "available_skills": "Available Skills", "health_checks": "Health Checks",
     "advanced": "Advanced Metrics", "advanced_desc": "Detailed analysis coming soon.",
+    "usage_by_model": "Cost by Model", "usage_by_model_desc": "Token spend breakdown per model.",
+    "daily_trend": "Daily Cost Trend", "daily_trend_desc": "Cost over the last 14 days.", "today_cost": "Today's Cost",
     "usage_summary": "Usage Overview", "usage_summary_desc": "API call consumption statistics.",
     "total_requests": "Total Requests", "total_tokens": "Total Tokens", "total_cost": "Total Cost", "avg_latency": "Avg Latency",
     "usage_by_agent": "Usage by Agent", "usage_by_agent_desc": "Consumption ranking by agent."

@@ -84,6 +84,8 @@
     "runtime": "运行时状态", "runtime_desc": "核心系统执行指标。",
     "active_agents": "活跃智能体", "configured_channels": "配置通道", "available_skills": "可用技能", "health_checks": "健康检查",
     "advanced": "高级指标", "advanced_desc": "详细分析即将推出。",
+    "usage_by_model": "按模型成本", "usage_by_model_desc": "每个模型的 Token 消耗明细。",
+    "daily_trend": "每日成本趋势", "daily_trend_desc": "最近 14 天的成本变化。", "today_cost": "今日成本",
     "usage_summary": "使用概览", "usage_summary_desc": "API 调用消耗统计。",
     "total_requests": "总请求数", "total_tokens": "总 Token", "total_cost": "总消耗", "avg_latency": "平均延迟",
     "usage_by_agent": "智能体消耗", "usage_by_agent_desc": "按智能体分组的消耗排名。"
