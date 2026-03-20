@@ -3869,15 +3869,26 @@ impl LibreFangKernel {
 
     /// Write enabled flag to agent's TOML file.
     fn persist_agent_enabled(&self, _agent_id: AgentId, name: &str, enabled: bool) {
-        let toml_path = self
+        // Check both agents/ and hands/ directories
+        let agents_path = self
             .config
             .home_dir
             .join("agents")
             .join(name)
             .join("agent.toml");
-        if !toml_path.exists() {
+        let hands_path = self
+            .config
+            .home_dir
+            .join("hands")
+            .join(name)
+            .join("agent.toml");
+        let toml_path = if agents_path.exists() {
+            agents_path
+        } else if hands_path.exists() {
+            hands_path
+        } else {
             return;
-        }
+        };
         match std::fs::read_to_string(&toml_path) {
             Ok(content) => {
                 // Simple: replace or append enabled field
