@@ -3904,6 +3904,7 @@ version = "0.6.8-20260320"
 dependencies = [
  "chrono",
  "dashmap",
+ "dirs 6.0.0",
  "librefang-types",
  "serde",
  "serde_json",
@@ -4037,6 +4038,7 @@ name = "librefang-skills"
 version = "0.6.8-20260320"
 dependencies = [
  "chrono",
+ "dirs 6.0.0",
  "hex",
  "librefang-types",
  "reqwest",

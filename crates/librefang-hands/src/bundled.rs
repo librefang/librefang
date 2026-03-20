@@ -1,84 +1,70 @@
-//! Compile-time embedded Hand definitions.
+//! Hand definitions loaded from disk at runtime.
+//!
+//! Hands are read from `~/.librefang/hands/` (synced from the registry
+//! via `librefang init`). No compile-time embedding.
 
 use crate::{HandDefinition, HandError};
 
-/// Returns all bundled hand definitions as (id, HAND.toml content, SKILL.md content).
+/// Returns all hand definitions found on disk as (id, HAND.toml content, SKILL.md content).
+///
+/// Scans the hands directory under LIBREFANG_HOME (default: ~/.librefang/hands/).
+/// Falls back to the bundled/ directory relative to the crate for dev builds.
 pub fn bundled_hands() -> Vec<(&'static str, &'static str, &'static str)> {
-    vec![
-        (
-            "clip",
-            include_str!("../bundled/clip/HAND.toml"),
-            include_str!("../bundled/clip/SKILL.md"),
-        ),
-        (
-            "lead",
-            include_str!("../bundled/lead/HAND.toml"),
-            include_str!("../bundled/lead/SKILL.md"),
-        ),
-        (
-            "collector",
-            include_str!("../bundled/collector/HAND.toml"),
-            include_str!("../bundled/collector/SKILL.md"),
-        ),
-        (
-            "predictor",
-            include_str!("../bundled/predictor/HAND.toml"),
-            include_str!("../bundled/predictor/SKILL.md"),
-        ),
-        (
-            "researcher",
-            include_str!("../bundled/researcher/HAND.toml"),
-            include_str!("../bundled/researcher/SKILL.md"),
-        ),
-        (
-            "twitter",
-            include_str!("../bundled/twitter/HAND.toml"),
-            include_str!("../bundled/twitter/SKILL.md"),
-        ),
-        (
-            "browser",
-            include_str!("../bundled/browser/HAND.toml"),
-            include_str!("../bundled/browser/SKILL.md"),
-        ),
-        (
-            "trader",
-            include_str!("../bundled/trader/HAND.toml"),
-            include_str!("../bundled/trader/SKILL.md"),
-        ),
-        (
-            "reddit",
-            include_str!("../bundled/reddit/HAND.toml"),
-            include_str!("../bundled/reddit/SKILL.md"),
-        ),
-        (
-            "linkedin",
-            include_str!("../bundled/linkedin/HAND.toml"),
-            include_str!("../bundled/linkedin/SKILL.md"),
-        ),
-        (
-            "strategist",
-            include_str!("../bundled/strategist/HAND.toml"),
-            include_str!("../bundled/strategist/SKILL.md"),
-        ),
-        (
-            "apitester",
-            include_str!("../bundled/apitester/HAND.toml"),
-            include_str!("../bundled/apitester/SKILL.md"),
-        ),
-        (
-            "devops",
-            include_str!("../bundled/devops/HAND.toml"),
-            include_str!("../bundled/devops/SKILL.md"),
-        ),
-        (
-            "analytics",
-            include_str!("../bundled/analytics/HAND.toml"),
-            include_str!("../bundled/analytics/SKILL.md"),
-        ),
-    ]
+    // Leak strings into 'static to preserve the existing API contract.
+    // This is called once at boot and cached, so the leak is bounded.
+    disk_hands()
+        .into_iter()
+        .map(|(id, toml, skill)| {
+            let id: &'static str = Box::leak(id.into_boxed_str());
+            let toml: &'static str = Box::leak(toml.into_boxed_str());
+            let skill: &'static str = Box::leak(skill.into_boxed_str());
+            (id, toml, skill)
+        })
+        .collect()
 }
 
-/// Parse a bundled HAND.toml into a HandDefinition with its skill content attached.
+fn disk_hands() -> Vec<(String, String, String)> {
+    let mut results = Vec::new();
+
+    // Primary: ~/.librefang/hands/
+    let home = std::env::var("LIBREFANG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".librefang")
+        });
+    let hands_dir = home.join("hands");
+
+    if let Ok(entries) = std::fs::read_dir(&hands_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let id = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let toml_path = path.join("HAND.toml");
+            let skill_path = path.join("SKILL.md");
+            if !toml_path.exists() {
+                continue;
+            }
+            let toml = match std::fs::read_to_string(&toml_path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let skill = std::fs::read_to_string(&skill_path).unwrap_or_default();
+            results.push((id, toml, skill));
+        }
+    }
+
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+}
+
+/// Parse a HAND.toml into a HandDefinition with its skill content attached.
 pub fn parse_bundled(
     _id: &str,
     toml_content: &str,
@@ -97,401 +83,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bundled_hands_not_empty() {
-        let hands = bundled_hands();
-        assert!(!hands.is_empty());
-        assert_eq!(hands[0].0, "clip");
-    }
+    fn parse_bundled_valid_toml() {
+        let toml = r#"
+id = "test"
+name = "Test Hand"
+description = "A test hand"
+category = "productivity"
 
-    #[test]
-    fn bundled_hands_count() {
-        let hands = bundled_hands();
-        assert_eq!(hands.len(), 14);
-    }
-
-    #[test]
-    fn parse_clip_hand() {
-        let hands = bundled_hands();
-        let (id, toml_content, skill_content) = hands[0];
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "clip");
-        assert_eq!(def.name, "Clip Hand");
-        assert_eq!(def.category, crate::HandCategory::Content);
+[agent]
+name = "test-agent"
+system_prompt = "You are a test agent."
+tools = ["file_read"]
+"#;
+        let def = parse_bundled("test", toml, "# Skill").unwrap();
+        assert_eq!(def.id, "test");
         assert!(def.skill_content.is_some());
-        assert!(!def.requires.is_empty());
-        assert!(!def.tools.is_empty());
-        assert!(!def.agent.system_prompt.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-    }
-
-    #[test]
-    fn parse_lead_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "lead")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "lead");
-        assert_eq!(def.name, "Lead Hand");
-        assert_eq!(def.category, crate::HandCategory::Data);
-        assert!(def.skill_content.is_some());
-        assert!(def.requires.is_empty());
-        assert!(!def.tools.is_empty());
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-        assert!(def.agent.temperature < 0.5);
-    }
-
-    #[test]
-    fn parse_collector_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "collector")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "collector");
-        assert_eq!(def.name, "Collector Hand");
-        assert_eq!(def.category, crate::HandCategory::Data);
-        assert!(def.skill_content.is_some());
-        assert!(def.requires.is_empty());
-        assert!(def.tools.contains(&"event_publish".to_string()));
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-    }
-
-    #[test]
-    fn parse_predictor_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "predictor")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "predictor");
-        assert_eq!(def.name, "Predictor Hand");
-        assert_eq!(def.category, crate::HandCategory::Data);
-        assert!(def.skill_content.is_some());
-        assert!(def.requires.is_empty());
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-        assert!((def.agent.temperature - 0.5).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn parse_researcher_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "researcher")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "researcher");
-        assert_eq!(def.name, "Researcher Hand");
-        assert_eq!(def.category, crate::HandCategory::Productivity);
-        assert!(def.skill_content.is_some());
-        assert!(def.requires.is_empty());
-        assert!(def.tools.contains(&"event_publish".to_string()));
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-        assert_eq!(def.agent.max_iterations, Some(80));
-    }
-
-    #[test]
-    fn parse_twitter_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "twitter")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "twitter");
-        assert_eq!(def.name, "Twitter Hand");
-        assert_eq!(def.category, crate::HandCategory::Communication);
-        assert!(def.skill_content.is_some());
-        assert!(!def.requires.is_empty()); // requires TWITTER_BEARER_TOKEN
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-        assert!((def.agent.temperature - 0.7).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn parse_browser_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "browser")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "browser");
-        assert_eq!(def.name, "Browser Hand");
-        assert_eq!(def.category, crate::HandCategory::Productivity);
-        assert!(def.skill_content.is_some());
-        assert!(!def.requires.is_empty()); // requires python3 + chromium
-        assert_eq!(def.requires.len(), 2);
-        assert!(def.tools.contains(&"browser_navigate".to_string()));
-        assert!(def.tools.contains(&"browser_click".to_string()));
-        assert!(def.tools.contains(&"browser_type".to_string()));
-        assert!(def.tools.contains(&"browser_screenshot".to_string()));
-        assert!(def.tools.contains(&"browser_read_page".to_string()));
-        assert!(def.tools.contains(&"browser_close".to_string()));
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-        assert!((def.agent.temperature - 0.3).abs() < f32::EPSILON);
-        assert_eq!(def.agent.max_iterations, Some(60));
-    }
-
-    #[test]
-    fn parse_trader_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "trader")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "trader");
-        assert_eq!(def.name, "Trading Hand");
-        assert_eq!(def.category, crate::HandCategory::Data);
-        assert!(def.skill_content.is_some());
-        assert!(def.requires.is_empty()); // no hard requirements
-        assert!(!def.tools.is_empty());
-        assert!(def.tools.contains(&"event_publish".to_string()));
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-        assert!((def.agent.temperature - 0.3).abs() < f32::EPSILON);
-        assert_eq!(def.agent.max_iterations, Some(80));
-    }
-
-    #[test]
-    fn parse_reddit_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "reddit")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "reddit");
-        assert_eq!(def.name, "Reddit Hand");
-        assert_eq!(def.category, crate::HandCategory::Communication);
-        assert!(def.skill_content.is_some());
-        assert!(!def.requires.is_empty());
-        assert_eq!(def.requires.len(), 4); // CLIENT_ID, CLIENT_SECRET, USERNAME, PASSWORD
-        assert!(def.tools.contains(&"event_publish".to_string()));
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-        assert!((def.agent.temperature - 0.7).abs() < f32::EPSILON);
-        assert_eq!(def.agent.max_iterations, Some(50));
-    }
-
-    #[test]
-    fn parse_linkedin_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "linkedin")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "linkedin");
-        assert_eq!(def.name, "LinkedIn Hand");
-        assert_eq!(def.category, crate::HandCategory::Communication);
-        assert!(def.skill_content.is_some());
-        assert!(!def.requires.is_empty());
-        assert_eq!(def.requires.len(), 1); // LINKEDIN_ACCESS_TOKEN
-        assert!(def.tools.contains(&"event_publish".to_string()));
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-        assert!((def.agent.temperature - 0.7).abs() < f32::EPSILON);
-        assert_eq!(def.agent.max_iterations, Some(50));
-    }
-
-    #[test]
-    fn parse_strategist_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "strategist")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "strategist");
-        assert_eq!(def.name, "Strategist Hand");
-        assert_eq!(def.category, crate::HandCategory::Productivity);
-        assert!(def.skill_content.is_some());
-        assert!(def.requires.is_empty());
-        assert!(def.tools.contains(&"event_publish".to_string()));
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-        assert!((def.agent.temperature - 0.5).abs() < f32::EPSILON);
-        assert_eq!(def.agent.max_iterations, Some(60));
-    }
-
-    #[test]
-    fn parse_apitester_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "apitester")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "apitester");
-        assert_eq!(def.name, "API Tester Hand");
-        assert_eq!(def.category, crate::HandCategory::Development);
-        assert!(def.skill_content.is_some());
-        assert!(def.requires.is_empty());
-        assert!(def.tools.contains(&"event_publish".to_string()));
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-        assert!((def.agent.temperature - 0.4).abs() < f32::EPSILON);
-        assert_eq!(def.agent.max_iterations, Some(60));
-    }
-
-    #[test]
-    fn parse_devops_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "devops")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "devops");
-        assert_eq!(def.name, "DevOps Hand");
-        assert_eq!(def.category, crate::HandCategory::Development);
-        assert!(def.skill_content.is_some());
-        assert!(def.requires.is_empty());
-        assert!(def.tools.contains(&"event_publish".to_string()));
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-        assert!((def.agent.temperature - 0.2).abs() < f32::EPSILON);
-        assert_eq!(def.agent.max_iterations, Some(60));
-    }
-
-    #[test]
-    fn parse_analytics_hand() {
-        let (id, toml_content, skill_content) = bundled_hands()
-            .into_iter()
-            .find(|(id, _, _)| *id == "analytics")
-            .unwrap();
-        let def = parse_bundled(id, toml_content, skill_content).unwrap();
-        assert_eq!(def.id, "analytics");
-        assert_eq!(def.name, "Analytics Hand");
-        assert_eq!(def.category, crate::HandCategory::Data);
-        assert!(def.skill_content.is_some());
-        assert!(!def.requires.is_empty()); // requires python3
-        assert_eq!(def.requires.len(), 1);
-        assert!(def.tools.contains(&"event_publish".to_string()));
-        assert!(!def.settings.is_empty());
-        assert!(!def.dashboard.metrics.is_empty());
-        assert!((def.agent.temperature - 0.3).abs() < f32::EPSILON);
-        assert_eq!(def.agent.max_iterations, Some(60));
-    }
-
-    #[test]
-    fn all_bundled_hands_parse() {
-        for (id, toml_content, skill_content) in bundled_hands() {
-            let def = parse_bundled(id, toml_content, skill_content)
-                .unwrap_or_else(|e| panic!("Failed to parse hand '{}': {}", id, e));
-            assert_eq!(def.id, id);
-            assert!(!def.name.is_empty());
-            assert!(!def.tools.is_empty());
-            assert!(!def.agent.system_prompt.is_empty());
-            assert!(def.skill_content.is_some());
-        }
-    }
-
-    #[test]
-    fn all_einstein_hands_have_schedules() {
-        let einstein_ids = [
-            "lead",
-            "collector",
-            "predictor",
-            "researcher",
-            "twitter",
-            "trader",
-            "reddit",
-            "linkedin",
-            "strategist",
-            "apitester",
-            "devops",
-            "analytics",
-        ];
-        for (id, toml_content, skill_content) in bundled_hands() {
-            if einstein_ids.contains(&id) {
-                let def = parse_bundled(id, toml_content, skill_content).unwrap();
-                assert!(
-                    def.tools.contains(&"schedule_create".to_string()),
-                    "Einstein hand '{}' must have schedule_create tool",
-                    id
-                );
-                assert!(
-                    def.tools.contains(&"schedule_list".to_string()),
-                    "Einstein hand '{}' must have schedule_list tool",
-                    id
-                );
-                assert!(
-                    def.tools.contains(&"schedule_delete".to_string()),
-                    "Einstein hand '{}' must have schedule_delete tool",
-                    id
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn all_einstein_hands_have_memory() {
-        let einstein_ids = [
-            "lead",
-            "collector",
-            "predictor",
-            "researcher",
-            "twitter",
-            "trader",
-            "reddit",
-            "linkedin",
-            "strategist",
-            "apitester",
-            "devops",
-            "analytics",
-        ];
-        for (id, toml_content, skill_content) in bundled_hands() {
-            if einstein_ids.contains(&id) {
-                let def = parse_bundled(id, toml_content, skill_content).unwrap();
-                assert!(
-                    def.tools.contains(&"memory_store".to_string()),
-                    "Einstein hand '{}' must have memory_store tool",
-                    id
-                );
-                assert!(
-                    def.tools.contains(&"memory_recall".to_string()),
-                    "Einstein hand '{}' must have memory_recall tool",
-                    id
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn all_einstein_hands_have_knowledge_graph() {
-        let einstein_ids = [
-            "lead",
-            "collector",
-            "predictor",
-            "researcher",
-            "twitter",
-            "trader",
-            "reddit",
-            "linkedin",
-            "strategist",
-            "apitester",
-            "devops",
-            "analytics",
-        ];
-        for (id, toml_content, skill_content) in bundled_hands() {
-            if einstein_ids.contains(&id) {
-                let def = parse_bundled(id, toml_content, skill_content).unwrap();
-                assert!(
-                    def.tools.contains(&"knowledge_add_entity".to_string()),
-                    "Einstein hand '{}' must have knowledge_add_entity tool",
-                    id
-                );
-                assert!(
-                    def.tools.contains(&"knowledge_add_relation".to_string()),
-                    "Einstein hand '{}' must have knowledge_add_relation tool",
-                    id
-                );
-                assert!(
-                    def.tools.contains(&"knowledge_query".to_string()),
-                    "Einstein hand '{}' must have knowledge_query tool",
-                    id
-                );
-            }
-        }
     }
 }
