@@ -1325,9 +1325,6 @@ fn dedupe(values: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LibreFangKernel;
-    use librefang_types::config::KernelConfig;
-    use std::process::Command;
     use tempfile::tempdir;
 
     /// Helper: call auto_select_hand without semantic scores.
