@@ -3,20 +3,58 @@
 #   or:  powershell -c "irm https://librefang.ai/install.ps1 | iex"
 #
 # Flags (via environment variables):
-#   $env:LIBREFANG_INSTALL_DIR / $env:LIBREFANG_INSTALL_DIR = custom install directory
-#   $env:LIBREFANG_VERSION / $env:LIBREFANG_VERSION         = specific version tag (e.g. "v0.1.0")
+#   $env:LIBREFANG_INSTALL_DIR         = custom install directory (default: ~/.librefang/bin)
+#   $env:LIBREFANG_VERSION             = specific version tag (e.g. "v0.1.0")
+#   $env:LIBREFANG_AUTO_START          = auto-start daemon after install (default: 1)
+#                                        accepts: 1/true/yes/on (others disable)
+#   $env:LIBREFANG_INSTALLER_SOURCE_ONLY = test hook; do not auto-run Install-LibreFang
 
 $ErrorActionPreference = 'Stop'
 
 $Repo = "librefang/librefang"
 $DefaultInstallDir = Join-Path $env:USERPROFILE ".librefang\bin"
-$InstallDir = if ($env:LIBREFANG_INSTALL_DIR) { $env:LIBREFANG_INSTALL_DIR } elseif ($env:LIBREFANG_INSTALL_DIR) { $env:LIBREFANG_INSTALL_DIR } else { $DefaultInstallDir }
+$InstallDir = if ($env:LIBREFANG_INSTALL_DIR) { $env:LIBREFANG_INSTALL_DIR } else { $DefaultInstallDir }
 
 function Write-Banner {
     Write-Host ""
     Write-Host "  LibreFang Installer" -ForegroundColor Cyan
     Write-Host "  ===================" -ForegroundColor Cyan
     Write-Host ""
+}
+
+function Test-Enabled {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
+    switch ($Value.Trim().ToLowerInvariant()) {
+        "1" { return $true }
+        "true" { return $true }
+        "yes" { return $true }
+        "on" { return $true }
+        default { return $false }
+    }
+}
+
+function Start-DaemonIfNeeded {
+    param([string]$InstalledExe)
+
+    $startOutput = & $InstalledExe start 2>&1
+    $startExitCode = $LASTEXITCODE
+
+    if ($startOutput) {
+        $startOutput | ForEach-Object { Write-Host $_ }
+    }
+
+    if ($startExitCode -eq 0) {
+        return $true
+    }
+
+    $startOutputText = ($startOutput | Out-String)
+    if ($startOutputText -match '(?i)already running') {
+        Write-Host "  Daemon already running; leaving it as-is." -ForegroundColor Yellow
+        return $true
+    }
+
+    return $false
 }
 
 function Get-Architecture {
@@ -60,10 +98,6 @@ function Get-Architecture {
 }
 
 function Get-LatestVersion {
-    if ($env:LIBREFANG_VERSION) {
-        return $env:LIBREFANG_VERSION
-    }
-
     if ($env:LIBREFANG_VERSION) {
         return $env:LIBREFANG_VERSION
     }
@@ -163,8 +197,18 @@ function Install-LibreFang {
 
     # Add to user PATH if not already present
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($currentPath -notlike "*$InstallDir*") {
-        [Environment]::SetEnvironmentVariable("Path", "$InstallDir;$currentPath", "User")
+    if ($null -eq $currentPath) { $currentPath = "" }
+    $userPathEntries = @()
+    if (-not [string]::IsNullOrWhiteSpace($currentPath)) {
+        $userPathEntries = $currentPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    }
+    $hasInstallDirInUserPath = @($userPathEntries | Where-Object {
+        $_.TrimEnd('\') -ieq $InstallDir.TrimEnd('\')
+    }).Count -gt 0
+
+    if (-not $hasInstallDirInUserPath) {
+        $newUserPath = if ([string]::IsNullOrWhiteSpace($currentPath)) { $InstallDir } else { "$InstallDir;$currentPath" }
+        [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
         Write-Host "  Added $InstallDir to user PATH." -ForegroundColor Green
     }
 
@@ -207,6 +251,28 @@ function Install-LibreFang {
     Write-Host "  The setup wizard will guide you through provider selection"
     Write-Host "  and configuration."
     Write-Host ""
+
+    $autoStartRaw = if ($env:LIBREFANG_AUTO_START) { $env:LIBREFANG_AUTO_START } else { "1" }
+    if (Test-Enabled $autoStartRaw) {
+        Write-Host "  Starting daemon in background..." -ForegroundColor Cyan
+        if (Start-DaemonIfNeeded -InstalledExe $installedExe) {
+            Write-Host ""
+            Write-Host "  Next steps:" -ForegroundColor Cyan
+            Write-Host "    1. Chat:              $installedExe chat"
+            Write-Host "    2. Stop daemon:       $installedExe stop"
+        }
+        else {
+            Write-Host ""
+            Write-Host "  Warning: automatic daemon start failed." -ForegroundColor Yellow
+            Write-Host "  Start it manually with:" -ForegroundColor Yellow
+            Write-Host "    $installedExe start"
+        }
+        Write-Host ""
+    }
+}
+
+if ($env:LIBREFANG_INSTALLER_SOURCE_ONLY -eq "1") {
+    return
 }
 
 Install-LibreFang

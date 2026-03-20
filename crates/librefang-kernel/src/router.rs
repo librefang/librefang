@@ -822,6 +822,10 @@ fn build_manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandid
 }
 
 fn load_template_manifest_at(agents_dir: &Path, template: &str) -> Result<AgentManifest, String> {
+    if !is_safe_template_name(template) {
+        return Err(format!("invalid template name '{template}'"));
+    }
+
     let manifest_path = agents_dir.join(template).join("agent.toml");
     if manifest_path.exists() {
         let manifest_toml = fs::read_to_string(&manifest_path)
@@ -851,7 +855,9 @@ fn template_names_from_dir(root: &Path) -> Vec<String> {
         let path = entry.path();
         if path.is_dir() && path.join("agent.toml").exists() {
             if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
-                names.push(name.to_string());
+                if is_safe_template_name(name) {
+                    names.push(name.to_string());
+                }
             }
         }
     }
@@ -864,7 +870,9 @@ fn all_template_names(agents_dir: &Path) -> Vec<String> {
     names.extend(
         BUNDLED_TEMPLATE_MANIFESTS
             .iter()
-            .map(|(name, _)| (*name).to_string()),
+            .map(|(name, _)| *name)
+            .filter(|name| is_safe_template_name(name))
+            .map(str::to_string),
     );
 
     let mut ordered: Vec<String> = names.into_iter().collect();
@@ -873,10 +881,20 @@ fn all_template_names(agents_dir: &Path) -> Vec<String> {
 }
 
 fn bundled_template_manifest(template: &str) -> Option<&'static str> {
+    if !is_safe_template_name(template) {
+        return None;
+    }
     BUNDLED_TEMPLATE_MANIFESTS
         .iter()
         .find(|(name, _)| *name == template)
         .map(|(_, manifest)| *manifest)
+}
+
+fn is_safe_template_name(template: &str) -> bool {
+    !template.is_empty()
+        && template
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn matched_labels(message: &str, patterns: &[(&'static str, &'static str)]) -> Vec<&'static str> {

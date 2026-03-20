@@ -173,8 +173,8 @@ These close the gaps that would make users pick OpenClaw over LibreFang.
 
 **What to do:**
 1. Set up GitHub Pages or Cloudflare Worker for `librefang.ai`
-2. Serve `scripts/install.sh` at root
-3. Serve `scripts/install.ps1` at `/install.ps1`
+2. Serve `web/public/install.sh` at root
+3. Serve `web/public/install.ps1` at `/install.ps1`
 4. Test on fresh Linux, macOS, and Windows machines
 
 **Done when:**
