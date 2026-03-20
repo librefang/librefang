@@ -225,7 +225,10 @@
     "create_goal": "Create Goal", "goal_title_placeholder": "Goal Title", "goal_desc_placeholder": "Description", "goal_tree": "Goal Tree"
   },
   "sessions": {
-    "title": "Sessions", "subtitle": "Active agent conversations and historical execution contexts.", "active": "Active", "idle": "Idle", "last_activity": "Last Activity", "resume": "Resume", "close": "Close"
+    "title": "Sessions", "subtitle": "Active agent conversations and historical execution contexts.",
+    "active_count": "active", "total": "total", "search_placeholder": "Search by agent name...",
+    "empty_title": "No sessions", "empty_desc": "Sessions will appear when agents start conversations.",
+    "unknown_agent": "Unknown Agent", "just_now": "just now"
   },
   "approvals": {
     "title": "Approvals", "subtitle": "Review and authorize critical agent actions.", "pending_review": "Pending Review", "approve": "Approve", "reject": "Reject",

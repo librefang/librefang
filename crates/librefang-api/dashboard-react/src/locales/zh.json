@@ -225,7 +225,10 @@
     "create_goal": "创建目标", "goal_title_placeholder": "目标标题", "goal_desc_placeholder": "描述", "goal_tree": "目标树"
   },
   "sessions": {
-    "title": "会话", "subtitle": "活跃的智能体对话和历史执行上下文。", "active": "活跃", "idle": "闲置", "last_activity": "最后活跃", "resume": "恢复", "close": "关闭"
+    "title": "会话", "subtitle": "活跃的智能体对话和历史执行上下文。",
+    "active_count": "活跃", "total": "总计", "search_placeholder": "按智能体名称搜索...",
+    "empty_title": "暂无会话", "empty_desc": "智能体开始对话时会话将出现在这里。",
+    "unknown_agent": "未知智能体", "just_now": "刚刚"
   },
   "approvals": {
     "title": "审批", "subtitle": "在执行前审查并授权关键操作。", "pending_review": "等待审查", "approve": "批准", "reject": "拒绝",
