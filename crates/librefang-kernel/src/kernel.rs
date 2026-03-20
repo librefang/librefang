@@ -1291,6 +1291,12 @@ impl LibreFangKernel {
                 .clone()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| kernel.config.default_model.model.clone());
+            // Strip provider prefix (e.g. "minimax/minimax-M2.5-highspeed" → "minimax-M2.5-highspeed")
+            // so the model name is valid for the upstream API.
+            let extraction_model = librefang_runtime::agent_loop::strip_provider_prefix(
+                &extraction_model,
+                &kernel.config.default_model.provider,
+            );
             let llm = Some((Arc::clone(&kernel.default_driver) as _, extraction_model));
             let store = if let Some(ref emb) = kernel.embedding_driver {
                 librefang_runtime::proactive_memory::init_proactive_memory_with_embedding(
@@ -3922,7 +3928,11 @@ impl LibreFangKernel {
         }
 
         let driver = self.resolve_driver(&entry.manifest)?;
-        let model = entry.manifest.model.model.clone();
+        // Strip provider prefix so the model name is valid for the upstream API.
+        let model = librefang_runtime::agent_loop::strip_provider_prefix(
+            &entry.manifest.model.model,
+            &entry.manifest.model.provider,
+        );
 
         // Resolve the agent's actual context window from the model catalog
         let agent_ctx_window = self
