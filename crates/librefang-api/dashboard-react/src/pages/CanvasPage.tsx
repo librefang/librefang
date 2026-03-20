@@ -9,12 +9,14 @@ import {
   addEdge,
   useNodesState,
   useEdgesState,
+  getNodesBounds,
   type Node,
   type Edge,
   type Connection,
   MarkerType,
   Handle,
   Position,
+  type OnSelectionChangeParams,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, type AgentItem, type WorkflowItem } from "../api";
@@ -24,7 +26,7 @@ import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import {
   Play, Save, Trash2, Plus, FolderOpen, Loader2,
-  Maximize2, Minimize2, ArrowLeft, X
+  Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight
 } from "lucide-react";
 
 // 节点类型配置
@@ -74,6 +76,35 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
         )}
       </div>
       {!isEnd && <Handle type="source" position={Position.Bottom} className="!w-2 !h-2 !bg-border-subtle !border-surface" />}
+    </div>
+  );
+}
+
+// 分组节点组件
+function GroupNodeComponent({ data, id }: { data: any; id: string }) {
+  const expanded = data._expanded !== false; // 默认展开
+  return (
+    <div className={`rounded-xl border-2 border-dashed transition-all ${
+      expanded ? "border-brand/40 bg-brand/5 min-w-[200px] min-h-[120px]" : "border-brand bg-surface shadow-lg w-[160px]"
+    }`}>
+      <Handle type="target" position={Position.Top} className="!w-2 !h-2 !bg-brand !border-surface" />
+      <div className="flex items-center gap-1.5 px-2 py-1.5 bg-brand/10 rounded-t-lg cursor-pointer"
+        onClick={() => data._onToggle?.(id)}>
+        {expanded
+          ? <ChevronDown className="w-3 h-3 text-brand shrink-0" />
+          : <ChevronRight className="w-3 h-3 text-brand shrink-0" />}
+        <Group className="w-3 h-3 text-brand shrink-0" />
+        <span className="text-xs font-bold text-brand truncate">{data.label || "Group"}</span>
+        {!expanded && data._childCount > 0 && (
+          <span className="text-[9px] text-brand/60 ml-auto">{data._childCount} nodes</span>
+        )}
+      </div>
+      {!expanded && (
+        <div className="px-2 py-1">
+          <p className="text-[8px] text-text-dim italic">Click to expand</p>
+        </div>
+      )}
+      <Handle type="source" position={Position.Bottom} className="!w-2 !h-2 !bg-brand !border-surface" />
     </div>
   );
 }
@@ -320,7 +351,86 @@ export function CanvasPage() {
   const [showRunInput, setShowRunInput] = useState(false);
   const [runInput, setRunInput] = useState("");
 
-  const nodeTypes = useMemo(() => ({ custom: (props: any) => <CustomNode {...props} t={t} /> }), [t]);
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
+
+  // 折叠/展开分组
+  const toggleGroup = useCallback((groupId: string) => {
+    setNodes(nds => {
+      const groupNode = nds.find(n => n.id === groupId);
+      if (!groupNode) return nds;
+      const isExpanded = (groupNode.data as any)._expanded !== false;
+      const willCollapse = isExpanded;
+
+      // 收集所有子节点
+      const childIds = new Set<string>();
+      const collectChildren = (pid: string) => {
+        nds.forEach(n => { if (n.parentId === pid) { childIds.add(n.id); collectChildren(n.id); } });
+      };
+      collectChildren(groupId);
+
+      return nds.map(n => {
+        if (n.id === groupId) {
+          return {
+            ...n,
+            style: willCollapse
+              ? { width: 160, height: undefined }
+              : { width: (n.data as any)._origWidth || 300, height: (n.data as any)._origHeight || 200 },
+            data: { ...n.data as any, _expanded: !isExpanded, _childCount: childIds.size },
+          };
+        }
+        if (childIds.has(n.id)) {
+          return { ...n, hidden: willCollapse };
+        }
+        return n;
+      });
+    });
+
+    // 处理边：隐藏内部边，重定向外部边
+    setEdges(eds => {
+      const nds = nodes; // 当前 nodes（可能还没更新，但足够获取 parentId）
+      const childIds = new Set<string>();
+      const collectChildren = (pid: string) => {
+        nds.forEach(n => { if (n.parentId === pid) { childIds.add(n.id); collectChildren(n.id); } });
+      };
+      collectChildren(groupId);
+
+      const groupNode = nds.find(n => n.id === groupId);
+      const isExpanded = (groupNode?.data as any)?._expanded !== false;
+      const willCollapse = isExpanded;
+
+      return eds.map(e => {
+        const srcChild = childIds.has(e.source);
+        const tgtChild = childIds.has(e.target);
+
+        if (srcChild && tgtChild) {
+          return { ...e, hidden: willCollapse };
+        }
+        if (willCollapse) {
+          if (srcChild && !tgtChild) {
+            return { ...e, data: { ...e.data, _origSource: e.source }, source: groupId };
+          }
+          if (tgtChild && !srcChild) {
+            return { ...e, data: { ...e.data, _origTarget: e.target }, target: groupId };
+          }
+        } else {
+          // 展开：恢复原始端点
+          const ed = e.data as any;
+          if (ed?._origSource) {
+            return { ...e, source: ed._origSource, data: { ...e.data, _origSource: undefined } };
+          }
+          if (ed?._origTarget) {
+            return { ...e, target: ed._origTarget, data: { ...e.data, _origTarget: undefined } };
+          }
+        }
+        return e;
+      });
+    });
+  }, [nodes, setNodes, setEdges]);
+
+  const nodeTypes = useMemo(() => ({
+    custom: (props: any) => <CustomNode {...props} t={t} />,
+    groupNode: (props: any) => <GroupNodeComponent {...props} data={{ ...props.data, _onToggle: toggleGroup }} />,
+  }), [t, toggleGroup]);
 
   // 需要 agent 的节点类型（后端所有 step 都需要 agent）
   const AGENT_NODE_TYPES = new Set(["agent", "channel", "respond", "condition", "loop", "parallel", "collect"]);
@@ -450,6 +560,60 @@ export function CanvasPage() {
       setEditingNode(null);
     }
   }, [editingNode]);
+
+  // 跟踪选中的节点
+  const onSelectionChange = useCallback(({ nodes: selected }: OnSelectionChangeParams) => {
+    setSelectedNodeIds(new Set(selected.map(n => n.id)));
+  }, []);
+
+  // 创建分组：把选中的节点包进一个 group
+  const createGroup = useCallback(() => {
+    if (selectedNodeIds.size < 2) return;
+
+    const selected = nodes.filter(n => selectedNodeIds.has(n.id) && !n.parentId);
+    if (selected.length < 2) return;
+
+    // 计算选中节点的边界
+    const bounds = getNodesBounds(selected);
+    const padding = 30;
+    const groupId = `group-${Date.now()}`;
+
+    // 创建 group 节点
+    const groupNode: Node = {
+      id: groupId,
+      type: "groupNode",
+      position: { x: bounds.x - padding, y: bounds.y - padding - 30 },
+      style: { width: bounds.width + padding * 2, height: bounds.height + padding * 2 + 30 },
+      data: {
+        label: t("canvas.new_group"),
+        _expanded: true,
+        _childCount: selected.length,
+        _origWidth: bounds.width + padding * 2,
+        _origHeight: bounds.height + padding * 2 + 30,
+        _onToggle: toggleGroup,
+      },
+    };
+
+    // 更新子节点：设置 parentId，坐标变为相对于 group
+    const updatedNodes = nodes.map(n => {
+      if (selectedNodeIds.has(n.id) && !n.parentId) {
+        return {
+          ...n,
+          parentId: groupId,
+          extent: "parent" as const,
+          position: {
+            x: n.position.x - (bounds.x - padding),
+            y: n.position.y - (bounds.y - padding - 30),
+          },
+        };
+      }
+      return n;
+    });
+
+    // group 必须在子节点之前
+    setNodes([groupNode, ...updatedNodes]);
+    setSelectedNodeIds(new Set());
+  }, [selectedNodeIds, nodes, setNodes, t, toggleGroup]);
 
   // 更新节点数据
   const handleNodeUpdate = useCallback((id: string, newData: any) => {
@@ -728,6 +892,12 @@ export function CanvasPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {selectedNodeIds.size >= 2 && (
+            <Button variant="secondary" size="sm" onClick={createGroup}>
+              <Group className="w-3.5 h-3.5 mr-1" />
+              {t("canvas.create_group")}
+            </Button>
+          )}
           {agentStepCount > 0 && (
             <span className="text-[10px] font-bold text-success mr-1">
               {agentStepCount} {t("canvas.agent_steps")}
@@ -865,6 +1035,7 @@ export function CanvasPage() {
             nodes={nodes} edges={edges}
             onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
             onConnect={onConnect} onNodeClick={onNodeClick} onNodesDelete={onNodesDelete}
+            onSelectionChange={onSelectionChange}
             nodeTypes={nodeTypes} colorMode={theme}
             defaultViewport={{ x: 50, y: 80, zoom: 1 }}
             minZoom={0.1} maxZoom={2} className="bg-main/20"

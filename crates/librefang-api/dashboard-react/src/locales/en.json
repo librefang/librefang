@@ -115,6 +115,7 @@
     "condition_text": "Condition Text", "condition_placeholder": "Execute if prev output contains...", "loop_until": "Stop When Output Contains", "loop_until_placeholder": "e.g. DONE", "loop_max": "Max Iterations",
     "error_mode": "Error Handling", "error_fail": "Stop on Error", "error_skip": "Skip on Error", "error_retry": "Retry on Error", "max_retries": "Max Retries",
     "timeout": "Timeout (seconds)", "output_var": "Output Variable", "output_var_hint": "(use {{name}} in later steps)",
+    "create_group": "Group Selected", "new_group": "Group",
     "node_types": {
       "start": "Start", "start_desc": "Workflow entry point", "end": "End", "end_desc": "Workflow termination",
       "schedule": "Schedule", "schedule_desc": "Time-based trigger", "webhook": "Webhook", "webhook_desc": "HTTP webhook trigger",
