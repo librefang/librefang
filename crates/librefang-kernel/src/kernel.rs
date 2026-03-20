@@ -1004,12 +1004,18 @@ impl LibreFangKernel {
             }
         }
 
-        // Initialize integration health monitor
+        // Initialize integration health monitor.
+        // [health_check] section overrides [extensions] when explicitly set (non-default).
+        let hc_interval = if config.health_check.health_check_interval_secs != 60 {
+            config.health_check.health_check_interval_secs
+        } else {
+            config.extensions.health_check_interval_secs
+        };
         let health_config = librefang_extensions::health::HealthMonitorConfig {
             auto_reconnect: config.extensions.auto_reconnect,
             max_reconnect_attempts: config.extensions.reconnect_max_attempts,
             max_backoff_secs: config.extensions.reconnect_max_backoff_secs,
-            check_interval_secs: config.extensions.health_check_interval_secs,
+            check_interval_secs: hc_interval,
         };
         let extension_health = librefang_extensions::health::HealthMonitor::new(health_config);
         // Register all installed integrations for health monitoring
@@ -4925,6 +4931,30 @@ impl LibreFangKernel {
                     }
                 }
             });
+        }
+
+        // Periodic audit log pruning (daily, respects audit.retention_days)
+        {
+            let kernel = Arc::clone(self);
+            let retention = self.config.audit.retention_days;
+            if retention > 0 {
+                tokio::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+                    interval.tick().await; // Skip first immediate tick
+                    loop {
+                        interval.tick().await;
+                        if kernel.supervisor.is_shutting_down() {
+                            break;
+                        }
+                        let pruned = kernel.audit_log.prune(retention);
+                        if pruned > 0 {
+                            info!("Audit log pruning: removed {pruned} entries older than {retention} days");
+                        }
+                    }
+                });
+                info!("Audit log pruning scheduled daily (retention_days={retention})");
+            }
         }
 
         // Periodic session retention cleanup (prune expired / excess sessions)

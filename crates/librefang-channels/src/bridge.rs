@@ -679,6 +679,14 @@ async fn dispatch_message(
 
     // --- Rate limiting ---
     if let Some(ref ov) = overrides {
+        // Global per-channel rate limit (all users combined)
+        if ov.rate_limit_per_minute > 0 {
+            if let Err(msg) = rate_limiter.check(ct_str, "__global__", ov.rate_limit_per_minute) {
+                send_response(adapter, &message.sender, msg, thread_id, output_format).await;
+                return;
+            }
+        }
+        // Per-user rate limit
         if ov.rate_limit_per_user > 0 {
             if let Err(msg) =
                 rate_limiter.check(ct_str, sender_user_id(message), ov.rate_limit_per_user)
