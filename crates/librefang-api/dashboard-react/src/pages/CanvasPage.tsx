@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect, useMemo } from "react";
+import React, { useCallback, useState, useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
@@ -558,6 +558,30 @@ export function CanvasPage() {
     }
   }, [editingNode]);
 
+  // group 拖拽时带动子节点
+  const groupDragStart = useRef<{ id: string; x: number; y: number } | null>(null);
+
+  const onNodeDragStart = useCallback((_: any, node: Node) => {
+    if (node.type === "groupNode") {
+      groupDragStart.current = { id: node.id, x: node.position.x, y: node.position.y };
+    }
+  }, []);
+
+  const onNodeDrag = useCallback((_: any, node: Node) => {
+    if (node.type === "groupNode" && groupDragStart.current?.id === node.id) {
+      const dx = node.position.x - groupDragStart.current.x;
+      const dy = node.position.y - groupDragStart.current.y;
+      if (dx === 0 && dy === 0) return;
+      const childIds = new Set<string>((node.data as any)?._childIds || []);
+      groupDragStart.current = { id: node.id, x: node.position.x, y: node.position.y };
+      setNodes(nds => nds.map(n =>
+        childIds.has(n.id) && !n.hidden
+          ? { ...n, position: { x: n.position.x + dx, y: n.position.y + dy } }
+          : n
+      ));
+    }
+  }, [setNodes]);
+
   // 跟踪选中的节点
   const onSelectionChange = useCallback(({ nodes: selected }: OnSelectionChangeParams) => {
     setSelectedNodeIds(new Set(selected.map(n => n.id)));
@@ -1023,6 +1047,7 @@ export function CanvasPage() {
             onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
             onConnect={onConnect} onNodeClick={onNodeClick} onNodesDelete={onNodesDelete}
             onSelectionChange={onSelectionChange}
+            onNodeDragStart={onNodeDragStart} onNodeDrag={onNodeDrag}
             nodeTypes={nodeTypes} colorMode={theme}
             defaultViewport={{ x: 50, y: 80, zoom: 1 }}
             minZoom={0.1} maxZoom={2} className="bg-main/20"
