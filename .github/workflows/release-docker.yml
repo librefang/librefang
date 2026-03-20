@@ -82,7 +82,7 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          dockerfile: deploy/Dockerfile
+          file: deploy/Dockerfile
           push: true
           platforms: ${{ matrix.platform }}
           tags: ghcr.io/librefang/librefang
@@ -123,7 +123,7 @@ jobs:
           # Strip date suffix (e.g. 0.5.0-20260316 → 0.5.0)
           echo "version=${RAW%-*}" >> "$GITHUB_OUTPUT"
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: ${{ runner.temp }}/digests
           pattern: docker-digest-*

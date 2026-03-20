@@ -110,7 +110,7 @@ impl SignedManifest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
+    use ed25519_dalek::ed25519::signature::rand_core::OsRng;
 
     #[test]
     fn test_sign_and_verify() {
