@@ -170,14 +170,7 @@ mod tests {
     use librefang_types::tool::ToolDefinition;
 
     fn test_catalog() -> crate::model_catalog::ModelCatalog {
-        let providers_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("catalog")
-            .join("providers");
-        crate::model_catalog::ModelCatalog::new_from_dir(&providers_dir)
+        crate::model_catalog::ModelCatalog::default()
     }
 
     fn default_config() -> ModelRoutingConfig {

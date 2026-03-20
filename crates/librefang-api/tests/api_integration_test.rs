@@ -185,46 +185,9 @@ async fn start_test_server_with_provider(
 async fn start_full_router(api_key: &str) -> FullRouterHarness {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
 
-    // Pre-populate providers/ from the in-repo catalog so the model catalog
-    // is populated when the kernel boots with a temp home_dir.
-    let repo_catalog = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("catalog");
-    let providers_src = repo_catalog.join("providers");
-    let providers_dst = tmp.path().join("providers");
-    if providers_src.exists() {
-        #[cfg(unix)]
-        {
-            let _ = std::os::unix::fs::symlink(&providers_src, &providers_dst);
-        }
-        #[cfg(not(unix))]
-        {
-            // On non-unix, copy instead of symlink
-            let _ = std::fs::create_dir_all(&providers_dst);
-            for entry in std::fs::read_dir(&providers_src)
-                .into_iter()
-                .flatten()
-                .flatten()
-            {
-                let _ = std::fs::copy(entry.path(), providers_dst.join(entry.file_name()));
-            }
-        }
-        // Also link aliases.toml
-        let aliases_src = repo_catalog.join("aliases.toml");
-        if aliases_src.exists() {
-            #[cfg(unix)]
-            {
-                let _ = std::os::unix::fs::symlink(&aliases_src, tmp.path().join("aliases.toml"));
-            }
-            #[cfg(not(unix))]
-            {
-                let _ = std::fs::copy(&aliases_src, tmp.path().join("aliases.toml"));
-            }
-        }
-    }
+    // Sync registry content into the temp home_dir so the kernel boots
+    // with a populated model catalog.
+    librefang_runtime::registry_sync::sync_registry(tmp.path());
 
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),

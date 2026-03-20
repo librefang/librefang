@@ -556,16 +556,8 @@ mod tests {
         MeteringEngine::new(store)
     }
 
-    /// Build a catalog from the in-repo catalog/providers/ directory.
     fn test_catalog() -> librefang_runtime::model_catalog::ModelCatalog {
-        let providers_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("catalog")
-            .join("providers");
-        librefang_runtime::model_catalog::ModelCatalog::new_from_dir(&providers_dir)
+        librefang_runtime::model_catalog::ModelCatalog::default()
     }
 
     #[test]

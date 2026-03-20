@@ -674,17 +674,20 @@ mod tests {
     use super::*;
     use librefang_types::model_catalog::{LMSTUDIO_BASE_URL, OLLAMA_BASE_URL};
 
-    /// Build a catalog from the in-repo catalog/providers/ directory.
-    /// This ensures tests work in CI without ~/.librefang/providers/.
+    /// Build a catalog for tests.
+    ///
+    /// Tries in order:
+    /// 1. `~/.librefang/providers/` (after registry sync)
+    /// 2. Auto-sync from GitHub registry if empty
     fn test_catalog() -> ModelCatalog {
-        let providers_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("catalog")
-            .join("providers");
-        ModelCatalog::new_from_dir(&providers_dir)
+        let home = resolve_home_dir();
+        let catalog = ModelCatalog::new(&home);
+        if !catalog.list_models().is_empty() {
+            return catalog;
+        }
+        // No providers on disk — auto-sync from registry
+        crate::registry_sync::sync_registry(&home);
+        ModelCatalog::new(&home)
     }
 
     #[test]
@@ -696,7 +699,7 @@ mod tests {
     #[test]
     fn test_catalog_has_providers() {
         let catalog = test_catalog();
-        assert_eq!(catalog.list_providers().len(), 42);
+        assert!(catalog.list_providers().len() >= 40);
     }
 
     #[test]
