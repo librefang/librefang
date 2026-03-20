@@ -79,7 +79,7 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
 
   return (
     <div
-      className={`rounded-2xl bg-surface min-w-[140px] max-w-[200px] overflow-hidden relative transition-all duration-300 ${
+      className={`rounded-2xl bg-surface min-w-[140px] max-w-[200px] overflow-hidden relative transition-all duration-300 border border-border-subtle ${
         runState === "running" ? "animate-pulse" : ""
       }`}
       style={{ border: `2px ${missingAgent ? "dashed" : "solid"} ${borderColor}`, ...ringStyle }}
@@ -92,7 +92,7 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
       )}
 
       {/* Header: icon circle + label */}
-      <div className="flex items-center gap-2.5 px-3 py-2.5" style={{ backgroundColor: (config as any).bg || "#f8fafc" }}>
+      <div className="flex items-center gap-2.5 px-3 py-2.5" style={{ backgroundColor: `${config.color}15` }}>
         <div
           className="w-8 h-8 rounded-xl flex items-center justify-center text-white text-sm font-bold shrink-0 transition-all"
           style={{ backgroundColor: config.color }}
@@ -1310,7 +1310,8 @@ function CanvasPageInner() {
             </>
           )}
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1">
+          {/* 状态信息 */}
           {selectedNodeIds.size >= 2 && (
             <Button variant="secondary" size="sm" onClick={createGroup}>
               <Group className="w-3.5 h-3.5 mr-1" />
@@ -1318,41 +1319,62 @@ function CanvasPageInner() {
             </Button>
           )}
           {agentStepCount > 0 && (
-            <span className="text-[10px] font-bold text-success mr-1">
+            <span className="text-[10px] font-bold text-success px-2">
               {agentStepCount} {t("canvas.agent_steps")}
             </span>
           )}
-          <Button variant="secondary" onClick={() => setIsFullscreen(!isFullscreen)}>
-            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
-          </Button>
-          <Button variant="secondary" onClick={() => setShowWorkflowPanel(!showWorkflowPanel)}>
-            <FolderOpen className="w-4 h-4 mr-1" />
-            {t("workflows.open_workflows")}
-          </Button>
-          <Button variant="secondary" onClick={() => { setNodes([]); setEdges([]); setEditingNode(null); }}>
-            {t("common.clear")}
-          </Button>
-          <Button variant="secondary" onClick={exportWorkflow} title="Cmd+E">
-            <Download className="w-4 h-4" />
-          </Button>
-          <Button variant="secondary" onClick={importWorkflow} title="Cmd+I">
-            <Upload className="w-4 h-4" />
-          </Button>
-          <Button variant="secondary" onClick={() => fitView({ padding: 0.2, duration: 300 })} title="Cmd+1">
-            <Scan className="w-4 h-4" />
-          </Button>
-          <Button variant="secondary" onClick={() => setShowHelp(true)} title="?">
-            <HelpCircle className="w-4 h-4" />
-          </Button>
-          <Button variant="primary" onClick={handleSave} disabled={!workflowName.trim() || agentStepCount === 0}>
-            <Save className="w-4 h-4 mr-1" />
-            {t("common.save")}
-          </Button>
-          <Button variant="primary" onClick={() => handleRunClick()}
-            disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId}>
-            {runningWorkflowId ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Play className="w-4 h-4 mr-1" />}
-            {t("workflows.run_workflow")}
-          </Button>
+
+          {/* 视图工具 */}
+          <div className="flex items-center gap-0.5 px-1">
+            <Button variant="secondary" onClick={() => setIsFullscreen(!isFullscreen)} title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}>
+              {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            </Button>
+            <Button variant="secondary" onClick={() => fitView({ padding: 0.2, duration: 300 })} title="Fit View (Cmd+1)">
+              <Scan className="w-4 h-4" />
+            </Button>
+          </div>
+
+          <div className="w-px h-5 bg-border-subtle" />
+
+          {/* 文件操作 */}
+          <div className="flex items-center gap-0.5 px-1">
+            <Button variant="secondary" onClick={() => setShowWorkflowPanel(!showWorkflowPanel)} title={t("workflows.open_workflows")}>
+              <FolderOpen className="w-4 h-4" />
+            </Button>
+            <Button variant="secondary" onClick={exportWorkflow} title="Export (Cmd+E)">
+              <Download className="w-4 h-4" />
+            </Button>
+            <Button variant="secondary" onClick={importWorkflow} title="Import (Cmd+I)">
+              <Upload className="w-4 h-4" />
+            </Button>
+          </div>
+
+          <div className="w-px h-5 bg-border-subtle" />
+
+          {/* 画布操作 */}
+          <div className="flex items-center gap-0.5 px-1">
+            <Button variant="secondary" onClick={() => { setNodes([]); setEdges([]); setEditingNode(null); }} title={t("common.clear")}>
+              <Trash2 className="w-4 h-4" />
+            </Button>
+            <Button variant="secondary" onClick={() => setShowHelp(true)} title="Shortcuts (?)">
+              <HelpCircle className="w-4 h-4" />
+            </Button>
+          </div>
+
+          <div className="w-px h-5 bg-border-subtle" />
+
+          {/* 主操作 */}
+          <div className="flex items-center gap-1.5 pl-1">
+            <Button variant="primary" onClick={handleSave} disabled={!workflowName.trim() || agentStepCount === 0}>
+              <Save className="w-4 h-4 mr-1" />
+              {t("common.save")}
+            </Button>
+            <Button variant="primary" onClick={() => handleRunClick()}
+              disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId}>
+              {runningWorkflowId ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Play className="w-4 h-4 mr-1" />}
+              {t("workflows.run_workflow")}
+            </Button>
+          </div>
         </div>
       </header>
 
