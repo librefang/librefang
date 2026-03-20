@@ -18,8 +18,9 @@ const REFRESH_MS = 30000;
 function getStatusVariant(status?: string) {
   const value = (status ?? "").toLowerCase();
   if (value === "running") return "success";
+  if (value === "suspended") return "warning";
   if (value === "idle") return "warning";
-  if (value === "error") return "error";
+  if (value === "error" || value === "crashed") return "error";
   return "default";
 }
 
@@ -97,8 +98,11 @@ export function AgentsPage() {
         )
       ) : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {filteredAgents.map((agent) => (
-            <Card key={agent.id} hover padding="lg" className="cursor-pointer" onClick={async () => {
+          {filteredAgents.map((agent) => {
+            const isSuspended = (agent.state || "").toLowerCase() === "suspended";
+            const isHand = agent.name.includes("-hand");
+            return (
+            <Card key={agent.id} hover padding="lg" className={`cursor-pointer ${isSuspended ? "opacity-60" : ""}`} onClick={async () => {
               setDetailLoading(true);
               try { const d = await getAgentDetail(agent.id); setDetailAgent(d); } catch { setDetailAgent({ name: agent.name, id: agent.id }); }
               setDetailLoading(false);
@@ -108,7 +112,10 @@ export function AgentsPage() {
                   <Avatar fallback={agent.name} size="lg" />
                   <div className="min-w-0">
                     <h2 className="text-lg font-black tracking-tight truncate group-hover:text-brand transition-colors">{agent.name}</h2>
-                    <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 truncate">{agent.id}</p>
+                    <div className="flex items-center gap-2">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 truncate">{agent.id.slice(0, 8)}</p>
+                      {isHand && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400 font-bold">HAND</span>}
+                    </div>
                   </div>
                 </div>
                 <Badge variant={getStatusVariant(agent.state)}>
@@ -157,7 +164,8 @@ export function AgentsPage() {
                 </Button>
               </div>
             </Card>
-          ))}
+            );
+          })}
         </div>
       )}
 
