@@ -64,7 +64,7 @@ jobs:
             echo ""
             echo '**pip:**'
             echo '```bash'
-            echo 'pip install librefang-cli'
+            echo 'pip install librefang'
             echo '```'
             echo ""
             echo '**Cargo:**'
