@@ -5,6 +5,37 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-03-21
+
+### Added
+
+- Configurable CORS, channel rate limits, audit pruning, and media gates (#1331) (@houko)
+- Docs (#1334) (@houko)
+- LLM intent routing, registry single source of truth, streaming fixes (#1336) (@houko)
+- Add migrate --from openfang for OpenFang users (#1344) (@houko)
+- Unify CLI detection + add Gemini CLI, Codex CLI, Aider providers (#1347) (@houko)
+
+### Fixed
+
+- Move CLI npm/PyPI publish to Shell workflow and fix Fly.io config path (#1327) (@houko)
+- Strip provider prefix for internal LLM calls (#1330) (@houko)
+- Sync upstream improvements (#1338) (@houko)
+- Harden OpenClaw migration inputs (#1342) (@houko)
+- Complete openfang migration across init wizard, API, and dashboard (#1345) (@houko)
+- Detect Qwen Code CLI in test_connection and setup wizard (#1346) (@houko)
+
+### Changed
+
+- Consolidate docs as Next.js deployment directory (#1335) (@houko)
+
+### Documentation
+
+- Add comparison page and clean up remaining artifacts (#1337) (@houko)
+
+### Other
+
+- Feature/fix docs (#1339) (@houko)
+
 ## [0.6.8] - 2026-03-20
 
 ### Added
