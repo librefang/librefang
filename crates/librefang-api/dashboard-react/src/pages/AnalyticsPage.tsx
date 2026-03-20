@@ -128,14 +128,18 @@ export function AnalyticsPage() {
             {(!daily?.days || daily.days.length === 0) ? (
               <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
             ) : (
-              <div className="flex items-end gap-1 h-32">
-                {(daily.days || []).slice(-21).map((d, i) => {
+              <div className="space-y-2">
+                {(daily.days || []).slice(-14).map((d, i) => {
                   const maxDay = Math.max(...(daily.days || []).map(x => x.cost_usd || 0), 0.001);
                   const pct = ((d.cost_usd || 0) / maxDay) * 100;
                   return (
-                    <div key={d.date || i} className="flex-1 flex flex-col items-center gap-1" title={`${d.date}: $${(d.cost_usd || 0).toFixed(4)}`}>
-                      <div className="w-full rounded-t bg-brand/60 hover:bg-brand transition-colors" style={{ height: `${Math.max(pct, 2)}%` }} />
-                      <span className="text-[7px] text-text-dim/40 -rotate-45 origin-top-left whitespace-nowrap">{(d.date || "").slice(5)}</span>
+                    <div key={d.date || i} className="flex items-center gap-3">
+                      <span className="text-[10px] font-mono text-text-dim/60 w-12 shrink-0">{(d.date || "").slice(5)}</span>
+                      <div className="flex-1 h-4 rounded-full bg-main overflow-hidden">
+                        <div className="h-full bg-gradient-to-r from-brand to-brand/60 rounded-full transition-all" style={{ width: `${Math.max(pct, 3)}%` }} />
+                      </div>
+                      <span className="text-[10px] font-mono text-text-dim w-20 text-right shrink-0">${(d.cost_usd || 0).toFixed(2)}</span>
+                      <span className="text-[9px] text-text-dim/40 w-14 text-right shrink-0">{d.calls || 0} calls</span>
                     </div>
                   );
                 })}
