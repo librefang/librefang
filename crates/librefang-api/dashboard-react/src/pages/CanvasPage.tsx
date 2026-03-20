@@ -714,15 +714,15 @@ export function CanvasPage() {
       },
     };
 
-    // 标记子节点归属（不改 parentId 和 position）
-    const updatedNodes = nodes.map(n => {
-      if (childIds.includes(n.id)) {
-        return { ...n, data: { ...(n.data as any), _groupId: groupId } };
-      }
-      return n;
-    });
-
-    setNodes([groupNode, ...updatedNodes]);
+    // 用函数式更新：在现有节点前面插入 group，修改子节点 data 标记归属
+    // 不替换整个数组，保留 ReactFlow 内部节点状态（measured 等）
+    setNodes(nds => [
+      groupNode,
+      ...nds.map(n => childIds.includes(n.id)
+        ? { ...n, data: { ...(n.data as any), _groupId: groupId } }
+        : n
+      ),
+    ]);
     setSelectedNodeIds(new Set());
   }, [selectedNodeIds, nodes, setNodes, t]);
 
