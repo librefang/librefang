@@ -606,116 +606,66 @@ pub fn read_codex_credential() -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// Builtin data — loaded from embedded TOML catalog files at compile time
+// Provider catalog — loaded from ~/.librefang/providers/ at runtime.
+// Synced from the registry via `librefang init`.
 // ---------------------------------------------------------------------------
 
-const BUILTIN_AI21: &str = include_str!("../../../catalog/providers/ai21.toml");
-const BUILTIN_ANTHROPIC: &str = include_str!("../../../catalog/providers/anthropic.toml");
-const BUILTIN_BEDROCK: &str = include_str!("../../../catalog/providers/bedrock.toml");
-const BUILTIN_CEREBRAS: &str = include_str!("../../../catalog/providers/cerebras.toml");
-const BUILTIN_CHATGPT: &str = include_str!("../../../catalog/providers/chatgpt.toml");
-const BUILTIN_CHUTES: &str = include_str!("../../../catalog/providers/chutes.toml");
-const BUILTIN_CLAUDE_CODE: &str = include_str!("../../../catalog/providers/claude-code.toml");
-const BUILTIN_COHERE: &str = include_str!("../../../catalog/providers/cohere.toml");
-const BUILTIN_DEEPSEEK: &str = include_str!("../../../catalog/providers/deepseek.toml");
-const BUILTIN_FIREWORKS: &str = include_str!("../../../catalog/providers/fireworks.toml");
-const BUILTIN_GEMINI: &str = include_str!("../../../catalog/providers/gemini.toml");
-const BUILTIN_GITHUB_COPILOT: &str = include_str!("../../../catalog/providers/github-copilot.toml");
-const BUILTIN_GROQ: &str = include_str!("../../../catalog/providers/groq.toml");
-const BUILTIN_HUGGINGFACE: &str = include_str!("../../../catalog/providers/huggingface.toml");
-const BUILTIN_KIMI_CODING: &str = include_str!("../../../catalog/providers/kimi-coding.toml");
-const BUILTIN_LEMONADE: &str = include_str!("../../../catalog/providers/lemonade.toml");
-const BUILTIN_LMSTUDIO: &str = include_str!("../../../catalog/providers/lmstudio.toml");
-const BUILTIN_MINIMAX: &str = include_str!("../../../catalog/providers/minimax.toml");
-const BUILTIN_MINIMAX_CN: &str = include_str!("../../../catalog/providers/minimax-cn.toml");
-const BUILTIN_MISTRAL: &str = include_str!("../../../catalog/providers/mistral.toml");
-const BUILTIN_MOONSHOT: &str = include_str!("../../../catalog/providers/moonshot.toml");
-const BUILTIN_NVIDIA_NIM: &str = include_str!("../../../catalog/providers/nvidia-nim.toml");
-const BUILTIN_OLLAMA: &str = include_str!("../../../catalog/providers/ollama.toml");
-const BUILTIN_OPENAI: &str = include_str!("../../../catalog/providers/openai.toml");
-const BUILTIN_OPENROUTER: &str = include_str!("../../../catalog/providers/openrouter.toml");
-const BUILTIN_PERPLEXITY: &str = include_str!("../../../catalog/providers/perplexity.toml");
-const BUILTIN_QIANFAN: &str = include_str!("../../../catalog/providers/qianfan.toml");
-const BUILTIN_QWEN_CODE: &str = include_str!("../../../catalog/providers/qwen-code.toml");
-const BUILTIN_QWEN: &str = include_str!("../../../catalog/providers/qwen.toml");
-const BUILTIN_REPLICATE: &str = include_str!("../../../catalog/providers/replicate.toml");
-const BUILTIN_SAMBANOVA: &str = include_str!("../../../catalog/providers/sambanova.toml");
-const BUILTIN_TOGETHER: &str = include_str!("../../../catalog/providers/together.toml");
-const BUILTIN_VENICE: &str = include_str!("../../../catalog/providers/venice.toml");
-const BUILTIN_VERTEX_AI: &str = include_str!("../../../catalog/providers/vertex-ai.toml");
-const BUILTIN_VLLM: &str = include_str!("../../../catalog/providers/vllm.toml");
-const BUILTIN_VOLCENGINE_CODING: &str =
-    include_str!("../../../catalog/providers/volcengine-coding.toml");
-const BUILTIN_VOLCENGINE: &str = include_str!("../../../catalog/providers/volcengine.toml");
-const BUILTIN_XAI: &str = include_str!("../../../catalog/providers/xai.toml");
-const BUILTIN_ZAI_CODING: &str = include_str!("../../../catalog/providers/zai-coding.toml");
-const BUILTIN_ZAI: &str = include_str!("../../../catalog/providers/zai.toml");
-const BUILTIN_ZHIPU_CODING: &str = include_str!("../../../catalog/providers/zhipu-coding.toml");
-const BUILTIN_ZHIPU: &str = include_str!("../../../catalog/providers/zhipu.toml");
+fn load_provider_sources() -> Vec<String> {
+    let home = std::env::var("LIBREFANG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".librefang")
+        });
+    let providers_dir = home.join("providers");
 
-const BUILTIN_ALIASES: &str = include_str!("../../../catalog/aliases.toml");
+    let mut sources = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&providers_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map_or(false, |e| e == "toml") {
+                if let Ok(content) = std::fs::read_to_string(&path) {
+                    sources.push(content);
+                }
+            }
+        }
+    }
+    sources
+}
 
-/// All builtin provider TOML sources.
-const BUILTIN_PROVIDER_SOURCES: &[&str] = &[
-    BUILTIN_AI21,
-    BUILTIN_ANTHROPIC,
-    BUILTIN_BEDROCK,
-    BUILTIN_CEREBRAS,
-    BUILTIN_CHATGPT,
-    BUILTIN_CHUTES,
-    BUILTIN_CLAUDE_CODE,
-    BUILTIN_COHERE,
-    BUILTIN_DEEPSEEK,
-    BUILTIN_FIREWORKS,
-    BUILTIN_GEMINI,
-    BUILTIN_GITHUB_COPILOT,
-    BUILTIN_GROQ,
-    BUILTIN_HUGGINGFACE,
-    BUILTIN_KIMI_CODING,
-    BUILTIN_LEMONADE,
-    BUILTIN_LMSTUDIO,
-    BUILTIN_MINIMAX,
-    BUILTIN_MINIMAX_CN,
-    BUILTIN_MISTRAL,
-    BUILTIN_MOONSHOT,
-    BUILTIN_NVIDIA_NIM,
-    BUILTIN_OLLAMA,
-    BUILTIN_OPENAI,
-    BUILTIN_OPENROUTER,
-    BUILTIN_PERPLEXITY,
-    BUILTIN_QIANFAN,
-    BUILTIN_QWEN_CODE,
-    BUILTIN_QWEN,
-    BUILTIN_REPLICATE,
-    BUILTIN_SAMBANOVA,
-    BUILTIN_TOGETHER,
-    BUILTIN_VENICE,
-    BUILTIN_VERTEX_AI,
-    BUILTIN_VLLM,
-    BUILTIN_VOLCENGINE_CODING,
-    BUILTIN_VOLCENGINE,
-    BUILTIN_XAI,
-    BUILTIN_ZAI_CODING,
-    BUILTIN_ZAI,
-    BUILTIN_ZHIPU_CODING,
-    BUILTIN_ZHIPU,
-];
+fn load_aliases_source() -> Option<String> {
+    let home = std::env::var("LIBREFANG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".librefang")
+        });
+    std::fs::read_to_string(home.join("aliases.toml")).ok()
+}
 
 fn builtin_providers() -> Vec<ProviderInfo> {
     let mut providers = Vec::new();
-    for source in BUILTIN_PROVIDER_SOURCES {
-        let file: ModelCatalogFile =
-            toml::from_str(source).expect("builtin provider TOML is invalid");
-        if let Some(p) = file.provider {
-            providers.push(p.into());
+    for source in load_provider_sources() {
+        if let Ok(file) = toml::from_str::<ModelCatalogFile>(&source) {
+            if let Some(p) = file.provider {
+                providers.push(p.into());
+            }
         }
     }
     providers
 }
 
 fn builtin_aliases() -> HashMap<String, String> {
-    let file: AliasesCatalogFile =
-        toml::from_str(BUILTIN_ALIASES).expect("builtin aliases TOML is invalid");
+    let content = match load_aliases_source() {
+        Some(c) => c,
+        None => return HashMap::new(),
+    };
+    let file: AliasesCatalogFile = match toml::from_str(&content) {
+        Ok(f) => f,
+        Err(_) => return HashMap::new(),
+    };
     file.aliases
         .into_iter()
         .map(|(k, v)| (k.to_lowercase(), v))
@@ -724,10 +674,10 @@ fn builtin_aliases() -> HashMap<String, String> {
 
 fn builtin_models() -> Vec<ModelCatalogEntry> {
     let mut models = Vec::new();
-    for source in BUILTIN_PROVIDER_SOURCES {
-        let file: ModelCatalogFile =
-            toml::from_str(source).expect("builtin model catalog TOML is invalid");
-        models.extend(file.models);
+    for source in load_provider_sources() {
+        if let Ok(file) = toml::from_str::<ModelCatalogFile>(&source) {
+            models.extend(file.models);
+        }
     }
     models
 }

@@ -72,6 +72,15 @@ pub fn sync_registry_agents(home_dir: &Path) {
             sync_subdirs(&src_dir, &dest_dir, manifest_file, dir_name);
         }
     }
+
+    // Sync root-level files (aliases.toml, schema.toml)
+    for name in &["aliases.toml", "schema.toml"] {
+        let src = registry_cache.join(name);
+        let dest = home_dir.join(name);
+        if src.exists() && !dest.exists() {
+            let _ = std::fs::copy(&src, &dest);
+        }
+    }
 }
 
 /// Sync flat .toml files (e.g. integrations/, providers/).
