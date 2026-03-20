@@ -825,7 +825,8 @@ export async function runSchedule(scheduleId: string): Promise<ApiActionResponse
 }
 
 export async function listTriggers(): Promise<TriggerItem[]> {
-  return get<TriggerItem[]>("/api/triggers");
+  const data = await get<any>("/api/triggers");
+  return data.triggers ?? data ?? [];
 }
 
 export async function updateTrigger(
