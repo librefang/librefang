@@ -610,8 +610,44 @@ export function CanvasPage() {
     }
   }, []);
 
+  const NODE_W = 200;
+  const NODE_H = 80;
+  const GROUP_PAD = 30;
+  const GROUP_HEADER = 36;
+
+  // 重新计算分组边框以包含所有子节点
+  const recalcGroupBounds = useCallback((nds: Node[], groupId: string): Node[] => {
+    const groupNode = nds.find(n => n.id === groupId);
+    if (!groupNode || (groupNode.data as any)._expanded === false) return nds;
+    const childIds = new Set<string>((groupNode.data as any)?._childIds || []);
+    const children = nds.filter(n => childIds.has(n.id) && !n.hidden);
+    if (children.length === 0) return nds;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const c of children) {
+      const w = c.measured?.width ?? c.width ?? NODE_W;
+      const h = c.measured?.height ?? c.height ?? NODE_H;
+      minX = Math.min(minX, c.position.x);
+      minY = Math.min(minY, c.position.y);
+      maxX = Math.max(maxX, c.position.x + w);
+      maxY = Math.max(maxY, c.position.y + h);
+    }
+    const gx = minX - GROUP_PAD;
+    const gy = minY - GROUP_PAD - GROUP_HEADER;
+    const gw = maxX - minX + GROUP_PAD * 2;
+    const gh = maxY - minY + GROUP_PAD * 2 + GROUP_HEADER;
+
+    return nds.map(n => n.id === groupId ? {
+      ...n,
+      position: { x: gx, y: gy },
+      style: { ...n.style, width: gw, height: gh },
+      data: { ...(n.data as any), _origWidth: gw, _origHeight: gh },
+    } : n);
+  }, []);
+
   const onNodeDrag = useCallback((_: any, node: Node) => {
     if (node.type === "groupNode" && groupDragStart.current?.id === node.id) {
+      // 拖拽分组 → 带动子节点
       const dx = node.position.x - groupDragStart.current.x;
       const dy = node.position.y - groupDragStart.current.y;
       if (dx === 0 && dy === 0) return;
@@ -622,8 +658,14 @@ export function CanvasPage() {
           ? { ...n, position: { x: n.position.x + dx, y: n.position.y + dy } }
           : n
       ));
+    } else {
+      // 拖拽子节点 → 扩展所属分组边框
+      const groupId = (node.data as any)?._groupId;
+      if (groupId) {
+        setNodes(nds => recalcGroupBounds(nds, groupId));
+      }
     }
-  }, [setNodes]);
+  }, [setNodes, recalcGroupBounds]);
 
   // 跟踪选中的节点
   const onSelectionChange = useCallback(({ nodes: selected }: OnSelectionChangeParams) => {
