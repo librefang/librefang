@@ -897,7 +897,8 @@ impl LibreFangKernel {
         }
 
         // Initialize model catalog, detect provider auth, and apply URL overrides
-        let mut model_catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let mut model_catalog =
+            librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
         model_catalog.detect_auth();
         if !config.provider_urls.is_empty() {
             model_catalog.apply_url_overrides(&config.provider_urls);

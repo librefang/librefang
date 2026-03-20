@@ -2053,7 +2053,7 @@ fn configured_default_model(provider: &str) -> Option<String> {
 fn default_model_for_provider(provider: &str) -> String {
     configured_default_model(provider)
         .or_else(|| {
-            let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+            let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
             catalog.default_model_for_provider(provider)
         })
         .unwrap_or_else(|| "local-model".to_string())
@@ -6849,7 +6849,7 @@ fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
         }
     } else {
         // Standalone: use ModelCatalog directly
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
         let models = catalog.list_models();
         if json {
             let arr: Vec<serde_json::Value> = models
@@ -6925,7 +6925,7 @@ fn cmd_models_aliases(json: bool) {
             );
         }
     } else {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
         let aliases = catalog.list_aliases();
         if json {
             let obj: serde_json::Map<String, serde_json::Value> = aliases
@@ -6980,7 +6980,7 @@ fn cmd_models_providers(json: bool) {
             );
         }
     } else {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
         let providers = catalog.list_providers();
         if json {
             let arr: Vec<serde_json::Value> = providers
@@ -7040,7 +7040,7 @@ fn cmd_models_set(model: Option<String>) {
 
 /// Interactive model picker — shows numbered list, accepts number or model ID.
 fn pick_model() -> String {
-    let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+    let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
     let models = catalog.list_models();
 
     if models.is_empty() {

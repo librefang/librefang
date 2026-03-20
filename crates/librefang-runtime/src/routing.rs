@@ -169,6 +169,17 @@ mod tests {
     use librefang_types::message::{Message, MessageContent, Role};
     use librefang_types::tool::ToolDefinition;
 
+    fn test_catalog() -> crate::model_catalog::ModelCatalog {
+        let providers_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("catalog")
+            .join("providers");
+        crate::model_catalog::ModelCatalog::new_from_dir(&providers_dir)
+    }
+
     fn default_config() -> ModelRoutingConfig {
         ModelRoutingConfig {
             simple_model: "llama-3.3-70b-versatile".to_string(),
@@ -296,7 +307,7 @@ mod tests {
 
     #[test]
     fn test_validate_models_all_found() {
-        let catalog = crate::model_catalog::ModelCatalog::new();
+        let catalog = test_catalog();
         let config = ModelRoutingConfig {
             simple_model: "llama-3.3-70b-versatile".to_string(),
             medium_model: "claude-sonnet-4-6".to_string(),
@@ -311,7 +322,7 @@ mod tests {
 
     #[test]
     fn test_validate_models_unknown() {
-        let catalog = crate::model_catalog::ModelCatalog::new();
+        let catalog = test_catalog();
         let config = ModelRoutingConfig {
             simple_model: "unknown-model".to_string(),
             medium_model: "claude-sonnet-4-6".to_string(),
@@ -327,7 +338,7 @@ mod tests {
 
     #[test]
     fn test_resolve_aliases() {
-        let catalog = crate::model_catalog::ModelCatalog::new();
+        let catalog = test_catalog();
         let config = ModelRoutingConfig {
             simple_model: "llama".to_string(),
             medium_model: "sonnet".to_string(),

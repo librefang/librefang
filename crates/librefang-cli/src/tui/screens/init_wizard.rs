@@ -344,7 +344,7 @@ impl State {
             key_test: KeyTestState::Idle,
             key_test_started: None,
             model_input: String::new(),
-            model_catalog: ModelCatalog::new(),
+            model_catalog: ModelCatalog::default(),
             model_entries: Vec::new(),
             model_list: ListState::default(),
             routing_phase: RoutingPhase::Choice,

@@ -16,12 +16,15 @@ pub struct ModelCatalog {
 }
 
 impl ModelCatalog {
-    /// Create a new catalog populated from the default disk location
-    /// (`LIBREFANG_HOME` or `~/.librefang/providers/`).
-    pub fn new() -> Self {
-        let sources = load_provider_sources();
-        let aliases_source = load_aliases_source();
-        Self::from_sources(&sources, aliases_source.as_deref())
+    /// Create a new catalog by loading providers from `home_dir/providers/`
+    /// and aliases from `home_dir/aliases.toml`.
+    ///
+    /// The caller is responsible for passing the authoritative home directory
+    /// (typically `config.home_dir`). This ensures sync and load use the
+    /// same path — no independent re-parsing of `LIBREFANG_HOME`.
+    pub fn new(home_dir: &std::path::Path) -> Self {
+        let providers_dir = home_dir.join("providers");
+        Self::new_from_dir(&providers_dir)
     }
 
     /// Create a catalog by loading all `*.toml` files from a specific directory.
@@ -598,8 +601,23 @@ impl ModelCatalog {
 
 impl Default for ModelCatalog {
     fn default() -> Self {
-        Self::new()
+        let home = resolve_home_dir();
+        Self::new(&home)
     }
+}
+
+/// Resolve the librefang home directory from `LIBREFANG_HOME` or `~/.librefang`.
+///
+/// Used only as a fallback for `Default` impl and standalone usage.
+/// Kernel code should always pass `config.home_dir` explicitly.
+fn resolve_home_dir() -> std::path::PathBuf {
+    std::env::var("LIBREFANG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            dirs::home_dir()
+                .unwrap_or_else(std::env::temp_dir)
+                .join(".librefang")
+        })
 }
 
 /// Read an OpenAI API key from the Codex CLI credential file.
@@ -649,46 +667,6 @@ pub fn read_codex_credential() -> Option<String> {
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
-}
-
-// ---------------------------------------------------------------------------
-// Provider catalog — loaded from ~/.librefang/providers/ at runtime.
-// Synced from the registry via `librefang init` or auto-sync at boot.
-// ---------------------------------------------------------------------------
-
-fn load_provider_sources() -> Vec<String> {
-    let home = std::env::var("LIBREFANG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".librefang")
-        });
-    let providers_dir = home.join("providers");
-
-    let mut sources = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&providers_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "toml") {
-                if let Ok(content) = std::fs::read_to_string(&path) {
-                    sources.push(content);
-                }
-            }
-        }
-    }
-    sources
-}
-
-fn load_aliases_source() -> Option<String> {
-    let home = std::env::var("LIBREFANG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            dirs::home_dir()
-                .unwrap_or_else(std::env::temp_dir)
-                .join(".librefang")
-        });
-    std::fs::read_to_string(home.join("aliases.toml")).ok()
 }
 
 #[cfg(test)]
