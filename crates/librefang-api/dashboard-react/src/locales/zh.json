@@ -210,7 +210,9 @@
   },
   "settings": {
     "title": "设置", "subtitle": "系统参数管理。", "appearance": "外观",
-    "theme": "界面主题", "language": "语言", "theme_light": "浅色", "theme_dark": "深色", "system_config": "系统配置"
+    "theme": "界面主题", "language": "语言", "theme_light": "浅色", "theme_dark": "深色", "system_config": "系统配置",
+    "nav_layout": "导航菜单布局", "nav_grouped": "分组", "nav_collapsible": "二级菜单",
+    "tools_title": "工具", "tools_search": "搜索工具..."
   },
   "chat": {
     "title": "对话", "neural_terminal": "神经终端", "select_agent": "选择智能体", "select_agent_desc": "从列表中选择一个智能体以建立通信链路。",

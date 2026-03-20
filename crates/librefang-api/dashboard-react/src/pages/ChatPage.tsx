@@ -53,7 +53,7 @@ function Typewriter({ text, speed = 15 }: { text: string; speed?: number }) {
 }
 
 // 聊天消息管理 - 包含历史加载和发送
-function useChatMessages(agentId: string | null) {
+function useChatMessages(agentId: string | null, agents: any[] = []) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -362,9 +362,8 @@ export function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const agentsQuery = useQuery({ queryKey: ["agents", "list", "chat"], queryFn: listAgents, staleTime: 30000 });
-  const { messages, isLoading, sendMessage, clearHistory } = useChatMessages(selectedAgentId || null);
-
   const agents = agentsQuery.data ?? [];
+  const { messages, isLoading, sendMessage, clearHistory } = useChatMessages(selectedAgentId || null, agents);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
   useEffect(() => {

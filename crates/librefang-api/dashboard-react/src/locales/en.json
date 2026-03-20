@@ -210,7 +210,9 @@
   },
   "settings": {
     "title": "Settings", "subtitle": "System parameters.", "appearance": "Appearance",
-    "theme": "Interface Theme", "language": "Language", "theme_light": "Light", "theme_dark": "Dark", "system_config": "System Configuration"
+    "theme": "Interface Theme", "language": "Language", "theme_light": "Light", "theme_dark": "Dark", "system_config": "System Configuration",
+    "nav_layout": "Navigation Layout", "nav_grouped": "Grouped", "nav_collapsible": "Collapsible",
+    "tools_title": "Tools", "tools_search": "Search tools..."
   },
   "chat": {
     "title": "Chat", "neural_terminal": "Neural Terminal", "select_agent": "Select Agent", "select_agent_desc": "Choose an agent from the list to establish a communication link.",
