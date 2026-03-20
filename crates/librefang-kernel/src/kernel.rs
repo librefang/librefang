@@ -1851,26 +1851,11 @@ system_prompt = "You are a helpful assistant."
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
     ) -> KernelResult<AgentLoopResult> {
-        // Acquire per-agent lock to serialize concurrent messages for the same agent.
-        // This prevents session corruption when multiple messages arrive in quick
-        // succession (e.g. rapid voice messages via Telegram). Messages for different
-        // agents are not blocked — each agent has its own independent lock.
-        let lock = self
-            .agent_msg_locks
-            .entry(agent_id)
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-            .clone();
-        let _guard = lock.lock().await;
-
-        // Enforce quota before running the agent loop
-        self.scheduler
-            .check_quota(agent_id)
-            .map_err(KernelError::LibreFang)?;
-
         // ── LLM intent routing ──────────────────────────────────────────
         // When the target is the default assistant, classify the message
-        // and route to a specialist if appropriate.
-        let effective_agent_id = {
+        // and route to a specialist if appropriate. This must happen before
+        // acquiring locks/quota so they apply to the effective target agent.
+        let agent_id = {
             let entry = self.registry.get(agent_id).ok_or_else(|| {
                 KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
             })?;
@@ -1894,7 +1879,22 @@ system_prompt = "You are a helpful assistant."
                 agent_id
             }
         };
-        let agent_id = effective_agent_id;
+
+        // Acquire per-agent lock to serialize concurrent messages for the same agent.
+        // This prevents session corruption when multiple messages arrive in quick
+        // succession (e.g. rapid voice messages via Telegram). Messages for different
+        // agents are not blocked — each agent has its own independent lock.
+        let lock = self
+            .agent_msg_locks
+            .entry(agent_id)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _guard = lock.lock().await;
+
+        // Enforce quota on the effective target agent (after routing)
+        self.scheduler
+            .check_quota(agent_id)
+            .map_err(KernelError::LibreFang)?;
 
         let entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))

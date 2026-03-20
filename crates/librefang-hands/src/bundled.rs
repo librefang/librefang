@@ -92,6 +92,7 @@ category = "productivity"
 
 [agent]
 name = "test-agent"
+description = "A test agent"
 system_prompt = "You are a test agent."
 tools = ["file_read"]
 "#;

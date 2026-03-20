@@ -78,6 +78,6 @@ description: "A test skill"
 Do something useful.
 "#;
         let manifest = parse_bundled("test-skill", content).unwrap();
-        assert_eq!(manifest.name, "test-skill");
+        assert_eq!(manifest.skill.name, "test-skill");
     }
 }

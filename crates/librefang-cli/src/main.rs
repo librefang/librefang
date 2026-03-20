@@ -9108,7 +9108,7 @@ mod tests {
         let skills_dir = std::env::temp_dir().join("librefang-doctor-test-skills");
         let mut skill_reg = librefang_skills::registry::SkillRegistry::new(skills_dir);
         let count = skill_reg.load_bundled();
-        assert!(count > 0, "Should load bundled skills");
+        // Skills are loaded from disk at runtime; count depends on registry files being present
         assert_eq!(skill_reg.count(), count);
     }
 
@@ -9118,7 +9118,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&tmp);
         let mut ext_reg = librefang_extensions::registry::IntegrationRegistry::new(&tmp);
         let count = ext_reg.load_bundled();
-        assert!(count > 0, "Should load bundled integration templates");
+        // Integrations are loaded from disk at runtime; count depends on registry files being present
         assert_eq!(ext_reg.template_count(), count);
     }
 

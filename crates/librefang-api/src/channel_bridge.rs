@@ -193,21 +193,16 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     }
                     StreamEvent::ContentComplete { .. } => {
                         // Flush buffered text if it's real user-facing content.
-                        // Discard if it looks like leaked tool call syntax.
+                        // Only suppress text when ToolUseStart was seen in this
+                        // iteration — the text is likely the tool call echoed as
+                        // content. Never filter based on text patterns alone;
+                        // normal JSON responses would be false-positived.
                         if !iter_buf.is_empty() && !saw_tool_use {
-                            let trimmed = iter_buf.trim();
-                            let looks_like_tool_call = trimmed.starts_with("[{")
-                                || trimmed.starts_with("functions.")
-                                || trimmed.starts_with("{\"name\":")
-                                || trimmed.starts_with("{\"type\":\"function\"")
-                                || (trimmed.starts_with('[') && trimmed.contains("'type': 'text'"));
-                            if !looks_like_tool_call {
-                                if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
-                                    break;
-                                }
-                            } else {
-                                debug!("Streaming bridge: filtered leaked tool call text");
+                            if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
+                                break;
                             }
+                        } else if saw_tool_use && !iter_buf.is_empty() {
+                            debug!("Streaming bridge: filtered tool-use-adjacent text");
                         }
                         iter_buf.clear();
                         saw_tool_use = false;
