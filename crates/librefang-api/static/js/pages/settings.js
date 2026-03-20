@@ -407,7 +407,7 @@ function settingsPage() {
     migrating: false,
     sourcePath: '',
     targetPath: '',
-    detectedSource: 'openclaw',
+    detectedSource: '',
     scanResult: null,
     migResult: null,
 
@@ -1070,6 +1070,12 @@ function settingsPage() {
     async scanPath() {
       if (!this.sourcePath) return;
       this.scanning = true;
+      // Infer source from path
+      if (this.sourcePath.includes('openfang')) {
+        this.detectedSource = 'openfang';
+      } else {
+        this.detectedSource = 'openclaw';
+      }
       try {
         var data = await LibreFangAPI.post('/api/migrate/scan', { path: this.sourcePath });
         if (data.error) {
@@ -1091,7 +1097,7 @@ function settingsPage() {
         var target = this.targetPath;
         if (!target) target = '';
         var data = await LibreFangAPI.post('/api/migrate', {
-          source: this.detectedSource || 'openclaw',
+          source: this.detectedSource || (this.sourcePath && this.sourcePath.includes('openfang') ? 'openfang' : 'openclaw'),
           source_dir: this.sourcePath || (this.scanResult ? this.scanResult.path : ''),
           target_dir: target,
           dry_run: dryRun
