@@ -84,12 +84,18 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
 function GroupNodeComponent({ data, id }: { data: any; id: string }) {
   const expanded = data._expanded !== false; // 默认展开
   return (
-    <div className={`rounded-xl border-2 border-dashed transition-all ${
-      expanded ? "border-brand/40 bg-brand/5 min-w-[200px] min-h-[120px]" : "border-brand bg-surface shadow-lg w-[160px]"
-    }`}>
+    <div
+      className={`rounded-xl border-2 border-dashed transition-all ${
+        expanded ? "border-brand/40 bg-brand/5" : "border-brand bg-surface shadow-lg w-[160px]"
+      }`}
+      style={expanded ? { pointerEvents: "none" } : undefined}
+    >
       <Handle type="target" position={Position.Top} className="!w-2 !h-2 !bg-brand !border-surface" />
-      <div className="flex items-center gap-1.5 px-2 py-1.5 bg-brand/10 rounded-t-lg cursor-pointer"
-        onClick={() => data._onToggle?.(id)}>
+      <div
+        className="flex items-center gap-1.5 px-2 py-1.5 bg-brand/10 rounded-t-lg cursor-pointer relative z-10"
+        style={{ pointerEvents: "auto" }}
+        onClick={(e) => { e.stopPropagation(); data._onToggle?.(id); }}
+      >
         {expanded
           ? <ChevronDown className="w-3 h-3 text-brand shrink-0" />
           : <ChevronRight className="w-3 h-3 text-brand shrink-0" />}
@@ -612,6 +618,8 @@ export function CanvasPage() {
 
     // group 必须在子节点之前
     setNodes([groupNode, ...updatedNodes]);
+    // 强制边重新计算路径（延迟一帧让 ReactFlow 先更新节点布局）
+    setTimeout(() => setEdges(eds => eds.map(e => ({ ...e }))), 50);
     setSelectedNodeIds(new Set());
   }, [selectedNodeIds, nodes, setNodes, t, toggleGroup]);
 
