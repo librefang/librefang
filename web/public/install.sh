@@ -247,18 +247,37 @@ install() {
     USER_SHELL=$(detect_user_shell)
     SHELL_RC=$(choose_shell_rc "$USER_SHELL")
 
-    if [ -n "$SHELL_RC" ] && ! grep -q "librefang" "$SHELL_RC" 2>/dev/null; then
-        # Choose syntax from TARGET RC file to avoid writing bash syntax to fish config.
+    if [ -n "$SHELL_RC" ]; then
+        # Determine syntax from the TARGET FILE, not $USER_SHELL — this
+        # prevents Bash syntax from ever being written to config.fish even
+        # when shell detection mis-identifies the user's shell.
         case "$SHELL_RC" in
             */config.fish)
                 mkdir -p "$(dirname "$SHELL_RC")"
-                echo "fish_add_path \"$INSTALL_DIR\"" >> "$SHELL_RC"
+
+                # Self-heal: remove old Bash-style PATH exports from fish config.
+                if [ -f "$SHELL_RC" ]; then
+                    TMP_FISH_RC=$(mktemp)
+                    grep -vE '^[[:space:]]*export[[:space:]]+PATH=.*(librefang|openfang)' "$SHELL_RC" > "$TMP_FISH_RC" || true
+                    if ! cmp -s "$SHELL_RC" "$TMP_FISH_RC" 2>/dev/null; then
+                        cat "$TMP_FISH_RC" > "$SHELL_RC"
+                        echo "  Removed incompatible Bash PATH export from $SHELL_RC"
+                    fi
+                    rm -f "$TMP_FISH_RC"
+                fi
+
+                if ! grep -q "librefang" "$SHELL_RC" 2>/dev/null; then
+                    echo "fish_add_path \"$INSTALL_DIR\"" >> "$SHELL_RC"
+                    echo "  Added $INSTALL_DIR to PATH in $SHELL_RC"
+                fi
                 ;;
             *)
-                echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$SHELL_RC"
+                if ! grep -q "librefang" "$SHELL_RC" 2>/dev/null; then
+                    echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$SHELL_RC"
+                    echo "  Added $INSTALL_DIR to PATH in $SHELL_RC"
+                fi
                 ;;
         esac
-        echo "  Added $INSTALL_DIR to PATH in $SHELL_RC"
     fi
 
     SESSION_NEEDS_PATH_REFRESH=0
@@ -284,7 +303,7 @@ install() {
         echo "  To use 'librefang' in this shell, run:"
         case "$USER_SHELL" in
             */fish|fish)
-                echo "    set -gx PATH \"$INSTALL_DIR\" \$PATH"
+                echo "    fish_add_path \"$INSTALL_DIR\""
                 ;;
             *)
                 echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
