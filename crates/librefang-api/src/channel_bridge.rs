@@ -268,6 +268,7 @@ use librefang_channels::qq::QqAdapter;
 use librefang_channels::wecom::WeComAdapter;
 
 use async_trait::async_trait;
+use librefang_kernel::error::KernelResult;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
@@ -279,6 +280,77 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use librefang_runtime::str_utils::safe_truncate_str;
+
+fn start_stream_text_bridge(
+    mut event_rx: mpsc::Receiver<StreamEvent>,
+    kernel_handle: tokio::task::JoinHandle<
+        KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
+    >,
+) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel::<String>(64);
+
+    let bridge_handle = tokio::spawn(async move {
+        // Buffer text per iteration. Some providers emit tool call syntax
+        // as plain text (recovered by agent_loop later). We hold text until
+        // ContentComplete, then flush only if it doesn't look like a raw
+        // tool call or content-block array.
+        let mut iter_buf = String::new();
+        let mut saw_tool_use = false;
+
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                StreamEvent::TextDelta { text } => {
+                    iter_buf.push_str(&text);
+                }
+                StreamEvent::ContentComplete { .. } => {
+                    if !iter_buf.is_empty() {
+                        if saw_tool_use {
+                            debug!("Streaming bridge: filtered tool-use-adjacent text");
+                        } else if looks_like_tool_call(&iter_buf) {
+                            debug!("Streaming bridge: filtered leaked tool call text");
+                        } else if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
+                            break;
+                        }
+                    }
+                    iter_buf.clear();
+                    saw_tool_use = false;
+                }
+                StreamEvent::ToolUseStart { .. } => {
+                    saw_tool_use = true;
+                }
+                _ => {}
+            }
+        }
+
+        if !iter_buf.is_empty() && !saw_tool_use {
+            if !looks_like_tool_call(&iter_buf) {
+                let _ = tx.send(iter_buf).await;
+            } else {
+                debug!("Streaming bridge: filtered leaked tool call text in final flush");
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        match kernel_handle.await {
+            Err(e) => error!("Streaming kernel task panicked: {e}"),
+            Ok(Err(e)) => error!("Streaming kernel task returned error: {e}"),
+            Ok(Ok(result)) => {
+                debug!(
+                    input_tokens = result.total_usage.input_tokens,
+                    output_tokens = result.total_usage.output_tokens,
+                    iterations = result.iterations,
+                    "Streaming kernel task completed"
+                );
+            }
+        }
+        if let Err(e) = bridge_handle.await {
+            error!("Streaming bridge task panicked: {e}");
+        }
+    });
+
+    rx
+}
 
 /// Wraps `LibreFangKernel` to implement `ChannelBridgeHandle`.
 pub struct KernelBridgeAdapter {
@@ -339,92 +411,26 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         agent_id: AgentId,
         message: &str,
     ) -> Result<mpsc::Receiver<String>, String> {
-        let (mut event_rx, kernel_handle) = self
+        let (event_rx, kernel_handle) = self
             .kernel
             .send_message_streaming_with_routing(agent_id, message, None)
             .await
             .map_err(|e| format!("{e}"))?;
+        Ok(start_stream_text_bridge(event_rx, kernel_handle))
+    }
 
-        // Bridge StreamEvent -> text-only mpsc channel for the adapter.
-        let (tx, rx) = mpsc::channel::<String>(64);
-
-        let bridge_handle = tokio::spawn(async move {
-            // Buffer text per iteration. Some providers emit tool call syntax
-            // as plain text (recovered by agent_loop later). We hold text until
-            // ContentComplete, then flush only if it doesn't look like a raw
-            // tool call or content-block array.
-            let mut iter_buf = String::new();
-            let mut saw_tool_use = false;
-
-            while let Some(event) = event_rx.recv().await {
-                match event {
-                    StreamEvent::TextDelta { text } => {
-                        iter_buf.push_str(&text);
-                    }
-                    StreamEvent::ContentComplete { .. } => {
-                        // Flush buffered text if it's real user-facing content.
-                        // Suppress when:
-                        // 1. ToolUseStart was seen (tool call echoed as content)
-                        // 2. Text looks like a raw tool call (recover_text_tool_calls
-                        //    scenario — model emits tool calls as plain text without
-                        //    ToolUseStart events)
-                        if !iter_buf.is_empty() {
-                            if saw_tool_use {
-                                debug!("Streaming bridge: filtered tool-use-adjacent text");
-                            } else if looks_like_tool_call(&iter_buf) {
-                                debug!("Streaming bridge: filtered leaked tool call text");
-                            } else if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
-                                break;
-                            }
-                        }
-                        iter_buf.clear();
-                        saw_tool_use = false;
-                    }
-                    StreamEvent::ToolUseStart { .. } => {
-                        // Mark this iteration as having tool use — any buffered
-                        // text is likely the tool call echoed as content.
-                        saw_tool_use = true;
-                    }
-                    _ => {
-                        // ToolInputDelta, ThinkingDelta, etc. — skip
-                    }
-                }
-            }
-
-            // Flush any remaining text after the stream ends (final iteration
-            // may not get a ContentComplete if the sender drops first).
-            // Here we must filter by content pattern because
-            // recover_text_tool_calls() emits tool calls as plain text
-            // without a ToolUseStart event.
-            if !iter_buf.is_empty() && !saw_tool_use {
-                if !looks_like_tool_call(&iter_buf) {
-                    let _ = tx.send(iter_buf).await;
-                } else {
-                    debug!("Streaming bridge: filtered leaked tool call text in final flush");
-                }
-            }
-        });
-
-        // Spawn a supervisor that awaits both handles and logs panics / errors.
-        tokio::spawn(async move {
-            match kernel_handle.await {
-                Err(e) => error!("Streaming kernel task panicked: {e}"),
-                Ok(Err(e)) => error!("Streaming kernel task returned error: {e}"),
-                Ok(Ok(result)) => {
-                    debug!(
-                        input_tokens = result.total_usage.input_tokens,
-                        output_tokens = result.total_usage.output_tokens,
-                        iterations = result.iterations,
-                        "Streaming kernel task completed"
-                    );
-                }
-            }
-            if let Err(e) = bridge_handle.await {
-                error!("Streaming bridge task panicked: {e}");
-            }
-        });
-
-        Ok(rx)
+    async fn send_message_streaming_with_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> Result<mpsc::Receiver<String>, String> {
+        let (event_rx, kernel_handle) = self
+            .kernel
+            .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(start_stream_text_bridge(event_rx, kernel_handle))
     }
 
     async fn send_message_with_sender(

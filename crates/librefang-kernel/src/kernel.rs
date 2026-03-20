@@ -84,6 +84,27 @@ impl std::fmt::Debug for RotationKeySpec {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AssistantRouteTarget {
+    Specialist(String),
+    Hand(String),
+}
+
+impl AssistantRouteTarget {
+    fn route_type(&self) -> &'static str {
+        match self {
+            Self::Specialist(_) => "specialist",
+            Self::Hand(_) => "hand",
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            Self::Specialist(name) | Self::Hand(name) => name,
+        }
+    }
+}
+
 fn collect_rotation_key_specs(
     profiles: Option<&[AuthProfile]>,
     primary_api_key: Option<&str>,
@@ -233,6 +254,9 @@ pub struct LibreFangKernel {
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
     agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// Sticky assistant routing per conversation (assistant + sender/thread).
+    /// Preserves follow-up context for brief messages after a route to a specialist/hand.
+    assistant_routes: dashmap::DashMap<String, AssistantRouteTarget>,
     /// Per-agent decision traces from the most recent message exchange.
     /// Stored for retrieval via `/api/agents/{id}/traces`.
     pub decision_traces: dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
@@ -890,7 +914,7 @@ impl LibreFangKernel {
         }
 
         // Auto-sync registry content on first boot or after upgrade when
-        // critical directories (providers/, hands/) are missing.
+        // critical directories (providers/, hands/, agents/) are missing.
         if librefang_runtime::registry_sync::needs_sync(&config.home_dir) {
             info!("Registry content missing — running auto-sync from librefang-registry");
             librefang_runtime::registry_sync::sync_registry(&config.home_dir);
@@ -1259,6 +1283,7 @@ impl LibreFangKernel {
             default_model_override: std::sync::RwLock::new(None),
             tool_policy_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
+            assistant_routes: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
             command_queue,
             context_engine,
@@ -1859,34 +1884,9 @@ system_prompt = "You are a helpful assistant."
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
     ) -> KernelResult<AgentLoopResult> {
-        // ── LLM intent routing ──────────────────────────────────────────
-        // When the target is the default assistant, classify the message
-        // and route to a specialist if appropriate. This must happen before
-        // acquiring locks/quota so they apply to the effective target agent.
-        let agent_id = {
-            let entry = self.registry.get(agent_id).ok_or_else(|| {
-                KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
-            })?;
-            if entry.name == "assistant" {
-                if let Some(specialist) = self.llm_classify_intent(message).await {
-                    match self.resolve_or_spawn_specialist(&specialist) {
-                        Ok(specialist_id) => specialist_id,
-                        Err(e) => {
-                            warn!(
-                                specialist = %specialist,
-                                error = %e,
-                                "Failed to spawn specialist — falling back to assistant"
-                            );
-                            agent_id
-                        }
-                    }
-                } else {
-                    agent_id
-                }
-            } else {
-                agent_id
-            }
-        };
+        let agent_id = self
+            .resolve_assistant_target(agent_id, message, sender_context)
+            .await?;
 
         // Acquire per-agent lock to serialize concurrent messages for the same agent.
         // This prevents session corruption when multiple messages arrive in quick
@@ -2003,27 +2003,23 @@ system_prompt = "You are a helpful assistant."
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
     )> {
-        let effective_id = {
-            let entry = self.registry.get(agent_id);
-            let is_assistant = entry.map(|e| e.name == "assistant").unwrap_or(false);
-            if is_assistant {
-                if let Some(specialist) = self.llm_classify_intent(message).await {
-                    match self.resolve_or_spawn_specialist(&specialist) {
-                        Ok(id) => id,
-                        Err(e) => {
-                            warn!(specialist = %specialist, error = %e,
-                                "Failed to spawn specialist — falling back to assistant");
-                            agent_id
-                        }
-                    }
-                } else {
-                    agent_id
-                }
-            } else {
-                agent_id
-            }
-        };
-        self.send_message_streaming(effective_id, message, kernel_handle)
+        self.send_message_streaming_resolved(agent_id, message, kernel_handle, None)
+            .await
+    }
+
+    /// Sender-aware streaming entry point for channel bridges.
+    pub async fn send_message_streaming_with_sender_context_and_routing(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender: &SenderContext,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        self.send_message_streaming_resolved(agent_id, message, kernel_handle, Some(sender))
+            .await
     }
 
     /// Send a message to an agent with streaming responses.
@@ -2694,28 +2690,29 @@ system_prompt = "You are a helpful assistant."
         use librefang_types::message::Message;
 
         // Skip classification for very short/simple messages — likely greetings
-        let trimmed = message.trim();
-        if trimmed.len() < 15 && !trimmed.contains("http") {
+        if Self::should_skip_intent_classification(message) {
             return None;
         }
 
-        let classify_prompt = r#"You are an intent classifier. Given a user message, reply with ONLY the agent name that should handle it. Choose from:
-- assistant: greetings, simple questions, casual chat, general knowledge
-- coder: write, explain, refactor, or debug code
-- code-reviewer: review code quality, PR review
-- debugger: trace bugs, root cause analysis
-- architect: system design, architecture decisions
-- test-engineer: write tests, QA strategy
-- researcher: web research, information gathering
-- analyst: data analysis, reports
-- writer: articles, content creation
-- doc-writer: technical documentation
-- translator: translation tasks
-- planner: project planning, task breakdown
-- devops-lead: CI/CD, infrastructure, deployments
-- security-auditor: security review, vulnerability analysis
-
-Reply with ONLY the agent name, nothing else."#;
+        let dynamic_choices =
+            router::all_template_descriptions(&self.config.home_dir.join("agents"));
+        let routable_names: HashSet<String> = dynamic_choices
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        let route_choices = dynamic_choices
+            .iter()
+            .map(|(name, desc)| {
+                let prefix = format!("{name}: ");
+                let prompt_desc = desc.strip_prefix(&prefix).unwrap_or(desc);
+                format!("- {name}: {prompt_desc}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let classify_prompt = format!(
+            "You are an intent classifier. Given a user message, reply with ONLY the agent name that should handle it. Choose from:\n- assistant: greetings, simple questions, casual chat, general knowledge\n{}\n\nReply with ONLY the agent name, nothing else.",
+            route_choices
+        );
 
         let request = CompletionRequest {
             model: String::new(), // use driver default
@@ -2723,7 +2720,7 @@ Reply with ONLY the agent name, nothing else."#;
             tools: vec![],
             max_tokens: 20,
             temperature: 0.0,
-            system: Some(classify_prompt.to_string()),
+            system: Some(classify_prompt),
             thinking: None,
             prompt_caching: false,
         };
@@ -2746,40 +2743,7 @@ Reply with ONLY the agent name, nothing else."#;
         };
 
         let agent_name = result.text().trim().to_lowercase();
-        // Validate it's a known agent name
-        let known = [
-            "assistant",
-            "coder",
-            "code-reviewer",
-            "debugger",
-            "architect",
-            "test-engineer",
-            "researcher",
-            "academic-researcher",
-            "analyst",
-            "data-scientist",
-            "writer",
-            "doc-writer",
-            "translator",
-            "planner",
-            "devops-lead",
-            "ops",
-            "security-auditor",
-            "email-assistant",
-            "meeting-assistant",
-            "customer-support",
-            "sales-assistant",
-            "recruiter",
-            "personal-finance",
-            "health-tracker",
-            "travel-planner",
-            "recipe-assistant",
-            "social-media",
-            "legal-assistant",
-            "home-automation",
-            "tutor",
-        ];
-        if known.contains(&agent_name.as_str()) && agent_name != "assistant" {
+        if agent_name != "assistant" && routable_names.contains(agent_name.as_str()) {
             info!(
                 target_agent = %agent_name,
                 "LLM intent classification: routing to specialist"
@@ -2802,6 +2766,208 @@ Reply with ONLY the agent name, nothing else."#;
         let id = self.spawn_agent(manifest)?;
         info!(agent = %name, id = %id, "Spawned specialist agent for LLM routing");
         Ok(id)
+    }
+
+    async fn send_message_streaming_resolved(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_context: Option<&SenderContext>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        let effective_id = self
+            .resolve_assistant_target(agent_id, message, sender_context)
+            .await?;
+        self.send_message_streaming(effective_id, message, kernel_handle)
+    }
+
+    async fn resolve_assistant_target(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender_context: Option<&SenderContext>,
+    ) -> KernelResult<AgentId> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        if entry.name != "assistant" {
+            return Ok(agent_id);
+        }
+        drop(entry);
+
+        let route_key = Self::assistant_route_key(agent_id, sender_context);
+
+        if Self::should_reuse_cached_route(message) {
+            if let Some(target) = self
+                .assistant_routes
+                .get(&route_key)
+                .map(|entry| entry.value().clone())
+            {
+                match self.resolve_assistant_route_target(&target) {
+                    Ok(routed_id) => {
+                        info!(
+                            route_type = target.route_type(),
+                            target = %target.name(),
+                            "Assistant reusing cached route for follow-up"
+                        );
+                        return Ok(routed_id);
+                    }
+                    Err(e) => {
+                        warn!(
+                            route_type = target.route_type(),
+                            target = %target.name(),
+                            error = %e,
+                            "Cached assistant route failed — clearing"
+                        );
+                        self.assistant_routes.remove(&route_key);
+                    }
+                }
+            }
+        }
+
+        if let Some(specialist) = self.llm_classify_intent(message).await {
+            let routed_id = self.resolve_or_spawn_specialist(&specialist)?;
+            self.assistant_routes.insert(
+                route_key,
+                AssistantRouteTarget::Specialist(specialist.clone()),
+            );
+            return Ok(routed_id);
+        }
+
+        if let Some(target) = self.route_assistant_by_metadata(message) {
+            let routed_id = self.resolve_assistant_route_target(&target)?;
+            info!(
+                route_type = target.route_type(),
+                target = %target.name(),
+                "Assistant routed via metadata fallback"
+            );
+            self.assistant_routes.insert(route_key, target);
+            return Ok(routed_id);
+        }
+
+        self.assistant_routes.remove(&route_key);
+        Ok(agent_id)
+    }
+
+    fn route_assistant_by_metadata(&self, message: &str) -> Option<AssistantRouteTarget> {
+        let hand_selection = router::auto_select_hand(message, None);
+        let template_selection =
+            router::auto_select_template(message, &self.config.home_dir.join("agents"), None);
+
+        let hand_candidate = hand_selection
+            .hand_id
+            .filter(|hand_id| hand_selection.score > 0 && self.hand_requirements_met(hand_id));
+
+        if let Some(hand_id) = hand_candidate {
+            if hand_selection.score >= template_selection.score {
+                return Some(AssistantRouteTarget::Hand(hand_id));
+            }
+        }
+
+        if template_selection.score > 0 && template_selection.template != "assistant" {
+            return Some(AssistantRouteTarget::Specialist(
+                template_selection.template,
+            ));
+        }
+
+        None
+    }
+
+    fn resolve_assistant_route_target(
+        &self,
+        target: &AssistantRouteTarget,
+    ) -> KernelResult<AgentId> {
+        match target {
+            AssistantRouteTarget::Specialist(name) => self.resolve_or_spawn_specialist(name),
+            AssistantRouteTarget::Hand(hand_id) => self.resolve_or_activate_hand(hand_id),
+        }
+    }
+
+    fn resolve_or_activate_hand(&self, hand_id: &str) -> KernelResult<AgentId> {
+        if let Some(agent_id) = self.active_hand_agent_id(hand_id) {
+            return Ok(agent_id);
+        }
+
+        let instance = self.activate_hand(hand_id, std::collections::HashMap::new())?;
+        instance.agent_id.ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::Internal(format!(
+                "Hand '{hand_id}' activated without an agent id"
+            )))
+        })
+    }
+
+    fn active_hand_agent_id(&self, hand_id: &str) -> Option<AgentId> {
+        self.hand_registry
+            .list_instances()
+            .into_iter()
+            .find(|instance| {
+                instance.hand_id == hand_id
+                    && instance.status == librefang_hands::HandStatus::Active
+            })
+            .and_then(|instance| instance.agent_id)
+    }
+
+    fn hand_requirements_met(&self, hand_id: &str) -> bool {
+        match self.hand_registry.check_requirements(hand_id) {
+            Ok(results) => {
+                for (req, satisfied) in &results {
+                    if !satisfied {
+                        info!(
+                            hand = %hand_id,
+                            requirement = %req.label,
+                            "Hand requirement not met, skipping assistant auto-route"
+                        );
+                        return false;
+                    }
+                }
+                true
+            }
+            Err(_) => true,
+        }
+    }
+
+    fn assistant_route_key(agent_id: AgentId, sender_context: Option<&SenderContext>) -> String {
+        match sender_context {
+            Some(sender) => format!(
+                "{agent_id}:{}:{}:{}",
+                sender.channel,
+                sender.user_id,
+                sender.thread_id.as_deref().unwrap_or_default()
+            ),
+            None => agent_id.to_string(),
+        }
+    }
+
+    fn should_skip_intent_classification(message: &str) -> bool {
+        let trimmed = message.trim();
+        trimmed.len() < 15 && !trimmed.contains("http")
+    }
+
+    fn should_reuse_cached_route(message: &str) -> bool {
+        Self::should_skip_intent_classification(message) && !Self::is_brief_acknowledgement(message)
+    }
+
+    fn is_brief_acknowledgement(message: &str) -> bool {
+        let trimmed = message.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "ok" | "okay"
+                | "thanks"
+                | "thank you"
+                | "thx"
+                | "cool"
+                | "great"
+                | "nice"
+                | "got it"
+                | "sounds good"
+        ) || matches!(
+            trimmed,
+            "好的" | "谢谢" | "谢了" | "收到" | "了解" | "行" | "好" | "多谢"
+        )
     }
 
     /// Execute the default LLM-based agent loop.
@@ -7552,6 +7718,36 @@ mod tests {
         );
 
         kernel.shutdown();
+    }
+
+    #[test]
+    fn test_should_reuse_cached_route_for_brief_follow_up() {
+        assert!(LibreFangKernel::should_reuse_cached_route("fix that"));
+        assert!(LibreFangKernel::should_reuse_cached_route("继续"));
+        assert!(!LibreFangKernel::should_reuse_cached_route("thanks"));
+        assert!(!LibreFangKernel::should_reuse_cached_route(
+            "please write the API design for this service"
+        ));
+    }
+
+    #[test]
+    fn test_assistant_route_key_scopes_sender_and_thread() {
+        let agent_id = AgentId::new();
+        let sender = SenderContext {
+            channel: "telegram".to_string(),
+            user_id: "user-123".to_string(),
+            display_name: "Alice".to_string(),
+            is_group: true,
+            thread_id: Some("thread-9".to_string()),
+        };
+
+        let with_sender = LibreFangKernel::assistant_route_key(agent_id, Some(&sender));
+        let without_sender = LibreFangKernel::assistant_route_key(agent_id, None);
+
+        assert!(with_sender.contains("telegram"));
+        assert!(with_sender.contains("user-123"));
+        assert!(with_sender.contains("thread-9"));
+        assert_ne!(with_sender, without_sender);
     }
 
     #[test]

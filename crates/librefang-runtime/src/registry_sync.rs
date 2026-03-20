@@ -179,3 +179,27 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::needs_sync;
+
+    #[test]
+    fn test_needs_sync_when_agents_dir_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("providers")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("hands")).unwrap();
+
+        assert!(needs_sync(tmp.path()));
+    }
+
+    #[test]
+    fn test_needs_sync_when_critical_dirs_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("providers")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("hands")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("agents")).unwrap();
+
+        assert!(!needs_sync(tmp.path()));
+    }
+}
