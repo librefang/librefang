@@ -20,7 +20,7 @@ use std::time::Duration;
 
 // ── Internal state ───────────────────────────────────────────────────────────
 
-const DEFAULT_ENTRY_AGENTS: &[&str] = &["router", "assistant"];
+const DEFAULT_ENTRY_AGENTS: &[&str] = &["assistant"];
 
 enum Backend {
     Daemon { base_url: String },
@@ -848,31 +848,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_preferred_daemon_agent_prefers_router_then_assistant() {
+    fn test_preferred_daemon_agent_prefers_assistant() {
         let agents = vec![
             serde_json::json!({"name": "coder", "id": "1"}),
             serde_json::json!({"name": "assistant", "id": "2"}),
-            serde_json::json!({"name": "router", "id": "3"}),
         ];
         let preferred = preferred_daemon_agent(&agents).unwrap();
-        assert_eq!(preferred["name"].as_str(), Some("router"));
+        assert_eq!(preferred["name"].as_str(), Some("assistant"));
     }
 
     #[test]
-    fn test_preferred_template_prefers_router_then_assistant() {
+    fn test_preferred_template_prefers_assistant() {
         let templates = vec![
+            crate::templates::AgentTemplate {
+                name: "coder".to_string(),
+                description: String::new(),
+                content: String::new(),
+            },
             crate::templates::AgentTemplate {
                 name: "assistant".to_string(),
                 description: String::new(),
                 content: String::new(),
             },
-            crate::templates::AgentTemplate {
-                name: "router".to_string(),
-                description: String::new(),
-                content: String::new(),
-            },
         ];
         let preferred = preferred_template(&templates).unwrap();
-        assert_eq!(preferred.name, "router");
+        assert_eq!(preferred.name, "assistant");
     }
 }

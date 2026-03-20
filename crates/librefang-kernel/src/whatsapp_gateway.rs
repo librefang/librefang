@@ -158,7 +158,7 @@ pub async fn start_whatsapp_gateway(kernel: &Arc<super::kernel::LibreFangKernel>
     let default_agent = wa_config
         .default_agent
         .as_deref()
-        .unwrap_or("router")
+        .unwrap_or("assistant")
         .to_string();
 
     // Owner routing: pass the first owner number to the gateway process

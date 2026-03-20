@@ -8,6 +8,176 @@ use librefang_channels::router::AgentRouter;
 use librefang_channels::sidecar::SidecarAdapter;
 use librefang_channels::types::{ChannelAdapter, SenderContext};
 
+/// Check if text looks like a raw tool call leaked as content.
+///
+/// Some providers emit tool calls as plain text (recovered by
+/// `agent_loop::recover_text_tool_calls`). These should not be
+/// forwarded to the user through streaming channels.
+fn looks_like_tool_call(text: &str) -> bool {
+    let t = text.trim();
+    // JSON-style tool calls (may appear at start of text)
+    t.starts_with("[{")
+        || t.starts_with("functions.")
+        || t.starts_with("{\"type\":\"function\"")
+        || (t.starts_with('[') && t.contains("'type': 'text'"))
+        || contains_bare_json_tool_call(t)
+        // Tag-based patterns — use contains() because tool call tags may
+        // appear after natural language preamble
+        || t.contains("<function=")
+        || t.contains("<function>")
+        || t.contains("<function ")
+        || t.contains("<tool>")
+        || t.contains("[TOOL_CALL]")
+        || t.contains("<tool_call>")
+        // Pattern 4: markdown code block containing a tool call
+        || contains_markdown_tool_call(t)
+        // Pattern 5: backtick-wrapped tool call
+        || contains_backtick_tool_call(t)
+}
+
+fn contains_markdown_tool_call(text: &str) -> bool {
+    let mut in_block = false;
+    let mut block_content = String::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            if in_block {
+                if looks_like_named_json_tool_call(&block_content) {
+                    return true;
+                }
+                block_content.clear();
+                in_block = false;
+            } else {
+                in_block = true;
+                block_content.clear();
+            }
+        } else if in_block {
+            if !block_content.is_empty() {
+                block_content.push('\n');
+            }
+            block_content.push_str(trimmed);
+        }
+    }
+
+    false
+}
+
+fn contains_backtick_tool_call(text: &str) -> bool {
+    text.split('`')
+        .skip(1)
+        .step_by(2)
+        .any(looks_like_named_json_tool_call)
+}
+
+fn looks_like_named_json_tool_call(text: &str) -> bool {
+    let trimmed = text.trim();
+    let Some(brace_pos) = trimmed.find('{') else {
+        return false;
+    };
+
+    let potential_tool = trimmed[..brace_pos].trim();
+    if potential_tool.is_empty() || !looks_like_tool_name(potential_tool) {
+        return false;
+    }
+
+    serde_json::from_str::<serde_json::Value>(trimmed[brace_pos..].trim()).is_ok()
+}
+
+fn looks_like_tool_name(name: &str) -> bool {
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/'))
+}
+
+fn contains_bare_json_tool_call(text: &str) -> bool {
+    let mut scan_from = 0;
+
+    while let Some(brace_start) = text[scan_from..].find('{') {
+        let abs_brace = scan_from + brace_start;
+        if let Some(end) = find_json_object_end(&text[abs_brace..]) {
+            if looks_like_tool_call_object(&text[abs_brace..abs_brace + end]) {
+                return true;
+            }
+        }
+        scan_from = abs_brace + 1;
+    }
+
+    false
+}
+
+fn find_json_object_end(text: &str) -> Option<usize> {
+    let mut depth = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (i, c) in text.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+
+            match c {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn looks_like_tool_call_object(text: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+
+    let Some(name) = obj
+        .get("name")
+        .or_else(|| obj.get("function"))
+        .or_else(|| obj.get("tool"))
+        .and_then(|value| value.as_str())
+    else {
+        return false;
+    };
+
+    if !looks_like_tool_name(name) {
+        return false;
+    }
+
+    let args = obj
+        .get("arguments")
+        .or_else(|| obj.get("parameters"))
+        .or_else(|| obj.get("args"))
+        .or_else(|| obj.get("input"));
+
+    match args {
+        Some(serde_json::Value::String(s)) => serde_json::from_str::<serde_json::Value>(s).is_ok(),
+        Some(_) => true,
+        None => matches!(
+            obj.get("type").and_then(|value| value.as_str()),
+            Some("function")
+        ),
+    }
+}
+
 // Feature-gated adapter imports
 #[cfg(feature = "channel-discord")]
 use librefang_channels::discord::DiscordAdapter;
@@ -98,6 +268,7 @@ use librefang_channels::qq::QqAdapter;
 use librefang_channels::wecom::WeComAdapter;
 
 use async_trait::async_trait;
+use librefang_kernel::error::KernelResult;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::llm_driver::StreamEvent;
 use librefang_types::agent::AgentId;
@@ -109,6 +280,80 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use librefang_runtime::str_utils::safe_truncate_str;
+
+fn start_stream_text_bridge(
+    mut event_rx: mpsc::Receiver<StreamEvent>,
+    kernel_handle: tokio::task::JoinHandle<
+        KernelResult<librefang_runtime::agent_loop::AgentLoopResult>,
+    >,
+) -> mpsc::Receiver<String> {
+    let (tx, rx) = mpsc::channel::<String>(64);
+
+    let bridge_handle = tokio::spawn(async move {
+        // Buffer text per iteration. Some providers emit tool call syntax
+        // as plain text (recovered by agent_loop later). We hold text until
+        // ContentComplete, then flush only if it doesn't look like a raw
+        // tool call or content-block array.
+        let mut iter_buf = String::new();
+        let mut saw_tool_use = false;
+
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                StreamEvent::TextDelta { text } => {
+                    iter_buf.push_str(&text);
+                }
+                StreamEvent::ContentComplete { .. } => {
+                    // Flush buffered text. Only suppress when ToolUseStart
+                    // was seen in this iteration (the text is the tool call
+                    // echoed as content). Do NOT apply heuristic filtering
+                    // here — normal replies that demonstrate tool syntax
+                    // (e.g. "use `web_search {…}`") must not be discarded.
+                    if !iter_buf.is_empty() {
+                        if saw_tool_use {
+                            debug!("Streaming bridge: filtered tool-use-adjacent text");
+                        } else if tx.send(std::mem::take(&mut iter_buf)).await.is_err() {
+                            break;
+                        }
+                    }
+                    iter_buf.clear();
+                    saw_tool_use = false;
+                }
+                StreamEvent::ToolUseStart { .. } => {
+                    saw_tool_use = true;
+                }
+                _ => {}
+            }
+        }
+
+        if !iter_buf.is_empty() && !saw_tool_use {
+            if !looks_like_tool_call(&iter_buf) {
+                let _ = tx.send(iter_buf).await;
+            } else {
+                debug!("Streaming bridge: filtered leaked tool call text in final flush");
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        match kernel_handle.await {
+            Err(e) => error!("Streaming kernel task panicked: {e}"),
+            Ok(Err(e)) => error!("Streaming kernel task returned error: {e}"),
+            Ok(Ok(result)) => {
+                debug!(
+                    input_tokens = result.total_usage.input_tokens,
+                    output_tokens = result.total_usage.output_tokens,
+                    iterations = result.iterations,
+                    "Streaming kernel task completed"
+                );
+            }
+        }
+        if let Err(e) = bridge_handle.await {
+            error!("Streaming bridge task panicked: {e}");
+        }
+    });
+
+    rx
+}
 
 /// Wraps `LibreFangKernel` to implement `ChannelBridgeHandle`.
 pub struct KernelBridgeAdapter {
@@ -169,62 +414,26 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         agent_id: AgentId,
         message: &str,
     ) -> Result<mpsc::Receiver<String>, String> {
-        let (mut event_rx, kernel_handle) = self
+        let (event_rx, kernel_handle) = self
             .kernel
-            .send_message_streaming(agent_id, message, None)
+            .send_message_streaming_with_routing(agent_id, message, None)
+            .await
             .map_err(|e| format!("{e}"))?;
+        Ok(start_stream_text_bridge(event_rx, kernel_handle))
+    }
 
-        // Bridge StreamEvent -> text-only mpsc channel for the adapter.
-        let (tx, rx) = mpsc::channel::<String>(64);
-
-        let bridge_handle = tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                match event {
-                    StreamEvent::TextDelta { text } => {
-                        if tx.send(text).await.is_err() {
-                            break; // receiver dropped
-                        }
-                    }
-                    StreamEvent::ContentComplete { .. } => {
-                        // Do NOT break here. ContentComplete fires at the end of each
-                        // LLM turn (iteration), not at the end of the entire agent loop.
-                        // In a multi-iteration scenario — e.g. the router agent's first
-                        // turn is a tool call (no text) and the second turn contains the
-                        // actual text response — breaking here would cause us to exit
-                        // before the text-bearing iteration is even reached.
-                        //
-                        // The loop naturally terminates when `event_rx.recv()` returns
-                        // `None`, which happens when the kernel drops the sender after
-                        // the full agent loop completes.
-                    }
-                    _ => {
-                        // ToolUseStart, ToolInputDelta, ThinkingDelta, etc. — skip
-                        debug!("Streaming bridge: skipping non-text event");
-                    }
-                }
-            }
-        });
-
-        // Spawn a supervisor that awaits both handles and logs panics / errors.
-        tokio::spawn(async move {
-            match kernel_handle.await {
-                Err(e) => error!("Streaming kernel task panicked: {e}"),
-                Ok(Err(e)) => error!("Streaming kernel task returned error: {e}"),
-                Ok(Ok(result)) => {
-                    debug!(
-                        input_tokens = result.total_usage.input_tokens,
-                        output_tokens = result.total_usage.output_tokens,
-                        iterations = result.iterations,
-                        "Streaming kernel task completed"
-                    );
-                }
-            }
-            if let Err(e) = bridge_handle.await {
-                error!("Streaming bridge task panicked: {e}");
-            }
-        });
-
-        Ok(rx)
+    async fn send_message_streaming_with_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> Result<mpsc::Receiver<String>, String> {
+        let (event_rx, kernel_handle) = self
+            .kernel
+            .send_message_streaming_with_sender_context_and_routing(agent_id, message, None, sender)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(start_stream_text_bridge(event_rx, kernel_handle))
     }
 
     async fn send_message_with_sender(
@@ -2359,6 +2568,45 @@ pub async fn reload_channels_from_disk(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn test_looks_like_tool_call_detects_markdown_tool_call_with_preamble() {
+        let text = "Here is the tool call:\n```json\nweb_search {\"query\":\"rust\"}\n```";
+        assert!(looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_detects_backtick_tool_call_with_preamble() {
+        let text = "I'll use `web_search {\"query\":\"rust\"}` for that.";
+        assert!(looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_detects_bare_json_tool_call_with_preamble() {
+        let text =
+            "I'll run that: {\"name\":\"shell_exec\",\"arguments\":{\"command\":\"ls -la\"}}";
+        assert!(looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_allows_normal_code_block() {
+        let text = "```rust\nfn main() {\n    println!(\"hi\");\n}\n```";
+        assert!(!looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_allows_inline_json_example() {
+        let text = "Use `{\"foo\":\"bar\"}` in your config.";
+        assert!(!looks_like_tool_call(text));
+    }
+
+    #[test]
+    fn test_looks_like_tool_call_allows_non_tool_json_object() {
+        let text = "Profile payload: {\"name\":\"Alice\",\"role\":\"admin\"}";
+        assert!(!looks_like_tool_call(text));
+    }
+
     #[tokio::test]
     async fn test_bridge_skips_when_no_config() {
         let config = librefang_types::config::KernelConfig::default();

@@ -60,6 +60,7 @@ jobs:
           # - GTK/webkit: transitive from Tauri 2.x
           # - lexical-core: transitive through imap (imap 3.x is alpha, nom 8+ required)
           # - rsa: Marvin Attack timing side-channel, no fix available (transitive from librefang-channels)
+          # - rustls-webpki 0.102.x: transitive from rumqttc, no compatible upgrade available
           cargo audit \
             --ignore RUSTSEC-2024-0384 \
             --ignore RUSTSEC-2024-0385 \
@@ -74,7 +75,8 @@ jobs:
             --ignore RUSTSEC-2024-0390 \
             --ignore RUSTSEC-2023-0086 \
             --ignore RUSTSEC-2024-0370 \
-            --ignore RUSTSEC-2023-0071
+            --ignore RUSTSEC-2023-0071 \
+            --ignore RUSTSEC-2026-0049
 
   # ── Secrets scanning (independent) ────────────────────────────────────────────────────
   secrets:

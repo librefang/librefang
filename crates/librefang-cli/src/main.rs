@@ -1801,8 +1801,8 @@ fn cmd_init(quick: bool) {
         }
     }
 
-    // Install bundled agent templates (skips existing ones to preserve user edits)
-    bundled_agents::install_bundled_agents(&librefang_dir.join("agents"));
+    // Sync agent templates from registry (skips existing ones to preserve user edits)
+    bundled_agents::sync_registry_agents(&librefang_dir);
 
     // Initialize vault if not already initialized
     init_vault_if_missing(&librefang_dir);
@@ -2054,7 +2054,7 @@ fn configured_default_model(provider: &str) -> Option<String> {
 fn default_model_for_provider(provider: &str) -> String {
     configured_default_model(provider)
         .or_else(|| {
-            let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+            let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
             catalog.default_model_for_provider(provider)
         })
         .unwrap_or_else(|| "local-model".to_string())
@@ -3781,7 +3781,7 @@ fn cmd_doctor(json: bool, repair: bool) {
         }
         let skills_dir = cli_librefang_home().join("skills");
         let mut skill_reg = librefang_skills::registry::SkillRegistry::new(skills_dir.clone());
-        skill_reg.load_bundled();
+        skill_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let bundled_count = skill_reg.count();
         if !json {
             ui::check_ok(&format!("Bundled skills loaded: {bundled_count}"));
@@ -3855,7 +3855,7 @@ fn cmd_doctor(json: bool, repair: bool) {
         let librefang_dir = cli_librefang_home();
         let mut ext_registry =
             librefang_extensions::registry::IntegrationRegistry::new(&librefang_dir);
-        ext_registry.load_bundled();
+        ext_registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let _ = ext_registry.load_installed();
         let template_count = ext_registry.template_count();
         let installed_count = ext_registry.installed_count();
@@ -5102,7 +5102,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
                 return;
             }
 
-            let config_block = "\n[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("telegram", config_block);
 
             // Save token to .env
@@ -5160,7 +5160,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let app_token = prompt_input("  Paste your App Token (xapp-...): ");
             let bot_token = prompt_input("  Paste your Bot Token (xoxb-...): ");
 
-            let config_block = "\n[channels.slack]\napp_token_env = \"SLACK_APP_TOKEN\"\nbot_token_env = \"SLACK_BOT_TOKEN\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.slack]\napp_token_env = \"SLACK_APP_TOKEN\"\nbot_token_env = \"SLACK_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("slack", config_block);
 
             if !app_token.is_empty() {
@@ -5195,7 +5195,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let access_token = prompt_input("  Access Token: ");
             let verify_token = prompt_input("  Verify Token: ");
 
-            let config_block = "\n[channels.whatsapp]\nmode = \"cloud_api\"\nphone_number_id_env = \"WA_PHONE_ID\"\naccess_token_env = \"WA_ACCESS_TOKEN\"\nverify_token_env = \"WA_VERIFY_TOKEN\"\nwebhook_port = 8443\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.whatsapp]\nmode = \"cloud_api\"\nphone_number_id_env = \"WA_PHONE_ID\"\naccess_token_env = \"WA_ACCESS_TOKEN\"\nverify_token_env = \"WA_VERIFY_TOKEN\"\nwebhook_port = 8443\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("whatsapp", config_block);
 
             for (key, val) in [
@@ -5231,7 +5231,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let password = prompt_input("  App password (or Enter to set later): ");
 
             let config_block = format!(
-                "\n[channels.email]\nimap_host = \"imap.gmail.com\"\nimap_port = 993\nsmtp_host = \"smtp.gmail.com\"\nsmtp_port = 587\nusername = \"{username}\"\npassword_env = \"EMAIL_PASSWORD\"\npoll_interval = 30\ndefault_agent = \"router\"\n"
+                "\n[channels.email]\nimap_host = \"imap.gmail.com\"\nimap_port = 993\nsmtp_host = \"smtp.gmail.com\"\nsmtp_port = 587\nusername = \"{username}\"\npassword_env = \"EMAIL_PASSWORD\"\npoll_interval = 30\ndefault_agent = \"assistant\"\n"
             );
             maybe_write_channel_config("email", &config_block);
 
@@ -5266,7 +5266,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
 
             let phone = prompt_input("  Your phone number (+1XXXX, or Enter to skip): ");
 
-            let config_block = "\n[channels.signal]\nphone_env = \"SIGNAL_PHONE\"\nsocket_path = \"/tmp/signal-cli.sock\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.signal]\nphone_env = \"SIGNAL_PHONE\"\nsocket_path = \"/tmp/signal-cli.sock\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("signal", config_block);
 
             if !phone.is_empty() {
@@ -5300,7 +5300,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             };
             let token = prompt_input("  Access token: ");
 
-            let config_block = "\n[channels.matrix]\nhomeserver_env = \"MATRIX_HOMESERVER\"\naccess_token_env = \"MATRIX_ACCESS_TOKEN\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.matrix]\nhomeserver_env = \"MATRIX_HOMESERVER\"\naccess_token_env = \"MATRIX_ACCESS_TOKEN\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("matrix", config_block);
 
             let _ = dotenv::save_env_key("MATRIX_HOMESERVER", &homeserver);
@@ -6374,7 +6374,7 @@ pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
 fn cmd_integration_add(name: &str, key: Option<&str>) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
+    registry.load_bundled(&librefang_dir);
     let _ = registry.load_installed();
 
     // Check template exists
@@ -6460,7 +6460,7 @@ fn cmd_integration_add(name: &str, key: Option<&str>) {
 fn cmd_integration_remove(name: &str) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
+    registry.load_bundled(&librefang_dir);
     let _ = registry.load_installed();
 
     match librefang_extensions::installer::remove_integration(&mut registry, name) {
@@ -6484,7 +6484,7 @@ fn cmd_integration_remove(name: &str) {
 fn cmd_integrations_list(query: Option<&str>) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
+    registry.load_bundled(&librefang_dir);
     let _ = registry.load_installed();
 
     let dotenv_path = home.join(".env");
@@ -6852,7 +6852,7 @@ fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
         }
     } else {
         // Standalone: use ModelCatalog directly
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
         let models = catalog.list_models();
         if json {
             let arr: Vec<serde_json::Value> = models
@@ -6928,7 +6928,7 @@ fn cmd_models_aliases(json: bool) {
             );
         }
     } else {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
         let aliases = catalog.list_aliases();
         if json {
             let obj: serde_json::Map<String, serde_json::Value> = aliases
@@ -6983,7 +6983,7 @@ fn cmd_models_providers(json: bool) {
             );
         }
     } else {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
         let providers = catalog.list_providers();
         if json {
             let arr: Vec<serde_json::Value> = providers
@@ -7043,7 +7043,7 @@ fn cmd_models_set(model: Option<String>) {
 
 /// Interactive model picker — shows numbered list, accepts number or model ID.
 fn pick_model() -> String {
-    let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+    let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
     let models = catalog.list_models();
 
     if models.is_empty() {
@@ -9110,8 +9110,9 @@ mod tests {
     fn test_doctor_skill_registry_loads_bundled() {
         let skills_dir = std::env::temp_dir().join("librefang-doctor-test-skills");
         let mut skill_reg = librefang_skills::registry::SkillRegistry::new(skills_dir);
-        let count = skill_reg.load_bundled();
-        assert!(count > 0, "Should load bundled skills");
+        let count =
+            skill_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        // Skills are loaded from disk at runtime; count depends on registry files being present
         assert_eq!(skill_reg.count(), count);
     }
 
@@ -9120,8 +9121,9 @@ mod tests {
         let tmp = std::env::temp_dir().join("librefang-doctor-test-ext");
         let _ = std::fs::create_dir_all(&tmp);
         let mut ext_reg = librefang_extensions::registry::IntegrationRegistry::new(&tmp);
-        let count = ext_reg.load_bundled();
-        assert!(count > 0, "Should load bundled integration templates");
+        let count =
+            ext_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        // Integrations are loaded from disk at runtime; count depends on registry files being present
         assert_eq!(ext_reg.template_count(), count);
     }
 

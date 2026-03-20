@@ -964,27 +964,45 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
     )
 )]
 pub async fn migrate_detect() -> impl IntoResponse {
-    match librefang_migrate::openclaw::detect_openclaw_home() {
-        Some(path) => {
-            let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
-            (
+    // Check OpenClaw first
+    if let Some(path) = librefang_migrate::openclaw::detect_openclaw_home() {
+        let scan = librefang_migrate::openclaw::scan_openclaw_workspace(&path);
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "detected": true,
+                "source": "openclaw",
+                "path": path.display().to_string(),
+                "scan": scan,
+            })),
+        );
+    }
+
+    // Check OpenFang
+    if let Some(home) = dirs::home_dir() {
+        let openfang_path = home.join(".openfang");
+        if openfang_path.exists() && openfang_path.is_dir() {
+            return (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "detected": true,
-                    "path": path.display().to_string(),
-                    "scan": scan,
+                    "source": "openfang",
+                    "path": openfang_path.display().to_string(),
+                    "scan": null,
                 })),
-            )
+            );
         }
-        None => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "detected": false,
-                "path": null,
-                "scan": null,
-            })),
-        ),
     }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "detected": false,
+            "source": null,
+            "path": null,
+            "scan": null,
+        })),
+    )
 }
 
 /// POST /api/migrate/scan — Scan a specific directory for OpenClaw workspace.
@@ -1025,11 +1043,12 @@ pub async fn run_migrate(
         "openclaw" => librefang_migrate::MigrateSource::OpenClaw,
         "langchain" => librefang_migrate::MigrateSource::LangChain,
         "autogpt" => librefang_migrate::MigrateSource::AutoGpt,
+        "openfang" => librefang_migrate::MigrateSource::OpenFang,
         other => {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(
-                    serde_json::json!({"error": format!("Unknown source: {other}. Use 'openclaw', 'langchain', or 'autogpt'")}),
+                    serde_json::json!({"error": format!("Unknown source: {other}. Use 'openclaw', 'openfang', 'langchain', or 'autogpt'")}),
                 ),
             );
         }
