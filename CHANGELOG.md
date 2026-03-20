@@ -5,6 +5,77 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.5] - 2026-03-20
+
+### Added
+
+- Auto-initialize vault during librefang init (#1206) (@houko)
+- Add token consumption metadata and reduce default hands (#1215) (@houko)
+- Add image pipeline and subprocess management (#1223) (@f-liva)
+- Add Qwen Code CLI as LLM provider (#1224) (@f-liva)
+- Align init defaults with OpenRouter Stepfun (#1262) (@houko)
+- Replace all icons with new LibreFang branding (#1263) (@f-liva)
+- Fix shell (#1270) (@houko)
+
+### Fixed
+
+- Decrypt encrypted webhook payloads (#1208) (@TechWizard9999)
+- Bootstrap context engine during startup (#1209) (@TechWizard9999)
+- Support target ids in channel test (#1210) (@TechWizard9999)
+- Make shell installer POSIX-compatible for Linux (#1226) (@houko)
+- Web deployment issues (#1236) (@houko)
+- Web deployment issues (#1237) (@houko)
+- Create web/public/assets directory (#1238) (@houko)
+- Web deployment and CI fixes (#1239) (@houko)
+- Web deployment and CI fixes (#1243) (@houko)
+- Repair install smoke script and drop update-star-history workflow (#1255) (@houko)
+- Use web/public installer source and harden curl|sh install flow (#1259) (@houko)
+- Address code-scanning path-injection findings (follow-up) (#1260) (@houko)
+- Initialize rustls crypto provider for TLS connections (#1294) (@houko)
+
+### Documentation
+
+- Update star history (#1197) (@houko)
+- Update star history (#1198) (@houko)
+- Update star history (#1199) (@houko)
+- Update star history (#1200) (@houko)
+- Update star history (#1201) (@houko)
+- Update star history (#1202) (@houko)
+- Update star history (#1203) (@houko)
+- Update star history (#1213) (@houko)
+- Update contributors (#1214) (@houko)
+- Update star history (#1225) (@houko)
+- Update star history (#1228) (@houko)
+- Add SDK usage examples to all README files (#1229) (@houko)
+- Update star history (#1231) (@houko)
+- Update star history (#1232) (@houko)
+- Update star history (#1235) (@houko)
+- Update contributors (#1240) (@app/github-actions)
+- Update star history (#1242) (@app/github-actions)
+
+### Maintenance
+
+- Tidy repo structure (#1211) (@houko)
+- Use .nvmrc for web Node.js version and fix Dockerfile path (#1234) (@houko)
+- Bump actions/setup-node from 4 to 6 (#1280) (@app/dependabot)
+- Bump actions/download-artifact from 4 to 8 (#1281) (@app/dependabot)
+- Bump pnpm/action-setup from 4 to 5 (#1282) (@app/dependabot)
+- Bump actions/labeler from 5 to 6 (#1283) (@app/dependabot)
+- Bump zip from 8.2.0 to 8.3.0 (#1284) (@app/dependabot)
+- Bump jsonwebtoken from 9.3.1 to 10.3.0 (#1285) (@app/dependabot)
+- Bump tracing-subscriber from 0.3.22 to 0.3.23 (#1286) (@app/dependabot)
+- Bump rusqlite from 0.38.0 to 0.39.0 (#1287) (@app/dependabot)
+- Bump rumqttc from 0.24.0 to 0.25.1 (#1288) (@app/dependabot)
+- Bump tokio-tungstenite from 0.28.0 to 0.29.0 (#1289) (@app/dependabot)
+- Bump criterion from 0.5.1 to 0.8.2 (#1290) (@app/dependabot)
+- Bump rand from 0.8.5 to 0.9.2 (#1291) (@app/dependabot)
+- Bump toml_edit from 0.25.4+spec-1.1.0 to 0.25.5+spec-1.1.0 (#1292) (@app/dependabot)
+
+### Other
+
+- Clean skills (#1212) (@houko)
+- Fix/webui chat input line break failed (#1245) (@aimlyo)
+
 ## [v0.6.4-20260320] - 2026-03-20
 
 ### Added
