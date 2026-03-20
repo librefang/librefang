@@ -1340,9 +1340,15 @@ impl LibreFangKernel {
                         .scheduler
                         .register(agent_id, entry.manifest.resources.clone());
 
-                    // Re-register in the in-memory registry (set state back to Running)
+                    // Re-register in the in-memory registry
                     let mut restored_entry = entry;
-                    restored_entry.state = AgentState::Running;
+                    // Respect `enabled` flag from manifest — disabled agents start as Suspended
+                    if restored_entry.manifest.enabled {
+                        restored_entry.state = AgentState::Running;
+                    } else {
+                        restored_entry.state = AgentState::Suspended;
+                        info!(agent = %name, "Agent disabled in config — starting as Suspended");
+                    }
 
                     // Inherit kernel exec_policy for agents that lack one
                     if restored_entry.manifest.exec_policy.is_none() {
@@ -3831,10 +3837,10 @@ impl LibreFangKernel {
         }
     }
 
-    /// Suspend an agent — sets state to Suspended, cron jobs will skip it.
+    /// Suspend an agent — sets state to Suspended, persists enabled=false to TOML.
     pub fn suspend_agent(&self, agent_id: AgentId) -> KernelResult<()> {
         use librefang_types::agent::AgentState;
-        self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
         let _ = self.registry.set_state(agent_id, AgentState::Suspended);
@@ -3842,19 +3848,61 @@ impl LibreFangKernel {
         if let Some((_, handle)) = self.running_tasks.remove(&agent_id) {
             handle.abort();
         }
+        // Persist enabled=false to agent.toml
+        self.persist_agent_enabled(agent_id, &entry.name, false);
         info!(agent_id = %agent_id, "Agent suspended");
         Ok(())
     }
 
-    /// Resume a suspended agent — sets state back to Running.
+    /// Resume a suspended agent — sets state back to Running, persists enabled=true.
     pub fn resume_agent(&self, agent_id: AgentId) -> KernelResult<()> {
         use librefang_types::agent::AgentState;
-        self.registry.get(agent_id).ok_or_else(|| {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
         let _ = self.registry.set_state(agent_id, AgentState::Running);
+        // Persist enabled=true to agent.toml
+        self.persist_agent_enabled(agent_id, &entry.name, true);
         info!(agent_id = %agent_id, "Agent resumed");
         Ok(())
+    }
+
+    /// Write enabled flag to agent's TOML file.
+    fn persist_agent_enabled(&self, _agent_id: AgentId, name: &str, enabled: bool) {
+        let toml_path = self
+            .config
+            .home_dir
+            .join("agents")
+            .join(name)
+            .join("agent.toml");
+        if !toml_path.exists() {
+            return;
+        }
+        match std::fs::read_to_string(&toml_path) {
+            Ok(content) => {
+                // Simple: replace or append enabled field
+                let new_content = if content.contains("enabled =") || content.contains("enabled=") {
+                    content
+                        .lines()
+                        .map(|line| {
+                            if line.trim_start().starts_with("enabled") && line.contains('=') {
+                                format!("enabled = {enabled}")
+                            } else {
+                                line.to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                } else {
+                    // Append after [agent] section or at end
+                    format!("{content}\nenabled = {enabled}\n")
+                };
+                if let Err(e) = std::fs::write(&toml_path, new_content) {
+                    warn!("Failed to persist enabled={enabled} for {name}: {e}");
+                }
+            }
+            Err(e) => warn!("Failed to read agent TOML for {name}: {e}"),
+        }
     }
 
     /// Compact an agent's session using LLM-based summarization.
