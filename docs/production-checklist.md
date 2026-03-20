@@ -118,13 +118,13 @@ convert icon.svg -resize 256x256 -define icon:auto-resize=256,128,64,48,32,16 ic
 **Status:** BLOCKING for install scripts — users should run `curl -fsSL https://librefang.ai/install.sh | sh`.
 
 Options:
-- **GitHub Pages**: Point `librefang.ai` to a GitHub Pages site that redirects `/install.sh` to `scripts/install.sh` and `/install.ps1` to `scripts/install.ps1` from the repo's latest release.
+- **GitHub Pages**: Point `librefang.ai` to a GitHub Pages site that redirects `/install.sh` to `web/public/install.sh` and `/install.ps1` to `web/public/install.ps1` from the repo's latest release.
 - **Cloudflare Workers / Vercel**: Serve the install scripts with proper `Content-Type: text/plain` headers.
 - **Raw GitHub redirect**: Use `librefang.ai` to route to the repo-hosted installer artifacts if needed (less reliable).
 
 The install scripts reference:
-- `https://librefang.ai/install.sh` → serves `scripts/install.sh`
-- `https://librefang.ai/install.ps1` → serves `scripts/install.ps1`
+- `https://librefang.ai/install.sh` → serves `web/public/install.sh`
+- `https://librefang.ai/install.ps1` → serves `web/public/install.ps1`
 
 Until the domain is set up, users can install via:
 ```bash
@@ -158,20 +158,20 @@ Confirm:
 ### Linux/macOS
 ```bash
 # Test against a real GitHub release (after first tag)
-bash scripts/install.sh
+bash web/public/install.sh
 
 # Or test syntax only
-bash -n scripts/install.sh
-shellcheck scripts/install.sh
+bash -n web/public/install.sh
+shellcheck web/public/install.sh
 ```
 
 ### Windows (PowerShell)
 ```powershell
 # Test against a real GitHub release (after first tag)
-powershell -ExecutionPolicy Bypass -File scripts/install.ps1
+powershell -ExecutionPolicy Bypass -File web/public/install.ps1
 
 # Or syntax check only
-pwsh -NoProfile -Command "Get-Content scripts/install.ps1 | Out-Null"
+pwsh -NoProfile -Command "Get-Content web/public/install.ps1 | Out-Null"
 ```
 
 ### Docker smoke test

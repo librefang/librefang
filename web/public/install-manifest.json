@@ -1,0 +1,57 @@
+{
+  "repo": "librefang/librefang",
+  "version": "v0.3.57-20260313",
+  "published_at": "2026-03-13T05:47:03Z",
+  "generated_from": "https://github.com/librefang/librefang/releases/tag/v0.3.57-20260313",
+  "channels": {
+    "stable": "v0.3.57-20260313"
+  },
+  "installers": {
+    "shell": "/install.sh",
+    "powershell": "/install.ps1"
+  },
+  "assets": {
+    "x86_64-unknown-linux-gnu": {
+      "name": "librefang-x86_64-unknown-linux-gnu.tar.gz",
+      "target": "x86_64-unknown-linux-gnu",
+      "archive": "tar.gz",
+      "url": "https://github.com/librefang/librefang/releases/download/v0.3.57-20260313/librefang-x86_64-unknown-linux-gnu.tar.gz",
+      "checksum_url": "https://github.com/librefang/librefang/releases/download/v0.3.57-20260313/librefang-x86_64-unknown-linux-gnu.tar.gz.sha256"
+    },
+    "aarch64-unknown-linux-gnu": {
+      "name": "librefang-aarch64-unknown-linux-gnu.tar.gz",
+      "target": "aarch64-unknown-linux-gnu",
+      "archive": "tar.gz",
+      "url": "https://github.com/librefang/librefang/releases/download/v0.3.57-20260313/librefang-aarch64-unknown-linux-gnu.tar.gz",
+      "checksum_url": "https://github.com/librefang/librefang/releases/download/v0.3.57-20260313/librefang-aarch64-unknown-linux-gnu.tar.gz.sha256"
+    },
+    "x86_64-apple-darwin": {
+      "name": "librefang-x86_64-apple-darwin.tar.gz",
+      "target": "x86_64-apple-darwin",
+      "archive": "tar.gz",
+      "url": "https://github.com/librefang/librefang/releases/download/v0.3.57-20260313/librefang-x86_64-apple-darwin.tar.gz",
+      "checksum_url": "https://github.com/librefang/librefang/releases/download/v0.3.57-20260313/librefang-x86_64-apple-darwin.tar.gz.sha256"
+    },
+    "aarch64-apple-darwin": {
+      "name": "librefang-aarch64-apple-darwin.tar.gz",
+      "target": "aarch64-apple-darwin",
+      "archive": "tar.gz",
+      "url": "https://github.com/librefang/librefang/releases/download/v0.3.57-20260313/librefang-aarch64-apple-darwin.tar.gz",
+      "checksum_url": "https://github.com/librefang/librefang/releases/download/v0.3.57-20260313/librefang-aarch64-apple-darwin.tar.gz.sha256"
+    },
+    "x86_64-pc-windows-msvc": {
+      "name": "librefang-x86_64-pc-windows-msvc.zip",
+      "target": "x86_64-pc-windows-msvc",
+      "archive": "zip",
+      "url": "https://github.com/librefang/librefang/releases/download/v0.3.57-20260313/librefang-x86_64-pc-windows-msvc.zip",
+      "checksum_url": "https://github.com/librefang/librefang/releases/download/v0.3.57-20260313/librefang-x86_64-pc-windows-msvc.zip.sha256"
+    },
+    "aarch64-pc-windows-msvc": {
+      "name": "librefang-aarch64-pc-windows-msvc.zip",
+      "target": "aarch64-pc-windows-msvc",
+      "archive": "zip",
+      "url": "https://github.com/librefang/librefang/releases/download/v0.3.57-20260313/librefang-aarch64-pc-windows-msvc.zip",
+      "checksum_url": "https://github.com/librefang/librefang/releases/download/v0.3.57-20260313/librefang-aarch64-pc-windows-msvc.zip.sha256"
+    }
+  }
+}

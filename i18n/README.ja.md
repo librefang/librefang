@@ -144,7 +144,41 @@ xtask                 ビルド自動化
 
 **OpenAI 互換 API** — ドロップインの `/v1/chat/completions` エンドポイント。140+ REST/WS/SSE エンドポイント。[API リファレンス](../docs/api-reference.md)
 
-**クライアント SDK** — [JavaScript](../sdk/javascript) &bull; [Python](../sdk/python) &bull; [Rust](../sdk/rust) &bull; [Go](../sdk/go) — ストリーミング対応の完全な REST クライアント。
+**クライアント SDK** — ストリーミング対応の完全な REST クライアント。
+
+```javascript
+// JavaScript/TypeScript
+npm install @librefang/sdk
+const { LibreFang } = require("@librefang/sdk");
+const client = new LibreFang("http://localhost:4545");
+const agent = await client.agents.create({ template: "assistant" });
+const reply = await client.agents.message(agent.id, "Hello!");
+```
+
+```python
+# Python
+pip install librefang
+from librefang import Client
+client = Client("http://localhost:4545")
+agent = client.agents.create(template="assistant")
+reply = client.agents.message(agent["id"], "Hello!")
+```
+
+```rust
+// Rust
+cargo add librefang
+use librefang::LibreFang;
+let client = LibreFang::new("http://localhost:4545");
+let agent = client.agents().create(CreateAgentRequest { template: Some("assistant".into()), .. }).await?;
+```
+
+```go
+// Go
+go get github.com/librefang/librefang/sdk/go
+import "github.com/librefang/librefang/sdk/go"
+client := librefang.New("http://localhost:4545")
+agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"})
+```
 
 **MCP サポート** — MCP クライアントとサーバーを内蔵。IDE 連携、カスタムツール拡張、エージェントパイプライン構築。[詳細](../docs/providers.md)
 
