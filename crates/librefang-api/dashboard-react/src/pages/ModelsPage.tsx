@@ -8,7 +8,7 @@ import {
   Cpu, Search, RefreshCw, Check, X, Eye, Wrench, Zap, AlertCircle
 } from "lucide-react";
 
-const TIERS = ["all", "basic", "smart", "standard", "advanced", "enterprise"] as const;
+const TIERS = ["all", "basic", "fast", "smart", "balanced", "standard", "advanced", "frontier", "enterprise"] as const;
 const REFRESH_MS = 60000;
 const PAGE_SIZE = 50;
 
@@ -49,9 +49,12 @@ export function ModelsPage() {
   const tierColor = (tier?: string) => {
     switch (tier) {
       case "basic": return "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400";
+      case "fast": return "bg-cyan-50 text-cyan-600 dark:bg-cyan-900/30 dark:text-cyan-400";
       case "smart": return "bg-blue-50 text-blue-600 dark:bg-blue-900/30 dark:text-blue-400";
+      case "balanced": return "bg-teal-50 text-teal-600 dark:bg-teal-900/30 dark:text-teal-400";
       case "standard": return "bg-green-50 text-green-600 dark:bg-green-900/30 dark:text-green-400";
       case "advanced": return "bg-purple-50 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400";
+      case "frontier": return "bg-rose-50 text-rose-600 dark:bg-rose-900/30 dark:text-rose-400";
       case "enterprise": return "bg-amber-50 text-amber-600 dark:bg-amber-900/30 dark:text-amber-400";
       default: return "bg-main text-text-dim";
     }
@@ -179,7 +182,10 @@ export function ModelsPage() {
                 !m.available ? "opacity-40" : ""
               } ${i % 2 === 0 ? "" : "bg-main/30"}`}>
               <div className="min-w-0">
-                <p className="text-xs font-bold truncate">{m.display_name || m.id}</p>
+                <div className="flex items-center gap-1.5">
+                  <p className="text-xs font-bold truncate">{m.display_name || m.id}</p>
+                  {m.available && <span className="w-1.5 h-1.5 rounded-full bg-success shrink-0" />}
+                </div>
                 {m.display_name && m.display_name !== m.id && (
                   <p className="text-[8px] text-text-dim/40 font-mono truncate">{m.id}</p>
                 )}
