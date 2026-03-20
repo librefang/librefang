@@ -27,7 +27,8 @@ import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import {
   Play, Save, Trash2, Plus, FolderOpen, Loader2,
-  Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight
+  Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight,
+  Copy, ClipboardPaste, Undo2, Redo2, LayoutGrid
 } from "lucide-react";
 
 // 节点类型配置 — n8n 风格配色
@@ -403,25 +404,148 @@ export function CanvasPage() {
 
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [spacePressed, setSpacePressed] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId?: string } | null>(null);
 
-  // 快捷键
+  // 撤销/重做历史
+  const historyRef = useRef<{ nodes: Node[]; edges: Edge[] }[]>([]);
+  const historyIndexRef = useRef(-1);
+  const clipboardRef = useRef<{ nodes: Node[]; edges: Edge[] } | null>(null);
+
+  const pushHistory = useCallback(() => {
+    const snapshot = { nodes: JSON.parse(JSON.stringify(nodes)), edges: JSON.parse(JSON.stringify(edges)) };
+    historyRef.current = historyRef.current.slice(0, historyIndexRef.current + 1);
+    historyRef.current.push(snapshot);
+    if (historyRef.current.length > 50) historyRef.current.shift();
+    historyIndexRef.current = historyRef.current.length - 1;
+  }, [nodes, edges]);
+
+  const undo = useCallback(() => {
+    if (historyIndexRef.current <= 0) return;
+    // 先保存当前状态到历史末尾（如果还没保存）
+    if (historyIndexRef.current === historyRef.current.length - 1) pushHistory();
+    historyIndexRef.current--;
+    const s = historyRef.current[historyIndexRef.current];
+    if (s) { setNodes(s.nodes); setEdges(s.edges); }
+  }, [pushHistory, setNodes, setEdges]);
+
+  const redo = useCallback(() => {
+    if (historyIndexRef.current >= historyRef.current.length - 1) return;
+    historyIndexRef.current++;
+    const s = historyRef.current[historyIndexRef.current];
+    if (s) { setNodes(s.nodes); setEdges(s.edges); }
+  }, [setNodes, setEdges]);
+
+  // 记录关键操作前的快照
+  const onNodesChangeWithHistory = useCallback((changes: any) => {
+    // 拖拽结束/删除时记录
+    const hasEnd = changes.some((c: any) => c.type === "position" && c.dragging === false);
+    const hasRemove = changes.some((c: any) => c.type === "remove");
+    if (hasEnd || hasRemove) pushHistory();
+    onNodesChange(changes);
+  }, [onNodesChange, pushHistory]);
+
+  const onEdgesChangeWithHistory = useCallback((changes: any) => {
+    const hasRemove = changes.some((c: any) => c.type === "remove");
+    if (hasRemove) pushHistory();
+    onEdgesChange(changes);
+  }, [onEdgesChange, pushHistory]);
+
+  // 复制选中节点
+  const copySelected = useCallback(() => {
+    const selNodes = nodes.filter(n => selectedNodeIds.has(n.id));
+    if (selNodes.length === 0) return;
+    const selIds = new Set(selNodes.map(n => n.id));
+    const selEdges = edges.filter(e => selIds.has(e.source) && selIds.has(e.target));
+    clipboardRef.current = { nodes: JSON.parse(JSON.stringify(selNodes)), edges: JSON.parse(JSON.stringify(selEdges)) };
+  }, [nodes, edges, selectedNodeIds]);
+
+  // 粘贴
+  const paste = useCallback(() => {
+    if (!clipboardRef.current) return;
+    pushHistory();
+    const offset = 40;
+    const idMap = new Map<string, string>();
+    const newNodes = clipboardRef.current.nodes.map(n => {
+      const newId = `${(n.data as any)?.nodeType || "node"}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      idMap.set(n.id, newId);
+      return { ...n, id: newId, position: { x: n.position.x + offset, y: n.position.y + offset }, selected: true };
+    });
+    const newEdges = clipboardRef.current.edges.map(e => ({
+      ...e,
+      id: `e-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      source: idMap.get(e.source) || e.source,
+      target: idMap.get(e.target) || e.target,
+    }));
+    // 取消选择旧节点
+    setNodes(nds => [...nds.map(n => ({ ...n, selected: false })), ...newNodes]);
+    setEdges(eds => [...eds, ...newEdges]);
+  }, [pushHistory, setNodes, setEdges]);
+
+  // 复制选中节点（Cmd+D）
+  const duplicate = useCallback(() => {
+    copySelected();
+    paste();
+  }, [copySelected, paste]);
+
+  // 全选
+  const selectAll = useCallback(() => {
+    setNodes(nds => nds.map(n => ({ ...n, selected: true })));
+  }, [setNodes]);
+
+  // 自动布局（简单的纵向排列）
+  const autoLayout = useCallback(() => {
+    pushHistory();
+    const agentNodes = nodes.filter(n => n.type === "custom" && !n.hidden);
+    const groupNodes = nodes.filter(n => n.type === "groupNode");
+    const x = 100;
+    let y = 80;
+    const gap = 100;
+    const positioned = new Map<string, { x: number; y: number }>();
+    agentNodes.forEach(n => {
+      positioned.set(n.id, { x, y });
+      y += (n.measured?.height || 80) + gap;
+    });
+    setNodes(nds => nds.map(n => {
+      const pos = positioned.get(n.id);
+      return pos ? { ...n, position: pos } : n;
+    }));
+    // 重新计算分组边框
+    groupNodes.forEach(g => {
+      setNodes(nds => recalcGroupBounds(nds, g.id));
+    });
+  }, [nodes, pushHistory, setNodes, recalcGroupBounds]);
+
+  // 快捷键 refs
   const createGroupRef = useRef<() => void>(() => {});
   const ungroupRef = useRef<(id: string) => void>(() => {});
-  // refs 在后面赋值，这里先声明供 useEffect 使用
 
   useEffect(() => {
+    const isInput = () => {
+      const tag = document.activeElement?.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    };
     const down = (e: KeyboardEvent) => {
+      if (isInput()) return; // 不在输入框中才处理
+      const mod = e.metaKey || e.ctrlKey;
       // 空格：平移模式
       if (e.code === "Space" && !e.repeat) { e.preventDefault(); setSpacePressed(true); }
-      // Cmd/Ctrl+B：创建分组
-      if (e.code === "KeyB" && (e.metaKey || e.ctrlKey) && !e.shiftKey) {
+      // Cmd+Z：撤销
+      if (e.code === "KeyZ" && mod && !e.shiftKey) { e.preventDefault(); undo(); }
+      // Cmd+Shift+Z：重做
+      if (e.code === "KeyZ" && mod && e.shiftKey) { e.preventDefault(); redo(); }
+      // Cmd+C：复制
+      if (e.code === "KeyC" && mod) { e.preventDefault(); copySelected(); }
+      // Cmd+V：粘贴
+      if (e.code === "KeyV" && mod) { e.preventDefault(); paste(); }
+      // Cmd+D：复制
+      if (e.code === "KeyD" && mod) { e.preventDefault(); duplicate(); }
+      // Cmd+A：全选
+      if (e.code === "KeyA" && mod) { e.preventDefault(); selectAll(); }
+      // Cmd+B：创建分组
+      if (e.code === "KeyB" && mod && !e.shiftKey) { e.preventDefault(); createGroupRef.current(); }
+      // Shift+Cmd+B：解散分组
+      if (e.code === "KeyB" && mod && e.shiftKey) {
         e.preventDefault();
-        createGroupRef.current();
-      }
-      // Shift+Cmd/Ctrl+B：解散分组（选中的 group 节点）
-      if (e.code === "KeyB" && (e.metaKey || e.ctrlKey) && e.shiftKey) {
-        e.preventDefault();
-        // 找选中的 group 节点解散
         const groupNode = nodes.find(n => selectedNodeIds.has(n.id) && n.type === "groupNode");
         if (groupNode) ungroupRef.current(groupNode.id);
       }
@@ -430,7 +554,7 @@ export function CanvasPage() {
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
     return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
-  }, [nodes, selectedNodeIds]);
+  }, [nodes, selectedNodeIds, undo, redo, copySelected, paste, duplicate, selectAll]);
 
   // 折叠/展开分组
   const toggleGroup = useCallback((groupId: string) => {
@@ -1216,14 +1340,26 @@ export function CanvasPage() {
 
           <ReactFlow
             nodes={nodes} edges={edges}
-            onNodesChange={onNodesChange} onEdgesChange={onEdgesChange}
-            onConnect={onConnect} onNodeClick={onNodeClick} onNodesDelete={onNodesDelete}
+            onNodesChange={onNodesChangeWithHistory} onEdgesChange={onEdgesChangeWithHistory}
+            onConnect={(p) => { pushHistory(); onConnect(p); }}
+            onNodeClick={(_, n) => { setContextMenu(null); onNodeClick(_, n); }}
+            onNodesDelete={onNodesDelete}
             onSelectionChange={onSelectionChange}
             onNodeDragStart={onNodeDragStart} onNodeDrag={onNodeDrag}
+            onPaneClick={() => { setContextMenu(null); setEditingNode(null); }}
+            onPaneContextMenu={(e) => {
+              e.preventDefault();
+              setContextMenu({ x: e.clientX, y: e.clientY });
+            }}
+            onNodeContextMenu={(e, node) => {
+              e.preventDefault();
+              setContextMenu({ x: e.clientX, y: e.clientY, nodeId: node.id });
+            }}
             nodeTypes={nodeTypes} colorMode={theme}
             defaultEdgeOptions={defaultEdgeOptions}
             defaultViewport={{ x: 50, y: 80, zoom: 1 }}
             minZoom={0.1} maxZoom={2}
+            snapToGrid snapGrid={[12, 12]}
             // 交互：默认拖拽=框选，空格+拖拽=平移
             panOnDrag={spacePressed}
             selectionOnDrag={!spacePressed}
@@ -1243,6 +1379,56 @@ export function CanvasPage() {
               }}
               maskColor={theme === "dark" ? "rgba(0,0,0,0.3)" : "rgba(0,0,0,0.08)"} />
           </ReactFlow>
+
+          {/* 右键上下文菜单 */}
+          {contextMenu && (
+            <div className="fixed z-50 rounded-xl border border-border-subtle bg-surface shadow-2xl py-1 min-w-[160px]"
+              style={{ left: contextMenu.x, top: contextMenu.y }}>
+              {contextMenu.nodeId ? (
+                <>
+                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                    onClick={() => { setEditingNode(nodes.find(n => n.id === contextMenu.nodeId) || null); setContextMenu(null); }}>
+                    {t("canvas.ctx_edit")}
+                  </button>
+                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                    onClick={() => { copySelected(); setContextMenu(null); }}>
+                    <Copy className="w-3 h-3" /> {t("canvas.ctx_copy")}
+                  </button>
+                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                    onClick={() => { duplicate(); setContextMenu(null); }}>
+                    {t("canvas.ctx_duplicate")}
+                  </button>
+                  <div className="h-px bg-border-subtle my-1" />
+                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-error/10 text-error flex items-center gap-2"
+                    onClick={() => { setNodes(nds => nds.filter(n => n.id !== contextMenu.nodeId)); setContextMenu(null); }}>
+                    <Trash2 className="w-3 h-3" /> {t("common.delete")}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                    onClick={() => { addNode("agent"); setContextMenu(null); }}>
+                    <Plus className="w-3 h-3" /> {t("canvas.ctx_add_agent")}
+                  </button>
+                  {clipboardRef.current && (
+                    <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                      onClick={() => { paste(); setContextMenu(null); }}>
+                      <ClipboardPaste className="w-3 h-3" /> {t("canvas.ctx_paste")}
+                    </button>
+                  )}
+                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                    onClick={() => { selectAll(); setContextMenu(null); }}>
+                    {t("canvas.ctx_select_all")}
+                  </button>
+                  <div className="h-px bg-border-subtle my-1" />
+                  <button className="w-full px-3 py-1.5 text-xs text-left hover:bg-main flex items-center gap-2"
+                    onClick={() => { autoLayout(); setContextMenu(null); }}>
+                    <LayoutGrid className="w-3 h-3" /> {t("canvas.ctx_auto_layout")}
+                  </button>
+                </>
+              )}
+            </div>
+          )}
 
           {/* 运行结果面板 */}
           {runResult && (

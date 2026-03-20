@@ -115,6 +115,7 @@
     "error_mode": "错误处理", "error_fail": "出错停止", "error_skip": "出错跳过", "error_retry": "出错重试", "max_retries": "最大重试次数",
     "timeout": "超时时间（秒）", "output_var": "输出变量名", "output_var_hint": "（后续步骤用 {{变量名}} 引用）",
     "create_group": "创建分组", "new_group": "分组",
+    "ctx_edit": "编辑节点", "ctx_copy": "复制", "ctx_duplicate": "复制节点", "ctx_add_agent": "添加智能体节点", "ctx_paste": "粘贴", "ctx_select_all": "全选", "ctx_auto_layout": "自动排列",
     "node_types": {
       "start": "开始", "start_desc": "工作流入口", "end": "结束", "end_desc": "工作流终止",
       "schedule": "定时", "schedule_desc": "时间触发器", "webhook": "Webhook", "webhook_desc": "HTTP webhook 触发器",
