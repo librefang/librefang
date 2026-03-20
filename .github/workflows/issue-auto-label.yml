@@ -14,18 +14,19 @@ jobs:
       - name: Label issue by title keywords
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
         run: |
-          TITLE=$(echo "${{ github.event.issue.title }}" | tr '[:upper:]' '[:lower:]')
+          TITLE=$(echo "$ISSUE_TITLE" | tr '[:upper:]' '[:lower:]')
           ISSUE="${{ github.event.issue.number }}"
           REPO="${{ github.repository }}"
           LABELS=""
 
           # By type prefix
           case "$TITLE" in
-            feat:*|feat\(*) LABELS="$LABELS,enhancement" ;;
-            fix:*|fix\(*)   LABELS="$LABELS,bug" ;;
-            docs:*|doc:*)   LABELS="$LABELS,area/docs" ;;
-            ci:*|build:*)   LABELS="$LABELS,area/ci" ;;
+            feat:*|'feat('*) LABELS="$LABELS,enhancement" ;;
+            fix:*|'fix('*)   LABELS="$LABELS,bug" ;;
+            docs:*|doc:*)    LABELS="$LABELS,area/docs" ;;
+            ci:*|build:*)    LABELS="$LABELS,area/ci" ;;
           esac
 
           # By keyword

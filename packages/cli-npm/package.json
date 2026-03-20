@@ -1,0 +1,29 @@
+{
+  "name": "@librefang/cli",
+  "version": "0.0.0",
+  "description": "LibreFang Agent OS — CLI binary distribution",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/librefang/librefang"
+  },
+  "bin": {
+    "librefang": "./bin/librefang.js"
+  },
+  "files": [
+    "bin/librefang.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "@librefang/cli-linux-x64": "0.0.0",
+    "@librefang/cli-linux-arm64": "0.0.0",
+    "@librefang/cli-linux-x64-musl": "0.0.0",
+    "@librefang/cli-linux-arm64-musl": "0.0.0",
+    "@librefang/cli-darwin-x64": "0.0.0",
+    "@librefang/cli-darwin-arm64": "0.0.0",
+    "@librefang/cli-win32-x64": "0.0.0",
+    "@librefang/cli-win32-arm64": "0.0.0"
+  }
+}

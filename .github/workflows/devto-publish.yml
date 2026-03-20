@@ -43,38 +43,39 @@ jobs:
             # Check if article already exists on Dev.to
             EXISTING=$(curl -s -H "api-key: $DEVTO_API_KEY" \
               "https://dev.to/api/articles/me?per_page=100" | \
-              python3 -c "
-          import json,sys
+              MATCH_TITLE="$TITLE" python3 -c "
+          import json,sys,os
           articles = json.load(sys.stdin)
           for a in articles:
-              if a.get('title') == '''$TITLE''':
+              if a.get('title') == os.environ['MATCH_TITLE']:
                   print(a['id'])
                   break
           " 2>/dev/null || true)
 
             # Build JSON payload
-            PAYLOAD=$(python3 -c "
-          import json
-          body = open('$article').read()
-          # Remove front matter
+            PAYLOAD=$(ARTICLE_FILE="$article" ARTICLE_TITLE="$TITLE" ARTICLE_TAGS="$TAGS" \
+              ARTICLE_DESC="$DESCRIPTION" ARTICLE_COVER="$COVER" ARTICLE_CANONICAL="$CANONICAL" \
+              python3 -c "
+          import json, os
+          body = open(os.environ['ARTICLE_FILE']).read()
           parts = body.split('---', 2)
-          if len(parts) >= 3:
-              body_content = parts[2].strip()
-          else:
-              body_content = body
+          body_content = parts[2].strip() if len(parts) >= 3 else body
 
           article = {
-              'title': '''$TITLE''',
+              'title': os.environ['ARTICLE_TITLE'],
               'body_markdown': body_content,
               'published': True,
-              'tags': [t.strip() for t in '''$TAGS'''.split(',') if t.strip()],
+              'tags': [t.strip() for t in os.environ['ARTICLE_TAGS'].split(',') if t.strip()],
           }
-          if '''$DESCRIPTION''':
-              article['description'] = '''$DESCRIPTION'''
-          if '''$COVER''':
-              article['main_image'] = '''$COVER'''
-          if '''$CANONICAL''':
-              article['canonical_url'] = '''$CANONICAL'''
+          desc = os.environ.get('ARTICLE_DESC', '')
+          if desc:
+              article['description'] = desc
+          cover = os.environ.get('ARTICLE_COVER', '')
+          if cover:
+              article['main_image'] = cover
+          canonical = os.environ.get('ARTICLE_CANONICAL', '')
+          if canonical:
+              article['canonical_url'] = canonical
 
           print(json.dumps({'article': article}))
           ")

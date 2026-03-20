@@ -52,6 +52,7 @@ jobs:
   docker:
     name: Docker / ${{ matrix.platform }}
     needs: [wait_for_release]
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -147,7 +148,7 @@ jobs:
       - uses: actions/checkout@v6
       - uses: superfly/flyctl-actions/setup-flyctl@v1
       - name: Deploy
-        run: flyctl deploy --remote-only
+        run: flyctl deploy --remote-only --config deploy/fly/fly.toml
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 

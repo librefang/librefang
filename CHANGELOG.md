@@ -5,6 +5,35 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.8] - 2026-03-20
+
+### Added
+
+- Add owner routing for external DM responses (#1266) (@f-liva)
+- Distribute CLI binary via npm and PyPI (#1323) (@houko)
+
+### Fixed
+
+- Use GitHub API to create Go SDK tag (#1321) (@houko)
+
+### Maintenance
+
+- Remove wasteful workflows and fix bugs (#1320) (@houko)
+
+## [0.6.7] - 2026-03-20
+
+### Added
+
+- Add GitHub Discussions link to dashboard sidebar (#1302) (@TechWizard9999)
+
+### Fixed
+
+- Include user-installed HAND manifests in hand routing (#1205) (@TechWizard9999)
+- Pass raw JSON payloads to context hook scripts (#1207) (@TechWizard9999)
+- Pass GITHUB_TOKEN to contributor/star-history scripts (#1300) (@houko)
+- Self-heal fish config PATH entries (#1303) (@TechWizard9999)
+- Fix 3 release workflow failures from v0.6.6 (#1309) (@houko)
+
 ## [0.6.6] - 2026-03-20
 
 ### Fixed
