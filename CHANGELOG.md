@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Harden OpenClaw migration inputs (#1342) (@houko)
 - Complete openfang migration across init wizard, API, and dashboard (#1345) (@houko)
 - Detect Qwen Code CLI in test_connection and setup wizard (#1346) (@houko)
+- Correct language toggle logic in navigation sidebar (#1349) (@danilopopeye)
+- Escape < in MDX comparison table to fix build (#1350) (@houko)
+- Escape < in MDX troubleshooting page (#1351) (@houko)
+- Resolve compilation errors breaking CI clippy check (#1353) (@houko)
 
 ### Changed
 
@@ -35,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Other
 
 - Feature/fix docs (#1339) (@houko)
+
 
 ## [0.6.8] - 2026-03-20
 
