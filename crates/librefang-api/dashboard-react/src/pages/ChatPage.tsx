@@ -1,5 +1,7 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { useTranslation } from "react-i18next";
 import { useSearch } from "@tanstack/react-router";
 import { listAgents, sendAgentMessage, loadAgentSession } from "../api";
@@ -28,9 +30,30 @@ const SLASH_COMMANDS = [
   { cmd: "/info", desc: "Show current agent info" },
 ];
 
-// 流式打字机效果
+// Markdown 样式
+const mdComponents = {
+  p: ({ children }: any) => <p className="mb-2 last:mb-0">{children}</p>,
+  h1: ({ children }: any) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
+  h2: ({ children }: any) => <h2 className="text-base font-bold mb-1.5">{children}</h2>,
+  h3: ({ children }: any) => <h3 className="text-sm font-bold mb-1">{children}</h3>,
+  ul: ({ children }: any) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
+  ol: ({ children }: any) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
+  li: ({ children }: any) => <li className="text-sm">{children}</li>,
+  code: ({ inline, children }: any) => inline
+    ? <code className="px-1 py-0.5 rounded bg-main font-mono text-[11px]">{children}</code>
+    : <pre className="p-2 rounded-lg bg-main font-mono text-[11px] overflow-x-auto mb-2"><code>{children}</code></pre>,
+  table: ({ children }: any) => <table className="w-full text-xs border-collapse mb-2">{children}</table>,
+  th: ({ children }: any) => <th className="border border-border-subtle px-2 py-1 bg-main font-bold text-left">{children}</th>,
+  td: ({ children }: any) => <td className="border border-border-subtle px-2 py-1">{children}</td>,
+  blockquote: ({ children }: any) => <blockquote className="border-l-2 border-brand pl-3 italic text-text-dim mb-2">{children}</blockquote>,
+  strong: ({ children }: any) => <strong className="font-bold">{children}</strong>,
+  a: ({ href, children }: any) => <a href={href} className="text-brand underline" target="_blank" rel="noopener noreferrer">{children}</a>,
+};
+
+// 流式打字机效果 + Markdown
 function Typewriter({ text, speed = 15 }: { text: string; speed?: number }) {
   const [displayed, setDisplayed] = useState("");
+  const done = displayed.length >= text.length;
 
   useEffect(() => {
     if (!text) { setDisplayed(""); return; }
@@ -49,6 +72,9 @@ function Typewriter({ text, speed = 15 }: { text: string; speed?: number }) {
     return () => clearInterval(interval);
   }, [text, speed]);
 
+  if (done) {
+    return <Markdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</Markdown>;
+  }
   return <span>{displayed}</span>;
 }
 
