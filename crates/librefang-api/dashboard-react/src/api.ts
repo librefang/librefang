@@ -581,6 +581,10 @@ export async function loadDashboardSnapshot(): Promise<DashboardSnapshot> {
 }
 
 
+export async function getAgentDetail(agentId: string): Promise<any> {
+  return get<any>(`/api/agents/${encodeURIComponent(agentId)}`);
+}
+
 export async function listAgents(): Promise<AgentItem[]> {
   const data = await get<PaginatedResponse<AgentItem>>(
     "/api/agents?limit=200&sort=last_active&order=desc"

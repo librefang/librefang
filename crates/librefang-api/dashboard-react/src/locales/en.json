@@ -34,7 +34,8 @@
   },
   "agents": {
     "title": "Agents", "subtitle": "Active autonomous units managed by the LibreFang kernel.",
-    "model": "Model", "provider": "Provider", "last_active": "Last Active", "no_matching": "No agents matching your search."
+    "model": "Model", "provider": "Provider", "last_active": "Last Active", "no_matching": "No agents matching your search.",
+    "system_prompt": "System Prompt", "capabilities": "Capabilities", "skills": "Skills", "tags": "Tags", "mode": "Mode"
   },
   "providers": {
     "title": "Providers", "subtitle": "Manage LLM API connections and health.",

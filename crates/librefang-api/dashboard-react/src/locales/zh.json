@@ -34,7 +34,8 @@
   },
   "agents": {
     "title": "智能体", "subtitle": "由 LibreFang 内核管理的活跃自主单元。",
-    "model": "模型", "provider": "供应商", "last_active": "最后活跃", "no_matching": "没有匹配的智能体。"
+    "model": "模型", "provider": "供应商", "last_active": "最后活跃", "no_matching": "没有匹配的智能体。",
+    "system_prompt": "系统提示词", "capabilities": "能力", "skills": "技能", "tags": "标签", "mode": "模式"
   },
   "providers": {
     "title": "供应商", "subtitle": "管理 LLM API 连接并监控健康状况。",
