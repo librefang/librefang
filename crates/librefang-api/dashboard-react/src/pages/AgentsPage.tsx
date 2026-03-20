@@ -46,10 +46,14 @@ export function AgentsPage() {
   });
 
   const agents = agentsQuery.data ?? [];
-  const filteredAgents = agents.filter(a =>
-    a.name.toLowerCase().includes(search.toLowerCase()) ||
-    a.id.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredAgents = agents
+    .filter(a => a.name.toLowerCase().includes(search.toLowerCase()) || a.id.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => {
+      // Running first, Suspended last
+      const aRunning = (a.state || "").toLowerCase() === "running" ? 0 : 1;
+      const bRunning = (b.state || "").toLowerCase() === "running" ? 0 : 1;
+      return aRunning - bRunning || a.name.localeCompare(b.name);
+    });
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
