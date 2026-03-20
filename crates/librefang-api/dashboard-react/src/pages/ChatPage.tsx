@@ -423,15 +423,19 @@ export function ChatPage() {
                   }`}
                 >
                   <div className={`relative h-10 w-10 rounded-xl flex items-center justify-center font-black text-lg ${
-                    selectedAgentId === agent.id ? "bg-white/20" : "bg-gradient-to-br from-brand/20 to-accent/20 text-brand group-hover:from-brand group-hover:to-brand"
+                    selectedAgentId === agent.id ? "bg-white/20"
+                    : (agent.state || "").toLowerCase() === "running" ? "bg-gradient-to-br from-brand/20 to-accent/20 text-brand"
+                    : "bg-main text-text-dim/40"
                   }`}>
                     {agent.name.charAt(0).toUpperCase()}
-                    {agent.state === "running" && (
+                    {(agent.state || "").toLowerCase() === "running" ? (
                       <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />
+                    ) : (
+                      <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-text-dim/30 border-2 border-white dark:border-surface" />
                     )}
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="text-sm font-bold truncate">{agent.name}</p>
+                    <p className={`text-sm font-bold truncate ${(agent.state || "").toLowerCase() !== "running" ? "opacity-50" : ""}`}>{agent.name}</p>
                     <p className={`text-[10px] truncate ${selectedAgentId === agent.id ? "text-white/70" : "text-text-dim"}`}>
                       {agent.model_name || t("common.unknown")}
                     </p>
