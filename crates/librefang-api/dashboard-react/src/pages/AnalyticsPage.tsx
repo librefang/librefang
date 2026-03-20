@@ -1,191 +1,154 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { loadDashboardSnapshot, getUsageSummary, listUsageByAgent, listUsageByModel, getUsageDaily, getBudgetStatus, updateBudget } from "../api";
-import { PageHeader } from "../components/ui/PageHeader";
-import { CardSkeleton } from "../components/ui/Skeleton";
+import { getUsageSummary, listUsageByAgent, listUsageByModel, getUsageDaily, getBudgetStatus, updateBudget } from "../api";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
-import { BarChart3, DollarSign, Shield, Save, Loader2 } from "lucide-react";
+import { Badge } from "../components/ui/Badge";
+import { BarChart3, DollarSign, Shield, Save, Loader2, RefreshCw, Cpu, Users, Zap, TrendingUp, Clock } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
 export function AnalyticsPage() {
   const { t } = useTranslation();
-  const snapshotQuery = useQuery({ queryKey: ["dashboard", "snapshot", "analytics"], queryFn: loadDashboardSnapshot, refetchInterval: REFRESH_MS });
+  const queryClient = useQueryClient();
+
   const usageQuery = useQuery({ queryKey: ["usage", "summary"], queryFn: getUsageSummary, refetchInterval: REFRESH_MS });
   const usageByAgentQuery = useQuery({ queryKey: ["usage", "byAgent"], queryFn: listUsageByAgent, refetchInterval: REFRESH_MS });
   const usageByModelQuery = useQuery({ queryKey: ["usage", "byModel"], queryFn: listUsageByModel, refetchInterval: REFRESH_MS });
   const dailyQuery = useQuery({ queryKey: ["usage", "daily"], queryFn: getUsageDaily, refetchInterval: REFRESH_MS });
   const budgetQuery = useQuery({ queryKey: ["budget"], queryFn: getBudgetStatus, refetchInterval: REFRESH_MS });
-  const queryClient = useQueryClient();
   const budgetMutation = useMutation({ mutationFn: updateBudget, onSuccess: () => queryClient.invalidateQueries({ queryKey: ["budget"] }) });
 
-  const [budgetForm, setBudgetForm] = useState<Record<string, string>>({});
-
-  const snapshot = snapshotQuery.data ?? null;
   const usage = usageQuery.data ?? null;
   const usageByAgent = usageByAgentQuery.data ?? [];
   const usageByModel = usageByModelQuery.data ?? [];
   const daily = dailyQuery.data ?? null;
 
+  const [budgetForm, setBudgetForm] = useState<Record<string, string>>({});
+
+  const isLoading = usageQuery.isLoading;
+
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
-      <PageHeader
-        badge={t("analytics.intelligence")}
-        title={t("analytics.title")}
-        subtitle={t("analytics.subtitle")}
-        isFetching={snapshotQuery.isFetching}
-        onRefresh={() => void snapshotQuery.refetch()}
-        icon={<BarChart3 className="h-4 w-4" />}
-      />
+      {/* Header */}
+      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+        <div>
+          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
+            <BarChart3 className="h-4 w-4" />
+            {t("analytics.intelligence")}
+          </div>
+          <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("analytics.title")}</h1>
+          <p className="mt-1 text-text-dim font-medium text-sm">{t("analytics.subtitle")}</p>
+        </div>
+        <Button variant="secondary" onClick={() => { usageQuery.refetch(); usageByAgentQuery.refetch(); usageByModelQuery.refetch(); dailyQuery.refetch(); }}>
+          <RefreshCw className={`h-3.5 w-3.5 ${usageQuery.isFetching ? "animate-spin" : ""}`} />
+          {t("common.refresh")}
+        </Button>
+      </header>
 
-      {snapshotQuery.isLoading ? (
-        <div className="grid gap-6 md:grid-cols-2">
-          <CardSkeleton />
-          <CardSkeleton />
+      {isLoading ? (
+        <div className="grid gap-4 md:grid-cols-4">
+          {[1, 2, 3, 4].map(i => <div key={i} className="h-24 rounded-2xl bg-main animate-pulse" />)}
         </div>
       ) : (
         <>
-          <div className="grid gap-6 md:grid-cols-2">
-            <Card padding="lg">
-              <h2 className="text-lg font-black tracking-tight mb-1">{t("analytics.compute")}</h2>
-              <p className="mb-6 text-xs text-text-dim font-medium">{t("analytics.compute_desc")}</p>
-              <div className="space-y-4">
-                {snapshot?.providers.map((p) => (
-                  <div key={p.id}>
-                    <div className="flex justify-between mb-1 text-xs"><span className="font-bold">{p.display_name || p.id}</span><span className="text-text-dim">{p.latency_ms ? `${p.latency_ms}ms` : "-"}</span></div>
-                    <div className="h-2 w-full rounded-full bg-main overflow-hidden"><div className="h-full bg-brand shadow-[0_0_8px_var(--brand-color)]" style={{ width: `${Math.min(100, (p.model_count || 0) * 10)}%` }} /></div>
-                  </div>
-                ))}
-                {(!snapshot?.providers || snapshot.providers.length === 0) && (
-                  <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
-                )}
+          {/* KPI Cards */}
+          <div className="grid gap-4 md:grid-cols-4">
+            {[
+              { icon: Zap, label: t("analytics.total_calls"), value: usage?.call_count ?? 0, color: "text-brand" },
+              { icon: Cpu, label: t("analytics.total_tokens_label"), value: `${(((usage?.total_input_tokens ?? 0) + (usage?.total_output_tokens ?? 0)) / 1000).toFixed(0)}K`, color: "text-purple-500" },
+              { icon: DollarSign, label: t("analytics.total_cost"), value: `$${(usage?.total_cost_usd ?? 0).toFixed(4)}`, color: "text-success" },
+              { icon: TrendingUp, label: t("analytics.today_cost"), value: `$${(daily?.today_cost_usd ?? 0).toFixed(4)}`, color: "text-warning" },
+            ].map((kpi, i) => (
+              <div key={i} className="p-4 rounded-2xl border border-border-subtle bg-surface">
+                <div className="flex items-center gap-2 mb-2">
+                  <kpi.icon className={`w-4 h-4 ${kpi.color}`} />
+                  <span className="text-[10px] font-bold text-text-dim uppercase">{kpi.label}</span>
+                </div>
+                <p className="text-2xl font-black">{kpi.value}</p>
               </div>
-            </Card>
-            <Card padding="lg">
-              <h2 className="text-lg font-black tracking-tight mb-1">{t("analytics.runtime")}</h2>
-              <p className="mb-6 text-xs text-text-dim font-medium">{t("analytics.runtime_desc")}</p>
-              <div className="grid grid-cols-2 gap-4">
-                {[{ l: t("analytics.active_agents"), v: snapshot?.status.agent_count || 0 }, { l: t("analytics.configured_channels"), v: snapshot?.channels.length || 0 }, { l: t("analytics.available_skills"), v: snapshot?.skillCount || 0 }, { l: t("analytics.health_checks"), v: snapshot?.health.checks?.length || 0 }].map((s, i) => (
-                  <div key={i} className="p-4 rounded-xl bg-main border border-border-subtle/50"><p className="text-[10px] font-black text-text-dim uppercase mb-1">{s.l}</p><p className="text-2xl font-black">{s.v}</p></div>
-                ))}
-              </div>
-            </Card>
+            ))}
           </div>
 
-          {/* 使用统计 */}
+          {/* Cost by Agent + Cost by Model */}
           <div className="grid gap-6 md:grid-cols-2">
             <Card padding="lg">
-              <h2 className="text-lg font-black tracking-tight mb-1">{t("analytics.usage_summary")}</h2>
-              <p className="mb-6 text-xs text-text-dim font-medium">{t("analytics.usage_summary_desc")}</p>
-              <div className="grid grid-cols-2 gap-4">
-                {[
-                  { label: t("analytics.total_requests"), value: usage?.total_requests ?? 0 },
-                  { label: t("analytics.total_tokens"), value: usage?.total_tokens ?? 0 },
-                  { label: t("analytics.total_cost"), value: `$${(usage?.total_cost ?? 0).toFixed(4)}` },
-                  { label: t("analytics.avg_latency"), value: `${(usage?.avg_latency_ms ?? 0).toFixed(0)}ms` },
-                ].map((s, i) => (
-                  <div key={i} className="p-4 rounded-xl bg-main border border-border-subtle/50">
-                    <p className="text-[10px] font-black text-text-dim uppercase mb-1">{s.label}</p>
-                    <p className="text-xl font-black">{s.value}</p>
-                  </div>
-                ))}
-              </div>
-            </Card>
-
-            <Card padding="lg">
-              <h2 className="text-lg font-black tracking-tight mb-1">{t("analytics.usage_by_agent")}</h2>
-              <p className="mb-6 text-xs text-text-dim font-medium">{t("analytics.usage_by_agent_desc")}</p>
-              <div className="space-y-3 max-h-64 overflow-y-auto">
-                {usageByAgent.slice(0, 10).map((u, i) => (
-                  <div key={u.agent_id || i} className="flex justify-between items-center p-3 rounded-lg bg-main/50">
-                    <div className="min-w-0">
-                      <p className="text-sm font-bold truncate">{u.agent_id}</p>
-                      <p className="text-[10px] text-text-dim">{u.request_count} requests</p>
-                    </div>
-                    <div className="text-right shrink-0">
-                      <p className="text-sm font-black text-brand">${u.total_cost?.toFixed(4) || "0.0000"}</p>
-                      <p className="text-[10px] text-text-dim">{u.total_tokens} tokens</p>
-                    </div>
-                  </div>
-                ))}
-                {usageByAgent.length === 0 && (
+              <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
+                <Users className="w-4 h-4 text-brand" /> {t("analytics.usage_by_agent")}
+              </h2>
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {usageByAgent.length === 0 ? (
                   <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
-                )}
-              </div>
-            </Card>
-          </div>
-
-          {/* 按模型和每日趋势 */}
-          <div className="grid gap-6 md:grid-cols-2">
-            <Card padding="lg">
-              <h2 className="text-lg font-black tracking-tight mb-1">{t("analytics.usage_by_model")}</h2>
-              <p className="mb-4 text-xs text-text-dim font-medium">{t("analytics.usage_by_model_desc")}</p>
-              <div className="space-y-2 max-h-72 overflow-y-auto">
-                {usageByModel.map((m, i) => {
-                  const maxCost = Math.max(...usageByModel.map(x => x.total_cost_usd || 0), 0.001);
-                  const pct = ((m.total_cost_usd || 0) / maxCost) * 100;
+                ) : usageByAgent.slice(0, 10).map((u, i) => {
+                  const maxCost = Math.max(...usageByAgent.map(x => x.total_cost ?? 0), 0.001);
+                  const pct = ((u.total_cost ?? 0) / maxCost) * 100;
                   return (
-                    <div key={m.model || i} className="p-3 rounded-lg bg-main/50">
-                      <div className="flex justify-between items-center mb-1.5">
-                        <span className="text-xs font-bold truncate max-w-[60%]">{m.model}</span>
-                        <span className="text-xs font-black text-brand">${(m.total_cost_usd || 0).toFixed(4)}</span>
+                    <div key={u.agent_id || i} className="flex items-center gap-3">
+                      <span className="text-xs font-bold w-28 truncate shrink-0">{u.name || u.agent_id?.slice(0, 8)}</span>
+                      <div className="flex-1 h-2 rounded-full bg-main overflow-hidden">
+                        <div className="h-full bg-brand rounded-full" style={{ width: `${pct}%` }} />
                       </div>
-                      <div className="h-1.5 rounded-full bg-border-subtle overflow-hidden">
-                        <div className="h-full bg-brand rounded-full transition-all" style={{ width: `${pct}%` }} />
-                      </div>
-                      <div className="flex justify-between mt-1 text-[9px] text-text-dim">
-                        <span>{m.call_count || 0} calls</span>
-                        <span>{((m.total_input_tokens || 0) + (m.total_output_tokens || 0)).toLocaleString()} tokens</span>
-                      </div>
+                      <span className="text-[10px] font-mono text-text-dim w-16 text-right shrink-0">${(u.total_cost ?? 0).toFixed(4)}</span>
                     </div>
                   );
                 })}
-                {usageByModel.length === 0 && <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>}
               </div>
             </Card>
 
             <Card padding="lg">
-              <h2 className="text-lg font-black tracking-tight mb-1">{t("analytics.daily_trend")}</h2>
-              <p className="mb-4 text-xs text-text-dim font-medium">{t("analytics.daily_trend_desc")}</p>
-              {daily?.today_cost_usd !== undefined && (
-                <div className="flex items-center gap-2 mb-4 p-3 rounded-xl bg-brand/10">
-                  <DollarSign className="w-5 h-5 text-brand" />
-                  <div>
-                    <p className="text-[10px] text-text-dim font-bold uppercase">{t("analytics.today_cost")}</p>
-                    <p className="text-lg font-black text-brand">${(daily.today_cost_usd || 0).toFixed(4)}</p>
-                  </div>
-                </div>
-              )}
-              <div className="space-y-1 max-h-52 overflow-y-auto">
-                {(daily?.days || []).slice(-14).map((d, i) => {
-                  const maxDay = Math.max(...(daily?.days || []).map(x => x.cost_usd || 0), 0.001);
+              <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
+                <Cpu className="w-4 h-4 text-purple-500" /> {t("analytics.usage_by_model")}
+              </h2>
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {usageByModel.length === 0 ? (
+                  <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
+                ) : usageByModel.slice(0, 10).map((m, i) => {
+                  const maxCost = Math.max(...usageByModel.map(x => x.total_cost_usd ?? 0), 0.001);
+                  const pct = ((m.total_cost_usd ?? 0) / maxCost) * 100;
+                  return (
+                    <div key={m.model || i} className="flex items-center gap-3">
+                      <span className="text-xs font-bold w-32 truncate shrink-0">{m.model}</span>
+                      <div className="flex-1 h-2 rounded-full bg-main overflow-hidden">
+                        <div className="h-full bg-purple-500 rounded-full" style={{ width: `${pct}%` }} />
+                      </div>
+                      <span className="text-[10px] font-mono text-text-dim w-16 text-right shrink-0">${(m.total_cost_usd ?? 0).toFixed(4)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          </div>
+
+          {/* Daily Trend */}
+          <Card padding="lg">
+            <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
+              <TrendingUp className="w-4 h-4 text-warning" /> {t("analytics.daily_trend")}
+            </h2>
+            {(!daily?.days || daily.days.length === 0) ? (
+              <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
+            ) : (
+              <div className="flex items-end gap-1 h-32">
+                {(daily.days || []).slice(-21).map((d, i) => {
+                  const maxDay = Math.max(...(daily.days || []).map(x => x.cost_usd || 0), 0.001);
                   const pct = ((d.cost_usd || 0) / maxDay) * 100;
                   return (
-                    <div key={d.date || i} className="flex items-center gap-2">
-                      <span className="text-[9px] text-text-dim/60 font-mono w-16 shrink-0">{d.date?.slice(5) || "-"}</span>
-                      <div className="flex-1 h-3 rounded bg-main overflow-hidden">
-                        <div className="h-full bg-brand/60 rounded transition-all" style={{ width: `${pct}%` }} />
-                      </div>
-                      <span className="text-[9px] text-text-dim font-mono w-16 text-right">${(d.cost_usd || 0).toFixed(3)}</span>
+                    <div key={d.date || i} className="flex-1 flex flex-col items-center gap-1" title={`${d.date}: $${(d.cost_usd || 0).toFixed(4)}`}>
+                      <div className="w-full rounded-t bg-brand/60 hover:bg-brand transition-colors" style={{ height: `${Math.max(pct, 2)}%` }} />
+                      <span className="text-[7px] text-text-dim/40 -rotate-45 origin-top-left whitespace-nowrap">{(d.date || "").slice(5)}</span>
                     </div>
                   );
                 })}
-                {(!daily?.days || daily.days.length === 0) && <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>}
               </div>
-            </Card>
-          </div>
+            )}
+          </Card>
 
-          {/* Budget 预算管理 */}
+          {/* Budget */}
           <Card padding="lg">
             <div className="flex items-center justify-between mb-4">
-              <div>
-                <h2 className="text-lg font-black tracking-tight flex items-center gap-2">
-                  <Shield className="w-5 h-5 text-brand" /> {t("analytics.budget_title")}
-                </h2>
-                <p className="text-xs text-text-dim font-medium mt-0.5">{t("analytics.budget_desc")}</p>
-              </div>
+              <h2 className="text-sm font-bold flex items-center gap-2">
+                <Shield className="w-4 h-4 text-brand" /> {t("analytics.budget_title")}
+              </h2>
               <Button variant="primary" size="sm"
                 onClick={() => {
                   const payload: Record<string, number> = {};
@@ -201,7 +164,7 @@ export function AnalyticsPage() {
                 {t("common.save")}
               </Button>
             </div>
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               {[
                 { key: "hourly", label: t("analytics.hourly_limit"), current: budgetQuery.data?.max_hourly_usd, unit: "$/hr" },
                 { key: "daily", label: t("analytics.daily_limit"), current: budgetQuery.data?.max_daily_usd, unit: "$/day" },
@@ -209,25 +172,20 @@ export function AnalyticsPage() {
                 { key: "tokens", label: t("analytics.token_limit"), current: budgetQuery.data?.default_max_llm_tokens_per_hour, unit: "tok/hr" },
                 { key: "alert", label: t("analytics.alert_threshold"), current: budgetQuery.data?.alert_threshold, unit: "0-1" },
               ].map(f => (
-                <div key={f.key} className="space-y-1">
-                  <label className="text-[10px] font-bold text-text-dim uppercase">{f.label}</label>
-                  <div className="flex items-center gap-1.5">
+                <div key={f.key}>
+                  <label className="text-[9px] font-bold text-text-dim uppercase">{f.label}</label>
+                  <div className="flex items-center gap-1 mt-1">
                     <input type="number" step="any"
                       value={budgetForm[f.key] ?? (f.current !== undefined ? String(f.current) : "")}
                       onChange={e => setBudgetForm(prev => ({ ...prev, [f.key]: e.target.value }))}
                       placeholder={f.current !== undefined ? String(f.current) : "-"}
-                      className="w-full rounded-lg border border-border-subtle bg-main px-2.5 py-1.5 text-xs font-mono outline-none focus:border-brand" />
-                    <span className="text-[9px] text-text-dim/50 shrink-0">{f.unit}</span>
+                      className="w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs font-mono outline-none focus:border-brand" />
+                    <span className="text-[8px] text-text-dim/40 shrink-0">{f.unit}</span>
                   </div>
                 </div>
               ))}
             </div>
-            {budgetMutation.isSuccess && (
-              <p className="text-xs text-success mt-3">{t("analytics.budget_saved")}</p>
-            )}
-            {budgetMutation.error && (
-              <p className="text-xs text-error mt-3">{(budgetMutation.error as any)?.message || String(budgetMutation.error)}</p>
-            )}
+            {budgetMutation.isSuccess && <p className="text-xs text-success mt-2">{t("analytics.budget_saved")}</p>}
           </Card>
         </>
       )}

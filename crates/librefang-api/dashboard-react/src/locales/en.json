@@ -92,6 +92,7 @@
     "advanced": "Advanced Metrics", "advanced_desc": "Detailed analysis coming soon.",
     "usage_by_model": "Cost by Model", "usage_by_model_desc": "Token spend breakdown per model.",
     "daily_trend": "Daily Cost Trend", "daily_trend_desc": "Cost over the last 14 days.", "today_cost": "Today's Cost",
+    "total_calls": "Total Calls", "total_tokens_label": "Total Tokens",
     "budget_title": "Budget Limits", "budget_desc": "Set spending caps to control costs.",
     "hourly_limit": "Hourly Limit", "daily_limit": "Daily Limit", "monthly_limit": "Monthly Limit",
     "token_limit": "Tokens/Hour", "alert_threshold": "Alert Threshold", "budget_saved": "Budget limits updated.",

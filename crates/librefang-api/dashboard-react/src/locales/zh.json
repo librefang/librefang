@@ -92,6 +92,7 @@
     "advanced": "高级指标", "advanced_desc": "详细分析即将推出。",
     "usage_by_model": "按模型成本", "usage_by_model_desc": "每个模型的 Token 消耗明细。",
     "daily_trend": "每日成本趋势", "daily_trend_desc": "最近 14 天的成本变化。", "today_cost": "今日成本",
+    "total_calls": "总调用次数", "total_tokens_label": "总 Token 数",
     "budget_title": "预算限额", "budget_desc": "设置消费上限控制成本。",
     "hourly_limit": "每小时限额", "daily_limit": "每日限额", "monthly_limit": "每月限额",
     "token_limit": "Token/小时", "alert_threshold": "告警阈值", "budget_saved": "预算限额已更新。",
