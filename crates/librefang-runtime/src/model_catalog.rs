@@ -59,6 +59,17 @@ impl ModelCatalog {
                 continue;
             }
 
+            // Qwen Code is special: no API key needed, but we probe for CLI
+            // installation so the dashboard shows "Configured" vs "Not Installed".
+            if provider.id == "qwen-code" {
+                provider.auth_status = if crate::drivers::qwen_code::qwen_code_available() {
+                    AuthStatus::Configured
+                } else {
+                    AuthStatus::Missing
+                };
+                continue;
+            }
+
             if !provider.key_required {
                 provider.auth_status = AuthStatus::NotRequired;
                 continue;

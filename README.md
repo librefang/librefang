@@ -144,7 +144,41 @@ xtask                 Build automation
 
 **OpenAI-Compatible API** — Drop-in `/v1/chat/completions` endpoint. 140+ REST/WS/SSE endpoints. [API Reference](docs/api-reference.md)
 
-**Client SDKs** — [JavaScript](sdk/javascript) &bull; [Python](sdk/python) &bull; [Rust](sdk/rust) &bull; [Go](sdk/go) — full REST client with streaming support.
+**Client SDKs** — Full REST client with streaming support.
+
+```javascript
+// JavaScript/TypeScript
+npm install @librefang/sdk
+const { LibreFang } = require("@librefang/sdk");
+const client = new LibreFang("http://localhost:4545");
+const agent = await client.agents.create({ template: "assistant" });
+const reply = await client.agents.message(agent.id, "Hello!");
+```
+
+```python
+# Python
+pip install librefang
+from librefang import Client
+client = Client("http://localhost:4545")
+agent = client.agents.create(template="assistant")
+reply = client.agents.message(agent["id"], "Hello!")
+```
+
+```rust
+// Rust
+cargo add librefang
+use librefang::LibreFang;
+let client = LibreFang::new("http://localhost:4545");
+let agent = client.agents().create(CreateAgentRequest { template: Some("assistant".into()), .. }).await?;
+```
+
+```go
+// Go
+go get github.com/librefang/librefang/sdk/go
+import "github.com/librefang/librefang/sdk/go"
+client := librefang.New("http://localhost:4545")
+agent, _ := client.Agents.Create(map[string]interface{}{"template": "assistant"})
+```
 
 **MCP Support** — Built-in MCP client and server. Connect to IDEs, extend with custom tools, compose agent pipelines. [Details](docs/providers.md)
 
@@ -176,7 +210,7 @@ See [docs/comparison.md](docs/comparison.md) for benchmarks and feature-by-featu
 ## Contributors
 
 <a href="https://github.com/librefang/librefang/graphs/contributors">
-  <img src="public/assets/contributors.svg" alt="Contributors" />
+  <img src="web/public/assets/contributors.svg" alt="Contributors" />
 </a>
 
 <p align="center">
@@ -186,7 +220,7 @@ See [docs/comparison.md](docs/comparison.md) for benchmarks and feature-by-featu
 
 <p align="center">
   <a href="https://github.com/librefang/librefang/stargazers">
-    <img src="public/assets/star-history.svg" alt="Star History" />
+    <img src="web/public/assets/star-history.svg" alt="Star History" />
   </a>
 </p>
 

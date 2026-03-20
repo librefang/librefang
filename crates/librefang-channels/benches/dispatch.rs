@@ -3,7 +3,8 @@
 //! Covers: message serialization/deserialization, channel routing,
 //! and message formatting (markdown conversion).
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
+use std::hint::black_box;
 
 use chrono::Utc;
 use librefang_channels::formatter::format_for_channel;

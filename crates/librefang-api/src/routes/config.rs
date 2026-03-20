@@ -1366,6 +1366,19 @@ pub async fn config_set(
     };
 
     let config_path = state.kernel.config.home_dir.join("config.toml");
+    if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
+        || config_path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"status":"error","error":"invalid config file path"})),
+        );
+    }
 
     // Read existing config as a TOML table, or start fresh
     let mut table: toml::value::Table = if config_path.exists() {
