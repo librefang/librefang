@@ -885,25 +885,27 @@ function CanvasPageInner() {
   const addNode = useCallback((type: string) => {
     const config = NODE_TYPES.find(n => n.type === type) || NODE_TYPES[10];
     const defaultMode = NODE_MODE_MAP[type];
-    // 放在现有节点下方，不重叠
-    const existingNodes = nodes.filter(n => n.type === "custom" && !n.hidden);
-    let maxY = 0;
-    for (const n of existingNodes) {
-      const bottom = n.position.y + (n.measured?.height || 80);
-      if (bottom > maxY) maxY = bottom;
-    }
-    const newNode: Node = {
-      id: `${type}-${Date.now()}`,
-      type: "custom",
-      position: { x: 100, y: existingNodes.length === 0 ? 80 : maxY + 40 },
-      data: {
-        label: t(config.labelKey),
-        description: t(config.descKey),
-        nodeType: type,
-        ...(defaultMode ? { stepMode: defaultMode } : {}),
+    // 用函数式更新读最新 nodes，避免闭包过期
+    setNodes(nds => {
+      const existing = nds.filter(n => n.type === "custom" && !n.hidden);
+      let maxY = 0;
+      for (const n of existing) {
+        const bottom = n.position.y + (n.measured?.height || 80);
+        if (bottom > maxY) maxY = bottom;
       }
-    };
-    setNodes((nds) => [...nds, newNode]);
+      const newNode: Node = {
+        id: `${type}-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`,
+        type: "custom",
+        position: { x: 100, y: existing.length === 0 ? 80 : maxY + 40 },
+        data: {
+          label: t(config.labelKey),
+          description: t(config.descKey),
+          nodeType: type,
+          ...(defaultMode ? { stepMode: defaultMode } : {}),
+        }
+      };
+      return [...nds, newNode];
+    });
   }, [setNodes, t]);
 
   // 连线
