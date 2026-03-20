@@ -404,14 +404,33 @@ export function CanvasPage() {
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
   const [spacePressed, setSpacePressed] = useState(false);
 
-  // 空格键：按住=平移模式，松开=框选模式
+  // 快捷键
+  const createGroupRef = useRef<() => void>(() => {});
+  const ungroupRef = useRef<(id: string) => void>(() => {});
+  // refs 在后面赋值，这里先声明供 useEffect 使用
+
   useEffect(() => {
-    const down = (e: KeyboardEvent) => { if (e.code === "Space" && !e.repeat) { e.preventDefault(); setSpacePressed(true); } };
-    const up = (e: KeyboardEvent) => { if (e.code === "Space") { setSpacePressed(false); } };
+    const down = (e: KeyboardEvent) => {
+      // 空格：平移模式
+      if (e.code === "Space" && !e.repeat) { e.preventDefault(); setSpacePressed(true); }
+      // Cmd/Ctrl+B：创建分组
+      if (e.code === "KeyB" && (e.metaKey || e.ctrlKey) && !e.shiftKey) {
+        e.preventDefault();
+        createGroupRef.current();
+      }
+      // Shift+Cmd/Ctrl+B：解散分组（选中的 group 节点）
+      if (e.code === "KeyB" && (e.metaKey || e.ctrlKey) && e.shiftKey) {
+        e.preventDefault();
+        // 找选中的 group 节点解散
+        const groupNode = nodes.find(n => selectedNodeIds.has(n.id) && n.type === "groupNode");
+        if (groupNode) ungroupRef.current(groupNode.id);
+      }
+    };
+    const up = (e: KeyboardEvent) => { if (e.code === "Space") setSpacePressed(false); };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
     return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
-  }, []);
+  }, [nodes, selectedNodeIds]);
 
   // 折叠/展开分组
   const toggleGroup = useCallback((groupId: string) => {
@@ -791,6 +810,10 @@ export function CanvasPage() {
     ]);
     setSelectedNodeIds(new Set());
   }, [selectedNodeIds, nodes, setNodes, t]);
+
+  // 同步快捷键 refs
+  createGroupRef.current = createGroup;
+  ungroupRef.current = ungroupNodes;
 
   // 更新节点数据
   const handleNodeUpdate = useCallback((id: string, newData: any) => {
