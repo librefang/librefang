@@ -1,7 +1,7 @@
 # Workflow-only agent for research steps. Isolated from researcher-hand to avoid
 # shared quota and session bloat. Use this in cron/workflow steps that need research.
 name = "research-pipeline-runner"
-version = "0.4.3-beta4-20260314"
+version = "0.6.6"
 description = "Workflow-only research agent for pipeline steps (no continuous session)."
 author = "librefang"
 module = "builtin:chat"
@@ -14,7 +14,6 @@ weak_aliases = ["pipeline step", "workflow research"]
 [model]
 provider = "default"
 model = "default"
-api_key_env = "GEMINI_API_KEY"
 max_tokens = 2048
 temperature = 0.5
 system_prompt = """You are a research step in a workflow pipeline. You receive a single task and produce a concise output for the next step.
