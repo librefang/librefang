@@ -389,6 +389,16 @@ export function CanvasPage() {
   const [runInput, setRunInput] = useState("");
 
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<string>>(new Set());
+  const [spacePressed, setSpacePressed] = useState(false);
+
+  // 空格键：按住=平移模式，松开=框选模式
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => { if (e.code === "Space" && !e.repeat) { e.preventDefault(); setSpacePressed(true); } };
+    const up = (e: KeyboardEvent) => { if (e.code === "Space") { setSpacePressed(false); } };
+    window.addEventListener("keydown", down);
+    window.addEventListener("keyup", up);
+    return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
+  }, []);
 
   // 折叠/展开分组
   const toggleGroup = useCallback((groupId: string) => {
@@ -1135,7 +1145,13 @@ export function CanvasPage() {
             defaultEdgeOptions={defaultEdgeOptions}
             defaultViewport={{ x: 50, y: 80, zoom: 1 }}
             minZoom={0.1} maxZoom={2}
-            className="!bg-transparent"
+            // 交互：默认拖拽=框选，空格+拖拽=平移
+            panOnDrag={spacePressed}
+            selectionOnDrag={!spacePressed}
+            panOnScroll
+            selectionMode={1 /* SelectionMode.Partial */}
+            zoomOnScroll
+            className={`!bg-transparent ${spacePressed ? "!cursor-grab" : ""}`}
             connectionLineStyle={{ stroke: edgeColorActive, strokeWidth: 2 }}
             connectionLineType="smoothstep"
           >
