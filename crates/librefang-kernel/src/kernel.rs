@@ -1358,6 +1358,10 @@ impl LibreFangKernel {
 
                     // Check enabled flag — also do a direct TOML read as fallback
                     let mut is_enabled = restored_entry.manifest.enabled;
+                    eprintln!(
+                        "[BOOT] agent={} manifest.enabled={} source_toml={:?}",
+                        name, is_enabled, restored_entry.source_toml_path
+                    );
                     if is_enabled {
                         // Double-check: read directly from hands/agents TOML in case DB is stale
                         for dir in &["agents", "hands"] {
@@ -4732,6 +4736,23 @@ impl LibreFangKernel {
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());
             for (hand_id, config, old_agent_id) in saved_hands {
+                // Check if hand's agent.toml has enabled=false — skip reactivation
+                let hand_agent_name = format!("{}-hand", hand_id);
+                let hand_toml = self
+                    .config
+                    .home_dir
+                    .join("hands")
+                    .join(&hand_agent_name)
+                    .join("agent.toml");
+                if hand_toml.exists() {
+                    if let Ok(content) = std::fs::read_to_string(&hand_toml) {
+                        if content.contains("enabled = false") || content.contains("enabled=false")
+                        {
+                            info!(hand = %hand_id, "Hand disabled in config — skipping reactivation");
+                            continue;
+                        }
+                    }
+                }
                 match self.activate_hand(&hand_id, config) {
                     Ok(inst) => {
                         info!(hand = %hand_id, instance = %inst.instance_id, "Hand restored");
