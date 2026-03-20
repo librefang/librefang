@@ -194,10 +194,14 @@
     }
   },
   "scheduler": {
-    "title": "调度器", "subtitle": "管理 Cron 任务和定期任务。", "create_job": "创建调度", "create_job_desc": "定义新的任务序列。",
-    "job_name": "任务名称", "job_name_placeholder": "例如：每周健康检查", "cron_exp": "Cron 表达式", "cron_exp_placeholder": "0 0 * * *",
-    "target_agent": "目标智能体", "select_agent": "选择智能体...", "active_schedules": "活跃调度", "run_now": "立即运行",
-    "event_triggers": "事件触发器", "system_cron": "系统 Cron"
+    "title": "调度器", "subtitle": "管理 Cron 任务和定期任务。", "create_job": "创建调度",
+    "job_name": "任务名称", "job_name_placeholder": "例如：每周健康检查", "cron_exp": "Cron 表达式",
+    "target_agent": "目标智能体", "select_agent": "选择智能体...", "active_schedules": "定时任务", "run_now": "立即运行",
+    "event_triggers": "事件触发器", "system_cron": "系统 Cron",
+    "schedules": "个调度", "triggers_label": "个触发器", "cron_jobs": "个定时",
+    "no_schedules": "暂无调度任务。创建一个来自动化智能体任务。",
+    "message": "消息", "message_placeholder": "发送给智能体的消息...",
+    "every_minute": "每分钟", "every_n_hours": "每 {{n}} 小时", "weekly": "每周"
   },
   "runtime": {
     "title": "运行时", "subtitle": "引擎状态与资源管理。", "kernel": "内核执行环境",

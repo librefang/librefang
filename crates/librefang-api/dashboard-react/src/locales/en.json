@@ -194,10 +194,14 @@
     }
   },
   "scheduler": {
-    "title": "Scheduler", "subtitle": "Cron jobs and tasks.", "create_job": "Create Schedule", "create_job_desc": "Define new task sequence.",
-    "job_name": "Job Name", "job_name_placeholder": "e.g. Weekly Health Check", "cron_exp": "Cron Expression", "cron_exp_placeholder": "0 0 * * *",
-    "target_agent": "Target Agent", "select_agent": "Select agent...", "active_schedules": "Active Schedules", "run_now": "Run Now",
-    "event_triggers": "Event Triggers", "system_cron": "System Cron"
+    "title": "Scheduler", "subtitle": "Manage cron jobs and scheduled tasks.", "create_job": "Create Schedule",
+    "job_name": "Job Name", "job_name_placeholder": "e.g. Weekly Health Check", "cron_exp": "Cron Expression",
+    "target_agent": "Target Agent", "select_agent": "Select agent...", "active_schedules": "Schedules", "run_now": "Run Now",
+    "event_triggers": "Event Triggers", "system_cron": "System Cron",
+    "schedules": "schedules", "triggers_label": "triggers", "cron_jobs": "cron jobs",
+    "no_schedules": "No schedules yet. Create one to automate agent tasks.",
+    "message": "Message", "message_placeholder": "Message to send to agent...",
+    "every_minute": "Every minute", "every_n_hours": "Every {{n}} hours", "weekly": "Weekly"
   },
   "runtime": {
     "title": "Runtime", "subtitle": "Engine status and resource management.", "kernel": "Kernel Execution Environment",
