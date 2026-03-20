@@ -35,7 +35,11 @@
   "agents": {
     "title": "智能体", "subtitle": "由 LibreFang 内核管理的活跃自主单元。",
     "model": "模型", "provider": "供应商", "last_active": "最后活跃", "no_matching": "没有匹配的智能体。",
-    "system_prompt": "系统提示词", "capabilities": "能力", "skills": "技能", "tags": "标签", "mode": "模式"
+    "system_prompt": "系统提示词", "capabilities": "能力", "skills": "技能", "tags": "标签", "mode": "模式",
+    "create_agent": "创建智能体", "from_template": "从模板", "from_toml": "从 TOML",
+    "template_name": "模板名称", "template_placeholder": "例如：default, researcher, coder",
+    "template_hint": "模板从 ~/.librefang/agents/{name}/agent.toml 加载",
+    "manifest_toml": "智能体清单 (TOML)"
   },
   "providers": {
     "title": "供应商", "subtitle": "管理 LLM API 连接并监控健康状况。",
@@ -87,6 +91,9 @@
     "advanced": "高级指标", "advanced_desc": "详细分析即将推出。",
     "usage_by_model": "按模型成本", "usage_by_model_desc": "每个模型的 Token 消耗明细。",
     "daily_trend": "每日成本趋势", "daily_trend_desc": "最近 14 天的成本变化。", "today_cost": "今日成本",
+    "budget_title": "预算限额", "budget_desc": "设置消费上限控制成本。",
+    "hourly_limit": "每小时限额", "daily_limit": "每日限额", "monthly_limit": "每月限额",
+    "token_limit": "Token/小时", "alert_threshold": "告警阈值", "budget_saved": "预算限额已更新。",
     "usage_summary": "使用概览", "usage_summary_desc": "API 调用消耗统计。",
     "total_requests": "总请求数", "total_tokens": "总 Token", "total_cost": "总消耗", "avg_latency": "平均延迟",
     "usage_by_agent": "智能体消耗", "usage_by_agent_desc": "按智能体分组的消耗排名。"

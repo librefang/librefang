@@ -1,8 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
-import { listAgents, getAgentDetail } from "../api";
+import { listAgents, getAgentDetail, spawnAgent } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -11,7 +11,7 @@ import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
-import { Search, Users, Settings, MessageCircle, ChevronDown, ChevronRight, X, Cpu, Wrench, Shield } from "lucide-react";
+import { Search, Users, Settings, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2 } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -29,6 +29,15 @@ export function AgentsPage() {
   const [search, setSearch] = useState("");
   const [detailAgent, setDetailAgent] = useState<any>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [createMode, setCreateMode] = useState<"template" | "toml">("template");
+  const [templateName, setTemplateName] = useState("");
+  const [manifestToml, setManifestToml] = useState("");
+  const queryClient = useQueryClient();
+  const spawnMutation = useMutation({
+    mutationFn: spawnAgent,
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["agents"] }); setShowCreate(false); setTemplateName(""); setManifestToml(""); }
+  });
 
   const agentsQuery = useQuery({
     queryKey: ["agents", "list"],
@@ -44,14 +53,20 @@ export function AgentsPage() {
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
-      <PageHeader
-        badge={t("common.kernel_runtime")}
-        title={t("agents.title")}
-        subtitle={t("agents.subtitle")}
-        isFetching={agentsQuery.isFetching}
-        onRefresh={() => void agentsQuery.refetch()}
-        icon={<Users className="h-4 w-4" />}
-      />
+      <div className="flex justify-between items-end">
+        <PageHeader
+          badge={t("common.kernel_runtime")}
+          title={t("agents.title")}
+          subtitle={t("agents.subtitle")}
+          isFetching={agentsQuery.isFetching}
+          onRefresh={() => void agentsQuery.refetch()}
+          icon={<Users className="h-4 w-4" />}
+        />
+        <Button variant="primary" onClick={() => setShowCreate(true)}>
+          <Plus className="w-4 h-4" />
+          {t("agents.create_agent")}
+        </Button>
+      </div>
 
       <Input
         value={search}
@@ -211,6 +226,63 @@ export function AgentsPage() {
                   <MessageCircle className="w-3.5 h-3.5 mr-1" />
                   {t("common.interact")}
                 </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create Agent Modal */}
+      {showCreate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreate(false)}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[480px]" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
+              <h3 className="text-sm font-bold">{t("agents.create_agent")}</h3>
+              <button onClick={() => setShowCreate(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-5 space-y-4">
+              {/* Mode tabs */}
+              <div className="flex gap-2">
+                <button onClick={() => setCreateMode("template")}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "template" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+                  {t("agents.from_template")}
+                </button>
+                <button onClick={() => setCreateMode("toml")}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-colors ${createMode === "toml" ? "bg-brand text-white" : "bg-main text-text-dim"}`}>
+                  {t("agents.from_toml")}
+                </button>
+              </div>
+
+              {createMode === "template" ? (
+                <div>
+                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.template_name")}</label>
+                  <input value={templateName} onChange={e => setTemplateName(e.target.value)}
+                    placeholder={t("agents.template_placeholder")}
+                    className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-sm outline-none focus:border-brand" />
+                  <p className="text-[9px] text-text-dim/50 mt-1">{t("agents.template_hint")}</p>
+                </div>
+              ) : (
+                <div>
+                  <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.manifest_toml")}</label>
+                  <textarea value={manifestToml} onChange={e => setManifestToml(e.target.value)}
+                    placeholder={'[agent]\nname = "my-agent"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"'}
+                    rows={10}
+                    className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-brand resize-none" />
+                </div>
+              )}
+
+              {spawnMutation.error && (
+                <p className="text-xs text-error">{(spawnMutation.error as any)?.message || String(spawnMutation.error)}</p>
+              )}
+
+              <div className="flex gap-2 pt-2">
+                <Button variant="primary" className="flex-1"
+                  onClick={() => spawnMutation.mutate(createMode === "template" ? { template: templateName } : { manifest_toml: manifestToml })}
+                  disabled={spawnMutation.isPending || (createMode === "template" ? !templateName.trim() : !manifestToml.trim())}>
+                  {spawnMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mr-1" /> : <Plus className="w-4 h-4 mr-1" />}
+                  {t("agents.create_agent")}
+                </Button>
+                <Button variant="secondary" onClick={() => setShowCreate(false)}>{t("common.cancel")}</Button>
               </div>
             </div>
           </div>

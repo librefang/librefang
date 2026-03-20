@@ -995,6 +995,27 @@ export async function getUsageDaily(): Promise<UsageDailyResponse> {
   return get<UsageDailyResponse>("/api/usage/daily");
 }
 
+export interface BudgetStatus {
+  max_hourly_usd?: number;
+  max_daily_usd?: number;
+  max_monthly_usd?: number;
+  alert_threshold?: number;
+  default_max_llm_tokens_per_hour?: number;
+  [key: string]: unknown;
+}
+
+export async function getBudgetStatus(): Promise<BudgetStatus> {
+  return get<BudgetStatus>("/api/budget");
+}
+
+export async function updateBudget(payload: Partial<BudgetStatus>): Promise<ApiActionResponse> {
+  return put<ApiActionResponse>("/api/budget", payload);
+}
+
+export async function spawnAgent(req: { manifest_toml?: string; template?: string }): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/agents", req);
+}
+
 export async function getCommsTopology(): Promise<CommsTopology> {
   return get<CommsTopology>("/api/comms/topology");
 }
