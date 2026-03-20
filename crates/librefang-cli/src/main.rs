@@ -578,6 +578,7 @@ enum MigrateSourceArg {
     Openclaw,
     Langchain,
     Autogpt,
+    Openfang,
 }
 
 #[derive(Subcommand)]
@@ -4488,6 +4489,7 @@ fn cmd_migrate(args: MigrateArgs) {
         MigrateSourceArg::Openclaw => librefang_migrate::MigrateSource::OpenClaw,
         MigrateSourceArg::Langchain => librefang_migrate::MigrateSource::LangChain,
         MigrateSourceArg::Autogpt => librefang_migrate::MigrateSource::AutoGpt,
+        MigrateSourceArg::Openfang => librefang_migrate::MigrateSource::OpenFang,
     };
 
     let source_dir = args.source_dir.unwrap_or_else(|| {
@@ -4499,6 +4501,7 @@ fn cmd_migrate(args: MigrateArgs) {
             librefang_migrate::MigrateSource::OpenClaw => home.join(".openclaw"),
             librefang_migrate::MigrateSource::LangChain => home.join(".langchain"),
             librefang_migrate::MigrateSource::AutoGpt => home.join("Auto-GPT"),
+            librefang_migrate::MigrateSource::OpenFang => home.join(".openfang"),
         }
     });
 
