@@ -80,7 +80,7 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
 
   return (
     <div
-      className={`rounded-2xl bg-surface min-w-[140px] max-w-[200px] overflow-hidden relative transition-all duration-300 border border-border-subtle ${
+      className={`rounded-2xl bg-surface min-w-[140px] max-w-[200px] overflow-hidden relative transition-all duration-200 border border-border-subtle hover:scale-[1.02] hover:shadow-lg ${
         runState === "running" ? "animate-pulse" : ""
       }`}
       style={{ border: `2px ${missingAgent ? "dashed" : "solid"} ${borderColor}`, ...ringStyle }}
@@ -1436,13 +1436,13 @@ function CanvasPageInner() {
 
         {/* 画布 */}
         <main className="flex-1 relative">
-          <div className="absolute top-3 left-3 right-3 z-10 flex gap-3">
+          <div className="absolute top-3 left-3 right-3 z-10 flex gap-2">
             <input type="text" value={workflowName} onChange={(e) => setWorkflowName(e.target.value)}
               placeholder={t("workflows.workflow_name")}
-              className="flex-1 max-w-xs rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm font-bold focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none" />
+              className="flex-1 max-w-xs rounded-xl border border-border-subtle bg-surface/90 backdrop-blur px-3 py-2 text-sm font-bold focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none shadow-sm" />
             <input type="text" value={workflowDescription} onChange={(e) => setWorkflowDescription(e.target.value)}
               placeholder={t("workflows.description")}
-              className="flex-1 max-w-xs rounded-lg border border-border-subtle bg-surface px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none" />
+              className="flex-1 max-w-sm rounded-xl border border-border-subtle bg-surface/90 backdrop-blur px-3 py-2 text-sm text-text-dim focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none shadow-sm" />
           </div>
 
           {/* 节点配置面板 */}
