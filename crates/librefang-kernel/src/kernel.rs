@@ -7352,6 +7352,7 @@ impl librefang_wire::peer::PeerHandle for LibreFangKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librefang_types::config::DefaultModelConfig;
     use std::collections::HashMap;
 
     struct EnvVarGuard {
@@ -7610,6 +7611,68 @@ mod tests {
         assert!(!caps
             .iter()
             .any(|c| matches!(c, Capability::ToolInvoke(name) if name == "shell_exec")));
+    }
+
+    #[test]
+    fn test_spawn_agent_applies_local_default_model_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-local-model-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+        *kernel
+            .default_model_override
+            .write()
+            .expect("default model override lock") = Some(DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "Qwen3.5-4B-MLX-4bit".to_string(),
+            api_key_env: String::new(),
+            base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+        });
+
+        let agent_id = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "local-model-agent".to_string(),
+                    description: "uses local model override".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    model: ModelConfig {
+                        provider: "default".to_string(),
+                        model: "default".to_string(),
+                        max_tokens: 4096,
+                        temperature: 0.7,
+                        system_prompt: String::new(),
+                        api_key_env: None,
+                        base_url: None,
+                    },
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("agent should spawn with local model override");
+
+        let entry = kernel.registry.get(agent_id).expect("agent registry entry");
+        assert_eq!(entry.manifest.model.provider, "ollama");
+        assert_eq!(entry.manifest.model.model, "Qwen3.5-4B-MLX-4bit");
+        assert_eq!(
+            entry.manifest.model.base_url.as_deref(),
+            Some("http://127.0.0.1:11434/v1")
+        );
+        assert!(
+            entry.manifest.model.api_key_env.is_none(),
+            "local model override should not require an API key env var"
+        );
+
+        kernel.shutdown();
     }
 
     #[test]
