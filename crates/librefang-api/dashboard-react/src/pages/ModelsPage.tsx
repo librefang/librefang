@@ -1,5 +1,5 @@
-import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+// No React Query — direct fetch to avoid cache mutation bugs
+import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listModels, type ModelItem } from "../api";
 import { Badge } from "../components/ui/Badge";
@@ -23,26 +23,25 @@ export function ModelsPage() {
 
   const [allModels, setAllModels] = useState<ModelItem[]>([]);
   const [totalAvailable, setTotalAvailable] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isFetching, setIsFetching] = useState(false);
 
-  const modelsQuery = useQuery({
-    queryKey: ["models"],
-    queryFn: () => listModels(),
-    refetchInterval: REFRESH_MS,
-  });
+  const fetchModels = useCallback(async () => {
+    setIsFetching(true);
+    try {
+      const data = await listModels();
+      setAllModels(data.models ?? []);
+      setTotalAvailable(data.available ?? 0);
+    } catch { /* ignore */ }
+    setIsLoading(false);
+    setIsFetching(false);
+  }, []);
 
-  // Update state only when API data changes
   useEffect(() => {
-    if (!modelsQuery.data?.models) return;
-    const seen = new Set<string>();
-    const deduped = modelsQuery.data.models.filter(m => {
-      const key = `${m.provider}:${m.id}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    setAllModels(deduped);
-    setTotalAvailable(modelsQuery.data.available ?? 0);
-  }, [modelsQuery.data]);
+    fetchModels();
+    const timer = setInterval(fetchModels, REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [fetchModels]);
 
   const providers = ["all", ...Array.from(new Set(allModels.map(m => m.provider))).sort()];
   const tiers = ["all", ...Array.from(new Set(allModels.map(m => m.tier).filter(Boolean))).sort()];
@@ -107,14 +106,14 @@ export function ModelsPage() {
           {allModels.length > 0 && (
             <Badge variant="brand">{totalAvailable} / {allModels.length} {t("models.available")}</Badge>
           )}
-          <Button variant="secondary" onClick={() => modelsQuery.refetch()}>
-            <RefreshCw className={`h-3.5 w-3.5 ${modelsQuery.isFetching ? "animate-spin" : ""}`} />
+          <Button variant="secondary" onClick={() => fetchModels()}>
+            <RefreshCw className={`h-3.5 w-3.5 ${isFetching ? "animate-spin" : ""}`} />
           </Button>
         </div>
       </header>
 
       {/* Error state */}
-      {modelsQuery.isError && (
+      {(!isLoading && allModels.length === 0) && (
         <div className="flex items-center gap-3 p-4 rounded-2xl bg-error/5 border border-error/20 text-error">
           <AlertCircle className="w-5 h-5 shrink-0" />
           <p className="text-sm">{t("models.load_error")}</p>
@@ -170,7 +169,7 @@ export function ModelsPage() {
       </div>
 
       {/* Model List */}
-      {modelsQuery.isLoading ? (
+      {isLoading ? (
         <div className="space-y-2">
           {[1, 2, 3, 4, 5].map(i => <div key={i} className="h-12 rounded-xl bg-main animate-pulse" />)}
         </div>
