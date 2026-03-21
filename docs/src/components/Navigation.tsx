@@ -6,13 +6,16 @@ import { ChevronRight } from "lucide-react";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useRef, useState } from "react";
-import { Button } from "@/components/Button";
+import { createContext, useContext, useRef, useState } from "react";
 import { useIsInsideMobileNavigation } from "@/components/MobileNavigation";
 import { type Section, useSectionStore } from "@/components/SectionProvider";
 import { Tag } from "@/components/Tag";
 import { remToPx } from "@/lib/remToPx";
 import { withPrefix } from "@/lib/utils";
+
+const AllSectionsContext = createContext<
+	Record<string, Array<Section>> | undefined
+>(undefined);
 
 interface NavGroup {
 	title: string;
@@ -413,12 +416,28 @@ export const enNavigation: Array<NavGroup> = [
 
 export { zhNavigation };
 
-export function Navigation({
+export function AllSectionsProvider({
 	allSections,
+	children,
+}: {
+	allSections: Record<string, Array<Section>>;
+	children: React.ReactNode;
+}) {
+	return (
+		<AllSectionsContext.Provider value={allSections}>
+			{children}
+		</AllSectionsContext.Provider>
+	);
+}
+
+export function Navigation({
+	allSections: allSectionsProp,
 	...props
 }: React.ComponentPropsWithoutRef<"nav"> & {
 	allSections?: Record<string, Array<Section>>;
 }) {
+	const allSectionsCtx = useContext(AllSectionsContext);
+	const allSections = allSectionsProp ?? allSectionsCtx;
 	const pathname = usePathname();
 	const isZh = pathname?.startsWith("/zh");
 	const navigation = isZh ? zhNavigation : enNavigation;
