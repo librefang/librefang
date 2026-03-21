@@ -184,6 +184,7 @@ impl SetupWizard {
             tool_allowlist: vec![],
             tool_blocklist: vec![],
             tools_disabled: false,
+            enabled: true,
             allowed_plugins: vec![],
         };
 

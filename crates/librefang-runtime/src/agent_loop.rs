@@ -107,19 +107,34 @@ fn safe_trim_messages(messages: &mut Vec<Message>, agent_name: &str, user_messag
 
 /// Strip base64 data from image blocks in session messages that the LLM has
 /// already processed, replacing them with lightweight text placeholders.
+///
+/// Each image block (~56K tokens of base64) is replaced with a small text
+/// note so the conversation context is preserved without token bloat.
 fn strip_processed_image_data(messages: &mut [Message]) {
     for msg in messages.iter_mut() {
-        if let MessageContent::Blocks(blocks) = &mut msg.content {
-            for block in blocks.iter_mut() {
-                if let ContentBlock::Image { media_type, .. } = block {
-                    let placeholder = format!("[image ({media_type}) already processed]");
-                    *block = ContentBlock::Text {
-                        text: placeholder,
-                        provider_metadata: None,
-                    };
-                }
-            }
+        msg.content.strip_images();
+    }
+}
+
+/// Strip images from all messages except the last user message.
+///
+/// Called *before* the LLM call to proactively clean stale images from
+/// previous turns (e.g. images that survived a crash or session reload).
+/// The last user message is preserved so the LLM can see any freshly
+/// attached image on the current turn.
+fn strip_prior_image_data(messages: &mut [Message]) {
+    // Find the index of the last user message
+    let last_user_idx = messages
+        .iter()
+        .rposition(|m| m.role == Role::User && m.content.has_images());
+
+    for (i, msg) in messages.iter_mut().enumerate() {
+        // Skip the last user message that contains images — it hasn't been
+        // processed by the LLM yet.
+        if Some(i) == last_user_idx {
+            continue;
         }
+        msg.content.strip_images();
     }
 }
 
@@ -589,6 +604,14 @@ pub async fn run_agent_loop(
     // overflow. Cuts at conversation-turn boundaries so ToolUse/ToolResult
     // pairs are never split (fixes "EOF while parsing" from empty API responses).
     safe_trim_messages(&mut messages, &manifest.name, user_message);
+
+    // Proactively strip base64 image data from previous turns.  Images that
+    // survived from earlier sessions (e.g. after a crash or daemon restart)
+    // would otherwise waste ~56K tokens per image on every subsequent LLM
+    // call.  The current turn's image (last user message) is preserved so the
+    // LLM can still process it.
+    strip_prior_image_data(&mut messages);
+    strip_prior_image_data(&mut session.messages);
 
     // Use autonomous config max_iterations if set, else default
     let max_iterations = manifest
@@ -1838,6 +1861,10 @@ pub async fn run_agent_loop_streaming(
 
     // Safety valve: trim at conversation-turn boundaries (streaming path).
     safe_trim_messages(&mut messages, &manifest.name, user_message);
+
+    // Proactively strip stale image data from previous turns (streaming path).
+    strip_prior_image_data(&mut messages);
+    strip_prior_image_data(&mut session.messages);
 
     // Use autonomous config max_iterations if set, else default
     let max_iterations = manifest

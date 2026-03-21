@@ -79,6 +79,9 @@ pub struct Workflow {
     /// Created at.
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
+    /// Optional canvas layout data (nodes, edges, positions) for the visual editor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<serde_json::Value>,
 }
 
 /// A single step in a workflow.
@@ -942,6 +945,7 @@ impl From<WorkflowFile> for Workflow {
             description: f.description,
             steps: f.steps,
             created_at: f.created_at.unwrap_or_else(Utc::now),
+            layout: None,
         }
     }
 }

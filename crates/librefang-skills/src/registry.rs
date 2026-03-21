@@ -197,6 +197,11 @@ impl SkillRegistry {
     }
 
     /// Load a single skill from a directory.
+    ///
+    /// Progressively loads skill resources:
+    /// 1. Parse `skill.toml` manifest
+    /// 2. Load `prompt_context.md` if the manifest lacks inline prompt context
+    /// 3. Canonicalize the skill directory path for reliable entry-point resolution
     pub fn load_skill(&mut self, skill_dir: &Path) -> Result<String, SkillError> {
         if self.frozen {
             return Err(SkillError::NotFound(
@@ -205,15 +210,44 @@ impl SkillRegistry {
         }
         let manifest_path = skill_dir.join("skill.toml");
         let toml_str = std::fs::read_to_string(&manifest_path)?;
-        let manifest: SkillManifest = toml::from_str(&toml_str)?;
+        let mut manifest: SkillManifest = toml::from_str(&toml_str)?;
+
+        // Progressive loading: if prompt_context is not inlined in skill.toml,
+        // try to load it from the companion prompt_context.md file.
+        let needs_prompt_context = manifest
+            .prompt_context
+            .as_ref()
+            .map_or(true, |ctx| ctx.is_empty());
+        if needs_prompt_context {
+            let prompt_path = skill_dir.join("prompt_context.md");
+            if prompt_path.exists() {
+                match std::fs::read_to_string(&prompt_path) {
+                    Ok(content) if !content.is_empty() => {
+                        manifest.prompt_context = Some(content);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(
+                            "Failed to read prompt_context.md for {}: {e}",
+                            skill_dir.display()
+                        );
+                    }
+                }
+            }
+        }
 
         let name = manifest.skill.name.clone();
+
+        // Canonicalize the skill directory path so entry-point resolution
+        // works regardless of the process working directory.
+        let resolved_path =
+            std::fs::canonicalize(skill_dir).unwrap_or_else(|_| skill_dir.to_path_buf());
 
         self.skills.insert(
             name.clone(),
             InstalledSkill {
                 manifest,
-                path: skill_dir.to_path_buf(),
+                path: resolved_path,
                 enabled: true,
             },
         );
@@ -550,5 +584,63 @@ input_schema = {{ type = "object" }}
 
         // Verify that skill.toml was written
         assert!(skill_dir.join("skill.toml").exists());
+    }
+
+    #[test]
+    fn test_progressive_prompt_context_loading() {
+        let dir = TempDir::new().unwrap();
+        let skill_dir = dir.path().join("context-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+
+        // Create a skill.toml WITHOUT inline prompt_context
+        std::fs::write(
+            skill_dir.join("skill.toml"),
+            r#"
+[skill]
+name = "context-skill"
+version = "0.1.0"
+description = "A skill with external prompt context"
+"#,
+        )
+        .unwrap();
+
+        // Create a companion prompt_context.md file
+        std::fs::write(
+            skill_dir.join("prompt_context.md"),
+            "# Context Skill\n\nYou are a helpful context-aware assistant.",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        let count = registry.load_all().unwrap();
+        assert_eq!(count, 1);
+
+        let skill = registry.get("context-skill").unwrap();
+        // Progressive loading should have picked up prompt_context.md
+        assert!(
+            skill.manifest.prompt_context.is_some(),
+            "prompt_context should be loaded from prompt_context.md"
+        );
+        assert!(skill
+            .manifest
+            .prompt_context
+            .as_ref()
+            .unwrap()
+            .contains("context-aware assistant"));
+    }
+
+    #[test]
+    fn test_skill_path_is_absolute() {
+        let dir = TempDir::new().unwrap();
+        create_test_skill(dir.path(), "abs-path-skill");
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.load_all().unwrap();
+
+        let skill = registry.get("abs-path-skill").unwrap();
+        assert!(
+            skill.path.is_absolute(),
+            "Skill path should be absolute for reliable entry-point resolution"
+        );
     }
 }

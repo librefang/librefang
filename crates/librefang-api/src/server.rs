@@ -75,6 +75,14 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/agents/{id}/mode",
             axum::routing::put(routes::set_agent_mode),
         )
+        .route(
+            "/agents/{id}/suspend",
+            axum::routing::put(routes::suspend_agent),
+        )
+        .route(
+            "/agents/{id}/resume",
+            axum::routing::put(routes::resume_agent),
+        )
         .route("/profiles", axum::routing::get(routes::list_profiles))
         .route("/profiles/{name}", axum::routing::get(routes::get_profile))
         .route(
@@ -847,9 +855,14 @@ pub async fn build_router(
 
     let app = Router::new()
         .route("/", axum::routing::get(webchat::webchat_page))
+        .route(
+            "/react-assets/{*path}",
+            axum::routing::get(webchat::react_asset),
+        )
         .route("/logo.png", axum::routing::get(webchat::logo_png))
         .route("/favicon.ico", axum::routing::get(webchat::favicon_ico))
         .route("/locales/en.json", axum::routing::get(webchat::locale_en))
+        .route("/locales/ja.json", axum::routing::get(webchat::locale_ja))
         .route(
             "/locales/zh-CN.json",
             axum::routing::get(webchat::locale_zh_cn),
