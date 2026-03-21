@@ -28,19 +28,21 @@ export function ModelsPage() {
     queryKey: ["models"],
     queryFn: () => listModels(),
     refetchInterval: REFRESH_MS,
-    onSuccess: (data) => {
-      // Deduplicate and store in state — only updates on fresh API data
-      const seen = new Set<string>();
-      const deduped = (data.models ?? []).filter(m => {
-        const key = `${m.provider}:${m.id}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
-      setAllModels(deduped);
-      setTotalAvailable(data.available ?? 0);
-    }
   });
+
+  // Update state only when API data changes
+  useEffect(() => {
+    if (!modelsQuery.data?.models) return;
+    const seen = new Set<string>();
+    const deduped = modelsQuery.data.models.filter(m => {
+      const key = `${m.provider}:${m.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    setAllModels(deduped);
+    setTotalAvailable(modelsQuery.data.available ?? 0);
+  }, [modelsQuery.data]);
 
   const providers = ["all", ...Array.from(new Set(allModels.map(m => m.provider))).sort()];
   const tiers = ["all", ...Array.from(new Set(allModels.map(m => m.tier).filter(Boolean))).sort()];
