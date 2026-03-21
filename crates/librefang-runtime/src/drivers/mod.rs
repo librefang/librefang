@@ -59,6 +59,8 @@ pub enum ApiFormat {
     Copilot,
     /// Google Cloud Vertex AI (Gemini format with OAuth2 auth).
     VertexAI,
+    /// Azure OpenAI (OpenAI format with `api-key` header and deployment-based URL).
+    AzureOpenAI,
 }
 
 /// A provider entry in the static registry.
@@ -496,6 +498,16 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         hidden: false,
     },
     ProviderEntry {
+        name: "azure-openai",
+        aliases: &["azure"],
+        base_url: "", // Constructed dynamically from endpoint + deployment
+        api_key_env: "AZURE_OPENAI_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::AzureOpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
         name: "vertex-ai",
         aliases: &["vertex", "vertex_ai"],
         base_url: VERTEX_AI_BASE_URL,
@@ -608,6 +620,36 @@ fn create_driver_from_entry(
         ApiFormat::ChatGpt => Ok(Arc::new(chatgpt::ChatGptDriver::new(api_key, base_url))),
         ApiFormat::Copilot => Ok(Arc::new(copilot::CopilotDriver::new(api_key, base_url))),
         ApiFormat::VertexAI => Ok(Arc::new(vertex_ai::VertexAiDriver::new(config)?)),
+        ApiFormat::AzureOpenAI => {
+            let azure = &config.azure_openai;
+            let endpoint = azure
+                .endpoint
+                .clone()
+                .or_else(|| config.base_url.clone())
+                .or_else(|| std::env::var("AZURE_OPENAI_ENDPOINT").ok())
+                .ok_or_else(|| LlmError::Api {
+                    status: 0,
+                    message: "Azure OpenAI requires an endpoint. Set [azure_openai] endpoint \
+                                  in config.toml, or AZURE_OPENAI_ENDPOINT env var."
+                        .to_string(),
+                })?;
+            let deployment = azure
+                .deployment
+                .clone()
+                .or_else(|| std::env::var("AZURE_OPENAI_DEPLOYMENT").ok())
+                .unwrap_or_default(); // empty deployment will use model name at request time
+            let api_version = azure
+                .api_version
+                .clone()
+                .or_else(|| std::env::var("AZURE_OPENAI_API_VERSION").ok())
+                .unwrap_or_else(|| "2024-02-01".to_string());
+            Ok(Arc::new(openai::OpenAIDriver::new_azure(
+                api_key,
+                endpoint,
+                deployment,
+                api_version,
+            )))
+        }
     }
 }
 
@@ -634,6 +676,7 @@ fn create_driver_from_entry(
 /// - `xai` — xAI (Grok)
 /// - `replicate` — Replicate
 /// - `chutes` — Chutes.ai (serverless open-source model inference)
+/// - `azure-openai` — Azure OpenAI Service (deployment-based URL, `api-key` header)
 /// - `vertex-ai` — Google Cloud Vertex AI (OAuth2 auth, enterprise Gemini)
 /// - `qwen` — Qwen / DashScope (use `provider_regions` for intl/us endpoints)
 /// - Any custom provider with `base_url` set uses OpenAI-compatible format
@@ -685,7 +728,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
             "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
              deepseek, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
-             chutes, venice, vertex-ai, nvidia-nim, codex, claude-code, qwen-code, \
+             chutes, venice, azure-openai, vertex-ai, nvidia-nim, codex, claude-code, qwen-code, \
              gemini-cli, codex-cli, aider, qwen, minimax, zhipu. \
              Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
@@ -885,9 +928,10 @@ mod tests {
         assert!(providers.contains(&"gemini-cli"));
         assert!(providers.contains(&"codex-cli"));
         assert!(providers.contains(&"aider"));
+        assert!(providers.contains(&"azure-openai"));
         assert!(providers.contains(&"vertex-ai"));
         assert!(providers.contains(&"nvidia-nim"));
-        assert_eq!(providers.len(), 40);
+        assert_eq!(providers.len(), 41);
     }
 
     #[test]
