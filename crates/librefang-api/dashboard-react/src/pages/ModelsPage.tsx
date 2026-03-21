@@ -21,7 +21,7 @@ export function ModelsPage() {
   const [availableOnly, setAvailableOnly] = useState(false);
   const [page, setPage] = useState(0);
 
-  const modelsQuery = useQuery({ queryKey: ["models"], queryFn: () => listModels(), refetchInterval: REFRESH_MS });
+  const modelsQuery = useQuery({ queryKey: ["models"], queryFn: () => listModels(), refetchInterval: REFRESH_MS, structuralSharing: false });
 
   // Deduplicate models by id+provider (backend may return duplicates after catalog sync)
   const allModels = useMemo(() => {
