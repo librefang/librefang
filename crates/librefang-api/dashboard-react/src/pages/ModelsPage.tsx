@@ -21,19 +21,25 @@ export function ModelsPage() {
   const [availableOnly, setAvailableOnly] = useState(false);
   const [page, setPage] = useState(0);
 
-  const modelsQuery = useQuery({ queryKey: ["models"], queryFn: () => listModels(), refetchInterval: REFRESH_MS });
+  const [allModels, setAllModels] = useState<ModelItem[]>([]);
+  const [totalAvailable, setTotalAvailable] = useState(0);
 
-  // Deep copy to prevent React Query cache mutation
-  const rawModels: ModelItem[] = JSON.parse(JSON.stringify(modelsQuery.data?.models ?? []));
-  const totalAvailable = modelsQuery.data?.available ?? 0;
-
-  // Deduplicate by provider:id
-  const seen = new Set<string>();
-  const allModels = rawModels.filter(m => {
-    const key = `${m.provider}:${m.id}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
+  const modelsQuery = useQuery({
+    queryKey: ["models"],
+    queryFn: () => listModels(),
+    refetchInterval: REFRESH_MS,
+    onSuccess: (data) => {
+      // Deduplicate and store in state — only updates on fresh API data
+      const seen = new Set<string>();
+      const deduped = (data.models ?? []).filter(m => {
+        const key = `${m.provider}:${m.id}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      setAllModels(deduped);
+      setTotalAvailable(data.available ?? 0);
+    }
   });
 
   const providers = ["all", ...Array.from(new Set(allModels.map(m => m.provider))).sort()];
