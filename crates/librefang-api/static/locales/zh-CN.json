@@ -419,6 +419,7 @@
       "help": "显示可用命令",
       "agents": "切换到代理页面",
       "new": "重置会话（清除历史）",
+      "reboot": "硬重置会话（完全清除上下文，不保存摘要）",
       "compact": "触发LLM会话压缩",
       "model": "显示或切换模型（/model [名称]）",
       "stop": "取消当前代理运行",
@@ -438,7 +439,9 @@
       "modelSwitched": "已切换到 {model}",
       "switchFailed": "切换失败：{message}",
       "sessionReset": "会话已重置",
+      "sessionRebooted": "会话已重启，上下文已清除。",
       "resetFailed": "重置失败：{message}",
+      "rebootFailed": "重启失败：{message}",
       "compactFailed": "压缩失败：{message}",
       "stopFailed": "停止失败：{message}",
       "modelSwitchFailed": "模型切换失败：{message}"

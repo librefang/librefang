@@ -5,6 +5,7 @@
 //! notifications, global shortcuts, auto-start, and update checking.
 
 mod commands;
+mod dotenv;
 mod server;
 mod shortcuts;
 mod tray;
@@ -39,6 +40,9 @@ pub fn run() {
         .init();
 
     info!("Starting LibreFang Desktop...");
+
+    // Load ~/.librefang/.env into process environment (system env takes priority).
+    dotenv::load_dotenv();
 
     // Boot kernel + embedded server (blocks until port is known)
     let server_handle = server::start_server().expect("Failed to start LibreFang server");

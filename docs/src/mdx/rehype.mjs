@@ -1,14 +1,14 @@
 import { slugifyWithCounter } from "@sindresorhus/slugify";
 import * as acorn from "acorn";
+import { fromHtml } from "hast-util-from-html";
 import { toString } from "mdast-util-to-string";
 import { mdxAnnotations } from "mdx-annotations";
 import { createHighlighter } from "shiki";
 import { visit } from "unist-util-visit";
-import { fromHtml } from "hast-util-from-html";
 
 function rehypeParseCodeBlocks() {
-	return function(tree) {
-		visit(tree, "element", function(node, _nodeIndex, parentNode) {
+	return (tree) => {
+		visit(tree, "element", (node, _nodeIndex, parentNode) => {
 			if (node.tagName === "code") {
 				parentNode.properties.language = node.properties.className
 					? node.properties.className[0].replace(/^language-/, "")
@@ -21,36 +21,65 @@ function rehypeParseCodeBlocks() {
 let highlighter;
 
 function rehypeShiki() {
-	return async function(tree) {
+	return async (tree) => {
 		highlighter =
 			highlighter ??
 			(await createHighlighter({
 				themes: ["github-light"],
 				langs: [
-					"javascript", "bash", "json", "typescript", "shell", "tsx", "jsx",
-					"python", "php", "ruby", "go", "rust", "java", "c", "cpp",
-					"csharp", "html", "css", "sql", "yaml", "xml", "markdown", "toml",
-					"nginx", "dockerfile", "ini", "powershell", "docker"
+					"javascript",
+					"bash",
+					"json",
+					"typescript",
+					"shell",
+					"tsx",
+					"jsx",
+					"python",
+					"php",
+					"ruby",
+					"go",
+					"rust",
+					"java",
+					"c",
+					"cpp",
+					"csharp",
+					"html",
+					"css",
+					"sql",
+					"yaml",
+					"xml",
+					"markdown",
+					"toml",
+					"nginx",
+					"dockerfile",
+					"ini",
+					"powershell",
+					"docker",
 				],
 			}));
 
-		visit(tree, "element", function(node) {
-			if (node.tagName === "pre" && node.children[0] && node.children[0].tagName === "code") {
+		visit(tree, "element", (node) => {
+			if (
+				node.tagName === "pre" &&
+				node.children[0] &&
+				node.children[0].tagName === "code"
+			) {
 				const codeNode = node.children[0];
 				const textNode = codeNode.children[0];
 
-				if (!textNode || textNode.type !== 'text') return;
+				if (!textNode || textNode.type !== "text") return;
 
 				node.properties.code = textNode.value;
 
-				if (node.properties.language === 'mermaid') {
-					const encodedCode = Buffer.from(textNode.value).toString('base64');
-					node.tagName = 'img';
+				if (node.properties.language === "mermaid") {
+					const encodedCode = Buffer.from(textNode.value).toString("base64");
+					node.tagName = "img";
 					node.properties = {
 						src: "https://mermaid.ink/img/" + encodedCode,
-						alt: 'Mermaid Diagram',
-						className: 'mermaid-diagram',
-						style: 'max-width: 100%; height: auto; margin: 2rem 0; display: block;'
+						alt: "Mermaid Diagram",
+						className: "mermaid-diagram",
+						style:
+							"max-width: 100%; height: auto; margin: 2rem 0; display: block;",
 					};
 					node.children = [];
 					return;
@@ -61,15 +90,23 @@ function rehypeShiki() {
 						lang: node.properties.language,
 						theme: "github-light",
 					});
-					
+
 					const hast = fromHtml(html, { fragment: true });
 					const preNode = hast.children[0];
-					if (preNode && preNode.tagName === 'pre') {
+					if (preNode && preNode.tagName === "pre") {
 						const innerCodeNode = preNode.children[0];
-						if (innerCodeNode && innerCodeNode.tagName === 'code') {
+						if (innerCodeNode && innerCodeNode.tagName === "code") {
 							codeNode.children = innerCodeNode.children;
-							codeNode.properties = Object.assign({}, codeNode.properties, innerCodeNode.properties);
-							node.properties = Object.assign({}, node.properties, preNode.properties);
+							codeNode.properties = Object.assign(
+								{},
+								codeNode.properties,
+								innerCodeNode.properties,
+							);
+							node.properties = Object.assign(
+								{},
+								node.properties,
+								preNode.properties,
+							);
 						}
 					}
 				}
@@ -79,25 +116,51 @@ function rehypeShiki() {
 }
 
 function rehypeSlugify() {
-	return function(tree) {
+	return (tree) => {
 		const slugify = slugifyWithCounter();
-		visit(tree, "element", function(node) {
+		const usedIds = new Set();
+
+		visit(tree, "element", (node) => {
 			if (node.tagName === "h2" && !node.properties.id) {
-				node.properties.id = slugify(toString(node));
+				const text = toString(node);
+				let id = slugify(text);
+
+				// @sindresorhus/slugify strips CJK characters, producing empty IDs.
+				// Fall back to a Unicode-aware slug that preserves CJK, Kana, Hangul, etc.
+				if (!id && text) {
+					id = text
+						.trim()
+						.replace(/\s+/g, "-")
+						.replace(/[^\p{L}\p{N}-]/gu, "")
+						.replace(/-{2,}/g, "-")
+						.replace(/^-|-$/g, "");
+				}
+
+				// Deduplicate IDs that the counter didn't handle
+				if (usedIds.has(id)) {
+					let counter = 2;
+					while (usedIds.has(id + "-" + counter)) {
+						counter++;
+					}
+					id = id + "-" + counter;
+				}
+				usedIds.add(id);
+
+				node.properties.id = id;
 			}
 		});
 	};
 }
 
 function rehypeAddMDXExports(getExports) {
-	return function(tree) {
+	return (tree) => {
 		const exports = Object.entries(getExports(tree));
 
 		for (var i = 0; i < exports.length; i++) {
 			var entry = exports[i];
 			var name = entry[0];
 			var value = entry[1];
-			
+
 			var found = false;
 			for (var j = 0; j < tree.children.length; j++) {
 				var node = tree.children[j];
@@ -109,7 +172,7 @@ function rehypeAddMDXExports(getExports) {
 					break;
 				}
 			}
-			
+
 			if (found) continue;
 
 			const exportStr = "export const " + name + " = " + value;
@@ -135,7 +198,13 @@ function getSections(node) {
 	for (var i = 0; i < children.length; i++) {
 		var child = children[i];
 		if (child.type === "element" && child.tagName === "h2") {
-			sections.push("{ title: " + JSON.stringify(toString(child)) + ", id: " + JSON.stringify(child.properties.id) + " }");
+			sections.push(
+				"{ title: " +
+					JSON.stringify(toString(child)) +
+					", id: " +
+					JSON.stringify(child.properties.id) +
+					" }",
+			);
 		} else if (child.children) {
 			const subSections = getSections(child);
 			for (var j = 0; j < subSections.length; j++) {
@@ -154,10 +223,8 @@ export const rehypePlugins = [
 	rehypeSlugify,
 	[
 		rehypeAddMDXExports,
-		function(tree) {
-			return {
-				sections: "[" + getSections(tree).join(",") + "]"
-			};
-		}
+		(tree) => ({
+			sections: "[" + getSections(tree).join(",") + "]",
+		}),
 	],
 ];

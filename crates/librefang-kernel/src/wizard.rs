@@ -184,6 +184,7 @@ impl SetupWizard {
             tool_allowlist: vec![],
             tool_blocklist: vec![],
             tools_disabled: false,
+            allowed_plugins: vec![],
         };
 
         let skills_to_install: Vec<String> = intent

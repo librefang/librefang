@@ -38,14 +38,25 @@ jobs:
           # Fallback: create a minimal release so builds can proceed
           echo "::warning::Release not found after 60s, creating fallback release"
           VERSION="${TAG#v}"
-          VERSION="${VERSION%-*}"
+          # Strip pre-release suffix then strip hour for CHANGELOG
+          VERSION=$(echo "$VERSION" | sed 's/-.*//')
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          if [ ${#PATCH} -eq 4 ]; then
+            VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH:0:2}"
+          fi
           CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)
           if [ -z "$CHANGES" ]; then
             CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
           fi
+          # Detect pre-release tags (-betaN, -rcN)
+          PRERELEASE_FLAG=""
+          if echo "$TAG" | grep -qE '-(beta|rc)[0-9]'; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
           gh release create "$TAG" \
             --title "LibreFang $TAG" \
             --notes "$CHANGES" \
+            $PRERELEASE_FLAG \
             --repo "${{ github.repository }}" || true
 
   # ── JavaScript SDK → npm ─────────────────────────────────────────────────
@@ -66,9 +77,7 @@ jobs:
 
       - name: Sync version from tag
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          # Strip date suffix (e.g. 0.5.0-20260316 → 0.5.0)
-          VERSION="${TAG%-*}"
+          VERSION="${GITHUB_REF#refs/tags/v}"
           npm version "$VERSION" --no-git-tag-version --allow-same-version
           echo "Publishing @librefang/sdk@$VERSION"
 
@@ -84,7 +93,11 @@ jobs:
           if npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; then
             echo "✓ ${PKG_NAME}@${PKG_VERSION} already published to npm, skipping"
           else
-            npm publish --access public
+            NPM_TAG=""
+            if echo "$PKG_VERSION" | grep -qE '-(beta|rc)[0-9]'; then
+              NPM_TAG="--tag next"
+            fi
+            npm publish --access public $NPM_TAG
           fi
 
       - name: Publish to GitHub Packages
@@ -114,11 +127,11 @@ jobs:
 
       - name: Sync version from tag
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          # Strip date suffix (e.g. 0.5.0-20260316 → 0.5.0)
-          VERSION="${TAG%-*}"
-          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
-          echo "Publishing librefang-sdk==$VERSION"
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          # PEP 440: convert -beta1 → b1, -rc1 → rc1
+          PYPI_VERSION=$(echo "$VERSION" | sed 's/-beta/b/; s/-rc/rc/')
+          sed -i "s/^version = .*/version = \"$PYPI_VERSION\"/" pyproject.toml
+          echo "Publishing librefang-sdk==$PYPI_VERSION"
           grep '^version' pyproject.toml
 
       - name: Build sdist and wheel
@@ -146,9 +159,7 @@ jobs:
 
       - name: Sync version from tag
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          # Strip date suffix (e.g. 0.5.0-20260316 → 0.5.0)
-          VERSION="${TAG%-*}"
+          VERSION="${GITHUB_REF#refs/tags/v}"
           sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
           MAJOR_MINOR=$(echo "$VERSION" | cut -d. -f1,2)
           sed -i '/^\[dependencies\]/,/^```/ s/librefang = "[^"]*"/librefang = "'"$MAJOR_MINOR"'"/' README.md
@@ -181,10 +192,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-          VERSION="${TAG%-*}"
-          GO_TAG="sdk/go/v${VERSION}"
+          VERSION="${GITHUB_REF#refs/tags/v}"
           REPO="${{ github.repository }}"
+
+          # Map CalVer to Go-compatible v0.YYYYMMDD.HH (keeps major=0, no /v2026 import path)
+          # e.g. 2026.3.2114 → v0.20260321.14, 2026.3.2114-rc1 → v0.20260321.14-rc1
+          YEAR=$(echo "$VERSION" | cut -d. -f1)
+          MONTH=$(printf '%02d' "$(echo "$VERSION" | cut -d. -f2)")
+          DDHH=$(echo "$VERSION" | cut -d. -f3 | sed 's/-.*//')
+          PRERELEASE=$(echo "$VERSION" | grep -oE '\-.*' || true)
+          DD=${DDHH:0:2}
+          HH=$((10#${DDHH:2:2}))  # strip leading zero (SemVer forbids 01, 02, etc.)
+          GO_VERSION="0.${YEAR}${MONTH}${DD}.${HH}${PRERELEASE}"
+          GO_TAG="sdk/go/v${GO_VERSION}"
 
           # Check if tag already exists
           if gh api "repos/$REPO/git/refs/tags/$GO_TAG" &>/dev/null; then
@@ -199,4 +219,4 @@ jobs:
           gh api "repos/$REPO/git/refs" \
             -f ref="refs/tags/$GO_TAG" \
             -f sha="$SHA"
-          echo "✓ Published Go module tag: $GO_TAG"
+          echo "✓ Published Go module tag: $GO_TAG (from $VERSION)"

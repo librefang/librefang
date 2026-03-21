@@ -18,6 +18,7 @@ pub mod registry;
 pub mod verify;
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// Errors from the skill system.
@@ -122,6 +123,21 @@ pub struct SkillManifest {
     /// Provenance tracking — where this skill came from.
     #[serde(default)]
     pub source: Option<SkillSource>,
+    /// Arbitrary user-defined configuration keys.
+    ///
+    /// Skill authors place custom config under a `[config]` table:
+    ///
+    /// ```toml
+    /// [skill]
+    /// name = "my-skill"
+    ///
+    /// [config]
+    /// apiKey = "sk-..."
+    /// custom_endpoint = "https://api.example.com"
+    /// max_retries = 3
+    /// ```
+    #[serde(default)]
+    pub config: HashMap<String, serde_json::Value>,
 }
 
 /// Skill metadata section.
@@ -252,5 +268,83 @@ capabilities = ["NetConnect(*)"]
         let json = serde_json::to_string(&native).unwrap();
         let back: SkillSource = serde_json::from_str(&json).unwrap();
         assert_eq!(back, SkillSource::Native);
+    }
+
+    #[test]
+    fn test_skill_manifest_extra_config_keys() {
+        let toml_str = r#"
+[skill]
+name = "my-custom-skill"
+version = "1.0.0"
+description = "A skill with custom config"
+
+[runtime]
+type = "python"
+entry = "main.py"
+
+[config]
+apiKey = "sk-test-123"
+custom_endpoint = "https://api.example.com"
+max_retries = 3
+nested_config = { timeout = 30, retries = 5 }
+"#;
+
+        let manifest: SkillManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.skill.name, "my-custom-skill");
+        assert_eq!(manifest.config.len(), 4);
+        assert_eq!(
+            manifest.config.get("apiKey").and_then(|v| v.as_str()),
+            Some("sk-test-123")
+        );
+        assert_eq!(
+            manifest
+                .config
+                .get("custom_endpoint")
+                .and_then(|v| v.as_str()),
+            Some("https://api.example.com")
+        );
+        assert_eq!(
+            manifest.config.get("max_retries").and_then(|v| v.as_i64()),
+            Some(3)
+        );
+        assert!(manifest.config.get("nested_config").unwrap().is_object());
+    }
+
+    #[test]
+    fn test_skill_manifest_no_extra_keys() {
+        let toml_str = r#"
+[skill]
+name = "plain-skill"
+version = "0.1.0"
+description = "No extra config"
+"#;
+
+        let manifest: SkillManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.skill.name, "plain-skill");
+        assert!(manifest.config.is_empty());
+    }
+
+    #[test]
+    fn test_skill_manifest_extra_roundtrip() {
+        let toml_str = r#"
+[skill]
+name = "roundtrip-skill"
+version = "1.0.0"
+description = "Test serialization roundtrip"
+
+[config]
+custom_key = "custom_value"
+"#;
+
+        let manifest: SkillManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.config.len(), 1);
+
+        // Serialize back and verify the extra key is preserved
+        let serialized = toml::to_string(&manifest).unwrap();
+        let reparsed: SkillManifest = toml::from_str(&serialized).unwrap();
+        assert_eq!(
+            reparsed.config.get("custom_key").and_then(|v| v.as_str()),
+            Some("custom_value")
+        );
     }
 }

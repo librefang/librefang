@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 # Build and publish platform-specific wheels to PyPI.
-# Called from CI with: VERSION=0.6.7 REPO=librefang/librefang TAG=v0.6.7-20260320
+# Called from CI with: VERSION=2026.3.2114 REPO=librefang/librefang TAG=v2026.3.2114
 set -euo pipefail
 
 : "${VERSION:?}"
 : "${REPO:?}"
 : "${TAG:?}"
+
+# PEP 440: convert -beta1 → b1, -rc1 → rc1
+PYPI_VERSION=$(echo "$VERSION" | sed 's/-beta/b/; s/-rc/rc/')
 
 # Retry download (brief retries for GitHub CDN propagation)
 download_asset() {
@@ -43,8 +46,8 @@ declare -A TARGETS=(
 build_wheel() {
   local target=$1 platform_tag=$2 ext=$3 exe=$4
   local wheel_dir="$WORK/wheel-$target"
-  local data_dir="${PKG_NAME}-${VERSION}.data/scripts"
-  local dist_info="${PKG_NAME}-${VERSION}.dist-info"
+  local data_dir="${PKG_NAME}-${PYPI_VERSION}.data/scripts"
+  local dist_info="${PKG_NAME}-${PYPI_VERSION}.dist-info"
 
   rm -rf "$wheel_dir"
   mkdir -p "$wheel_dir/$data_dir" "$wheel_dir/$dist_info"
@@ -67,7 +70,7 @@ build_wheel() {
   cat > "$wheel_dir/$dist_info/METADATA" <<EOF
 Metadata-Version: 2.1
 Name: ${PKG_NAME}
-Version: ${VERSION}
+Version: ${PYPI_VERSION}
 Summary: LibreFang Agent OS CLI
 Home-page: https://librefang.ai
 License: MIT
@@ -152,7 +155,7 @@ print('sha256=' + base64.urlsafe_b64encode(h).decode().rstrip('='))
   echo "$dist_info/RECORD,," >> "$dist_info/RECORD"
 
   # Build wheel (just a zip with .whl extension)
-  local wheel_name="${PKG_NAME}-${VERSION}-py3-none-${platform_tag}.whl"
+  local wheel_name="${PKG_NAME}-${PYPI_VERSION}-py3-none-${platform_tag}.whl"
   cd "$wheel_dir"
   zip -q -r "$DIST/$wheel_name" .
   echo "  Built $wheel_name"

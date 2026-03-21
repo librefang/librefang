@@ -12,7 +12,7 @@ export interface SearchOptions {
 export function search(query: string, options?: SearchOptions): Result[];
 
 // 为.mjs文件声明模块类型
-declare module '@/mdx/search.mjs' {
+declare module "@/mdx/search.mjs" {
 	export interface Result {
 		url: string;
 		title: string;

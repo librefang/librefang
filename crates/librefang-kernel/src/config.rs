@@ -66,6 +66,41 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
                                     }
                                 }
                             }
+                            // Remove the legacy [api] section after migration so that
+                            // unknown-field detection does not flag it.
+                            tbl.remove("api");
+                        }
+                    }
+
+                    // Detect unknown top-level fields before deserialization.
+                    // Re-insert "include" temporarily into the known set is not
+                    // needed because it was already removed above and is in the
+                    // known_top_level_fields list.
+                    let unknown_fields = KernelConfig::detect_unknown_fields(&root_value);
+
+                    // Check if strict_config is set in the raw TOML (before
+                    // deserializing the full struct) so we can decide whether
+                    // to reject or warn on unknown fields.
+                    let is_strict = root_value
+                        .as_table()
+                        .and_then(|t| t.get("strict_config"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    if !unknown_fields.is_empty() {
+                        if is_strict {
+                            tracing::error!(
+                                path = %config_path.display(),
+                                fields = %unknown_fields.join(", "),
+                                "strict_config is enabled and config contains unknown fields, using defaults"
+                            );
+                            return KernelConfig {
+                                strict_config: true,
+                                ..KernelConfig::default()
+                            };
+                        }
+                        for field in &unknown_fields {
+                            tracing::warn!(field, "Unknown config field (ignored)");
                         }
                     }
 
@@ -453,5 +488,75 @@ mod tests {
 
         let config = load_config(Some(&root));
         assert_eq!(config.log_level, "trace");
+    }
+
+    // --- Tolerant / strict config mode tests ---
+
+    #[test]
+    fn test_tolerant_mode_loads_with_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "log_level = \"debug\"").unwrap();
+        writeln!(f, "unknown_field_xyz = 42").unwrap();
+        writeln!(f, "another_typo = true").unwrap();
+        drop(f);
+
+        // Tolerant mode (default): should still load successfully
+        let config = load_config(Some(&root));
+        assert_eq!(config.log_level, "debug");
+        assert!(!config.strict_config);
+    }
+
+    #[test]
+    fn test_strict_mode_rejects_unknown_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "strict_config = true").unwrap();
+        writeln!(f, "log_level = \"debug\"").unwrap();
+        writeln!(f, "bogus_field = \"oops\"").unwrap();
+        drop(f);
+
+        // Strict mode: should reject and return defaults (with strict_config=true)
+        let config = load_config(Some(&root));
+        // Falls back to defaults because strict mode rejected unknown fields
+        assert_eq!(config.log_level, "info"); // default, not "debug"
+        assert!(config.strict_config);
+    }
+
+    #[test]
+    fn test_strict_mode_accepts_clean_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "strict_config = true").unwrap();
+        writeln!(f, "log_level = \"warn\"").unwrap();
+        drop(f);
+
+        // Strict mode with no unknown fields: should load normally
+        let config = load_config(Some(&root));
+        assert_eq!(config.log_level, "warn");
+        assert!(config.strict_config);
+    }
+
+    #[test]
+    fn test_tolerant_mode_with_explicit_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("config.toml");
+
+        let mut f = std::fs::File::create(&root).unwrap();
+        writeln!(f, "strict_config = false").unwrap();
+        writeln!(f, "log_level = \"error\"").unwrap();
+        writeln!(f, "not_a_real_field = 123").unwrap();
+        drop(f);
+
+        // Explicitly tolerant: should load despite unknown field
+        let config = load_config(Some(&root));
+        assert_eq!(config.log_level, "error");
+        assert!(!config.strict_config);
     }
 }

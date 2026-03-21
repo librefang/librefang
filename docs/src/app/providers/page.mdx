@@ -825,7 +825,78 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 
 ---
 
-### 34. Vertex AI
+### 34. Qwen (DashScope)
+
+| | |
+|---|---|
+| **Display Name** | Qwen |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `DASHSCOPE_API_KEY` |
+| **Base URL** | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| **Aliases** | `dashscope`, `model_studio` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits on signup) |
+| **Auth** | `Authorization: Bearer` header |
+
+**Regions:**
+
+| Region | Endpoint | API Key Env |
+|--------|----------|-------------|
+| *(default)* | `dashscope.aliyuncs.com` | `DASHSCOPE_API_KEY` |
+| `intl` | `dashscope-intl.aliyuncs.com` | `DASHSCOPE_API_KEY` |
+| `us` | `dashscope-us.aliyuncs.com` | `DASHSCOPE_API_KEY` |
+
+**Setup:**
+1. Sign up at [DashScope Console](https://dashscope.console.aliyun.com)
+2. Create an API key
+3. `export DASHSCOPE_API_KEY="sk-..."`
+4. Optionally select a region in `config.toml`:
+   ```toml
+   [provider_regions]
+   qwen = "intl"    # or "us"
+   ```
+
+**Notes:** Qwen uses Alibaba Cloud's DashScope API. The default endpoint serves mainland China; use the `intl` or `us` region for lower latency outside China. Models are defined in the registry TOML and loaded at boot.
+
+---
+
+### 35. MiniMax
+
+| | |
+|---|---|
+| **Display Name** | MiniMax |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `MINIMAX_API_KEY` |
+| **Base URL** | `https://api.minimax.io/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `Authorization: Bearer` header |
+
+**Regions:**
+
+| Region | Endpoint | API Key Env |
+|--------|----------|-------------|
+| *(default)* | `api.minimax.io` | `MINIMAX_API_KEY` |
+| `china` | `api.minimaxi.com` | `MINIMAX_CN_API_KEY` |
+
+**Setup:**
+1. Sign up at [minimax.io](https://www.minimax.io) (international) or [minimaxi.com](https://www.minimaxi.com) (China)
+2. Create an API key
+3. `export MINIMAX_API_KEY="..."`
+4. For China region:
+   ```toml
+   [provider_regions]
+   minimax = "china"
+   ```
+   ```bash
+   export MINIMAX_CN_API_KEY="..."
+   ```
+
+**Notes:** MiniMax international (`minimax.io`) and China (`minimaxi.com`) use separate API keys. When selecting the `china` region, LibreFang automatically reads from `MINIMAX_CN_API_KEY` instead of `MINIMAX_API_KEY`.
+
+---
+
+### 36. Vertex AI
 
 | | |
 |---|---|
@@ -890,7 +961,31 @@ supports_tools = true
 supports_vision = false
 ```
 
-Files in `~/.librefang/providers/` are loaded at startup and merged into the catalog alongside the 34 builtin providers.
+Files in `~/.librefang/providers/` are loaded at startup and merged into the catalog alongside the builtin providers.
+
+### Provider Regions
+
+Some providers offer region-specific endpoints. Regions are defined in registry TOML files with an optional `api_key_env` override:
+
+```toml
+# In a provider's registry TOML:
+[provider.regions.intl]
+base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+[provider.regions.china]
+base_url = "https://api.minimaxi.com/v1"
+api_key_env = "MINIMAX_CN_API_KEY"    # Optional: override the default API key env var
+```
+
+Select a region in `config.toml`:
+
+```toml
+[provider_regions]
+qwen = "intl"
+minimax = "china"
+```
+
+**Priority:** Region selections are applied *before* explicit `[provider_urls]` entries. If both are set for the same provider, `provider_urls` wins.
 
 ---
 
@@ -1415,4 +1510,3 @@ Quick reference for all provider environment variables:
 
 
 
-export const sections = [];
