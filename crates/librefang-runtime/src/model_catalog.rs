@@ -320,6 +320,31 @@ impl ModelCatalog {
         resolved
     }
 
+    /// Resolve provider region selections into API key env var overrides.
+    ///
+    /// For each entry in `region_selections` (provider ID → region name), looks up
+    /// the region's `api_key_env` from the provider's `regions` map. Only returns
+    /// entries where the region defines a custom `api_key_env`.
+    ///
+    /// The returned map can be merged into `config.provider_api_keys` so that
+    /// [`KernelConfig::resolve_api_key_env`] picks up region-specific env vars.
+    pub fn resolve_region_api_keys(
+        &self,
+        region_selections: &HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        let mut resolved = HashMap::new();
+        for (provider_id, region_name) in region_selections {
+            if let Some(provider) = self.get_provider(provider_id) {
+                if let Some(region_cfg) = provider.regions.get(region_name) {
+                    if let Some(api_key_env) = &region_cfg.api_key_env {
+                        resolved.insert(provider_id.clone(), api_key_env.clone());
+                    }
+                }
+            }
+        }
+        resolved
+    }
+
     /// List models filtered by tier.
     pub fn models_by_tier(&self, tier: ModelTier) -> Vec<&ModelCatalogEntry> {
         self.models.iter().filter(|m| m.tier == tier).collect()
@@ -717,7 +742,6 @@ mod tests {
         crate::registry_sync::sync_registry(&home);
         ModelCatalog::new(&home)
     }
-
 
     #[test]
     fn test_catalog_has_models() {
@@ -1195,6 +1219,56 @@ mod tests {
             catalog.get_provider("lmstudio").unwrap().base_url,
             LMSTUDIO_BASE_URL
         );
+    }
+
+    #[test]
+    fn test_resolve_region_urls() {
+        let catalog = test_catalog();
+        let qwen = catalog.get_provider("qwen");
+        // qwen should have regions defined in registry
+        if let Some(q) = qwen {
+            if q.regions.contains_key("intl") {
+                let mut sel = HashMap::new();
+                sel.insert("qwen".to_string(), "intl".to_string());
+                let urls = catalog.resolve_region_urls(&sel);
+                assert!(urls.contains_key("qwen"));
+                assert!(urls["qwen"].contains("dashscope-intl"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_region_api_keys() {
+        let catalog = test_catalog();
+        let minimax = catalog.get_provider("minimax");
+        // minimax china region should have a custom api_key_env
+        if let Some(m) = minimax {
+            if m.regions.contains_key("china") {
+                let mut sel = HashMap::new();
+                sel.insert("minimax".to_string(), "china".to_string());
+                let keys = catalog.resolve_region_api_keys(&sel);
+                assert_eq!(
+                    keys.get("minimax").map(|s| s.as_str()),
+                    Some("MINIMAX_CN_API_KEY")
+                );
+
+                // qwen intl has no custom api_key_env — should not appear
+                sel.insert("qwen".to_string(), "intl".to_string());
+                let keys = catalog.resolve_region_api_keys(&sel);
+                assert!(!keys.contains_key("qwen"));
+            }
+        }
+    }
+
+    #[test]
+    fn test_resolve_region_unknown_provider() {
+        let catalog = test_catalog();
+        let mut sel = HashMap::new();
+        sel.insert("nonexistent".to_string(), "us".to_string());
+        let urls = catalog.resolve_region_urls(&sel);
+        assert!(urls.is_empty());
+        let keys = catalog.resolve_region_api_keys(&sel);
+        assert!(keys.is_empty());
     }
 
     #[test]

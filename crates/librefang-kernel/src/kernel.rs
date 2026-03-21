@@ -931,6 +931,13 @@ impl LibreFangKernel {
                 model_catalog.apply_url_overrides(&region_urls);
                 info!("applied {} provider region override(s)", region_urls.len());
             }
+            // Also apply region-specific api_key_env overrides (e.g. minimax china
+            // uses MINIMAX_CN_API_KEY instead of MINIMAX_API_KEY). Only inserts if
+            // the user hasn't already set an explicit provider_api_keys entry.
+            let region_api_keys = model_catalog.resolve_region_api_keys(&config.provider_regions);
+            for (provider, env_var) in region_api_keys {
+                config.provider_api_keys.entry(provider).or_insert(env_var);
+            }
         }
         if !config.provider_urls.is_empty() {
             model_catalog.apply_url_overrides(&config.provider_urls);
