@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
-# release.sh — Create a new LibreFang release.
+# release.sh — Create a new LibreFang release using CalVer (YYYY.M.DDHH).
 #
 # Usage:
-#   ./scripts/release.sh            # interactive: choose patch/minor/major
-#   ./scripts/release.sh 0.5.0      # explicit version
+#   ./scripts/release.sh                    # interactive: choose stable/beta/rc
+#   ./scripts/release.sh 2026.3.2114        # explicit stable version
+#   ./scripts/release.sh 2026.3.2114-beta1  # explicit pre-release version
 #
 # What it does:
 #   1. Validate environment (clean worktree, on main, up to date)
@@ -56,49 +57,57 @@ if [ -z "$CURRENT" ]; then
     exit 1
 fi
 
-MAJOR=$(echo "$CURRENT" | cut -d. -f1)
-MINOR=$(echo "$CURRENT" | cut -d. -f2)
-PATCH=$(echo "$CURRENT" | cut -d. -f3 | sed 's/-.*//')
-
 if [ $# -ge 1 ]; then
     VERSION="$1"
 else
-    V_CURRENT="${MAJOR}.${MINOR}.${PATCH}"
-    V_PATCH="${MAJOR}.${MINOR}.$((PATCH + 1))"
-    V_MINOR="${MAJOR}.$((MINOR + 1)).0"
-    V_MAJOR="$((MAJOR + 1)).0.0"
+    # CalVer: YYYY.M.DDHH
+    YEAR=$(date +%Y)
+    MONTH=$(date +%-m)
+    DAY=$(date +%d)
+    HOUR=$(date +%H)
+    BASE_VERSION="${YEAR}.${MONTH}.${DAY}${HOUR}"
+
+    # Count existing beta/rc tags for today to auto-increment
+    TODAY_BETA_COUNT=$(git -C "$REPO_ROOT" tag -l "v${BASE_VERSION}-beta*" 2>/dev/null | wc -l | tr -d ' ')
+    TODAY_RC_COUNT=$(git -C "$REPO_ROOT" tag -l "v${BASE_VERSION}-rc*" 2>/dev/null | wc -l | tr -d ' ')
+    NEXT_BETA=$((TODAY_BETA_COUNT + 1))
+    NEXT_RC=$((TODAY_RC_COUNT + 1))
 
     echo ""
     echo "Current version: $CURRENT (tag: ${PREV_TAG:-none})"
     echo ""
-    echo "  1) patch   → $V_PATCH"
-    echo "  2) minor   → $V_MINOR"
-    echo "  3) major   → $V_MAJOR"
-    echo "  4) current → $V_CURRENT (re-release, overwrites existing tag)"
+    echo "  1) stable  → $BASE_VERSION"
+    echo "  2) beta    → ${BASE_VERSION}-beta${NEXT_BETA}"
+    echo "  3) rc      → ${BASE_VERSION}-rc${NEXT_RC}"
     echo ""
-    read -rp "Choose [1/2/3/4]: " choice
+    read -rp "Choose [1/2/3]: " choice
     case "$choice" in
-        1) VERSION="$V_PATCH" ;;
-        2) VERSION="$V_MINOR" ;;
-        3) VERSION="$V_MAJOR" ;;
-        4) VERSION="$V_CURRENT" ;;
+        1) VERSION="$BASE_VERSION" ;;
+        2) VERSION="${BASE_VERSION}-beta${NEXT_BETA}" ;;
+        3) VERSION="${BASE_VERSION}-rc${NEXT_RC}" ;;
         *) echo "Invalid choice"; exit 1 ;;
     esac
 fi
 
-# Validate semver
-if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
-    echo "Error: '$VERSION' is not a valid semver" >&2
+# Validate CalVer format: YYYY.M.DDHH with optional -betaN or -rcN
+if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[0-9]{1,2}\.[0-9]{2,4}(-(beta|rc)[0-9]+)?$'; then
+    echo "Error: '$VERSION' is not a valid CalVer (expected: YYYY.M.DDHH or YYYY.M.DDHH-rc1)" >&2
     exit 1
 fi
 
-DATE=$(date +%Y%m%d)
-FULL_VERSION="${VERSION}-${DATE}"
-TAG="v${FULL_VERSION}"
+TAG="v${VERSION}"
+# Check if this is a pre-release
+IS_PRERELEASE=false
+if echo "$VERSION" | grep -qE '-(beta|rc)[0-9]'; then
+    IS_PRERELEASE=true
+fi
 
 echo ""
-echo "  Version: $CURRENT → $FULL_VERSION"
+echo "  Version: $CURRENT → $VERSION"
 echo "  Tag:     $TAG"
+if [ "$IS_PRERELEASE" = true ]; then
+    echo "  Type:    pre-release"
+fi
 echo ""
 read -rp "Confirm? [Y/n]: " confirm
 if [[ "$confirm" =~ ^[Nn] ]]; then
@@ -136,20 +145,31 @@ if git -C "$REPO_ROOT" rev-parse "$TAG" &>/dev/null; then
     PREV_TAG=$(git -C "$REPO_ROOT" tag --sort=-creatordate | grep -E '^v[0-9]' | grep -vE '(alpha|beta|rc)' | head -1 || true)
 fi
 
+# --- Extract base version for CHANGELOG matching ---
+# Strip pre-release suffix and hour for changelog section
+# e.g. 2026.3.2114-beta1 → 2026.3.21
+BASE_FOR_CHANGELOG=$(echo "$VERSION" | sed 's/-.*//')
+PATCH_PART=$(echo "$BASE_FOR_CHANGELOG" | cut -d. -f3)
+if [ ${#PATCH_PART} -eq 4 ]; then
+    CHANGELOG_VERSION="$(echo "$BASE_FOR_CHANGELOG" | cut -d. -f1,2).${PATCH_PART:0:2}"
+else
+    CHANGELOG_VERSION="$BASE_FOR_CHANGELOG"
+fi
+
 # --- Generate changelog ---
 
 CHANGELOG_SCRIPT="$REPO_ROOT/scripts/generate-changelog.sh"
 if [ -x "$CHANGELOG_SCRIPT" ]; then
     echo ""
     echo "Generating changelog..."
-    "$CHANGELOG_SCRIPT" "$VERSION" "${PREV_TAG:-}"
+    "$CHANGELOG_SCRIPT" "$CHANGELOG_VERSION" "${PREV_TAG:-}"
 fi
 
 # --- Bump all versions ---
 
 echo ""
 echo "Syncing versions..."
-"$SYNC_SCRIPT" "$FULL_VERSION"
+"$SYNC_SCRIPT" "$VERSION"
 
 # --- Update lockfile if cargo is available ---
 
@@ -158,26 +178,29 @@ if command -v cargo &>/dev/null; then
     cargo update --workspace 2>/dev/null || echo "Warning: cargo update failed, continuing"
 fi
 
-# --- Generate Dev.to release article ---
+# --- Generate Dev.to release article (skip for pre-releases) ---
 
-ARTICLE="$REPO_ROOT/articles/release-${VERSION}.md"
-if [ ! -f "$ARTICLE" ]; then
-    CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' "$REPO_ROOT/CHANGELOG.md")
+ARTICLE="$REPO_ROOT/articles/release-${CHANGELOG_VERSION}.md"
+if [ "$IS_PRERELEASE" = true ]; then
+    echo ""
+    echo "Skipping Dev.to article for pre-release"
+elif [ ! -f "$ARTICLE" ]; then
+    CHANGES=$(awk '/^## \['"$CHANGELOG_VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' "$REPO_ROOT/CHANGELOG.md")
     if [ -n "$CHANGES" ]; then
         echo "Generating Dev.to article..."
         cat > "$ARTICLE" <<ARTICLE_EOF
 ---
-title: "LibreFang $VERSION Released"
+title: "LibreFang $CHANGELOG_VERSION Released"
 published: true
-description: "LibreFang v${VERSION} release notes — open-source Agent OS built in Rust"
+description: "LibreFang v${CHANGELOG_VERSION} release notes — open-source Agent OS built in Rust"
 tags: rust, ai, opensource, release
 canonical_url: https://github.com/librefang/librefang/releases/tag/${TAG}
 cover_image: https://raw.githubusercontent.com/librefang/librefang/main/public/assets/logo.png
 ---
 
-# LibreFang $VERSION Released
+# LibreFang $CHANGELOG_VERSION Released
 
-We're excited to announce **LibreFang v${VERSION}**! Here's what's new:
+We're excited to announce **LibreFang v${CHANGELOG_VERSION}**! Here's what's new:
 
 ${CHANGES}
 
@@ -237,6 +260,8 @@ git -C "$REPO_ROOT" add \
     CHANGELOG.md \
     sdk/javascript/package.json \
     sdk/python/setup.py \
+    sdk/rust/Cargo.toml \
+    sdk/rust/README.md \
     packages/whatsapp-gateway/package.json \
     crates/librefang-desktop/tauri.conf.json
 [ -f "$ARTICLE" ] && git -C "$REPO_ROOT" add "$ARTICLE"
@@ -278,7 +303,7 @@ if command -v gh &>/dev/null; then
     echo "Creating Pull Request..."
 
     # Extract the current version's section from CHANGELOG.md as PR body
-    RELEASE_BODY=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' "$REPO_ROOT/CHANGELOG.md")
+    RELEASE_BODY=$(awk '/^## \['"$CHANGELOG_VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' "$REPO_ROOT/CHANGELOG.md")
     PR_BODY="## Release $TAG"
     if [ -n "$RELEASE_BODY" ]; then
         PR_BODY="$PR_BODY
