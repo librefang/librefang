@@ -1118,6 +1118,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            layout: None,
         }
     }
 
@@ -1232,6 +1233,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -1284,6 +1286,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -1323,6 +1326,7 @@ mod tests {
                 output_var: None,
             }],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "draft".to_string()).await.unwrap();
@@ -1369,6 +1373,7 @@ mod tests {
                 output_var: None,
             }],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -1416,6 +1421,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -1462,6 +1468,7 @@ mod tests {
                 output_var: None,
             }],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -1530,6 +1537,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "start".to_string()).await.unwrap();
@@ -1599,6 +1607,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
