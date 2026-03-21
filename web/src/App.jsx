@@ -9,7 +9,7 @@ const comparisonData = [
   { metric: 'Binary Size', openclaw: '100MB+', zeroclaw: '200MB+', librefang: '32MB' },
   { metric: 'Security Layers', openclaw: '3', zeroclaw: '2', librefang: '16' },
   { metric: 'Channel Adapters', openclaw: '15', zeroclaw: '8', librefang: '40' },
-  { metric: 'Built-in Hands', openclaw: '0', zeroclaw: '0', librefang: '7' },
+  { metric: 'Built-in Hands', openclaw: '0', zeroclaw: '0', librefang: '14' },
 ]
 
 function MaterialIcon({ name, className = '' }) {
@@ -453,6 +453,16 @@ function Install({ t }) {
               {platform}
             </div>
           ))}
+        </div>
+        <div className="flex flex-wrap justify-center gap-6 pt-4">
+          <a href="https://deploy.librefang.ai/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 px-6 py-3 bg-primary/10 border border-primary/30 rounded-xl text-primary font-bold hover:bg-primary/20 transition-colors">
+            <MaterialIcon name="open_in_new" className="w-5 h-5" />
+            {t.install?.cloudDeploy || 'One-Click Cloud Deploy'}
+          </a>
+          <a href="https://github.com/librefang/librefang-registry" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 px-6 py-3 bg-white/5 border border-gray-700/50 rounded-xl text-gray-300 font-bold hover:border-gray-600/50 hover:text-white transition-colors">
+            <MaterialIcon name="code" className="w-5 h-5" />
+            {t.install?.handRegistry || 'Hand Registry'}
+          </a>
         </div>
       </div>
     </section>
