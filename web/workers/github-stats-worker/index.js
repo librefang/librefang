@@ -1,7 +1,6 @@
 // GitHub Stats Worker
 // Optimized: stores history as single JSON blob to minimize KV operations
-// Before: ~128 KV ops per uncached request (120 reads + 8 writes)
-// After: ~6 KV ops per uncached request (2 reads + 4 writes)
+// Includes one-time migration from old individual KV keys (stars_YYYY-MM-DD)
 
 export default {
   async fetch(request, env) {
@@ -11,6 +10,61 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(recordDailyStats(env))
   },
+}
+
+// Migrate old individual KV keys (stars_YYYY-MM-DD, forks_YYYY-MM-DD, etc.)
+// into the stats_history blob. Runs once when blob has < 7 entries.
+async function migrateOldKeys(env, history) {
+  if (history.length >= 7) return history
+
+  const migrated = await env.KV.get('stats_migration_done')
+  if (migrated) return history
+
+  const existingDates = new Set(history.map(h => h.date))
+  const newEntries = []
+
+  // Read old individual keys for last 90 days
+  for (let i = 0; i < 90; i++) {
+    const d = new Date()
+    d.setDate(d.getDate() - i)
+    const dateStr = d.toISOString().split('T')[0]
+
+    if (existingDates.has(dateStr)) continue
+
+    const stars = await env.KV.get('stars_' + dateStr)
+    if (stars) {
+      const forks = await env.KV.get('forks_' + dateStr)
+      const issues = await env.KV.get('issues_' + dateStr)
+      const prs = await env.KV.get('prs_' + dateStr)
+      newEntries.push({
+        date: dateStr,
+        stars: parseInt(stars, 10),
+        forks: forks ? parseInt(forks, 10) : 0,
+        issues: issues ? parseInt(issues, 10) : 0,
+        prs: prs ? parseInt(prs, 10) : 0,
+      })
+    }
+  }
+
+  if (newEntries.length > 0) {
+    history = [...history, ...newEntries]
+    history.sort((a, b) => a.date.localeCompare(b.date))
+    // Deduplicate by date (keep latest)
+    const seen = new Map()
+    for (const entry of history) {
+      seen.set(entry.date, entry)
+    }
+    history = Array.from(seen.values())
+    if (history.length > 90) {
+      history = history.slice(-90)
+    }
+    await env.KV.put('stats_history', JSON.stringify(history))
+    console.log('Migration: merged', newEntries.length, 'old entries into blob')
+  }
+
+  // Mark migration done so we don't re-scan
+  await env.KV.put('stats_migration_done', '1')
+  return history
 }
 
 async function recordDailyStats(env) {
@@ -54,6 +108,9 @@ async function recordDailyStats(env) {
         const raw = await env.KV.get('stats_history')
         if (raw) history = JSON.parse(raw)
       } catch {}
+
+      // Run migration if needed
+      history = await migrateOldKeys(env, history)
 
       // Replace or append today's entry
       const idx = history.findIndex(h => h.date === today)
@@ -163,6 +220,9 @@ async function handleGitHubStats(env, cors) {
       const raw = await env.KV.get('stats_history')
       if (raw) history = JSON.parse(raw)
     } catch {}
+
+    // Run migration if needed
+    history = await migrateOldKeys(env, history)
 
     const idx = history.findIndex(h => h.date === today)
     if (idx >= 0) {
