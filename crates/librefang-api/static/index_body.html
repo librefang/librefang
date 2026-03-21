@@ -4534,7 +4534,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                           class="cost-bar"
                           style="opacity:0.85"
                         >
-                          <title x-text="bar.date + ': ' + formatCost(bar.cost) + ' (' + bar.calls + ' calls)'"></title>
+                          <title x-text="barTitle(bar)"></title>
                         </rect>
                         <!-- Day label -->
                         <text
@@ -4585,7 +4585,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                         <td><span class="badge badge-muted" style="font-size:9px" x-text="_extractProvider(m.model)"></span></td>
                         <td>
                           <span class="tier-badge"
-                            :class="'tier-' + modelTier(m.model)"
+                            :class="'tier-' + modelTierKey(m.model)"
                             x-text="modelTier(m.model)"></span>
                         </td>
                         <td x-text="formatTokens(m.total_input_tokens)"></td>
@@ -4764,9 +4764,9 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             </span>
             <select class="form-select" style="width:100px" x-model="levelFilter">
               <option value="" data-i18n="logsPage.allLevels">All</option>
-              <option value="info" data-i18n="logsPage2.levelInfo">INFO</option>
-              <option value="warn" data-i18n="logsPage2.levelWarn">WARN</option>
-              <option value="error" data-i18n="logsPage2.levelError">ERROR</option>
+              <option value="info">INFO</option>
+              <option value="warn">WARN</option>
+              <option value="error">ERROR</option>
             </select>
             <input class="form-input" style="width:180px" data-i18n-placeholder="logsPage.searchPlaceholder" placeholder="Search..." x-model="textFilter">
             <button class="btn btn-ghost btn-sm" @click="togglePause()" x-text="streamPaused ? t('logsPage.resume', 'Resume') : t('logsPage.pause', 'Pause')"></button>
