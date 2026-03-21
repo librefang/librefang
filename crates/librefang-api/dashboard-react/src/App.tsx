@@ -20,8 +20,9 @@ export function App() {
     }
   }, [theme]);
 
-  const navBase =
-    "flex items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 text-sm text-text-dim transition-all duration-200 hover:bg-surface-hover hover:text-brand group";
+  const navBase = `flex items-center rounded-xl border border-transparent py-2.5 text-sm text-text-dim transition-all duration-300 hover:bg-surface-hover hover:text-brand group ${
+    isSidebarCollapsed ? "lg:justify-center lg:px-2 lg:gap-0" : "px-3 gap-3"
+  }`;
   const navActive = "border-brand/20 bg-brand/10 text-brand font-semibold shadow-sm shadow-brand/5";
 
   const navGroups = [
@@ -88,25 +89,32 @@ export function App() {
         ${isSidebarCollapsed ? "lg:w-[72px]" : "lg:w-[280px]"}
       `}>
         {/* Sidebar Header */}
-        <div className="flex h-16 items-center justify-between border-b border-border-subtle px-4">
-          <div className="flex items-center gap-3">
+        <div className={`flex h-16 items-center border-b border-border-subtle transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+          isSidebarCollapsed ? "lg:justify-center lg:px-2" : "justify-between px-4"
+        }`}>
+          <div className={`flex items-center gap-3 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand/20 shadow-[0_0_15px_rgba(14,165,233,0.3)] ring-1 ring-brand/40 shrink-0">
               <div className="h-3 w-3 rounded-full bg-brand animate-pulse" />
             </div>
-            <div className={`flex flex-col overflow-hidden transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${isSidebarCollapsed ? "lg:w-0 lg:opacity-0" : "lg:w-auto lg:opacity-100"}`}>
+            <div className="flex flex-col">
               <strong className="text-sm font-bold tracking-tight whitespace-nowrap">LibreFang</strong>
               <span className="text-[10px] font-semibold uppercase tracking-wider text-text-dim whitespace-nowrap">{t("common.infrastructure")}</span>
             </div>
           </div>
-          <div className="flex items-center gap-1">
-            <button
-              onClick={toggleSidebar}
-              className="hidden lg:flex h-8 w-8 items-center justify-center rounded-lg border border-border-subtle bg-surface text-text-dim hover:text-brand transition-all shadow-sm"
-              title={isSidebarCollapsed ? "Expand" : "Collapse"}
-            >
-              {isSidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
-            </button>
-          </div>
+          {isSidebarCollapsed && (
+            <div className="hidden lg:flex h-8 w-8 items-center justify-center rounded-lg bg-brand/20 ring-1 ring-brand/40 shrink-0">
+              <div className="h-3 w-3 rounded-full bg-brand animate-pulse" />
+            </div>
+          )}
+          <button
+            onClick={toggleSidebar}
+            className={`hidden lg:flex h-8 w-8 items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-all ${
+              isSidebarCollapsed ? "mt-0" : ""
+            }`}
+            title={isSidebarCollapsed ? "Expand" : "Collapse"}
+          >
+            {isSidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+          </button>
         </div>
 
         {/* Navigation */}
@@ -114,7 +122,7 @@ export function App() {
           {/* Search Button */}
           <button
             onClick={() => setPaletteOpen(true)}
-            className={`mb-4 flex w-full items-center gap-2 rounded-xl border border-border-subtle bg-surface-hover px-3 py-2.5 text-text-dim hover:border-brand/30 hover:text-brand transition-all ${isSidebarCollapsed ? "lg:opacity-0 lg:w-0 lg:overflow-hidden lg:p-0 lg:m-0" : "lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`}
+            className={`mb-4 flex w-full items-center gap-2 rounded-xl border border-border-subtle bg-surface-hover px-3 py-2.5 text-text-dim hover:border-brand/30 hover:text-brand transition-all ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:!p-0 lg:!m-0 lg:!mb-0" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
             title="Search (Cmd+K)"
           >
             <Search className="h-4 w-4" />
@@ -122,7 +130,7 @@ export function App() {
             <kbd className="text-[10px] font-mono bg-main px-1.5 py-0.5 rounded">⌘K</kbd>
           </button>
 
-          <div className="flex flex-col gap-6">
+          <div className={`flex flex-col transition-all duration-500 ${isSidebarCollapsed ? "lg:gap-1" : "gap-6"}`}>
             {navGroups.map((group) => (
               <div key={group.key} className="flex flex-col gap-1">
                 {navLayout === "collapsible" ? (
@@ -130,7 +138,7 @@ export function App() {
                   <>
                     <button
                       onClick={() => toggleNavGroup(group.key)}
-                      className={`flex items-center justify-between px-3 text-[11px] font-bold uppercase tracking-[0.1em] text-text-dim/80 hover:text-brand transition-colors ${isSidebarCollapsed ? "lg:opacity-0 lg:w-0 lg:overflow-hidden lg:p-0 lg:m-0" : "lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`}
+                      className={`flex items-center justify-between px-3 text-[11px] font-bold uppercase tracking-[0.1em] text-text-dim/80 hover:text-brand transition-colors ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:!p-0 lg:!m-0 lg:!mb-0" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}
                     >
                       {group.label}
                       <ChevronDown className={`h-3 w-3 transition-transform ${collapsedNavGroups[group.key] ? "-rotate-90" : ""}`} />
@@ -145,7 +153,7 @@ export function App() {
                           onClick={() => setMobileMenuOpen(false)}
                         >
                           {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
-                          <span className={`flex-1 ${isSidebarCollapsed ? "lg:opacity-0 lg:w-0 lg:overflow-hidden lg:p-0 lg:m-0" : "lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`}>{item.label}</span>
+                          <span className={`flex-1 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:!p-0 lg:!m-0 lg:!mb-0" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>{item.label}</span>
                         </Link>
                       ))}
                     </div>
@@ -153,7 +161,7 @@ export function App() {
                 ) : (
                   // 分组布局 - 全部显示
                   <>
-                    <h3 className={`px-3 text-[11px] font-bold uppercase tracking-[0.1em] text-text-dim/80 ${isSidebarCollapsed ? "lg:opacity-0 lg:w-0 lg:overflow-hidden lg:p-0 lg:m-0" : "lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`}>
+                    <h3 className={`px-3 text-[11px] font-bold uppercase tracking-[0.1em] text-text-dim/80 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:!p-0 lg:!m-0 lg:!mb-0" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
                       {group.label}
                     </h3>
                     <div className="mt-1 flex flex-col gap-0.5">
@@ -166,7 +174,7 @@ export function App() {
                           onClick={() => setMobileMenuOpen(false)}
                         >
                           {item.icon && <item.icon className="h-4 w-4 transition-transform group-hover:scale-110 group-hover:text-brand shrink-0" />}
-                          <span className={`flex-1 ${isSidebarCollapsed ? "lg:opacity-0 lg:w-0 lg:overflow-hidden lg:p-0 lg:m-0" : "lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`}>{item.label}</span>
+                          <span className={`flex-1 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:!p-0 lg:!m-0 lg:!mb-0" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>{item.label}</span>
                         </Link>
                       ))}
                     </div>
@@ -178,7 +186,7 @@ export function App() {
         </nav>
 
         {/* Sidebar Footer */}
-        <div className={`border-t border-border-subtle p-4 ${isSidebarCollapsed ? "lg:opacity-0 lg:w-0 lg:overflow-hidden lg:p-0 lg:m-0" : "lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]`}>
+        <div className={`border-t border-border-subtle p-4 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:!p-0 lg:!m-0 lg:!mb-0" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
           <div className="rounded-xl bg-gradient-to-r from-success/5 to-transparent p-3 border border-success/10">
             <p className="text-[10px] font-bold text-text-dim uppercase tracking-wider">{t("common.status")}</p>
             <div className="mt-2 flex items-center gap-2">
