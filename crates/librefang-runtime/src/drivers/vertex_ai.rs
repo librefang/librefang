@@ -952,6 +952,7 @@ mod tests {
             api_key: None,
             base_url: None,
             vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
         };
         let region = resolve_region(&config);
@@ -968,6 +969,7 @@ mod tests {
                 region: Some("europe-west4".to_string()),
                 ..Default::default()
             },
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
         };
         let region = resolve_region(&config);

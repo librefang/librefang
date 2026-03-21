@@ -1396,6 +1396,9 @@ pub struct KernelConfig {
     /// Vertex AI provider configuration.
     #[serde(default)]
     pub vertex_ai: VertexAiConfig,
+    /// Azure OpenAI provider configuration.
+    #[serde(default)]
+    pub azure_openai: AzureOpenAiConfig,
     /// OAuth client ID overrides for PKCE flows.
     #[serde(default)]
     pub oauth: OAuthConfig,
@@ -1456,6 +1459,37 @@ pub struct KernelConfig {
     /// Alternatively you can set `provider_urls.qwen-code` to the same value.
     #[serde(default)]
     pub qwen_code_path: Option<String>,
+}
+
+/// Azure OpenAI provider configuration.
+///
+/// Azure OpenAI uses a different URL format and authentication header
+/// than standard OpenAI. Configure in config.toml:
+/// ```toml
+/// [azure_openai]
+/// endpoint = "https://my-resource.openai.azure.com"
+/// deployment = "gpt-4o"
+/// api_version = "2024-02-01"
+/// ```
+///
+/// Environment variable fallbacks:
+/// - `AZURE_OPENAI_ENDPOINT` for the resource URL
+/// - `AZURE_OPENAI_API_VERSION` for the API version (default: "2024-02-01")
+/// - `AZURE_OPENAI_DEPLOYMENT` for the deployment name
+/// - `AZURE_OPENAI_API_KEY` for the API key
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AzureOpenAiConfig {
+    /// Azure resource endpoint URL (e.g., "https://my-resource.openai.azure.com").
+    /// Falls back to `AZURE_OPENAI_ENDPOINT` env var.
+    pub endpoint: Option<String>,
+    /// Azure OpenAI API version (default: "2024-02-01").
+    /// Falls back to `AZURE_OPENAI_API_VERSION` env var.
+    pub api_version: Option<String>,
+    /// Azure deployment name (e.g., "gpt-4o").
+    /// Falls back to `AZURE_OPENAI_DEPLOYMENT` env var.
+    /// If not set, the model name from `default_model.model` is used.
+    pub deployment: Option<String>,
 }
 
 /// Vertex AI provider configuration.
@@ -2100,6 +2134,7 @@ impl Default for KernelConfig {
             provider_regions: HashMap::new(),
             provider_api_keys: HashMap::new(),
             vertex_ai: VertexAiConfig::default(),
+            azure_openai: AzureOpenAiConfig::default(),
             oauth: OAuthConfig::default(),
             sidecar_channels: Vec::new(),
             proxy: ProxyConfig::default(),

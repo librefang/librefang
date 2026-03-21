@@ -3,7 +3,7 @@
 //! Abstracts over multiple LLM providers (Anthropic, OpenAI, Ollama, etc.).
 
 use async_trait::async_trait;
-use librefang_types::config::VertexAiConfig;
+use librefang_types::config::{AzureOpenAiConfig, VertexAiConfig};
 use librefang_types::message::{ContentBlock, Message, StopReason, TokenUsage};
 use librefang_types::tool::{ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
@@ -184,6 +184,9 @@ pub struct DriverConfig {
     /// Provider-specific Vertex AI settings from `KernelConfig.vertex_ai`.
     #[serde(default)]
     pub vertex_ai: VertexAiConfig,
+    /// Provider-specific Azure OpenAI settings from `KernelConfig.azure_openai`.
+    #[serde(default)]
+    pub azure_openai: AzureOpenAiConfig,
     /// Skip interactive permission prompts (Claude Code provider only).
     ///
     /// When `true`, adds `--dangerously-skip-permissions` to the spawned
@@ -216,6 +219,9 @@ impl std::fmt::Debug for DriverConfig {
                     .as_ref()
                     .map(|_| "<redacted>"),
             )
+            .field("azure_openai.endpoint", &self.azure_openai.endpoint)
+            .field("azure_openai.deployment", &self.azure_openai.deployment)
+            .field("azure_openai.api_version", &self.azure_openai.api_version)
             .field("skip_permissions", &self.skip_permissions)
             .finish()
     }
