@@ -23,13 +23,13 @@ export function LogsPage() {
   const auditQuery = useQuery({ queryKey: ["audit", "recent", limit], queryFn: () => listAuditRecent(limit), refetchInterval: REFRESH_MS });
 
   const logs = auditQuery.data?.entries ?? auditQuery.data?.events ?? [];
-  const modules = Array.from(new Set(logs.map(l => l.source).filter(Boolean))) as string[];
+  const modules = Array.from(new Set(logs.map(l => l.action || l.source).filter(Boolean))) as string[];
   const [search, setSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState<string | null>(null);
 
   const filteredLogs = logs.filter(l => {
-    const matchesSearch = !search || (l.message || "").toLowerCase().includes(search.toLowerCase());
-    const matchesModule = !moduleFilter || l.source === moduleFilter;
+    const matchesSearch = !search || (l.detail || l.outcome || l.message || "").toLowerCase().includes(search.toLowerCase());
+    const matchesModule = !moduleFilter || (l.action || l.source) === moduleFilter;
     return matchesSearch && matchesModule;
   });
 
@@ -92,15 +92,17 @@ export function LogsPage() {
             <div className="text-center py-8 text-text-dim">{t("common.no_data")}</div>
           ) : (
             filteredLogs.map((l, i) => {
-              const level = (l.event_type || "info").toLowerCase();
+              const outcome = l.outcome || "";
+              const isError = outcome.startsWith("error");
+              const level = isError ? "error" : (l.event_type || "info").toLowerCase();
               const levelStyle = LOG_LEVELS[level as keyof typeof LOG_LEVELS] || LOG_LEVELS.info;
-              const time = l.timestamp ? new Date(l.timestamp).toLocaleString() : "-";
+              const time = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : "-";
               return (
-                <div key={l.id || i} className="flex gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-center">
-                  <span className="text-text-dim/40 shrink-0 w-24">{time.split(' ')[1] || "-"}</span>
+                <div key={l.seq || l.id || i} className="flex gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-start">
+                  <span className="text-text-dim/40 shrink-0 w-16 text-[10px]">{time}</span>
                   <span className={`px-1.5 py-0.5 rounded text-[10px] font-black uppercase shrink-0 ${levelStyle.bg} ${levelStyle.color}`}>{level}</span>
-                  <span className="text-brand font-bold shrink-0 w-24">[{l.source || "-"}]</span>
-                  <span className="text-slate-700 dark:text-slate-300 truncate">{l.message || "-"}</span>
+                  <span className="text-brand font-bold shrink-0 w-28 truncate text-[10px]">{l.action || l.source || "-"}</span>
+                  <span className="text-slate-700 dark:text-slate-300 text-[11px] break-all">{l.detail || l.outcome || l.message || "-"}</span>
                 </div>
               );
             })
