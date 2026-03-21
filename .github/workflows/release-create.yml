@@ -54,7 +54,15 @@ jobs:
             echo ""
             echo "## Installation"
             echo ""
-            echo "**Desktop App** — Download the installer for your platform below."
+            echo '**Desktop App (macOS):**'
+            echo '```bash'
+            echo 'brew install --cask librefang/tap/librefang'
+            echo '```'
+            echo ""
+            echo '**CLI (macOS):**'
+            echo '```bash'
+            echo 'brew install librefang/tap/librefang'
+            echo '```'
             echo ""
             echo '**CLI (Linux/macOS):**'
             echo '```bash'
@@ -69,16 +77,6 @@ jobs:
             echo '**pip:**'
             echo '```bash'
             echo 'pip install librefang'
-            echo '```'
-            echo ""
-            echo '**Homebrew:**'
-            echo '```bash'
-            echo 'brew install librefang/tap/librefang'
-            echo '```'
-            echo ""
-            echo '**Homebrew Cask (Desktop):**'
-            echo '```bash'
-            echo 'brew install --cask librefang/tap/librefang'
             echo '```'
             echo ""
             echo '**Cargo:**'
