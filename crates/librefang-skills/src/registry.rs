@@ -217,7 +217,7 @@ impl SkillRegistry {
         let needs_prompt_context = manifest
             .prompt_context
             .as_ref()
-            .map_or(true, |ctx| ctx.is_empty());
+            .is_none_or(|ctx| ctx.is_empty());
         if needs_prompt_context {
             let prompt_path = skill_dir.join("prompt_context.md");
             if prompt_path.exists() {
