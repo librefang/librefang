@@ -238,12 +238,15 @@ pub async fn create_workflow(
         });
     }
 
+    let layout = req.get("layout").cloned();
+
     let workflow = Workflow {
         id: WorkflowId::new(),
         name,
         description,
         steps,
         created_at: chrono::Utc::now(),
+        layout,
     };
 
     let id = state.kernel.register_workflow(workflow).await;
@@ -326,6 +329,7 @@ pub async fn get_workflow(
                     })
                 }).collect::<Vec<_>>(),
                 "created_at": w.created_at.to_rfc3339(),
+                "layout": w.layout,
             })),
         ),
         None => (
@@ -423,12 +427,19 @@ pub async fn update_workflow(
         existing.steps.clone()
     };
 
+    let layout = if req.get("layout").is_some() {
+        req.get("layout").cloned()
+    } else {
+        existing.layout.clone()
+    };
+
     let updated = Workflow {
         id: workflow_id,
         name,
         description,
         steps,
         created_at: existing.created_at,
+        layout,
     };
 
     if !state

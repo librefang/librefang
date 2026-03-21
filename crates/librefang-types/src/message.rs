@@ -176,6 +176,44 @@ impl MessageContent {
                 .join(""),
         }
     }
+
+    /// Check whether this content contains any image blocks.
+    pub fn has_images(&self) -> bool {
+        match self {
+            MessageContent::Text(_) => false,
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .any(|b| matches!(b, ContentBlock::Image { .. })),
+        }
+    }
+
+    /// Replace all image blocks with lightweight text placeholders.
+    ///
+    /// After an image has been sent to the LLM, the base64 data (~56K tokens
+    /// per image) is no longer needed in session history.  This replaces each
+    /// `ContentBlock::Image` with a small text note so the conversation context
+    /// is preserved without the massive token cost.
+    ///
+    /// Returns `true` if any images were replaced.
+    pub fn strip_images(&mut self) -> bool {
+        match self {
+            MessageContent::Text(_) => false,
+            MessageContent::Blocks(blocks) => {
+                let mut stripped = false;
+                for block in blocks.iter_mut() {
+                    if let ContentBlock::Image { media_type, .. } = block {
+                        let placeholder = format!("[Image ({media_type}) previously processed]");
+                        *block = ContentBlock::Text {
+                            text: placeholder,
+                            provider_metadata: None,
+                        };
+                        stripped = true;
+                    }
+                }
+                stripped
+            }
+        }
+    }
 }
 
 impl Message {
@@ -384,5 +422,96 @@ mod tests {
             }
             _ => panic!("Expected blocks content"),
         }
+    }
+
+    #[test]
+    fn test_has_images_text_content() {
+        let content = MessageContent::text("Hello");
+        assert!(!content.has_images());
+    }
+
+    #[test]
+    fn test_has_images_blocks_without_image() {
+        let content = MessageContent::Blocks(vec![ContentBlock::Text {
+            text: "Hello".to_string(),
+            provider_metadata: None,
+        }]);
+        assert!(!content.has_images());
+    }
+
+    #[test]
+    fn test_has_images_blocks_with_image() {
+        let content = MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "What is this?".to_string(),
+                provider_metadata: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "base64data".to_string(),
+            },
+        ]);
+        assert!(content.has_images());
+    }
+
+    #[test]
+    fn test_strip_images_text_content() {
+        let mut content = MessageContent::text("Hello");
+        assert!(!content.strip_images());
+        assert_eq!(content.text_content(), "Hello");
+    }
+
+    #[test]
+    fn test_strip_images_no_images() {
+        let mut content = MessageContent::Blocks(vec![ContentBlock::Text {
+            text: "Hello".to_string(),
+            provider_metadata: None,
+        }]);
+        assert!(!content.strip_images());
+    }
+
+    #[test]
+    fn test_strip_images_replaces_image_with_placeholder() {
+        let mut content = MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "What is this?".to_string(),
+                provider_metadata: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/jpeg".to_string(),
+                data: "huge_base64_data_here".to_string(),
+            },
+        ]);
+        assert!(content.strip_images());
+        // Image block should now be a text placeholder
+        assert!(!content.has_images());
+        let text = content.text_content();
+        assert!(text.contains("[Image (image/jpeg) previously processed]"));
+        // Original text should still be present
+        assert!(text.contains("What is this?"));
+    }
+
+    #[test]
+    fn test_strip_images_multiple_images() {
+        let mut content = MessageContent::Blocks(vec![
+            ContentBlock::Image {
+                media_type: "image/png".to_string(),
+                data: "data1".to_string(),
+            },
+            ContentBlock::Text {
+                text: "between".to_string(),
+                provider_metadata: None,
+            },
+            ContentBlock::Image {
+                media_type: "image/jpeg".to_string(),
+                data: "data2".to_string(),
+            },
+        ]);
+        assert!(content.strip_images());
+        assert!(!content.has_images());
+        let text = content.text_content();
+        assert!(text.contains("[Image (image/png) previously processed]"));
+        assert!(text.contains("[Image (image/jpeg) previously processed]"));
+        assert!(text.contains("between"));
     }
 }

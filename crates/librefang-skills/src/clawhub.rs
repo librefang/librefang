@@ -254,9 +254,21 @@ impl ClawHubClient {
 
     /// Create a ClawHub client with a custom API URL.
     pub fn with_url(base_url: &str, cache_dir: PathBuf) -> Self {
+        // Check if we should skip TLS verification (for servers with expired certs)
+        let use_dangerous = std::env::var("LIBREFANG_DANGEROUSLY_SKIP_TLS_VERIFICATION")
+            .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+            .unwrap_or(false);
+
+        let builder = if use_dangerous {
+            tracing::warn!("TLS verification disabled - use only for testing!");
+            crate::http_client::dangerous_client_builder()
+        } else {
+            crate::http_client::client_builder()
+        };
+
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            client: crate::http_client::client_builder()
+            client: builder
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("HTTP client build"),
