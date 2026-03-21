@@ -4,6 +4,7 @@
 
 function analyticsPage() {
   return {
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     tab: 'summary',
     summary: {},
     byModel: [],
@@ -32,12 +33,18 @@ function analyticsPage() {
 
     init() {
       var self = this;
+      if (typeof i18n !== 'undefined') i18n.bindPageLanguage(this);
       var hashParts = window.location.hash.split('?');
       if (hashParts.length > 1) {
         var params = new URLSearchParams(hashParts[1]);
         if (params.get('tab')) self.tab = params.get('tab');
       }
       this.$watch('tab', function() { self._updateURL(); });
+    },
+
+    t(key, fallback, params) {
+      if (typeof i18n === 'undefined') return fallback || key;
+      return i18n.tReactive(this, key, fallback, params);
     },
 
     async loadUsage() {
@@ -51,7 +58,7 @@ function analyticsPage() {
           this.loadDailyCosts()
         ]);
       } catch(e) {
-        this.loadError = e.message || 'Could not load usage data.';
+        this.loadError = e.message || this.t('analyticsPage.loadError', 'Could not load usage data.');
       }
       this.loading = false;
     },
@@ -164,7 +171,7 @@ function analyticsPage() {
     },
 
     _extractProvider(modelName) {
-      if (!modelName) return 'Unknown';
+      if (!modelName) return this.t('analyticsPage.providerUnknown', 'Unknown');
       var lower = modelName.toLowerCase();
       if (lower.indexOf('claude') !== -1 || lower.indexOf('haiku') !== -1 || lower.indexOf('sonnet') !== -1 || lower.indexOf('opus') !== -1) return 'Anthropic';
       if (lower.indexOf('gemini') !== -1 || lower.indexOf('gemma') !== -1) return 'Google';
@@ -176,7 +183,7 @@ function analyticsPage() {
       if (lower.indexOf('grok') !== -1) return 'xAI';
       if (lower.indexOf('jamba') !== -1) return 'AI21';
       if (lower.indexOf('qwen') !== -1) return 'Together';
-      return 'Other';
+      return this.t('analyticsPage.providerOther', 'Other');
     },
 
     // ── Donut chart (stroke-dasharray on circles) ──
@@ -217,7 +224,15 @@ function analyticsPage() {
       days.forEach(function(d) { if (d.cost_usd > maxCost) maxCost = d.cost_usd; });
       if (maxCost === 0) maxCost = 1;
 
-      var dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      var dayNames = [
+        this.t('analyticsPage.dayShort.sun', 'Sun'),
+        this.t('analyticsPage.dayShort.mon', 'Mon'),
+        this.t('analyticsPage.dayShort.tue', 'Tue'),
+        this.t('analyticsPage.dayShort.wed', 'Wed'),
+        this.t('analyticsPage.dayShort.thu', 'Thu'),
+        this.t('analyticsPage.dayShort.fri', 'Fri'),
+        this.t('analyticsPage.dayShort.sat', 'Sat')
+      ];
       var result = [];
       for (var i = 0; i < days.length; i++) {
         var d = new Date(days[i].date + 'T12:00:00');
@@ -233,6 +248,14 @@ function analyticsPage() {
         });
       }
       return result;
+    },
+
+    barTitle(bar) {
+      return this.t('analyticsPage.barTooltip', '{date}: {cost} ({calls} calls)', {
+        date: bar.date,
+        cost: this.formatCost(bar.cost),
+        calls: bar.calls
+      });
     },
 
     // ── Cost by model table (sorted by cost descending) ──
@@ -255,7 +278,7 @@ function analyticsPage() {
       return Math.max(2, Math.round(((m.total_cost_usd || 0) / this.maxModelCost()) * 100)) + '%';
     },
 
-    modelTier(modelName) {
+    modelTierKey(modelName) {
       if (!modelName) return 'unknown';
       var lower = modelName.toLowerCase();
       if (lower.indexOf('opus') !== -1 || lower.indexOf('o1') !== -1 || lower.indexOf('o3') !== -1 || lower.indexOf('deepseek-r1') !== -1) return 'frontier';
@@ -263,6 +286,13 @@ function analyticsPage() {
       if (lower.indexOf('haiku') !== -1 || lower.indexOf('gpt-3.5') !== -1 || lower.indexOf('flash') !== -1 || lower.indexOf('mixtral') !== -1) return 'balanced';
       if (lower.indexOf('llama') !== -1 || lower.indexOf('groq') !== -1 || lower.indexOf('gemma') !== -1) return 'fast';
       return 'balanced';
+    },
+
+    modelTier(modelName) {
+      var tier = this.modelTierKey(modelName);
+      var key = 'analyticsPage.tier' + tier.charAt(0).toUpperCase() + tier.slice(1);
+      var fallback = tier.charAt(0).toUpperCase() + tier.slice(1);
+      return this.t(key, fallback);
     }
   };
 }
