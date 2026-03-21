@@ -5,6 +5,73 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-03-21
+
+### Added
+
+- Configurable CORS, channel rate limits, audit pruning, and media gates (#1331) (@houko)
+- Docs (#1334) (@houko)
+- LLM intent routing, registry single source of truth, streaming fixes (#1336) (@houko)
+- Add migrate --from openfang for OpenFang users (#1344) (@houko)
+- Unify CLI detection + add Gemini CLI, Codex CLI, Aider providers (#1347) (@houko)
+
+### Fixed
+
+- Move CLI npm/PyPI publish to Shell workflow and fix Fly.io config path (#1327) (@houko)
+- Strip provider prefix for internal LLM calls (#1330) (@houko)
+- Sync upstream improvements (#1338) (@houko)
+- Harden OpenClaw migration inputs (#1342) (@houko)
+- Complete openfang migration across init wizard, API, and dashboard (#1345) (@houko)
+- Detect Qwen Code CLI in test_connection and setup wizard (#1346) (@houko)
+- Correct language toggle logic in navigation sidebar (#1349) (@danilopopeye)
+- Escape < in MDX comparison table to fix build (#1350) (@houko)
+- Escape < in MDX troubleshooting page (#1351) (@houko)
+- Resolve compilation errors breaking CI clippy check (#1353) (@houko)
+- Clean stale registry dir before clone to prevent CI race condition (#1356) (@houko)
+- Handle re-release in release.sh when no files changed (#1360) (@houko)
+
+### Changed
+
+- Consolidate docs as Next.js deployment directory (#1335) (@houko)
+
+### Documentation
+
+- Add comparison page and clean up remaining artifacts (#1337) (@houko)
+
+### Other
+
+- Feature/fix docs (#1339) (@houko)
+
+
+## [0.6.8] - 2026-03-20
+
+### Added
+
+- Add owner routing for external DM responses (#1266) (@f-liva)
+- Distribute CLI binary via npm and PyPI (#1323) (@houko)
+
+### Fixed
+
+- Use GitHub API to create Go SDK tag (#1321) (@houko)
+
+### Maintenance
+
+- Remove wasteful workflows and fix bugs (#1320) (@houko)
+
+## [0.6.7] - 2026-03-20
+
+### Added
+
+- Add GitHub Discussions link to dashboard sidebar (#1302) (@TechWizard9999)
+
+### Fixed
+
+- Include user-installed HAND manifests in hand routing (#1205) (@TechWizard9999)
+- Pass raw JSON payloads to context hook scripts (#1207) (@TechWizard9999)
+- Pass GITHUB_TOKEN to contributor/star-history scripts (#1300) (@houko)
+- Self-heal fish config PATH entries (#1303) (@TechWizard9999)
+- Fix 3 release workflow failures from v0.6.6 (#1309) (@houko)
+
 ## [0.6.6] - 2026-03-20
 
 ### Fixed

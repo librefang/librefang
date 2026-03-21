@@ -2174,6 +2174,26 @@ impl ProactiveMemoryHooks for ProactiveMemoryStore {
         let mut stored_memories = Vec::new();
         let mut conflicts = Vec::new();
         for item in &extraction_result.memories {
+            // Filter by configured extract_categories (if non-empty)
+            if !cfg.extract_categories.is_empty() {
+                let cat = item.category.as_deref().unwrap_or("");
+                if !cat.is_empty() && !cfg.extract_categories.iter().any(|c| c == cat) {
+                    continue;
+                }
+            }
+
+            // Filter by extraction_threshold: skip low-confidence extractions.
+            // Confidence is stored in metadata by the LLM extractor; rule-based
+            // extractor defaults to 1.0 (always passes).
+            let confidence = item
+                .metadata
+                .get("confidence")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0) as f32;
+            if confidence < cfg.extraction_threshold {
+                continue;
+            }
+
             // Tag with auto_memorize metadata
             let mut enriched = item.clone();
             enriched

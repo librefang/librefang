@@ -1,0 +1,372 @@
+# 常见问题
+
+LibreFang 常见问题解答。
+
+---
+
+## 安装与配置
+
+### Q: 如何安装 LibreFang？
+
+```bash
+# 使用 cargo 安装
+cargo install --git https://github.com/librefang/librefang librefang-cli
+
+# 或从源码构建
+git clone https://github.com/librefang/librefang.git
+cd librefang
+cargo install --path crates/librefang-cli
+```
+
+### Q: 需要配置哪些 API 密钥？
+
+LibreFang 需要至少一个 LLM 提供商的 API 密钥：
+
+```bash
+# 选项 1: Anthropic (推荐)
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# 选项 2: OpenAI
+export OPENAI_API_KEY="sk-..."
+
+# 选项 3: Groq (有免费额度)
+export GROQ_API_KEY="gsk_..."
+```
+
+### Q: 配置文件在哪里？
+
+默认位置：`~/.librefang/config.toml`
+
+首次运行 `librefang init` 时会自动创建。
+
+### Q: 如何查看日志？
+
+```bash
+# 实时日志
+librefang logs
+
+# 或手动查看
+tail -f ~/.librefang/logs/librefang.log
+
+# 调试模式
+RUST_LOG=debug librefang start
+```
+
+---
+
+## Agent 操作
+
+### Q: 如何创建自定义 Agent？
+
+```bash
+# 使用模板创建
+librefang agent spawn agents/hello-world/agent.toml
+
+# 或交互式创建
+librefang agent new
+```
+
+### Q: Agent 无响应怎么办？
+
+1. 检查 Agent 状态：`librefang agent list`
+2. 查看 Agent 日志：`librefang agent logs <id>`
+3. 重启 Agent：`librefang agent kill <id>` 然后重新生成
+
+### Q: 如何限制 Agent 的能力？
+
+在 Agent 清单中使用 capabilities：
+
+```toml
+[capabilities]
+tools = ["file_read", "web_fetch"]  # 只允许这些工具
+network = ["example.com"]  # 只允许访问这个域名
+memory_read = ["self.*"]  # 只允许读取自己的记忆
+memory_write = ["self.*"]  # 只允许写入自己的记忆
+agent_spawn = false  # 禁止生成子 Agent
+```
+
+### Q: 如何实现多 Agent 协作？
+
+使用 orchestrator Agent 或工作流：
+
+```json
+{
+  "name": "multi-agent",
+  "steps": [
+    {"agent": "researcher", "input": "Research topic"},
+    {"agent": "writer", "input": "Write about {{research.results}}"}
+  ]
+}
+```
+
+---
+
+## 技能与工具
+
+### Q: 什么是技能？
+
+技能是扩展 Agent 能力的可插拔工具包。例如：
+
+- `git` - Git 操作
+- `python` - Python 代码执行
+- `web_search` - 网络搜索
+
+### Q: 如何安装自定义技能？
+
+```bash
+# 从本地安装
+librefang skill install ./my-skill
+
+# 从 FangHub 安装
+librefang skill install fanghub:skill-name
+```
+
+### Q: 如何创建自定义工具？
+
+在技能中定义工具函数：
+
+```python
+def my_tool(param: str) -> str:
+    """工具描述"""
+    return f"Result: {param}"
+```
+
+---
+
+## 通道与集成
+
+### Q: 支持哪些消息平台？
+
+LibreFang 支持 40+ 通道适配器：
+
+- **核心**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
+- **企业**: Microsoft Teams, Google Chat, Webex, Feishu
+- **社交**: LINE, Viber, Facebook Messenger, Twitter
+
+### Q: 如何配置 Telegram Bot？
+
+1. 创建 Bot: @BotFather on Telegram
+2. 获取 Bot Token
+3. 配置 LibreFang：
+
+```toml
+[telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allowed_users = ["user_id_1", "user_id_2"]
+```
+
+### Q: 如何使用 MCP 服务器？
+
+```toml
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+```
+
+---
+
+## 安全
+
+### Q: LibreFang 如何保护我的数据？
+
+LibreFang 采用 16 层安全防护：
+
+1. **WASM 双计量沙箱** - 工具在隔离环境中运行
+2. **Merkle 哈希链** - 所有操作可审计
+3. **污点追踪** - 敏感信息被追踪
+4. **SSRF 保护** - 防止服务器端请求伪造
+5. **Secret 零化** - API 密钥自动清除
+
+### Q: 如何启用 API 认证？
+
+```toml
+api_key = "your-secure-api-key"
+```
+
+然后在请求中使用：
+
+```
+Authorization: Bearer your-secure-api-key
+```
+
+### Q: 什么是能力门？
+
+能力门控制 Agent 可以访问哪些资源：
+
+```toml
+[capabilities]
+tools = ["file_read"]  # 只读文件
+file_system = false  # 禁止写入
+agent_spawn = false  # 禁止生成子 Agent
+```
+
+---
+
+## 性能
+
+### Q: 如何优化性能？
+
+1. **选择合适的模型**: 简单任务用小模型
+2. **启用压缩**: 自动压缩会话历史
+3. **配置限制**: 限制并发 Agent 数量
+
+```toml
+[compaction]
+threshold = 80
+keep_recent = 20
+max_summary_tokens = 1024
+```
+
+### Q: 内存占用太高怎么办？
+
+1. 压缩会话：`librefang session compact <id>`
+2. 限制 Agent 数量
+3. 使用更小的模型
+
+### Q: 如何监控使用情况？
+
+```bash
+# 查看使用统计
+librefang usage
+
+# 查看成本
+librefang cost
+
+# API 端点
+curl http://127.0.0.1:4545/api/usage
+```
+
+---
+
+## 故障排除
+
+### Q: 守护进程无法启动？
+
+```bash
+# 检查端口是否被占用
+lsof -i :4545
+
+# 查看详细错误
+RUST_LOG=debug librefang start
+
+# 运行诊断
+librefang doctor
+```
+
+### Q: API 密钥无效？
+
+1. 确认环境变量已设置：`echo $ANTHROPIC_API_KEY`
+2. 验证密钥有效
+3. 检查配置文件中的 `api_key_env` 名称
+
+### Q: 通道连接失败？
+
+```bash
+# 测试通道
+librefang channel test telegram
+
+# 检查 Bot Token
+curl -X POST "https://api.telegram.org/bot<TOKEN>/getMe"
+```
+
+### Q: 技能无法加载？
+
+```bash
+# 列出技能
+librefang skill list
+
+# 验证技能
+librefang skill verify my-skill
+
+# 查看错误日志
+RUST_LOG=debug librefang skill list
+```
+
+---
+
+## 迁移
+
+### Q: 如何从 OpenClaw 迁移？
+
+```bash
+# 自动迁移
+librefang migrate --from openclaw
+
+# 预览模式
+librefang migrate --from openclaw --dry-run
+```
+
+### Q: 支持哪些迁移来源？
+
+- OpenClaw (直接支持)
+- LangChain (兼容层)
+- AutoGPT (配置转换)
+
+---
+
+## 计费与成本
+
+### Q: LibreFang 收费吗？
+
+LibreFang 本身是开源免费的。您只需支付 LLM 提供商的 API 费用。
+
+### Q: 如何跟踪成本？
+
+```bash
+# 查看成本
+librefang cost
+
+# 按提供商查看
+curl http://127.0.0.1:4545/api/usage/providers
+```
+
+### Q: 如何设置预算限制？
+
+```toml
+[budget]
+monthly_limit = 100  # 美元
+alert_threshold = 0.8  # 80% 时告警
+```
+
+---
+
+## 开发
+
+### Q: 如何贡献代码？
+
+1. Fork 仓库
+2. 创建特性分支
+3. 提交 PR
+
+确保：
+- `cargo clippy` 无警告
+- `cargo test` 通过
+- 添加测试覆盖
+
+### Q: 如何添加新通道？
+
+参考开发指南中的"添加新通道"部分。
+
+---
+
+## 其他
+
+### Q: LibreFang 与其他框架的区别？
+
+| 特性 | LibreFang | OpenClaw | LangChain |
+|------|-----------|----------|-----------|
+| 语言 | Rust | Node.js | Python |
+| 内存 | ~40MB | ~200MB | 依赖语言 |
+| 通道 | 40+ | ~15 | 无 |
+| 安全 | 16层 | 基础 | 无 |
+| 桌面 | Tauri | Electron | 无 |
+
+### Q: 如何获取帮助？
+
+- GitHub Issues: https://github.com/librefang/librefang/issues
+- Discord: https://discord.gg/librefang
+
+### Q: 如何报告安全漏洞？
+
+请参考 SECURITY.md: https://github.com/librefang/librefang/blob/main/SECURITY.md

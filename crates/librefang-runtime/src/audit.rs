@@ -301,6 +301,45 @@ impl AuditLog {
         let start = entries.len().saturating_sub(n);
         entries[start..].to_vec()
     }
+
+    /// Remove audit entries older than `retention_days` days.
+    ///
+    /// Returns the number of entries pruned. When `retention_days` is 0 the
+    /// call is a no-op (unlimited retention).
+    pub fn prune(&self, retention_days: u32) -> usize {
+        if retention_days == 0 {
+            return 0;
+        }
+
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
+        let cutoff_str = cutoff.to_rfc3339();
+        let mut pruned = 0;
+
+        // Prune from database
+        if let Some(ref db) = self.db {
+            if let Ok(conn) = db.lock() {
+                if let Ok(n) = conn.execute(
+                    "DELETE FROM audit_entries WHERE timestamp < ?1",
+                    rusqlite::params![cutoff_str],
+                ) {
+                    pruned = n;
+                }
+            }
+        }
+
+        // Prune from in-memory list
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        let before = entries.len();
+        entries.retain(|e| e.timestamp >= cutoff_str);
+        let mem_pruned = before - entries.len();
+
+        // Prefer DB count (authoritative), fall back to in-memory count
+        if pruned > 0 {
+            pruned
+        } else {
+            mem_pruned
+        }
+    }
 }
 
 impl Default for AuditLog {

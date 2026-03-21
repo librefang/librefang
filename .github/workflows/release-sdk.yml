@@ -184,13 +184,19 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/v}"
           VERSION="${TAG%-*}"
           GO_TAG="sdk/go/v${VERSION}"
+          REPO="${{ github.repository }}"
 
           # Check if tag already exists
-          if git ls-remote --tags origin "refs/tags/$GO_TAG" | grep -q .; then
+          if gh api "repos/$REPO/git/refs/tags/$GO_TAG" &>/dev/null; then
             echo "Tag $GO_TAG already exists, skipping"
             exit 0
           fi
 
-          git tag "$GO_TAG"
-          git push origin "$GO_TAG"
+          # Get the commit SHA for this tag
+          SHA=$(gh api "repos/$REPO/git/ref/tags/${GITHUB_REF#refs/tags/}" --jq '.object.sha')
+
+          # Create tag via API (avoids git push workflow permission issue)
+          gh api "repos/$REPO/git/refs" \
+            -f ref="refs/tags/$GO_TAG" \
+            -f sha="$SHA"
           echo "✓ Published Go module tag: $GO_TAG"

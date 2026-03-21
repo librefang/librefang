@@ -6,6 +6,7 @@ license.workspace = true
 description = "Skill system for LibreFang — registry, loader, marketplace, and OpenClaw compatibility"
 
 [dependencies]
+dirs = "6"
 librefang-types = { path = "../librefang-types" }
 serde = { workspace = true }
 serde_json = { workspace = true }

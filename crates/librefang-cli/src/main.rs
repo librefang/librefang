@@ -315,7 +315,7 @@ enum Commands {
     /// Authenticate with a provider (chatgpt) [*].
     #[command(
         subcommand,
-        long_about = "Authenticate with external providers.\n\nExamples:\n  librefang auth chatgpt   # Browser-based ChatGPT session token flow"
+        long_about = "Authenticate with external providers.\n\nExamples:\n  librefang auth chatgpt\n  librefang auth chatgpt --device-auth"
     )]
     Auth(AuthCommands),
     /// Manage the credential vault (init, set, list, remove) [*].
@@ -520,11 +520,15 @@ enum VaultCommands {
 
 #[derive(Subcommand)]
 enum AuthCommands {
-    /// Authenticate with ChatGPT (browser-based session token flow).
+    /// Authenticate with ChatGPT using browser or device auth.
     #[command(
-        long_about = "Authenticate with ChatGPT using a browser-based session token flow.\n\nOpens a browser window for you to log in and extract a session token.\n\nExamples:\n  librefang auth chatgpt"
+        long_about = "Authenticate with ChatGPT using the OpenAI Codex login flow.\n\nBy default this opens a browser and waits for the localhost callback.\nUse --device-auth for headless or remote environments. If device auth is\nnot enabled for the current OpenAI account or workspace, LibreFang falls\nback to the standard browser login flow.\n\nExamples:\n  librefang auth chatgpt\n  librefang auth chatgpt --device-auth"
     )]
-    Chatgpt,
+    Chatgpt {
+        /// Use the OpenAI device auth flow before falling back to browser auth.
+        #[arg(long)]
+        device_auth: bool,
+    },
 }
 
 #[derive(Clone, clap::ValueEnum)]
@@ -578,6 +582,7 @@ enum MigrateSourceArg {
     Openclaw,
     Langchain,
     Autogpt,
+    Openfang,
 }
 
 #[derive(Subcommand)]
@@ -1558,7 +1563,7 @@ fn main() {
         Some(Commands::Remove { name }) => cmd_integration_remove(&name),
         Some(Commands::Integrations { query }) => cmd_integrations_list(query.as_deref()),
         Some(Commands::Auth(sub)) => match sub {
-            AuthCommands::Chatgpt => cmd_auth_chatgpt(),
+            AuthCommands::Chatgpt { device_auth } => cmd_auth_chatgpt(device_auth),
         },
         Some(Commands::Vault(sub)) => match sub {
             VaultCommands::Init => cmd_vault_init(),
@@ -1800,8 +1805,8 @@ fn cmd_init(quick: bool) {
         }
     }
 
-    // Install bundled agent templates (skips existing ones to preserve user edits)
-    bundled_agents::install_bundled_agents(&librefang_dir.join("agents"));
+    // Sync agent templates from registry (skips existing ones to preserve user edits)
+    bundled_agents::sync_registry_agents(&librefang_dir);
 
     // Initialize vault if not already initialized
     init_vault_if_missing(&librefang_dir);
@@ -2053,7 +2058,7 @@ fn configured_default_model(provider: &str) -> Option<String> {
 fn default_model_for_provider(provider: &str) -> String {
     configured_default_model(provider)
         .or_else(|| {
-            let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+            let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
             catalog.default_model_for_provider(provider)
         })
         .unwrap_or_else(|| "local-model".to_string())
@@ -3780,7 +3785,7 @@ fn cmd_doctor(json: bool, repair: bool) {
         }
         let skills_dir = cli_librefang_home().join("skills");
         let mut skill_reg = librefang_skills::registry::SkillRegistry::new(skills_dir.clone());
-        skill_reg.load_bundled();
+        skill_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let bundled_count = skill_reg.count();
         if !json {
             ui::check_ok(&format!("Bundled skills loaded: {bundled_count}"));
@@ -3854,7 +3859,7 @@ fn cmd_doctor(json: bool, repair: bool) {
         let librefang_dir = cli_librefang_home();
         let mut ext_registry =
             librefang_extensions::registry::IntegrationRegistry::new(&librefang_dir);
-        ext_registry.load_bundled();
+        ext_registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let _ = ext_registry.load_installed();
         let template_count = ext_registry.template_count();
         let installed_count = ext_registry.installed_count();
@@ -4488,6 +4493,7 @@ fn cmd_migrate(args: MigrateArgs) {
         MigrateSourceArg::Openclaw => librefang_migrate::MigrateSource::OpenClaw,
         MigrateSourceArg::Langchain => librefang_migrate::MigrateSource::LangChain,
         MigrateSourceArg::Autogpt => librefang_migrate::MigrateSource::AutoGpt,
+        MigrateSourceArg::Openfang => librefang_migrate::MigrateSource::OpenFang,
     };
 
     let source_dir = args.source_dir.unwrap_or_else(|| {
@@ -4499,6 +4505,7 @@ fn cmd_migrate(args: MigrateArgs) {
             librefang_migrate::MigrateSource::OpenClaw => home.join(".openclaw"),
             librefang_migrate::MigrateSource::LangChain => home.join(".langchain"),
             librefang_migrate::MigrateSource::AutoGpt => home.join("Auto-GPT"),
+            librefang_migrate::MigrateSource::OpenFang => home.join(".openfang"),
         }
     });
 
@@ -5099,7 +5106,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
                 return;
             }
 
-            let config_block = "\n[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.telegram]\nbot_token_env = \"TELEGRAM_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("telegram", config_block);
 
             // Save token to .env
@@ -5157,7 +5164,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let app_token = prompt_input("  Paste your App Token (xapp-...): ");
             let bot_token = prompt_input("  Paste your Bot Token (xoxb-...): ");
 
-            let config_block = "\n[channels.slack]\napp_token_env = \"SLACK_APP_TOKEN\"\nbot_token_env = \"SLACK_BOT_TOKEN\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.slack]\napp_token_env = \"SLACK_APP_TOKEN\"\nbot_token_env = \"SLACK_BOT_TOKEN\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("slack", config_block);
 
             if !app_token.is_empty() {
@@ -5192,7 +5199,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let access_token = prompt_input("  Access Token: ");
             let verify_token = prompt_input("  Verify Token: ");
 
-            let config_block = "\n[channels.whatsapp]\nmode = \"cloud_api\"\nphone_number_id_env = \"WA_PHONE_ID\"\naccess_token_env = \"WA_ACCESS_TOKEN\"\nverify_token_env = \"WA_VERIFY_TOKEN\"\nwebhook_port = 8443\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.whatsapp]\nmode = \"cloud_api\"\nphone_number_id_env = \"WA_PHONE_ID\"\naccess_token_env = \"WA_ACCESS_TOKEN\"\nverify_token_env = \"WA_VERIFY_TOKEN\"\nwebhook_port = 8443\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("whatsapp", config_block);
 
             for (key, val) in [
@@ -5228,7 +5235,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             let password = prompt_input("  App password (or Enter to set later): ");
 
             let config_block = format!(
-                "\n[channels.email]\nimap_host = \"imap.gmail.com\"\nimap_port = 993\nsmtp_host = \"smtp.gmail.com\"\nsmtp_port = 587\nusername = \"{username}\"\npassword_env = \"EMAIL_PASSWORD\"\npoll_interval = 30\ndefault_agent = \"router\"\n"
+                "\n[channels.email]\nimap_host = \"imap.gmail.com\"\nimap_port = 993\nsmtp_host = \"smtp.gmail.com\"\nsmtp_port = 587\nusername = \"{username}\"\npassword_env = \"EMAIL_PASSWORD\"\npoll_interval = 30\ndefault_agent = \"assistant\"\n"
             );
             maybe_write_channel_config("email", &config_block);
 
@@ -5263,7 +5270,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
 
             let phone = prompt_input("  Your phone number (+1XXXX, or Enter to skip): ");
 
-            let config_block = "\n[channels.signal]\nphone_env = \"SIGNAL_PHONE\"\nsocket_path = \"/tmp/signal-cli.sock\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.signal]\nphone_env = \"SIGNAL_PHONE\"\nsocket_path = \"/tmp/signal-cli.sock\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("signal", config_block);
 
             if !phone.is_empty() {
@@ -5297,7 +5304,7 @@ fn cmd_channel_setup(channel: Option<&str>) {
             };
             let token = prompt_input("  Access token: ");
 
-            let config_block = "\n[channels.matrix]\nhomeserver_env = \"MATRIX_HOMESERVER\"\naccess_token_env = \"MATRIX_ACCESS_TOKEN\"\ndefault_agent = \"router\"\n";
+            let config_block = "\n[channels.matrix]\nhomeserver_env = \"MATRIX_HOMESERVER\"\naccess_token_env = \"MATRIX_ACCESS_TOKEN\"\ndefault_agent = \"assistant\"\n";
             maybe_write_channel_config("matrix", config_block);
 
             let _ = dotenv::save_env_key("MATRIX_HOMESERVER", &homeserver);
@@ -6371,7 +6378,7 @@ pub(crate) fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) {
 fn cmd_integration_add(name: &str, key: Option<&str>) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
+    registry.load_bundled(&home);
     let _ = registry.load_installed();
 
     // Check template exists
@@ -6457,7 +6464,7 @@ fn cmd_integration_add(name: &str, key: Option<&str>) {
 fn cmd_integration_remove(name: &str) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
+    registry.load_bundled(&home);
     let _ = registry.load_installed();
 
     match librefang_extensions::installer::remove_integration(&mut registry, name) {
@@ -6481,7 +6488,7 @@ fn cmd_integration_remove(name: &str) {
 fn cmd_integrations_list(query: Option<&str>) {
     let home = librefang_home();
     let mut registry = librefang_extensions::registry::IntegrationRegistry::new(&home);
-    registry.load_bundled();
+    registry.load_bundled(&home);
     let _ = registry.load_installed();
 
     let dotenv_path = home.join(".env");
@@ -6557,102 +6564,170 @@ fn cmd_integrations_list(query: Option<&str>) {
 // Auth commands (librefang auth chatgpt)
 // ---------------------------------------------------------------------------
 
-fn cmd_auth_chatgpt() {
+enum DeviceAuthNextStep {
+    ContinueDevice(librefang_runtime::chatgpt_oauth::DeviceAuthPrompt),
+    FallbackToBrowser(String),
+}
+
+fn resolve_device_auth_start(
+    result: Result<
+        librefang_runtime::chatgpt_oauth::DeviceAuthPrompt,
+        librefang_runtime::chatgpt_oauth::DeviceAuthFlowError,
+    >,
+) -> Result<DeviceAuthNextStep, String> {
+    match result {
+        Ok(prompt) => Ok(DeviceAuthNextStep::ContinueDevice(prompt)),
+        Err(librefang_runtime::chatgpt_oauth::DeviceAuthFlowError::BrowserFallback { message }) => {
+            Ok(DeviceAuthNextStep::FallbackToBrowser(message))
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+async fn authenticate_chatgpt(
+    device_auth: bool,
+) -> Result<librefang_runtime::chatgpt_oauth::ChatGptAuthResult, String> {
     use librefang_runtime::chatgpt_oauth;
 
-    println!("Starting ChatGPT OAuth authentication flow...\n");
+    if device_auth {
+        match resolve_device_auth_start(chatgpt_oauth::start_device_auth_flow().await)? {
+            DeviceAuthNextStep::ContinueDevice(prompt) => {
+                println!("Device authentication requested.");
+                println!(
+                    "Open this URL in any browser:\n  {}\n",
+                    chatgpt_oauth::DEVICE_AUTH_URL
+                );
+                println!("Enter this one-time code:\n  {}\n", prompt.user_code);
+                println!("Do not share this code.");
+                println!("Waiting for authorization...");
+                return chatgpt_oauth::poll_device_auth_flow(&prompt).await;
+            }
+            DeviceAuthNextStep::FallbackToBrowser(message) => {
+                println!("{message}");
+                println!("\nSwitching to the standard browser login flow...\n");
+            }
+        }
+    }
+
+    let (auth_url, port, code_verifier, state) = chatgpt_oauth::start_oauth_flow().await?;
+
+    println!("Opening browser for OpenAI authentication...");
+    println!("If the browser does not open, visit:\n  {auth_url}\n");
+
+    if let Err(e) = open::that(&auth_url) {
+        eprintln!("Could not open browser automatically: {e}");
+        eprintln!("Please open manually: {auth_url}");
+    }
+
+    let code = chatgpt_oauth::run_oauth_callback_server(port, &state).await?;
+    chatgpt_oauth::exchange_code_for_tokens(&code, &code_verifier, port).await
+}
+
+async fn persist_chatgpt_auth(
+    auth_result: librefang_runtime::chatgpt_oauth::ChatGptAuthResult,
+) -> Result<(), String> {
+    use librefang_runtime::chatgpt_oauth;
+
+    let home = librefang_home();
+    std::fs::create_dir_all(&home)
+        .map_err(|e| format!("Failed to create LibreFang home directory: {e}"))?;
+
+    let access_token = auth_result.access_token;
+    let refresh_token = auth_result.refresh_token;
+    let secrets_path = write_chatgpt_secrets(
+        &home,
+        access_token.as_str(),
+        refresh_token.as_ref().map(|rt| rt.as_str()),
+    )?;
+
+    println!("\nChatGPT tokens saved to {}", secrets_path.display());
+
+    println!("Detecting best available model...");
+    let best_model = chatgpt_oauth::fetch_best_codex_model(&access_token).await;
+    println!("Selected model: {best_model}");
+
+    update_chatgpt_config(&home, &best_model)?;
+
+    println!("config.toml updated: provider = \"chatgpt\", model = \"{best_model}\"");
+    Ok(())
+}
+
+fn write_chatgpt_secrets(
+    home: &std::path::Path,
+    access_token: &str,
+    refresh_token: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    let secrets_path = home.join("secrets.env");
+    let mut env_vars: Vec<(String, String)> = vec![(
+        "CHATGPT_SESSION_TOKEN".to_string(),
+        access_token.to_string(),
+    )];
+    if let Some(rt) = refresh_token {
+        env_vars.push(("CHATGPT_REFRESH_TOKEN".to_string(), rt.to_string()));
+    }
+
+    let existing = std::fs::read_to_string(&secrets_path).unwrap_or_default();
+    let mut lines: Vec<String> = existing
+        .lines()
+        .filter(|l| {
+            !l.starts_with("CHATGPT_SESSION_TOKEN=") && !l.starts_with("CHATGPT_REFRESH_TOKEN=")
+        })
+        .map(|l| l.to_string())
+        .collect();
+
+    for (key, val) in &env_vars {
+        lines.push(format!("{key}={val}"));
+    }
+
+    let mut updated = lines.join("\n");
+    if !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+
+    std::fs::write(&secrets_path, updated)
+        .map_err(|e| format!("Failed to write secrets.env: {e}"))?;
+
+    Ok(secrets_path)
+}
+
+fn update_chatgpt_config(home: &std::path::Path, best_model: &str) -> Result<(), String> {
+    let config_path = home.join("config.toml");
+    let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc = if config_str.trim().is_empty() {
+        toml_edit::DocumentMut::new()
+    } else {
+        config_str
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| format!("Failed to parse config.toml: {e}"))?
+    };
+
+    let dm = doc
+        .entry("default_model")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
+        .as_table_mut()
+        .ok_or("default_model is not a table")?;
+    dm.insert("provider", toml_edit::value("chatgpt"));
+    dm.insert("api_key_env", toml_edit::value("CHATGPT_SESSION_TOKEN"));
+    dm.insert("model", toml_edit::value(best_model));
+    dm.insert(
+        "base_url",
+        toml_edit::value(librefang_runtime::chatgpt_oauth::CHATGPT_BASE_URL),
+    );
+
+    std::fs::write(&config_path, doc.to_string())
+        .map_err(|e| format!("Failed to write config.toml: {e}"))?;
+
+    Ok(())
+}
+
+fn cmd_auth_chatgpt(device_auth: bool) {
+    println!("Starting ChatGPT authentication flow...\n");
 
     let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
 
     let result: Result<(), String> = rt.block_on(async {
-        // Start OAuth flow: bind local server, generate PKCE, build auth URL.
-        let (auth_url, port, code_verifier, state) = chatgpt_oauth::start_oauth_flow().await?;
-
-        println!("Opening browser for OpenAI authentication...");
-        println!("If the browser does not open, visit:\n  {auth_url}\n");
-
-        // Open the authorization URL in the default browser.
-        if let Err(e) = open::that(&auth_url) {
-            eprintln!("Could not open browser automatically: {e}");
-            eprintln!("Please open manually: {auth_url}");
-        }
-
-        // Wait for the OAuth callback with the authorization code.
-        let code = chatgpt_oauth::run_oauth_callback_server(port, &state).await?;
-
-        // Exchange the authorization code for tokens.
-        let auth_result =
-            chatgpt_oauth::exchange_code_for_tokens(&code, &code_verifier, port).await?;
-
-        // Save tokens to secrets.env
-        let home = librefang_home();
-        let secrets_path = home.join("secrets.env");
-
-        let access_token = auth_result.access_token;
-        let refresh_token = auth_result.refresh_token;
-
-        let mut env_vars: Vec<(String, String)> = vec![(
-            "CHATGPT_SESSION_TOKEN".to_string(),
-            access_token.to_string(),
-        )];
-        if let Some(ref rt) = refresh_token {
-            env_vars.push(("CHATGPT_REFRESH_TOKEN".to_string(), rt.to_string()));
-        }
-
-        let existing = std::fs::read_to_string(&secrets_path).unwrap_or_default();
-        let mut lines: Vec<String> = existing
-            .lines()
-            .filter(|l| {
-                !l.starts_with("CHATGPT_SESSION_TOKEN=") && !l.starts_with("CHATGPT_REFRESH_TOKEN=")
-            })
-            .map(|l| l.to_string())
-            .collect();
-
-        for (key, val) in &env_vars {
-            lines.push(format!("{key}={val}"));
-        }
-
-        let mut updated = lines.join("\n");
-        if !updated.ends_with('\n') {
-            updated.push('\n');
-        }
-
-        std::fs::write(&secrets_path, updated)
-            .map_err(|e| format!("Failed to write secrets.env: {e}"))?;
-
-        println!("\nChatGPT tokens saved to {}", secrets_path.display());
-
-        // Auto-detect best available Codex model using the fresh access token.
-        println!("Detecting best available model...");
-        let best_model = chatgpt_oauth::fetch_best_codex_model(&access_token).await;
-        println!("Selected model: {best_model}");
-
-        // Auto-update config.toml to use chatgpt provider
-        let config_path = home.join("config.toml");
-        let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
-        let mut doc = config_str
-            .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| format!("Failed to parse config.toml: {e}"))?;
-
-        let dm = doc
-            .entry("default_model")
-            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()))
-            .as_table_mut()
-            .ok_or("default_model is not a table")?;
-        dm.insert("provider", toml_edit::value("chatgpt"));
-        dm.insert("api_key_env", toml_edit::value("CHATGPT_SESSION_TOKEN"));
-        dm.insert("model", toml_edit::value(&best_model));
-        // ChatGPT OAuth tokens use the Responses API at the backend-api endpoint.
-        dm.insert(
-            "base_url",
-            toml_edit::value("https://chatgpt.com/backend-api"),
-        );
-
-        std::fs::write(&config_path, doc.to_string())
-            .map_err(|e| format!("Failed to write config.toml: {e}"))?;
-
-        println!("config.toml updated: provider = \"chatgpt\", model = \"{best_model}\"");
-        Ok(())
+        let auth_result = authenticate_chatgpt(device_auth).await?;
+        persist_chatgpt_auth(auth_result).await
     });
 
     match result {
@@ -6849,7 +6924,7 @@ fn cmd_models_list(provider_filter: Option<&str>, json: bool) {
         }
     } else {
         // Standalone: use ModelCatalog directly
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
         let models = catalog.list_models();
         if json {
             let arr: Vec<serde_json::Value> = models
@@ -6925,7 +7000,7 @@ fn cmd_models_aliases(json: bool) {
             );
         }
     } else {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
         let aliases = catalog.list_aliases();
         if json {
             let obj: serde_json::Map<String, serde_json::Value> = aliases
@@ -6980,7 +7055,7 @@ fn cmd_models_providers(json: bool) {
             );
         }
     } else {
-        let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
         let providers = catalog.list_providers();
         if json {
             let arr: Vec<serde_json::Value> = providers
@@ -7040,7 +7115,7 @@ fn cmd_models_set(model: Option<String>) {
 
 /// Interactive model picker — shows numbered list, accepts number or model ID.
 fn pick_model() -> String {
-    let catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+    let catalog = librefang_runtime::model_catalog::ModelCatalog::default();
     let models = catalog.list_models();
 
     if models.is_empty() {
@@ -8848,7 +8923,8 @@ mod tests {
     use super::{
         channel_test_request_body, compare_release_tag, daemon_log_path_for_config,
         daemon_log_path_for_home, detached_daemon_args, normalize_release_tag, parse_version_core,
-        resolve_hand_instance, ChannelCommands, Cli, Commands, GatewayCommands, ReleaseComparison,
+        resolve_device_auth_start, resolve_hand_instance, AuthCommands, ChannelCommands, Cli,
+        Commands, DeviceAuthNextStep, GatewayCommands, ReleaseComparison,
     };
     use clap::Parser;
     use serde_json::json;
@@ -9049,6 +9125,43 @@ mod tests {
     }
 
     #[test]
+    fn test_auth_chatgpt_accepts_device_auth_flag() {
+        let cli = Cli::parse_from(["librefang", "auth", "chatgpt", "--device-auth"]);
+        match cli.command {
+            Some(Commands::Auth(AuthCommands::Chatgpt { device_auth })) => {
+                assert!(device_auth);
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_device_auth_start_continues_device_path() {
+        let prompt = librefang_runtime::chatgpt_oauth::DeviceAuthPrompt {
+            device_auth_id: "device-1".to_string(),
+            user_code: "ABCD-EFGH".to_string(),
+            interval_secs: 9,
+        };
+
+        match resolve_device_auth_start(Ok(prompt.clone())).unwrap() {
+            DeviceAuthNextStep::ContinueDevice(actual) => assert_eq!(actual, prompt),
+            DeviceAuthNextStep::FallbackToBrowser(_) => panic!("unexpected fallback"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_device_auth_start_requests_browser_fallback_on_unsupported_error() {
+        let err = librefang_runtime::chatgpt_oauth::DeviceAuthFlowError::BrowserFallback {
+            message: "fallback".to_string(),
+        };
+
+        match resolve_device_auth_start(Err(err)).unwrap() {
+            DeviceAuthNextStep::FallbackToBrowser(message) => assert_eq!(message, "fallback"),
+            DeviceAuthNextStep::ContinueDevice(_) => panic!("unexpected device continuation"),
+        }
+    }
+
+    #[test]
     fn test_start_rejects_tail_with_foreground() {
         let cli = Cli::try_parse_from(["librefang", "start", "--tail", "--foreground"]);
         assert!(cli.is_err());
@@ -9107,8 +9220,9 @@ mod tests {
     fn test_doctor_skill_registry_loads_bundled() {
         let skills_dir = std::env::temp_dir().join("librefang-doctor-test-skills");
         let mut skill_reg = librefang_skills::registry::SkillRegistry::new(skills_dir);
-        let count = skill_reg.load_bundled();
-        assert!(count > 0, "Should load bundled skills");
+        let count =
+            skill_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        // Skills are loaded from disk at runtime; count depends on registry files being present
         assert_eq!(skill_reg.count(), count);
     }
 
@@ -9117,8 +9231,9 @@ mod tests {
         let tmp = std::env::temp_dir().join("librefang-doctor-test-ext");
         let _ = std::fs::create_dir_all(&tmp);
         let mut ext_reg = librefang_extensions::registry::IntegrationRegistry::new(&tmp);
-        let count = ext_reg.load_bundled();
-        assert!(count > 0, "Should load bundled integration templates");
+        let count =
+            ext_reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+        // Integrations are loaded from disk at runtime; count depends on registry files being present
         assert_eq!(ext_reg.template_count(), count);
     }
 

@@ -1,0 +1,66 @@
+import { Bot } from 'lucide-react'
+
+export const metadata = {
+  title: 'LibreFang - Agent Operating System',
+}
+
+# LibreFang
+
+LibreFang 是一个用 Rust 编写的开源 Agent 操作系统。
+
+**官网**: [https://librefang.ai/](https://librefang.ai/)
+**GitHub**: [https://github.com/librefang/librefang](https://github.com/librefang/librefang)
+
+## 快速链接
+
+- [快速开始](/librefang) — 安装、配置、运行第一个 Agent
+- [GitHub](https://github.com/librefang/librefang) — 源码
+
+---
+
+## 特性
+
+<div className="not-prose mt-8 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+  <div className="rounded-2xl border border-zinc-200 p-6 transition-all hover:border-zinc-300 hover:shadow-md dark:border-zinc-800 dark:hover:border-zinc-700">
+    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+      <Bot className="h-5 w-5" />
+    </div>
+    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">7 个内置 Hands</h3>
+    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Clip、Lead、Collector、Predictor、Researcher、Twitter、Browser</p>
+  </div>
+  <div className="rounded-2xl border border-zinc-200 p-6 transition-all hover:border-zinc-300 hover:shadow-md dark:border-zinc-800 dark:hover:border-zinc-700">
+    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/10 text-sky-600 dark:text-sky-400">
+      <Bot className="h-5 w-5" />
+    </div>
+    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">16 层安全防护</h3>
+    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">WASM 沙箱、Merkle 哈希链、污点追踪、SSRF 保护</p>
+  </div>
+  <div className="rounded-2xl border border-zinc-200 p-6 transition-all hover:border-zinc-300 hover:shadow-md dark:border-zinc-800 dark:hover:border-zinc-700">
+    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-500/10 text-violet-600 dark:text-violet-400">
+      <Bot className="h-5 w-5" />
+    </div>
+    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">40 个通道适配器</h3>
+    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Telegram、Discord、Slack、WhatsApp、Matrix、Email 等</p>
+  </div>
+  <div className="rounded-2xl border border-zinc-200 p-6 transition-all hover:border-zinc-300 hover:shadow-md dark:border-zinc-800 dark:hover:border-zinc-700">
+    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400">
+      <Bot className="h-5 w-5" />
+    </div>
+    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">27 个 LLM 提供商</h3>
+    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Anthropic、OpenAI、Gemini、Groq、DeepSeek、Ollama 等</p>
+  </div>
+  <div className="rounded-2xl border border-zinc-200 p-6 transition-all hover:border-zinc-300 hover:shadow-md dark:border-zinc-800 dark:hover:border-zinc-700">
+    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-rose-500/10 text-rose-600 dark:text-rose-400">
+      <Bot className="h-5 w-5" />
+    </div>
+    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">30 个 Agent 模板</h3>
+    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Coder、Researcher、Writer、Analyst、Architect 等</p>
+  </div>
+  <div className="rounded-2xl border border-zinc-200 p-6 transition-all hover:border-zinc-300 hover:shadow-md dark:border-zinc-800 dark:hover:border-zinc-700">
+    <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-teal-500/10 text-teal-600 dark:text-teal-400">
+      <Bot className="h-5 w-5" />
+    </div>
+    <h3 className="mt-4 text-sm font-semibold text-zinc-900 dark:text-white">Rust + WASM</h3>
+    <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">14 个 crates，137K+ 代码行，冷启动 {'<'}200ms</p>
+  </div>
+</div>

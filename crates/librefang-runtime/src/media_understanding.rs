@@ -209,6 +209,20 @@ impl MediaEngine {
         let mut handles = Vec::new();
 
         for attachment in attachments {
+            // Skip media types that are disabled in config
+            match attachment.media_type {
+                MediaType::Image if !self.config.image_description => {
+                    continue;
+                }
+                MediaType::Audio if !self.config.audio_transcription => {
+                    continue;
+                }
+                MediaType::Video if !self.config.video_description => {
+                    continue;
+                }
+                _ => {}
+            }
+
             let sem = self.semaphore.clone();
             let config = self.config.clone();
             let handle = tokio::spawn(async move {

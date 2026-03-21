@@ -273,6 +273,20 @@ pub trait ChannelBridgeHandle: Send + Sync {
         let _ = tx.send(response).await;
         Ok(rx)
     }
+
+    /// Send a message with sender identity context and stream text deltas back.
+    ///
+    /// Default implementation preserves existing streaming behavior and ignores
+    /// the sender context for handles that do not support it.
+    async fn send_message_streaming_with_sender(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender: &SenderContext,
+    ) -> Result<mpsc::Receiver<String>, String> {
+        let _ = sender;
+        self.send_message_streaming(agent_id, message).await
+    }
 }
 
 /// Owns all running channel adapters and dispatches messages to agents.
@@ -411,6 +425,11 @@ fn build_sender_context(message: &ChannelMessage) -> SenderContext {
         display_name: message.sender.display_name.clone(),
         is_group: message.is_group,
         thread_id: message.thread_id.clone(),
+        account_id: message
+            .metadata
+            .get("account_id")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     }
 }
 
@@ -679,6 +698,14 @@ async fn dispatch_message(
 
     // --- Rate limiting ---
     if let Some(ref ov) = overrides {
+        // Global per-channel rate limit (all users combined)
+        if ov.rate_limit_per_minute > 0 {
+            if let Err(msg) = rate_limiter.check(ct_str, "__global__", ov.rate_limit_per_minute) {
+                send_response(adapter, &message.sender, msg, thread_id, output_format).await;
+                return;
+            }
+        }
+        // Per-user rate limit
         if ov.rate_limit_per_user > 0 {
             if let Err(msg) =
                 rate_limiter.check(ct_str, sender_user_id(message), ov.rate_limit_per_user)
@@ -1003,7 +1030,10 @@ async fn dispatch_message(
     // Streaming path: if the adapter supports progressive output, pipe text
     // deltas directly to it instead of waiting for the full response.
     if adapter.supports_streaming() {
-        match handle.send_message_streaming(agent_id, &text).await {
+        match handle
+            .send_message_streaming_with_sender(agent_id, &text, &sender_ctx)
+            .await
+        {
             Ok(mut delta_rx) => {
                 send_lifecycle_reaction(adapter, &message.sender, msg_id, AgentPhase::Streaming)
                     .await;
