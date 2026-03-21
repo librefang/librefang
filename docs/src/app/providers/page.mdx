@@ -1,6 +1,6 @@
 # LLM Providers Guide
 
-LibreFang ships with a comprehensive model catalog covering **3 native LLM drivers**, **34 providers**, **51 builtin models**, and **23 aliases**. Every provider uses one of three battle-tested drivers: the native **Anthropic** driver, the native **Gemini** driver, or the universal **OpenAI-compatible** driver. This guide is the single source of truth for configuring, selecting, and managing LLM providers in LibreFang.
+LibreFang ships with a comprehensive model catalog covering **3 native LLM drivers**, **49 providers**, **230+ builtin models**, and **23 aliases**. Every provider uses one of three battle-tested drivers: the native **Anthropic** driver, the native **Gemini** driver, or the universal **OpenAI-compatible** driver. This guide is the single source of truth for configuring, selecting, and managing LLM providers in LibreFang.
 
 The model catalog also supports **dynamic loading** — you can add custom provider definitions by placing TOML files in `~/.librefang/providers/`. Any file matching `~/.librefang/providers/*.toml` is merged into the catalog at boot, allowing you to add private endpoints, on-premises deployments, or new providers without modifying the core configuration.
 
@@ -55,7 +55,7 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 | **Key Required** | Yes |
 | **Free Tier** | No |
 | **Auth** | `x-api-key` header |
-| **Models** | 3 |
+| **Models** | 7 |
 
 **Available Models:**
 - `claude-opus-4-20250514` (Frontier)
@@ -80,7 +80,7 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 | **Key Required** | Yes |
 | **Free Tier** | No |
 | **Auth** | `Authorization: Bearer` header |
-| **Models** | 6 |
+| **Models** | 18 |
 
 **Available Models:**
 - `gpt-4.1` (Frontier)
@@ -108,7 +108,7 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 | **Key Required** | Yes |
 | **Free Tier** | Yes (generous free tier) |
 | **Auth** | `x-goog-api-key` header |
-| **Models** | 3 |
+| **Models** | 10 |
 
 **Available Models:**
 - `gemini-2.5-pro` (Frontier)
@@ -135,7 +135,7 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 | **Key Required** | Yes |
 | **Free Tier** | No |
 | **Auth** | `Authorization: Bearer` header |
-| **Models** | 2 |
+| **Models** | 4 |
 
 **Available Models:**
 - `deepseek-chat` (Smart) -- DeepSeek V3
@@ -159,7 +159,7 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 | **Key Required** | Yes |
 | **Free Tier** | Yes (rate-limited) |
 | **Auth** | `Authorization: Bearer` header |
-| **Models** | 4 |
+| **Models** | 10 |
 
 **Available Models:**
 - `llama-3.3-70b-versatile` (Balanced)
@@ -185,9 +185,9 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 | **Env Var** | `OPENROUTER_API_KEY` |
 | **Base URL** | `https://openrouter.ai/api/v1` |
 | **Key Required** | Yes |
-| **Free Tier** | Yes (limited credits for some models) |
+| **Free Tier** | Yes (8 free models including Step 3.5 Flash, DeepSeek R1, Llama 3.1 8B, etc.) |
 | **Auth** | `Authorization: Bearer` header |
-| **Models** | 10 |
+| **Models** | 17 |
 
 **Available Models:**
 - `openrouter/google/gemini-2.5-flash` (Smart) -- cheap, fast, 1M context (default)
@@ -221,7 +221,7 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 | **Key Required** | Yes |
 | **Free Tier** | No |
 | **Auth** | `Authorization: Bearer` header |
-| **Models** | 3 |
+| **Models** | 6 |
 
 **Available Models:**
 - `mistral-large-latest` (Smart)
@@ -246,7 +246,7 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 | **Key Required** | Yes |
 | **Free Tier** | Yes (limited credits on signup) |
 | **Auth** | `Authorization: Bearer` header |
-| **Models** | 3 |
+| **Models** | 8 |
 
 **Available Models:**
 - `meta-llama/Meta-Llama-3.1-405B-Instruct-Turbo` (Frontier)
@@ -271,7 +271,7 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 | **Key Required** | Yes |
 | **Free Tier** | Yes (limited credits on signup) |
 | **Auth** | `Authorization: Bearer` header |
-| **Models** | 2 |
+| **Models** | 5 |
 
 **Available Models:**
 - `accounts/fireworks/models/llama-v3p1-405b-instruct` (Frontier)
@@ -467,9 +467,9 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 | **Env Var** | `SAMBANOVA_API_KEY` |
 | **Base URL** | `https://api.sambanova.ai/v1` |
 | **Key Required** | Yes |
-| **Free Tier** | Yes (limited credits) |
+| **Free Tier** | Yes (3 free models) |
 | **Auth** | `Authorization: Bearer` header |
-| **Models** | 1 |
+| **Models** | 3 |
 
 **Available Models:**
 - `sambanova/llama-3.3-70b` (Balanced)
@@ -490,7 +490,7 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 | **Env Var** | `HF_API_KEY` |
 | **Base URL** | `https://api-inference.huggingface.co/v1` |
 | **Key Required** | Yes |
-| **Free Tier** | Yes (rate-limited) |
+| **Free Tier** | No |
 | **Auth** | `Authorization: Bearer` header |
 | **Models** | 1 |
 
@@ -991,7 +991,7 @@ minimax = "china"
 
 ## Model Catalog
 
-The complete catalog of all 51 builtin models, sorted by provider. Pricing is per million tokens.
+The complete catalog of all 230+ builtin models, sorted by provider. Pricing is per million tokens.
 
 | # | Model ID | Display Name | Provider | Tier | Context Window | Max Output | Input $/M | Output $/M | Tools | Vision |
 |---|----------|-------------|----------|------|---------------|------------|-----------|------------|-------|--------|
@@ -1061,7 +1061,7 @@ The complete catalog of all 51 builtin models, sorted by provider. Pricing is pe
 
 **Notes:**
 - Local providers (Ollama, vLLM, LM Studio) auto-discover models at runtime. Any model you download and serve will be merged into the catalog with `Local` tier and zero cost.
-- The 46 entries above are the builtin models. The total of 51 referenced in the catalog includes runtime auto-discovered models that vary per installation.
+- The entries above are a representative subset of the 230+ builtin models. The full catalog includes additional models per provider and runtime auto-discovered models that vary per installation.
 
 ---
 
@@ -1343,7 +1343,7 @@ Returns a map of all alias-to-canonical-ID mappings.
 GET /api/providers
 ```
 
-Returns all 28 providers with auth status and model counts.
+Returns all 49 providers with auth status and model counts.
 
 **Response:**
 ```json
@@ -1438,7 +1438,7 @@ Local:
 
 ### `/providers`
 
-Lists all 28 providers with their authentication status.
+Lists all 49 providers with their authentication status.
 
 ```
 /providers
@@ -1446,7 +1446,7 @@ Lists all 28 providers with their authentication status.
 
 Example output:
 ```
-LLM Providers (28):
+LLM Providers (49):
 
   Anthropic          ANTHROPIC_API_KEY       Configured    3 models
   OpenAI             OPENAI_API_KEY          Missing       6 models
