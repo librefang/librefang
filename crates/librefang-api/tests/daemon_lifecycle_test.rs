@@ -165,6 +165,7 @@ async fn test_full_daemon_lifecycle() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "ok");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
 
     // --- Verify status endpoint ---
     let resp = client
@@ -175,6 +176,7 @@ async fn test_full_daemon_lifecycle() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "running");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
 
     // --- Shutdown ---
     let resp = client
