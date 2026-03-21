@@ -217,6 +217,8 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("providers")).unwrap();
         std::fs::create_dir_all(tmp.path().join("hands")).unwrap();
         std::fs::create_dir_all(tmp.path().join("agents")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("skills")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("integrations")).unwrap();
 
         assert!(!needs_sync(tmp.path()));
     }

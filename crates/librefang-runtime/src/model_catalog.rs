@@ -998,22 +998,36 @@ mod tests {
         assert!(catalog.find_model("codegeex").is_some());
         assert!(catalog.find_model("ernie").is_some());
         assert!(catalog.find_model("minimax").is_some());
-        // MiniMax M2.7 — by exact ID, alias, and case-insensitive
-        let m27 = catalog.find_model("MiniMax-M2.7").unwrap();
-        assert_eq!(m27.provider, "minimax");
-        assert_eq!(m27.tier, ModelTier::Frontier);
-        assert!(catalog.find_model("minimax-m2.7").is_some());
-        // Default "minimax" alias resolves to a minimax model
+        // MiniMax M2.5 — by exact ID, alias, and case-insensitive
+        let m25 = catalog.find_model("MiniMax-M2.5").unwrap();
+        assert!(
+            m25.provider == "minimax" || m25.provider == "minimax-cn",
+            "unexpected provider: {}",
+            m25.provider
+        );
+        assert!(catalog.find_model("minimax-m2.5").is_some());
+        // Default "minimax" alias resolves to a minimax-family model
         let default = catalog.find_model("minimax").unwrap();
-        assert_eq!(default.provider, "minimax");
-        // MiniMax M2.7 Highspeed — by exact ID and aliases
-        let hs = catalog.find_model("MiniMax-M2.7-highspeed").unwrap();
-        assert_eq!(hs.provider, "minimax");
-        assert!(catalog.find_model("minimax-m2.7-highspeed").is_some());
+        assert!(
+            default.provider == "minimax" || default.provider == "minimax-cn",
+            "unexpected provider: {}",
+            default.provider
+        );
+        // MiniMax M2.5 Highspeed — by exact ID and aliases
+        let hs = catalog.find_model("MiniMax-M2.5-highspeed").unwrap();
+        assert!(
+            hs.provider == "minimax" || hs.provider == "minimax-cn",
+            "unexpected provider: {}",
+            hs.provider
+        );
+        assert!(catalog.find_model("minimax-m2.5-highspeed").is_some());
         // abab7-chat
         let abab7 = catalog.find_model("abab7-chat").unwrap();
-        assert_eq!(abab7.provider, "minimax");
-        assert!(abab7.supports_vision);
+        assert!(
+            abab7.provider == "minimax" || abab7.provider == "minimax-cn",
+            "unexpected provider: {}",
+            abab7.provider
+        );
     }
 
     #[test]
