@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Escape < in MDX comparison table to fix build (#1350) (@houko)
 - Escape < in MDX troubleshooting page (#1351) (@houko)
 - Resolve compilation errors breaking CI clippy check (#1353) (@houko)
+- Clean stale registry dir before clone to prevent CI race condition (#1356) (@houko)
 
 ### Changed
 
