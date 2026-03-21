@@ -255,7 +255,7 @@ fi
 
 # --- Build React dashboard ---
 
-DASHBOARD_DIR="$REPO_ROOT/crates/librefang-api/dashboard-react"
+DASHBOARD_DIR="$REPO_ROOT/crates/librefang-api/dashboard"
 if [ -f "$DASHBOARD_DIR/package.json" ]; then
     echo ""
     echo "Building React dashboard..."
