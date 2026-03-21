@@ -25,10 +25,10 @@ use librefang_types::model_catalog::{
     GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL, KIMI_CODING_BASE_URL,
     LEMONADE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_CN_BASE_URL, MINIMAX_INTL_BASE_URL,
     MISTRAL_BASE_URL, MOONSHOT_BASE_URL, NVIDIA_NIM_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL,
-    OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL,
-    SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VENICE_BASE_URL, VERTEX_AI_BASE_URL, VLLM_BASE_URL,
-    VOLCENGINE_BASE_URL, VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL,
-    ZAI_CODING_BASE_URL, ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
+    OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, QWEN_INTL_BASE_URL,
+    QWEN_US_BASE_URL, REPLICATE_BASE_URL, SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VENICE_BASE_URL,
+    VERTEX_AI_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL, VOLCENGINE_CODING_BASE_URL,
+    XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
 };
 use std::sync::Arc;
 
@@ -396,6 +396,26 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         hidden: false,
     },
     ProviderEntry {
+        name: "qwen-intl",
+        aliases: &["dashscope-intl", "qwen-sg"],
+        base_url: QWEN_INTL_BASE_URL,
+        api_key_env: "DASHSCOPE_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "qwen-us",
+        aliases: &["dashscope-us"],
+        base_url: QWEN_US_BASE_URL,
+        api_key_env: "DASHSCOPE_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
         name: "minimax",
         aliases: &[],
         base_url: MINIMAX_INTL_BASE_URL,
@@ -695,7 +715,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
              deepseek, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
              chutes, venice, vertex-ai, nvidia-nim, codex, claude-code, qwen-code, \
-             gemini-cli, codex-cli, aider. Or set base_url for a custom OpenAI-compatible endpoint.",
+             gemini-cli, codex-cli, aider, qwen. Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
     })
@@ -880,6 +900,8 @@ mod tests {
         assert!(providers.contains(&"github-copilot"));
         assert!(providers.contains(&"moonshot"));
         assert!(providers.contains(&"qwen"));
+        assert!(providers.contains(&"qwen-intl"));
+        assert!(providers.contains(&"qwen-us"));
         assert!(providers.contains(&"minimax"));
         assert!(providers.contains(&"minimax-cn"));
         assert!(providers.contains(&"zhipu"));
