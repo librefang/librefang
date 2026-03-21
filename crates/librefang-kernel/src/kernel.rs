@@ -43,6 +43,85 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock, Weak};
 use tracing::{debug, info, warn};
 
+// ---------------------------------------------------------------------------
+// Prompt metadata cache — avoids redundant filesystem I/O and skill registry
+// iteration on every message.
+// ---------------------------------------------------------------------------
+
+/// TTL for cached prompt metadata entries (30 seconds).
+const PROMPT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Cached workspace context and identity files for an agent's workspace.
+#[derive(Clone, Debug)]
+struct CachedWorkspaceMetadata {
+    workspace_context: Option<String>,
+    soul_md: Option<String>,
+    user_md: Option<String>,
+    memory_md: Option<String>,
+    agents_md: Option<String>,
+    bootstrap_md: Option<String>,
+    identity_md: Option<String>,
+    heartbeat_md: Option<String>,
+    created_at: std::time::Instant,
+}
+
+impl CachedWorkspaceMetadata {
+    fn is_expired(&self) -> bool {
+        self.created_at.elapsed() > PROMPT_CACHE_TTL
+    }
+}
+
+/// Cached skill summary and prompt context for a given skill allowlist.
+#[derive(Clone, Debug)]
+struct CachedSkillMetadata {
+    skill_summary: String,
+    skill_prompt_context: String,
+    created_at: std::time::Instant,
+}
+
+impl CachedSkillMetadata {
+    fn is_expired(&self) -> bool {
+        self.created_at.elapsed() > PROMPT_CACHE_TTL
+    }
+}
+
+/// Thread-safe cache for prompt-building metadata. Avoids redundant filesystem
+/// scans and skill registry iteration on every incoming message.
+///
+/// Keyed by workspace path (for workspace metadata) and a sorted skill
+/// allowlist string (for skill metadata). Entries expire after [`PROMPT_CACHE_TTL`].
+///
+/// Invalidated explicitly on skill reload, config reload, or workspace change.
+struct PromptMetadataCache {
+    workspace: dashmap::DashMap<PathBuf, CachedWorkspaceMetadata>,
+    skills: dashmap::DashMap<String, CachedSkillMetadata>,
+}
+
+impl PromptMetadataCache {
+    fn new() -> Self {
+        Self {
+            workspace: dashmap::DashMap::new(),
+            skills: dashmap::DashMap::new(),
+        }
+    }
+
+    /// Invalidate all cached entries (used on skill reload, config reload).
+    fn invalidate_all(&self) {
+        self.workspace.clear();
+        self.skills.clear();
+    }
+
+    /// Build a cache key for the skill allowlist.
+    fn skill_cache_key(allowlist: &[String]) -> String {
+        if allowlist.is_empty() {
+            return String::from("*");
+        }
+        let mut sorted = allowlist.to_vec();
+        sorted.sort();
+        sorted.join(",")
+    }
+}
+
 const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
 /// The main LibreFang kernel — coordinates all subsystems.
@@ -270,6 +349,9 @@ pub struct LibreFangKernel {
     self_handle: OnceLock<Weak<LibreFangKernel>>,
     /// Whether we've already logged the "no provider" audit entry (prevents spam).
     pub provider_unconfigured_logged: std::sync::atomic::AtomicBool,
+    /// Cache for workspace context, identity files, and skill metadata to avoid
+    /// redundant filesystem I/O and registry scans on every message.
+    prompt_metadata_cache: PromptMetadataCache,
 }
 
 /// Bounded in-memory delivery receipt tracker.
@@ -1340,6 +1422,7 @@ impl LibreFangKernel {
             context_engine_config,
             self_handle: OnceLock::new(),
             provider_unconfigured_logged: std::sync::atomic::AtomicBool::new(false),
+            prompt_metadata_cache: PromptMetadataCache::new(),
         };
 
         // Initialize proactive memory system (mem0-style) from config.
@@ -2236,7 +2319,9 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Build the structured system prompt via prompt_builder
+        // Build the structured system prompt via prompt_builder.
+        // Workspace metadata and skill summaries are cached to avoid redundant
+        // filesystem I/O and skill registry iteration on every message.
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
@@ -2261,40 +2346,42 @@ system_prompt = "You are a helpful assistant."
                 })
                 .collect();
 
+            // Use cached workspace metadata (identity files + workspace context)
+            let ws_meta = manifest
+                .workspace
+                .as_ref()
+                .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
+
+            // Use cached skill metadata (summary + prompt context)
+            let skill_meta = if manifest.skills_disabled {
+                None
+            } else {
+                Some(self.cached_skill_metadata(&manifest.skills))
+            };
+
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
                 base_system_prompt: manifest.model.system_prompt.clone(),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
                 recalled_memories: vec![],
-                skill_summary: if manifest.skills_disabled {
-                    String::new()
-                } else {
-                    self.build_skill_summary(&manifest.skills)
-                },
-                skill_prompt_context: if manifest.skills_disabled {
-                    String::new()
-                } else {
-                    self.collect_prompt_context(&manifest.skills)
-                },
+                skill_summary: skill_meta
+                    .as_ref()
+                    .map(|s| s.skill_summary.clone())
+                    .unwrap_or_default(),
+                skill_prompt_context: skill_meta
+                    .as_ref()
+                    .map(|s| s.skill_prompt_context.clone())
+                    .unwrap_or_default(),
                 mcp_summary: if mcp_tool_count > 0 {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
                     String::new()
                 },
                 workspace_path: manifest.workspace.as_ref().map(|p| p.display().to_string()),
-                soul_md: manifest
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| read_identity_file(w, "SOUL.md")),
-                user_md: manifest
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| read_identity_file(w, "USER.md")),
-                memory_md: manifest
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| read_identity_file(w, "MEMORY.md")),
+                soul_md: ws_meta.as_ref().and_then(|m| m.soul_md.clone()),
+                user_md: ws_meta.as_ref().and_then(|m| m.user_md.clone()),
+                memory_md: ws_meta.as_ref().and_then(|m| m.memory_md.clone()),
                 canonical_context: if stable_prefix_mode {
                     None
                 } else {
@@ -2313,31 +2400,11 @@ system_prompt = "You are a helpful assistant."
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
                 is_autonomous: manifest.autonomous.is_some(),
-                agents_md: manifest
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| read_identity_file(w, "AGENTS.md")),
-                bootstrap_md: manifest
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| read_identity_file(w, "BOOTSTRAP.md")),
-                workspace_context: manifest.workspace.as_ref().map(|w| {
-                    let mut ws_ctx =
-                        librefang_runtime::workspace_context::WorkspaceContext::detect(w);
-                    ws_ctx.build_context_section()
-                }),
-                identity_md: manifest
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| read_identity_file(w, "IDENTITY.md")),
-                heartbeat_md: if manifest.autonomous.is_some() {
-                    manifest
-                        .workspace
-                        .as_ref()
-                        .and_then(|w| read_identity_file(w, "HEARTBEAT.md"))
-                } else {
-                    None
-                },
+                agents_md: ws_meta.as_ref().and_then(|m| m.agents_md.clone()),
+                bootstrap_md: ws_meta.as_ref().and_then(|m| m.bootstrap_md.clone()),
+                workspace_context: ws_meta.as_ref().and_then(|m| m.workspace_context.clone()),
+                identity_md: ws_meta.as_ref().and_then(|m| m.identity_md.clone()),
+                heartbeat_md: ws_meta.as_ref().and_then(|m| m.heartbeat_md.clone()),
                 peer_agents,
                 current_date: Some(
                     chrono::Local::now()
@@ -3103,7 +3170,9 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
-        // Build the structured system prompt via prompt_builder
+        // Build the structured system prompt via prompt_builder.
+        // Workspace metadata and skill summaries are cached to avoid redundant
+        // filesystem I/O and skill registry iteration on every message.
         {
             let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
             let shared_id = shared_memory_agent_id();
@@ -3128,40 +3197,42 @@ system_prompt = "You are a helpful assistant."
                 })
                 .collect();
 
+            // Use cached workspace metadata (identity files + workspace context)
+            let ws_meta = manifest
+                .workspace
+                .as_ref()
+                .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
+
+            // Use cached skill metadata (summary + prompt context)
+            let skill_meta = if manifest.skills_disabled {
+                None
+            } else {
+                Some(self.cached_skill_metadata(&manifest.skills))
+            };
+
             let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
                 agent_name: manifest.name.clone(),
                 agent_description: manifest.description.clone(),
                 base_system_prompt: manifest.model.system_prompt.clone(),
                 granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
                 recalled_memories: vec![], // Recalled in agent_loop, not here
-                skill_summary: if manifest.skills_disabled {
-                    String::new()
-                } else {
-                    self.build_skill_summary(&manifest.skills)
-                },
-                skill_prompt_context: if manifest.skills_disabled {
-                    String::new()
-                } else {
-                    self.collect_prompt_context(&manifest.skills)
-                },
+                skill_summary: skill_meta
+                    .as_ref()
+                    .map(|s| s.skill_summary.clone())
+                    .unwrap_or_default(),
+                skill_prompt_context: skill_meta
+                    .as_ref()
+                    .map(|s| s.skill_prompt_context.clone())
+                    .unwrap_or_default(),
                 mcp_summary: if mcp_tool_count > 0 {
                     self.build_mcp_summary(&manifest.mcp_servers)
                 } else {
                     String::new()
                 },
                 workspace_path: manifest.workspace.as_ref().map(|p| p.display().to_string()),
-                soul_md: manifest
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| read_identity_file(w, "SOUL.md")),
-                user_md: manifest
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| read_identity_file(w, "USER.md")),
-                memory_md: manifest
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| read_identity_file(w, "MEMORY.md")),
+                soul_md: ws_meta.as_ref().and_then(|m| m.soul_md.clone()),
+                user_md: ws_meta.as_ref().and_then(|m| m.user_md.clone()),
+                memory_md: ws_meta.as_ref().and_then(|m| m.memory_md.clone()),
                 canonical_context: if stable_prefix_mode {
                     None
                 } else {
@@ -3180,31 +3251,11 @@ system_prompt = "You are a helpful assistant."
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
                 is_autonomous: manifest.autonomous.is_some(),
-                agents_md: manifest
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| read_identity_file(w, "AGENTS.md")),
-                bootstrap_md: manifest
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| read_identity_file(w, "BOOTSTRAP.md")),
-                workspace_context: manifest.workspace.as_ref().map(|w| {
-                    let mut ws_ctx =
-                        librefang_runtime::workspace_context::WorkspaceContext::detect(w);
-                    ws_ctx.build_context_section()
-                }),
-                identity_md: manifest
-                    .workspace
-                    .as_ref()
-                    .and_then(|w| read_identity_file(w, "IDENTITY.md")),
-                heartbeat_md: if manifest.autonomous.is_some() {
-                    manifest
-                        .workspace
-                        .as_ref()
-                        .and_then(|w| read_identity_file(w, "HEARTBEAT.md"))
-                } else {
-                    None
-                },
+                agents_md: ws_meta.as_ref().and_then(|m| m.agents_md.clone()),
+                bootstrap_md: ws_meta.as_ref().and_then(|m| m.bootstrap_md.clone()),
+                workspace_context: ws_meta.as_ref().and_then(|m| m.workspace_context.clone()),
+                identity_md: ws_meta.as_ref().and_then(|m| m.identity_md.clone()),
+                heartbeat_md: ws_meta.as_ref().and_then(|m| m.heartbeat_md.clone()),
                 peer_agents,
                 current_date: Some(
                     chrono::Local::now()
@@ -4565,6 +4616,10 @@ system_prompt = "You are a helpful assistant."
                 }
             }
         }
+
+        // Invalidate prompt metadata cache so next message picks up any
+        // config-driven changes (workspace paths, skill config, etc.).
+        self.prompt_metadata_cache.invalidate_all();
 
         // Invalidate the manifest cache so newly installed/removed
         // agents are picked up on the next routing call.
@@ -6312,6 +6367,9 @@ system_prompt = "You are a helpful assistant."
         let user = fresh.load_all().unwrap_or(0);
         info!(bundled, user, "Skill registry hot-reloaded");
         *registry = fresh;
+
+        // Invalidate cached skill metadata so next message picks up changes
+        self.prompt_metadata_cache.skills.clear();
     }
 
     /// Check whether the context engine plugin (if any) is allowed for an agent.
@@ -6344,6 +6402,72 @@ system_prompt = "You are a helpful assistant."
         }
         // No plugin configured (manual hooks or default engine) — always allow
         Some(engine)
+    }
+
+    /// Get cached workspace metadata (workspace context + identity files) for
+    /// an agent's workspace, rebuilding if the cache entry has expired.
+    ///
+    /// This avoids redundant filesystem I/O on every message — workspace context
+    /// detection scans for project type markers and reads context files, while
+    /// identity file reads do path canonicalization and file I/O for up to 7 files.
+    fn cached_workspace_metadata(
+        &self,
+        workspace: &Path,
+        is_autonomous: bool,
+    ) -> CachedWorkspaceMetadata {
+        if let Some(entry) = self.prompt_metadata_cache.workspace.get(workspace) {
+            if !entry.is_expired() {
+                return entry.clone();
+            }
+        }
+
+        let metadata = CachedWorkspaceMetadata {
+            workspace_context: {
+                let mut ws_ctx =
+                    librefang_runtime::workspace_context::WorkspaceContext::detect(workspace);
+                Some(ws_ctx.build_context_section())
+            },
+            soul_md: read_identity_file(workspace, "SOUL.md"),
+            user_md: read_identity_file(workspace, "USER.md"),
+            memory_md: read_identity_file(workspace, "MEMORY.md"),
+            agents_md: read_identity_file(workspace, "AGENTS.md"),
+            bootstrap_md: read_identity_file(workspace, "BOOTSTRAP.md"),
+            identity_md: read_identity_file(workspace, "IDENTITY.md"),
+            heartbeat_md: if is_autonomous {
+                read_identity_file(workspace, "HEARTBEAT.md")
+            } else {
+                None
+            },
+            created_at: std::time::Instant::now(),
+        };
+
+        self.prompt_metadata_cache
+            .workspace
+            .insert(workspace.to_path_buf(), metadata.clone());
+        metadata
+    }
+
+    /// Get cached skill summary and prompt context for the given allowlist,
+    /// rebuilding if the cache entry has expired.
+    fn cached_skill_metadata(&self, skill_allowlist: &[String]) -> CachedSkillMetadata {
+        let cache_key = PromptMetadataCache::skill_cache_key(skill_allowlist);
+
+        if let Some(entry) = self.prompt_metadata_cache.skills.get(&cache_key) {
+            if !entry.is_expired() {
+                return entry.clone();
+            }
+        }
+
+        let metadata = CachedSkillMetadata {
+            skill_summary: self.build_skill_summary(skill_allowlist),
+            skill_prompt_context: self.collect_prompt_context(skill_allowlist),
+            created_at: std::time::Instant::now(),
+        };
+
+        self.prompt_metadata_cache
+            .skills
+            .insert(cache_key, metadata.clone());
+        metadata
     }
 
     /// Build a compact skill summary for the system prompt so the agent knows
