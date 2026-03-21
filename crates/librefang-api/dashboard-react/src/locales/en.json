@@ -218,7 +218,7 @@
   },
   "logs": {
     "title": "Logs", "subtitle": "Real-time diagnostic events.", "export_json": "Export JSON",
-    "timestamp": "Timestamp", "module": "Module", "message": "Message", "all_modules": "All Modules"
+    "timestamp": "Timestamp", "module": "Module", "agent": "Agent", "message": "Message", "all_modules": "All Modules"
   },
   "settings": {
     "title": "Settings", "subtitle": "System parameters.", "appearance": "Appearance",

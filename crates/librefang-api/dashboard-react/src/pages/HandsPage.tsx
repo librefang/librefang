@@ -5,6 +5,7 @@ import { activateHand, deactivateHand, listActiveHands, listHands } from "../api
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
+import { Input } from "../components/ui/Input";
 import { Hand, RefreshCw, Search, Power, PowerOff, Loader2, Check } from "lucide-react";
 
 const REFRESH_MS = 15000;
@@ -84,12 +85,9 @@ export function HandsPage() {
 
       {/* Search */}
       {hands.length > 0 && (
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-dim/40" />
-          <input type="text" value={search} onChange={e => setSearch(e.target.value)}
-            placeholder={t("hands.search_placeholder")}
-            className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-border-subtle bg-surface text-sm outline-none focus:border-brand" />
-        </div>
+        <Input value={search} onChange={(e) => setSearch(e.target.value)}
+          placeholder={t("hands.search_placeholder")}
+          leftIcon={<Search className="h-4 w-4" />} />
       )}
 
       {/* Hands List */}

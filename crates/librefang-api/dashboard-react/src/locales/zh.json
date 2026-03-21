@@ -218,7 +218,7 @@
   },
   "logs": {
     "title": "日志", "subtitle": "实时诊断事件。", "export_json": "导出 JSON",
-    "timestamp": "时间戳", "module": "模块", "message": "内容", "all_modules": "全部模块"
+    "timestamp": "时间戳", "module": "模块", "agent": "智能体", "message": "内容", "all_modules": "全部模块"
   },
   "settings": {
     "title": "设置", "subtitle": "系统参数管理。", "appearance": "外观",

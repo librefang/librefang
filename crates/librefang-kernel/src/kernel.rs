@@ -1938,6 +1938,12 @@ system_prompt = "You are a helpful assistant."
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
+        // Skip suspended agents — cron/triggers should not dispatch to them
+        if entry.state == AgentState::Suspended {
+            tracing::debug!(agent_id = %agent_id, "Skipping message to suspended agent");
+            return Ok(AgentLoopResult::default());
+        }
+
         // Dispatch based on module type
         let result = match entry.manifest.module.as_str() {
             module if module.starts_with("wasm:") => {
@@ -4175,6 +4181,18 @@ system_prompt = "You are a helpful assistant."
         } else {
             def.agent.model.clone()
         };
+        // When using default provider, also inherit the default api_key_env and base_url
+        let hand_api_key_env = if def.agent.provider == "default" && def.agent.api_key_env.is_none()
+        {
+            Some(self.config.default_model.api_key_env.clone())
+        } else {
+            def.agent.api_key_env.clone()
+        };
+        let hand_base_url = if def.agent.provider == "default" && def.agent.base_url.is_none() {
+            self.config.default_model.base_url.clone()
+        } else {
+            def.agent.base_url.clone()
+        };
 
         let mut manifest = AgentManifest {
             name: def.agent.name.clone(),
@@ -4186,8 +4204,8 @@ system_prompt = "You are a helpful assistant."
                 max_tokens: def.agent.max_tokens,
                 temperature: def.agent.temperature,
                 system_prompt: def.agent.system_prompt.clone(),
-                api_key_env: def.agent.api_key_env.clone(),
-                base_url: def.agent.base_url.clone(),
+                api_key_env: hand_api_key_env,
+                base_url: hand_base_url,
             },
             capabilities: ManifestCapabilities {
                 tools: def.tools.clone(),

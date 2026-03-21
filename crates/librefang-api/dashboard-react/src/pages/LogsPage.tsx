@@ -82,8 +82,12 @@ export function LogsPage() {
           </select>
         </div>
 
-        <div className="bg-main border-b border-border-subtle px-6 py-3 flex items-center justify-between text-[10px] font-black uppercase tracking-widest text-text-dim/60">
-          <div className="flex gap-12"><span>{t("logs.timestamp")}</span><span>{t("logs.module")}</span><span>{t("logs.message")}</span></div>
+        <div className="bg-main border-b border-border-subtle px-4 py-3 flex gap-4 items-center text-[10px] font-black uppercase tracking-widest text-text-dim/60">
+          <span className="shrink-0 w-16">{t("logs.timestamp")}</span>
+          <span className="shrink-0 w-14">{t("common.type")}</span>
+          <span className="shrink-0 w-28">{t("logs.module")}</span>
+          <span className="shrink-0 w-16">{t("logs.agent")}</span>
+          <span className="flex-1">{t("logs.message")}</span>
         </div>
         <div className="p-4 font-mono text-xs space-y-1 max-h-[60vh] overflow-y-auto">
           {auditQuery.isLoading ? (
@@ -97,12 +101,21 @@ export function LogsPage() {
               const level = isError ? "error" : (l.event_type || "info").toLowerCase();
               const levelStyle = LOG_LEVELS[level as keyof typeof LOG_LEVELS] || LOG_LEVELS.info;
               const time = l.timestamp ? new Date(l.timestamp).toLocaleTimeString() : "-";
+              const detail = l.detail || l.message || "-";
+              const reason = l.outcome && l.outcome !== detail ? l.outcome : "";
+              const agentId = l.agent_id ? l.agent_id.slice(0, 8) : "";
               return (
                 <div key={l.seq || l.id || i} className="flex gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-start">
                   <span className="text-text-dim/40 shrink-0 w-16 text-[10px]">{time}</span>
-                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-black uppercase shrink-0 ${levelStyle.bg} ${levelStyle.color}`}>{level}</span>
+                  <span className="shrink-0 w-14"><span className={`px-1.5 py-0.5 rounded text-[10px] font-black uppercase ${levelStyle.bg} ${levelStyle.color}`}>{level}</span></span>
                   <span className="text-brand font-bold shrink-0 w-28 truncate text-[10px]">{l.action || l.source || "-"}</span>
-                  <span className="text-slate-700 dark:text-slate-300 text-[11px] break-all">{l.detail || l.outcome || l.message || "-"}</span>
+                  <span className="text-text-dim/40 font-mono shrink-0 w-16 text-[9px]">{agentId || "-"}</span>
+                  <div className="min-w-0 flex-1">
+                    <span className="text-slate-700 dark:text-slate-300 text-[11px] break-all">{detail}</span>
+                    {reason && (
+                      <p className={`text-[10px] mt-0.5 break-all ${isError ? "text-error/70" : "text-text-dim/50"}`}>{reason}</p>
+                    )}
+                  </div>
                 </div>
               );
             })

@@ -73,7 +73,7 @@ export function AnalyticsPage() {
 
           {/* Cost by Agent + Cost by Model */}
           <div className="grid gap-6 md:grid-cols-2">
-            <Card padding="lg">
+            <Card padding="lg" hover>
               <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
                 <Users className="w-4 h-4 text-brand" /> {t("analytics.usage_by_agent")}
               </h2>
@@ -92,7 +92,7 @@ export function AnalyticsPage() {
               )}
             </Card>
 
-            <Card padding="lg">
+            <Card padding="lg" hover>
               <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
                 <Cpu className="w-4 h-4 text-purple-500" /> {t("analytics.usage_by_model")}
               </h2>
@@ -113,7 +113,7 @@ export function AnalyticsPage() {
           </div>
 
           {/* Daily Trend */}
-          <Card padding="lg">
+          <Card padding="lg" hover>
             <h2 className="text-sm font-bold mb-4 flex items-center gap-2">
               <TrendingUp className="w-4 h-4 text-warning" /> {t("analytics.daily_trend")}
             </h2>
@@ -143,7 +143,7 @@ export function AnalyticsPage() {
           </Card>
 
           {/* Budget */}
-          <Card padding="lg">
+          <Card padding="lg" hover>
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-sm font-bold flex items-center gap-2">
                 <Shield className="w-4 h-4 text-brand" /> {t("analytics.budget_title")}

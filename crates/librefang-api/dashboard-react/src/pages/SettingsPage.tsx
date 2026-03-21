@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
+import { Input } from "../components/ui/Input";
 import { Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Wrench, Search, RefreshCw } from "lucide-react";
 import { useUIStore } from "../lib/store";
 
@@ -96,11 +97,11 @@ export function SettingsPage() {
             </div>
           </div>
 
-          <div className="relative mb-3">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-dim/40" />
-            <input type="text" value={toolSearch} onChange={e => setToolSearch(e.target.value)}
+          <div className="mb-3">
+            <Input value={toolSearch} onChange={(e) => setToolSearch(e.target.value)}
               placeholder={t("settings.tools_search")}
-              className="w-full pl-9 pr-3 py-2 rounded-lg border border-border-subtle bg-main text-xs outline-none focus:border-brand" />
+              leftIcon={<Search className="h-3.5 w-3.5" />}
+              className="!text-xs" />
           </div>
 
           <div className="space-y-1.5 max-h-80 overflow-y-auto">
