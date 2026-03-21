@@ -255,6 +255,36 @@ impl ClaudeCodeDriver {
             }
         }
     }
+
+    fn build_command_args(
+        &self,
+        prompt: &str,
+        output_format: &str,
+        verbose: bool,
+        model_flag: Option<&str>,
+    ) -> Vec<String> {
+        let mut args = vec![
+            "-p".to_string(),
+            prompt.to_string(),
+            "--output-format".to_string(),
+            output_format.to_string(),
+        ];
+
+        if verbose {
+            args.push("--verbose".to_string());
+        }
+
+        if self.skip_permissions {
+            args.push("--dangerously-skip-permissions".to_string());
+        }
+
+        if let Some(model) = model_flag {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+
+        args
+    }
 }
 
 /// Prompt text plus optional temp directory containing decoded images.
@@ -323,22 +353,13 @@ impl LlmDriver for ClaudeCodeDriver {
         let model_flag = Self::model_flag(&request.model);
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
-        cmd.arg("-p")
-            .arg(&prepared.text)
-            .arg("--output-format")
-            .arg("json");
-
-        if self.skip_permissions {
-            cmd.arg("--dangerously-skip-permissions");
+        for arg in self.build_command_args(&prepared.text, "json", false, model_flag.as_deref()) {
+            cmd.arg(arg);
         }
 
         // Allow the CLI to read temp image files
         if let Some(ref dir) = prepared.image_dir {
             cmd.arg("--add-dir").arg(dir);
-        }
-
-        if let Some(ref model) = model_flag {
-            cmd.arg("--model").arg(model);
         }
 
         Self::apply_env_filter(&mut cmd);
@@ -520,23 +541,13 @@ impl LlmDriver for ClaudeCodeDriver {
         let model_flag = Self::model_flag(&request.model);
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
-        cmd.arg("-p")
-            .arg(&prepared.text)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--verbose");
-
-        if self.skip_permissions {
-            cmd.arg("--dangerously-skip-permissions");
+        for arg in self.build_command_args(&prepared.text, "stream-json", true, model_flag.as_deref()) {
+            cmd.arg(arg);
         }
 
         // Allow the CLI to read temp image files
         if let Some(ref dir) = prepared.image_dir {
             cmd.arg("--add-dir").arg(dir);
-        }
-
-        if let Some(ref model) = model_flag {
-            cmd.arg("--model").arg(model);
         }
 
         Self::apply_env_filter(&mut cmd);
@@ -890,6 +901,55 @@ mod tests {
         map.insert("test-agent".to_string(), 12345);
         assert_eq!(driver.active_pids().len(), 1);
         assert_eq!(driver.active_pids()[0], ("test-agent".to_string(), 12345));
+    }
+
+    #[test]
+    fn test_complete_args_include_skip_permissions_when_enabled() {
+        let driver = ClaudeCodeDriver::new(None, true);
+        let args = driver.build_command_args("hello", "json", false, Some("sonnet"));
+
+        assert_eq!(
+            args,
+            vec![
+                "-p",
+                "hello",
+                "--output-format",
+                "json",
+                "--dangerously-skip-permissions",
+                "--model",
+                "sonnet",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_stream_args_include_verbose_and_skip_permissions() {
+        let driver = ClaudeCodeDriver::new(None, true);
+        let args = driver.build_command_args("hello", "stream-json", true, Some("sonnet"));
+
+        assert_eq!(
+            args,
+            vec![
+                "-p",
+                "hello",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions",
+                "--model",
+                "sonnet",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_args_omit_skip_permissions_when_disabled() {
+        let driver = ClaudeCodeDriver::new(None, false);
+        let args = driver.build_command_args("hello", "json", false, Some("sonnet"));
+
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions"));
     }
 
     #[test]
