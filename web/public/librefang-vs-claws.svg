@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <rect width="1200" height="630" fill="#080c10"/>
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#00d4aa;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0891b2;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <text x="600" y="280" font-family="Arial, sans-serif" font-size="72" font-weight="bold" fill="url(#grad)" text-anchor="middle">Librefang</text>
+  <text x="600" y="350" font-family="Arial, sans-serif" font-size="28" fill="#94a3b8" text-anchor="middle">Agent Operating System</text>
+  <text x="600" y="420" font-family="Arial, sans-serif" font-size="22" fill="#64748b" text-anchor="middle">Production-Grade Autonomous AI Agents in Rust</text>
+  <text x="600" y="470" font-family="Arial, sans-serif" font-size="18" fill="#475569" text-anchor="middle">180ms cold start • 40MB memory • 16 security layers • 40 channels</text>
+  <rect x="450" y="500" width="300" height="50" rx="8" fill="url(#grad)"/>
+  <text x="600" y="533" font-family="Arial, sans-serif" font-size="20" fill="#080c10" text-anchor="middle" font-weight="bold">librefang.ai</text>
+</svg>
