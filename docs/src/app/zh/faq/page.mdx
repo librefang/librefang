@@ -137,11 +137,11 @@ def my_tool(param: str) -> str:
 
 ### Q: 支持哪些消息平台？
 
-LibreFang 支持 40+ 通道适配器：
+LibreFang 支持 42 个通道适配器：
 
 - **核心**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
 - **企业**: Microsoft Teams, Google Chat, Webex, Feishu
-- **社交**: LINE, Viber, Facebook Messenger, Twitter
+- **社交**: LINE, Viber, Facebook Messenger, Mastodon, Bluesky
 
 ### Q: 如何配置 Telegram Bot？
 
@@ -211,12 +211,7 @@ agent_spawn = false  # 禁止生成子 Agent
 2. **启用压缩**: 自动压缩会话历史
 3. **配置限制**: 限制并发 Agent 数量
 
-```toml
-[compaction]
-threshold = 80
-keep_recent = 20
-max_summary_tokens = 1024
-```
+压缩参数（threshold、keep_recent、max_summary_tokens）由 runtime 内部管理，不在 `config.toml` 中配置。自动压缩默认启用，会话超过 80 条消息时触发。
 
 ### Q: 内存占用太高怎么办？
 
@@ -299,9 +294,9 @@ librefang migrate --from openclaw --dry-run
 
 ### Q: 支持哪些迁移来源？
 
-- OpenClaw (直接支持)
-- LangChain (兼容层)
-- AutoGPT (配置转换)
+- OpenClaw（自动迁移，通过 `librefang migrate --from openclaw`）
+- LangChain（仅有手动迁移指南，无自动化工具）
+- AutoGPT（仅有手动迁移指南，无自动化工具）
 
 ---
 
@@ -358,7 +353,7 @@ alert_threshold = 0.8  # 80% 时告警
 |------|-----------|----------|-----------|
 | 语言 | Rust | Node.js | Python |
 | 内存 | ~40MB | ~200MB | 依赖语言 |
-| 通道 | 40+ | ~15 | 无 |
+| 通道 | 42 | ~15 | 无 |
 | 安全 | 16层 | 基础 | 无 |
 | 桌面 | Tauri | Electron | 无 |
 

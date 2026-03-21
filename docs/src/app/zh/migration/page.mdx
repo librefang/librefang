@@ -6,11 +6,11 @@
 
 ## 概述
 
-LibreFang 提供全面的迁移支持：
+LibreFang 提供以下迁移支持：
 
-- **OpenClaw** - 直接迁移
-- **LangChain** - 兼容层
-- **AutoGPT** - 配置转换
+- **OpenClaw** - 通过 `librefang-migrate` crate 自动迁移（`librefang migrate --from openclaw`）
+- **LangChain** - 手动迁移指南（无自动化工具支持）
+- **AutoGPT** - 手动迁移指南（无自动化工具支持）
 
 ---
 
@@ -56,6 +56,9 @@ librefang migrate --from openclaw --import
 ---
 
 ## 从 LangChain 迁移
+
+> **注意**: LangChain 迁移是**手动过程**，没有自动化工具支持。
+> 以下指南展示如何手动将 LangChain 配置转换为 LibreFang 格式。
 
 ### Agent 配置转换
 
@@ -114,6 +117,9 @@ result = agent.run("What is the capital of France?")
 ---
 
 ## 从 AutoGPT 迁移
+
+> **注意**: AutoGPT 迁移是**手动过程**，没有自动化工具支持。
+> 以下指南展示如何手动将 AutoGPT 配置转换为 LibreFang 格式。
 
 ### 配置转换
 

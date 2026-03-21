@@ -30,6 +30,11 @@ cargo build -p librefang-cli
 
 # Build desktop app
 cargo build -p librefang-desktop
+
+# Build React dashboard (required for web UI)
+cd crates/librefang-api/dashboard-react
+npm install
+npm run build
 ```
 
 ### Test
@@ -92,40 +97,60 @@ librefang/
 // crates/librefang-channels/src/my_channel.rs
 
 use async_trait::async_trait;
-use crate::channel::{Channel, Message, ChannelConfig};
+use std::pin::Pin;
+use futures::Stream;
+use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelStatus, ChannelType, ChannelUser};
 
 pub struct MyChannel {
-    config: ChannelConfig,
+    // channel-specific fields (e.g. API client, config)
 }
 
 #[async_trait]
-impl Channel for MyChannel {
-    async fn send(&self, message: Message) -> Result<(), Error> {
-        // Implement send logic
+impl ChannelAdapter for MyChannel {
+    fn name(&self) -> &str {
+        "my_channel"
+    }
+
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::Custom("my_channel".to_string())
+    }
+
+    async fn start(
+        &self,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        // Return a stream of incoming messages
+        todo!()
+    }
+
+    async fn send(
+        &self,
+        _user: &ChannelUser,
+        _content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Send response back to the user
         Ok(())
     }
 
-    async fn receive(&self) -> Result<Message, Error> {
-        // Implement receive logic
-        Ok(Message::default())
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
     }
 }
 ```
 
 ### 2. Register Channel
 
+Channel adapters are registered with `BridgeManager` in `librefang-api/src/server.rs`
+by calling `bridge_manager.add_adapter(Arc::new(MyChannel::new(config)))`.
+Each adapter is gated behind a Cargo feature flag (`channel-my-channel`) in
+`crates/librefang-channels/Cargo.toml`.
+
 ```rust
-// crates/librefang-channels/src/lib.rs
-
+// crates/librefang-channels/src/lib.rs — add the feature-gated module
+#[cfg(feature = "channel-my-channel")]
 pub mod my_channel;
-
-use crate::registry::ChannelRegistry;
-
-pub fn register_channels(registry: &mut ChannelRegistry) {
-    registry.register("my_channel", |config| {
-        Ok(Box::new(MyChannel::new(config)))
-    });
-}
 ```
 
 ### 3. Add Configuration
@@ -394,7 +419,7 @@ cargo version bump patch
 vim CHANGELOG.md
 
 # 3. Create tag
-git tag v0.1.0
+git tag v0.7.0
 
 # 4. Build release
 cargo build --release

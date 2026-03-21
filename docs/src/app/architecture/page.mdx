@@ -31,15 +31,17 @@ librefang-cli            CLI interface, daemon auto-detect, MCP server
     |
 librefang-desktop        Tauri 2.0 desktop app (WebView + system tray)
     |
-librefang-api            REST/WS/SSE API server (Axum 0.8), 76 endpoints
+librefang-api            REST/WS/SSE API server (Axum 0.8), 230+ endpoints
     |
 librefang-kernel         Kernel: assembles all subsystems, workflow engine, RBAC, metering
     |
-    +-- librefang-runtime    Agent loop, 3 LLM drivers, 23 tools, WASM sandbox, MCP, A2A
-    +-- librefang-channels   40 channel adapters, bridge, formatter, rate limiter
-    +-- librefang-wire       OFP peer-to-peer networking with HMAC-SHA256 auth
-    +-- librefang-migrate    Migration engine (OpenClaw YAML->TOML)
-    +-- librefang-skills     60 bundled skills, FangHub marketplace, ClawHub client
+    +-- librefang-runtime      Agent loop, 3 LLM drivers, 60 tools, WASM sandbox, MCP, A2A
+    +-- librefang-channels     44 channel adapters, bridge, formatter, rate limiter
+    +-- librefang-wire         OFP peer-to-peer networking with HMAC-SHA256 auth
+    +-- librefang-migrate      Migration engine (OpenClaw YAML->TOML)
+    +-- librefang-skills       60 bundled skills, FangHub marketplace, ClawHub client
+    +-- librefang-extensions   Extension & integration system (credential vault, OAuth2 PKCE, one-click MCP setup)
+    +-- librefang-hands        Autonomous Hands system (14 built-in hand agents)
     |
 librefang-memory         SQLite memory substrate, sessions, semantic search, usage tracking
     |
@@ -53,15 +55,17 @@ librefang-types          Shared types: Agent, Capability, Event, Memory, Message
 |-------|-------------|
 | **librefang-types** | Core type definitions used across all crates. Defines `AgentManifest`, `AgentId`, `Capability`, `Event`, `ToolDefinition`, `KernelConfig`, `LibreFangError`, taint tracking (`TaintLabel`, `TaintSet`), Ed25519 manifest signing, model catalog types (`ModelCatalogEntry`, `ProviderInfo`, `ModelTier`), tool compatibility mappings (21 OpenClaw-to-LibreFang), MCP/A2A config types, and web config types. All config structs use `#[serde(default)]` for forward-compatible TOML parsing. |
 | **librefang-memory** | SQLite-backed memory substrate (schema v5). Uses `Arc<Mutex<Connection>>` with `spawn_blocking` for async bridge. Provides structured KV storage, semantic search with vector embeddings, knowledge graph (entities and relations), session management, task board, usage event persistence (`usage_events` table, `UsageStore`), and canonical sessions for cross-channel memory. Five schema versions: V1 core, V2 collab, V3 embeddings, V4 usage, V5 canonical_sessions. |
-| **librefang-runtime** | Agent execution engine. Contains the agent loop (`run_agent_loop`, `run_agent_loop_streaming`), 3 native LLM drivers (Anthropic, Gemini, OpenAI-compatible covering 20 providers), 23 built-in tools, WASM sandbox (Wasmtime with dual fuel+epoch metering), MCP client/server (JSON-RPC 2.0 over stdio/SSE), A2A protocol (AgentCard, task management), web search engine (4 providers: Tavily/Brave/Perplexity/DuckDuckGo), web fetch with SSRF protection, loop guard (SHA256-based tool loop detection), session repair (history validation), LLM session compactor (block-aware), Merkle hash chain audit trail, and embedding driver. Defines the `KernelHandle` trait that enables inter-agent tools without circular crate dependencies. |
+| **librefang-runtime** | Agent execution engine. Contains the agent loop (`run_agent_loop`, `run_agent_loop_streaming`), 3 native LLM drivers (Anthropic, Gemini, OpenAI-compatible covering 28 providers), 60 built-in tools, WASM sandbox (Wasmtime with dual fuel+epoch metering), MCP client/server (JSON-RPC 2.0 over stdio/SSE), A2A protocol (AgentCard, task management), web search engine (4 providers: Tavily/Brave/Perplexity/DuckDuckGo), web fetch with SSRF protection, loop guard (SHA256-based tool loop detection), session repair (history validation), LLM session compactor (block-aware), Merkle hash chain audit trail, embedding driver, browser automation (Playwright, `browser.rs`), Docker sandbox execution (`docker_sandbox.rs`), image generation (`image_gen.rs`), text-to-speech (`tts.rs`), plugin manager (`plugin_manager.rs`), context engine (`context_engine.rs`), proactive memory (`proactive_memory.rs`), and process manager (`process_manager.rs`). Defines the `KernelHandle` trait that enables inter-agent tools without circular crate dependencies. |
 | **librefang-kernel** | The central coordinator. `LibreFangKernel` assembles all subsystems: `AgentRegistry`, `AgentScheduler`, `CapabilityManager`, `EventBus`, `Supervisor`, `WorkflowEngine`, `TriggerEngine`, `BackgroundExecutor`, `WasmSandbox`, `ModelCatalog`, `MeteringEngine`, `ModelRouter`, `AuthManager` (RBAC), `HeartbeatMonitor`, `SetupWizard`, `SkillRegistry`, MCP connections, and `WebToolsContext`. Implements `KernelHandle` for inter-agent operations. Handles agent spawn/kill, message dispatch, workflow execution, trigger evaluation, capability inheritance validation, and graceful shutdown with state persistence. |
-| **librefang-api** | HTTP API server built on Axum 0.8 with 76 endpoints. Routes for agents, workflows, triggers, memory, channels, templates, models, providers, skills, ClawHub, MCP, health, status, version, and shutdown. WebSocket handler for real-time agent chat with streaming. SSE endpoint for streaming responses. OpenAI-compatible endpoints (`POST /v1/chat/completions`, `GET /v1/models`). A2A endpoints (`/.well-known/agent.json`, `/a2a/*`). Middleware: Bearer token auth, request ID injection, structured request logging, GCRA rate limiter (cost-aware), security headers (CSP, X-Frame-Options, etc.), health endpoint redaction. |
-| **librefang-channels** | Channel bridge layer with 40 adapters. Each adapter implements the `ChannelAdapter` trait. Includes: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, SMS, Webhook, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP, LINE, Viber, Messenger, Reddit, Mastodon, Bluesky, Feishu, Revolt, Nextcloud, Guilded, Keybase, Threema, Nostr, Webex, Pumble, Flock, Twist, Mumble, DingTalk, Discourse, Gitter, Ntfy, Gotify, LinkedIn. Features: `AgentRouter` for message routing, `BridgeManager` for lifecycle coordination, `ChannelRateLimiter` (per-user DashMap tracking), `formatter.rs` (Markdown to TelegramHTML/SlackMrkdwn/PlainText), `ChannelOverrides` (model/system_prompt/dm_policy/group_policy/rate_limit/threading/output_format), DM/group policy enforcement. |
+| **librefang-api** | HTTP API server built on Axum 0.8 with 230+ endpoints. Routes for agents, workflows, triggers, memory, channels, templates, models, providers, skills, ClawHub, MCP, health, status, version, and shutdown. WebSocket handler for real-time agent chat with streaming. SSE endpoint for streaming responses. OpenAI-compatible endpoints (`POST /v1/chat/completions`, `GET /v1/models`). A2A endpoints (`/.well-known/agent.json`, `/a2a/*`). Middleware: Bearer token auth, request ID injection, structured request logging, GCRA rate limiter (cost-aware), security headers (CSP, X-Frame-Options, etc.), health endpoint redaction. Serves two dashboard UIs: the legacy Alpine.js SPA (`static/index_body.html`) and the modern React dashboard (`static/react/`, built with Vite + React + TanStack Router/Query). Both dashboards coexist and share the same REST/WS API surface. |
+| **librefang-channels** | Channel bridge layer with 44 adapters. Each adapter implements the `ChannelAdapter` trait. Includes: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Webhook, MQTT, Sidecar, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP, LINE, Viber, Messenger, Reddit, Mastodon, Bluesky, Feishu, Revolt, Nextcloud, Guilded, Keybase, Threema, Nostr, Webex, Pumble, Flock, Twist, Mumble, DingTalk, QQ, WeCom (WeChat Work), Discourse, Gitter, Ntfy, Gotify, LinkedIn. Features: `AgentRouter` for message routing, `BridgeManager` for lifecycle coordination, `ChannelRateLimiter` (per-user DashMap tracking), `formatter.rs` (Markdown to TelegramHTML/SlackMrkdwn/PlainText), `ChannelOverrides` (model/system_prompt/dm_policy/group_policy/rate_limit/threading/output_format), DM/group policy enforcement, sidecar_channels mechanism for auxiliary channel wiring. |
 | **librefang-wire** | LibreFang Protocol (OFP) for peer-to-peer agent communication. JSON-framed messages over TCP with HMAC-SHA256 mutual authentication (nonce + constant-time verify via `subtle`). `PeerNode` listens for connections and manages peers. `PeerRegistry` tracks known remote peers and their agents. |
 | **librefang-cli** | Clap-based CLI. Supports all commands: `init`, `start`, `status`, `doctor`, `agent spawn/list/chat/kill`, `workflow list/create/run`, `trigger list/create/delete`, `migrate`, `skill install/list/remove/search/create`, `channel list/setup/test/enable/disable`, `config show/edit`, `chat`, `mcp`. Daemon auto-detect: checks `~/.librefang/daemon.json` and health pings; uses HTTP when a daemon is running, boots an in-process kernel as fallback. Built-in MCP server mode. |
 | **librefang-desktop** | Tauri 2.0 native desktop application. Boots the kernel in-process, runs the axum server on a background thread, and points a WebView at `http://127.0.0.1:{random_port}`. Features: system tray (Show/Browser/Status/Quit), single-instance enforcement, desktop notifications, hide-to-tray on close. IPC commands: `get_port`, `get_status`. Mobile-ready with `#[cfg(desktop)]` guards. |
 | **librefang-migrate** | Migration engine. Supports OpenClaw (`~/.openclaw/`). Converts YAML configs to TOML, maps tool names, maps provider names, imports agent manifests, copies memory files, converts channel configs. Produces a `MigrationReport` with imported items, skipped items, and warnings. |
 | **librefang-skills** | Skill system for pluggable tool bundles. 60 bundled skills compiled via `include_str!()`. Skills are `skill.toml` + Python/WASM/Node.js/PromptOnly code. `SkillManifest` defines metadata, runtime config, provided tools, and requirements. `SkillRegistry` manages installed and bundled skills. `FangHubClient` connects to FangHub marketplace. `ClawHubClient` connects to clawhub.ai for cross-ecosystem skill discovery. `SKILL.md` parser for OpenClaw compatibility (YAML frontmatter + Markdown body). `SkillVerifier` with SHA256 verification. Prompt injection scanner (`scan_prompt_content()`) detects override attempts, data exfiltration, and shell references. |
+| **librefang-extensions** | Extension and integration system. Provides a credential vault for securely storing third-party service credentials, OAuth2 PKCE flow for user-authorized integrations, and one-click MCP setup helpers for popular external services. |
+| **librefang-hands** | Autonomous Hands system. 14 built-in hand agents that operate independently with specialized domain expertise: analytics, apitester, browser, clip, collector, devops, lead, linkedin, predictor, reddit, researcher, strategist, trader, twitter. Each hand exposes a structured tool surface and can be activated/deactivated at runtime via the `hand_activate`/`hand_deactivate` tools. |
 | **xtask** | Build automation tasks (cargo-xtask pattern). |
 
 ---
@@ -90,12 +94,13 @@ When `LibreFangKernel::boot_with_config()` is called (either by the daemon or in
    - Validate driver config
 
 5. Initialize model catalog
-   - Build ModelCatalog with 51 builtin models, 20+ aliases, 20 providers
+   - Build ModelCatalog with 130+ builtin models, 20+ aliases, 28 providers
+   - Load additional provider definitions from ~/.librefang/providers/*.toml (dynamic catalog)
    - Run detect_auth() to check env var presence (never reads secrets)
    - Store as kernel.model_catalog
 
 6. Initialize metering engine
-   - Create MeteringEngine with cost catalog (20+ model families)
+   - Create MeteringEngine with cost catalog (28+ model families)
    - Wire to model catalog for pricing source
 
 7. Initialize model router
@@ -356,13 +361,13 @@ pub trait LlmDriver: Send + Sync {
 
 ### Provider Architecture
 
-Three native driver implementations cover all 20 providers with 51 models:
+Three native driver implementations cover all 28 providers with 130+ models:
 
 1. **AnthropicDriver**: Native Anthropic Messages API. Handles Claude-specific features (content blocks including images, tool use blocks, streaming deltas). Supports `ContentBlock::Image` with media type validation and 5MB cap.
 
 2. **GeminiDriver**: Native Google Gemini API (v1beta). Uses `x-goog-api-key` auth, `systemInstruction`, `functionDeclarations`, `streamGenerateContent?alt=sse`. Maps Gemini function call responses to the unified `ToolUse` stop reason.
 
-3. **OpenAiCompatDriver**: OpenAI-compatible Chat Completions API. Works with any provider that implements the OpenAI API format. Configured with different base URLs per provider. Covers 18+ providers including OpenAI, DeepSeek, Groq, Mistral, Together, and local runners.
+3. **OpenAiCompatDriver**: OpenAI-compatible Chat Completions API. Works with any provider that implements the OpenAI API format. Configured with different base URLs per provider. Covers 26+ providers including OpenAI, DeepSeek, Groq, Mistral, Together, and local runners.
 
 ### Provider Configuration
 
@@ -385,6 +390,14 @@ Three native driver implementations cover all 20 providers with 51 models:
 | `huggingface` | OpenAI-compat | `https://api-inference.huggingface.co` | Yes |
 | `xai` | OpenAI-compat | `https://api.x.ai` | Yes |
 | `replicate` | OpenAI-compat | `https://api.replicate.com` | Yes |
+| `nvidia` | OpenAI-compat | `https://integrate.api.nvidia.com` | Yes |
+| `voyage` | OpenAI-compat | `https://api.voyageai.com` | Yes |
+| `anyscale` | OpenAI-compat | `https://api.endpoints.anyscale.com` | Yes |
+| `deepinfra` | OpenAI-compat | `https://api.deepinfra.com` | Yes |
+| `azure` | OpenAI-compat | `https://{resource}.openai.azure.com` | Yes |
+| `bedrock` | OpenAI-compat | `https://bedrock-runtime.{region}.amazonaws.com` | Yes |
+| `vertex` | OpenAI-compat | `https://{region}-aiplatform.googleapis.com` | Yes |
+| `claude-code` | OpenAI-compat | `http://localhost:3000` (Claude Code local proxy) | No |
 | `ollama` | OpenAI-compat | `http://localhost:11434` | No |
 | `vllm` | OpenAI-compat | `http://localhost:8000` | No |
 | `lmstudio` | OpenAI-compat | `http://localhost:1234` | No |
@@ -417,9 +430,10 @@ The `ModelCatalog` (`librefang-runtime/src/model_catalog.rs`) provides a registr
 
 ### Registry Contents
 
-- **51 builtin models** across 20+ model families (Claude, GPT, Gemini, DeepSeek, Llama, Mixtral, Command, Jamba, Grok, etc.)
+- **130+ builtin models** across 28+ model families (Claude, GPT, Gemini, DeepSeek, Llama, Mixtral, Command, Jamba, Grok, etc.)
 - **20+ aliases** for convenience (e.g., `claude` -> `claude-sonnet-4-20250514`, `grok` -> `grok-2`)
-- **20 providers** with authentication status detection
+- **28 providers** with authentication status detection
+- **Dynamic catalog loading**: Additional provider and model definitions can be placed in `~/.librefang/providers/*.toml` and are merged at boot time, allowing user-defined providers without recompilation
 
 ### Types
 
@@ -432,7 +446,7 @@ The `ModelCatalog` (`librefang-runtime/src/model_catalog.rs`) provides a registr
 
 - **Metering**: `estimate_cost_with_catalog()` uses catalog entries as the pricing source.
 - **Router**: `ModelRouter.validate_models()` and `resolve_aliases()` reference the catalog.
-- **API**: 4 endpoints (`/api/models`, `/api/models/{id}`, `/api/models/aliases`, `/api/providers`).
+- **API**: 4 endpoints (`/api/models`, `/api/models/{id}`, `/api/models/aliases`, `/api/providers`). The `/api/providers` endpoint returns all 28 built-in providers plus any dynamically loaded custom providers.
 - **Channels**: `/models` and `/providers` chat commands via `ChannelBridgeHandle`.
 
 ---
@@ -468,6 +482,21 @@ pub enum Capability {
     OfpDiscover,              // Can discover remote peers
     OfpConnect(String),       // Can connect to specific peers
     OfpAdvertise,             // Can advertise to peers
+
+    // Network listening
+    NetListen(u16),           // Can bind and listen on a port
+
+    // LLM access
+    LlmQuery(String),         // Can query a specific model/provider
+    LlmMaxTokens(u64),        // Maximum tokens per LLM call
+
+    // Environment access
+    EnvRead(String),          // Can read a specific env var
+
+    // Economy / metering
+    EconSpend(f64),           // Spending cap in USD
+    EconEarn,                 // Can earn credits (revenue-generating agents)
+    EconTransfer(String),     // Can transfer credits to another agent
 }
 ```
 
@@ -582,16 +611,18 @@ See [Agent Loop Stability](#agent-loop-stability) above.
 
 ## Channel System
 
-The channel system (`librefang-channels`) provides 40 adapters for messaging platform integration.
+The channel system (`librefang-channels`) provides 44 adapters for messaging platform integration.
 
 ### Adapter List
 
 | Wave | Channels |
 |------|----------|
-| **Original (15)** | Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, SMS, Webhook, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat |
-| **Wave 2 (8)** | Zulip, XMPP, LINE, Viber, Messenger, Reddit, Mastodon, Bluesky |
-| **Wave 3 (8)** | Feishu, Revolt, Nextcloud, Guilded, Keybase, Threema, Nostr, Webex |
-| **Wave 4 (9)** | Pumble, Flock, Twist, Mumble, DingTalk, Discourse, Gitter, Ntfy, Gotify, LinkedIn |
+| **Wave 1 (15)** | Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP |
+| **Wave 2 (8)** | LINE, Viber, Messenger, Reddit, Mastodon, Bluesky, Feishu, Revolt |
+| **Wave 3 (9)** | Nextcloud, Guilded, Keybase, Threema, Nostr, Webex, Pumble, Flock, Twist |
+| **Wave 4 (12)** | Mumble, DingTalk, QQ, WeCom (WeChat Work), Discourse, Gitter, Ntfy, Gotify, Webhook, LinkedIn, MQTT, Sidecar |
+
+> Total: 44 adapters. The Sidecar adapter enables external processes written in any language to act as channel adapters via JSON-RPC over stdin/stdout.
 
 ### Channel Features
 
@@ -633,12 +664,63 @@ All skills pass through a security pipeline before activation:
 3. **Trust boundary markers**: Skill-injected context in system prompts is wrapped with trust boundary markers.
 4. **Subprocess env_clear()**: Skill code execution uses environment isolation.
 
+### Tool Categories (60 Built-in Tools)
+
+| Category | Tools |
+|----------|-------|
+| **File & Patch (4)** | file_read, file_write, file_list, apply_patch |
+| **Web & Location (3)** | web_search, web_fetch, location_get |
+| **Shell & Docker (2)** | shell_exec, docker_exec |
+| **Agent Ops (6)** | agent_spawn, agent_send, agent_list, agent_kill, agent_find, system_time |
+| **Memory & Knowledge (5)** | memory_store, memory_recall, knowledge_add_entity, knowledge_add_relation, knowledge_query |
+| **Tasks & Events (5)** | task_post, task_claim, task_complete, task_list, event_publish |
+| **Browser Automation (10)** | browser_navigate, browser_click, browser_type, browser_screenshot, browser_read_page, browser_close, browser_scroll, browser_wait, browser_run_js, browser_back |
+| **Process Management (5)** | process_start, process_poll, process_write, process_kill, process_list |
+| **Media & AI (6)** | image_analyze, media_describe, media_transcribe, image_generate, text_to_speech, speech_to_text |
+| **Hands Control (4)** | hand_list, hand_activate, hand_status, hand_deactivate |
+| **Scheduling & Comms (7)** | cron_create, cron_list, cron_cancel, channel_send, schedule_create, schedule_list, schedule_delete |
+| **A2A & Canvas (3)** | a2a_discover, a2a_send, canvas_present |
+
 ### Ecosystem Bridges
 
 - **FangHub**: Native LibreFang marketplace (`FangHubClient`).
 - **ClawHub**: Cross-ecosystem compatibility (`ClawHubClient` connects to clawhub.ai).
 - **SKILL.md Parser**: Auto-converts OpenClaw SKILL.md format (YAML frontmatter + Markdown body) to `skill.toml`.
 - **Tool Compat**: 21 OpenClaw-to-LibreFang tool name mappings in `tool_compat.rs`.
+
+---
+
+## Hands System
+
+The Hands system (`librefang-hands`) provides 14 built-in autonomous hand agents, each specialized for a particular domain.
+
+### Built-in Hands (14)
+
+| Hand | Domain |
+|------|--------|
+| `analytics` | Business analytics and metrics |
+| `apitester` | API testing and validation |
+| `browser` | Web browsing and scraping via Playwright |
+| `clip` | Content clipping and extraction |
+| `collector` | Data collection and aggregation |
+| `devops` | CI/CD pipeline and infrastructure |
+| `lead` | Lead generation and outreach |
+| `linkedin` | LinkedIn professional networking automation |
+| `predictor` | Predictive analysis and forecasting |
+| `reddit` | Reddit content and community management |
+| `researcher` | Deep research and information gathering |
+| `strategist` | Strategic planning and decision support |
+| `trader` | Trading signals and market analysis |
+| `twitter` | Twitter/X content and community management |
+
+### Hand Lifecycle Tools
+
+Hands are managed at runtime via four built-in tools:
+
+- `hand_list` — List all available hands and their current status
+- `hand_activate` — Activate a hand agent with an optional config override
+- `hand_status` — Query the running status and recent activity of a hand
+- `hand_deactivate` — Gracefully shut down a hand agent
 
 ---
 
@@ -649,7 +731,7 @@ All skills pass through a security pipeline before activation:
 LibreFang implements both MCP client and server:
 
 - **MCP Client** (`mcp.rs`): JSON-RPC 2.0 over stdio or SSE transports. Connects to external MCP servers. Tools are namespaced as `mcp_{server}_{tool}` to prevent collisions. Background connection in `start_background_agents()`.
-- **MCP Server** (`mcp_server.rs`): Exposes LibreFang's 23 built-in tools via the MCP protocol. Enables external tools to use LibreFang as a tool provider.
+- **MCP Server** (`mcp_server.rs`): Exposes LibreFang's 60 built-in tools via the MCP protocol. Enables external tools to use LibreFang as a tool provider.
 - **Configuration**: `KernelConfig.mcp_servers` (Vec of `McpServerConfigEntry` with name, command, args, env, transport).
 - **API**: `/api/mcp/servers` returns configured and connected servers with their tool lists.
 
@@ -800,7 +882,7 @@ The desktop app (`librefang-desktop`) wraps the full LibreFang stack in a native
 |                         librefang-api                                |
 |  +-------------+  +----------+  +--------+  +------------------+   |
 |  | REST Routes |  | WS Chat  |  | SSE    |  | OpenAI /v1/      |   |
-|  | (76 endpts) |  +----------+  +--------+  +------------------+   |
+|  | (230+ endpts)|  +----------+  +--------+  +------------------+   |
 |  +-------------+  +------------------+  +-----------------------+   |
 |  | Auth+RBAC   |  | Security Headers |  | GCRA Rate Limiter    |   |
 |  +-------------+  +------------------+  +-----------------------+   |
@@ -826,7 +908,7 @@ The desktop app (`librefang-desktop`) wraps the full LibreFang stack in a native
 |  +----------------+  +------------------+  +-------------------+   |
 |  +----------------+  +------------------+  +-------------------+   |
 |  | ModelCatalog   |  | MeteringEngine   |  | ModelRouter       |   |
-|  | (51 models)    |  | (cost tracking)  |  | (auto-select)     |   |
+|  | (130+ models)  |  | (cost tracking)  |  | (auto-select)     |   |
 |  +----------------+  +------------------+  +-------------------+   |
 |  +----------------+  +------------------+  +-------------------+   |
 |  | HeartbeatMon   |  | SetupWizard      |  | SkillRegistry     |   |
@@ -846,15 +928,15 @@ The desktop app (`librefang-desktop`) wraps the full LibreFang stack in a native
 |                  |  | channels     |  | fang-  |  | skills    |
 | +------------+   |  |              |  | wire   |  |           |
 | | Agent Loop |   |  | +----------+|  |        |  | +-------+ |
-| | +LoopGuard |   |  | | 40 Chan  ||  | +----+ |  | |60 Bun| |
+| | +LoopGuard |   |  | | 44 Chan  ||  | +----+ |  | |60 Bun| |
 | | +SessRepair|   |  | | Adapters ||  | |OFP | |  | |Skills | |
 | +------------+   |  | +----------+|  | |HMAC| |  | +-------+ |
 | +------------+   |  | +----------+|  | +----+ |  | +-------+ |
 | | 3 LLM Drv |   |  | |Formatter ||  | +----+ |  | |FangHub| |
-| | (20 provs) |   |  | |Rate Lim ||  | |Peer| |  | |ClawHub| |
+| | (28 provs) |   |  | |Rate Lim ||  | |Peer| |  | |ClawHub| |
 | +------------+   |  | |DM/Group ||  | |Reg | |  | +-------+ |
 | +------------+   |  | +----------+|  | +----+ |  | +-------+ |
-| | 23 Tools   |   |  | +----------+|  +--------+  | |Verify | |
+| | 60 Tools   |   |  | +----------+|  +--------+  | |Verify | |
 | +------------+   |  | |AgentRouter|               | |Inject | |
 | +------------+   |  | +----------+|               | |Scan   | |
 | | WASM Sand  |   |  +--------------+              | +-------+ |

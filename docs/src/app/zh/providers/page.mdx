@@ -1,6 +1,6 @@
 # LLM 提供商指南
 
-LibreFang 包含全面的模型目录，覆盖 **3 个原生 LLM 驱动**、**20+ 提供商**、**51 个内置模型**。
+LibreFang 包含全面的模型目录，覆盖 **3 个原生 LLM 驱动**、**34 个提供商**、**130+ 个内置模型**。
 
 ---
 
@@ -105,6 +105,143 @@ LibreFang 在启动时自动检测哪些提供商已配置 API 密钥。
 
 ---
 
+### 7. GitHub Copilot
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | GitHub Copilot |
+| 驱动 | OpenAI 兼容（通过 Token 交换） |
+| 环境变量 | `GITHUB_TOKEN` |
+| 基础 URL | `https://api.githubcopilot.com` |
+| 免费额度 | 含于 GitHub Copilot 订阅 |
+| 认证 | OAuth PKCE 流程，自动交换短期 Copilot API Token |
+
+**设置:**
+1. 订阅 [GitHub Copilot](https://github.com/features/copilot)
+2. 创建具有 `copilot` 权限的 Personal Access Token
+3. `export GITHUB_TOKEN="ghp_..."`
+
+---
+
+### 8. Aider（CLI Provider）
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | Aider |
+| **类型** | **CLI Provider（子进程）** |
+| 二进制 | `aider`（需在 PATH 中） |
+| 环境变量 | 无（使用 Aider 自身的提供商配置） |
+
+**设置:**
+1. 安装 Aider: `pip install aider-install && aider-install`
+2. 配置 Aider 的 LLM 提供商环境变量（如 `OPENAI_API_KEY`）
+
+**说明:** LibreFang 以子进程方式调用 `aider` CLI，使用 `--message` 非交互模式。Aider 自行管理 LLM 认证。
+
+---
+
+### 9. Claude Code CLI（CLI Provider）
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | Claude Code CLI |
+| **类型** | **CLI Provider（子进程）** |
+| 二进制 | `claude`（需在 PATH 中） |
+| 环境变量 | 无（使用 Claude Code 自身的 OAuth 会话） |
+
+**设置:**
+1. 安装 Claude Code: `npm install -g @anthropic-ai/claude-code`
+2. 认证: `claude auth login`
+
+**说明:** LibreFang 以子进程方式调用 `claude` CLI，使用 `-p` 打印模式。子进程环境中会移除其他提供商的 API Key 以防泄露。支持视觉输入（base64 图片）。
+
+---
+
+### 10. Codex CLI（CLI Provider）
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | Codex CLI |
+| **类型** | **CLI Provider（子进程）** |
+| 二进制 | `codex`（需在 PATH 中） |
+| 环境变量 | `OPENAI_API_KEY`（供 Codex CLI 自身使用） |
+
+**设置:**
+1. 安装 Codex CLI: `npm install -g @openai/codex`
+2. `export OPENAI_API_KEY="sk-..."`
+
+**说明:** LibreFang 以子进程方式调用 `codex` CLI，使用 `-q` 安静模式。
+
+---
+
+### 11. Gemini CLI（CLI Provider）
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | Gemini CLI |
+| **类型** | **CLI Provider（子进程）** |
+| 二进制 | `gemini`（需在 PATH 中） |
+| 环境变量 | 无（使用 Google OAuth） |
+| 免费额度 | 有（通过 Google 账户） |
+
+**设置:**
+1. 安装 Gemini CLI: `npm install -g @google/gemini-cli`
+2. 认证: `gemini auth login`
+
+**说明:** LibreFang 以子进程方式调用 `gemini` CLI，使用 `-p` 打印模式。通过 Google OAuth 认证，无需单独配置 API Key。
+
+---
+
+### 12. Qwen Code（CLI Provider）
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | Qwen Code |
+| **类型** | **CLI Provider（子进程）** |
+| 二进制 | `qwen`（需在 PATH 中） |
+| 环境变量 | 无（使用通义千问 OAuth） |
+| 免费额度 | 有（通过阿里云账户） |
+
+**设置:**
+1. 安装 Qwen Code: `npm install -g @alibaba/qwen-code`
+2. 认证: `qwen auth login`
+
+**说明:** LibreFang 以子进程方式调用 `qwen` CLI，使用 `-p` 打印模式。通过阿里云 OAuth 认证，支持流式 JSON 输出，无需单独配置 API Key。
+
+---
+
+### 13. Vertex AI
+
+| 属性 | 值 |
+|------|-----|
+| 显示名称 | Google Vertex AI |
+| 驱动 | 原生 Gemini（企业版，通过 Vertex AI） |
+| 配置段 | `[vertex_ai]` |
+| 环境变量 | `GOOGLE_APPLICATION_CREDENTIALS`、`VERTEX_PROJECT`、`VERTEX_LOCATION` |
+| 基础 URL | `https://<location>-aiplatform.googleapis.com` |
+| 免费额度 | 无 |
+| 认证 | OAuth2 服务账号或 gcloud CLI |
+
+**设置:**
+1. 在 [Google Cloud Console](https://console.cloud.google.com) 启用 Vertex AI API
+2. 创建服务账号密钥文件，或使用 `gcloud auth application-default login`
+3. 设置环境变量:
+   ```bash
+   export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+   export VERTEX_PROJECT="your-gcp-project"
+   export VERTEX_LOCATION="us-central1"
+   ```
+4. 在 `config.toml` 中配置:
+   ```toml
+   [vertex_ai]
+   project = "your-gcp-project"
+   location = "us-central1"
+   ```
+
+**说明:** 使用与原生 Gemini 驱动相同的 `generateContent` API，但通过 Google Cloud OAuth2 认证（而非 API Key）。访问令牌缓存约 50 分钟并在到期前自动刷新。
+
+---
+
 ## 支持的提供商列表
 
 | 提供商 | 驱动 | 免费额度 |
@@ -129,6 +266,19 @@ LibreFang 在启动时自动检测哪些提供商已配置 API 密钥。
 | Ollama | OpenAI 兼容 | 本地 |
 | vLLM | OpenAI 兼容 | 本地 |
 | LM Studio | OpenAI 兼容 | 本地 |
+| NVIDIA NIM | OpenAI 兼容 | ❌ |
+| Voyage AI | OpenAI 兼容 | ❌ |
+| Anyscale | OpenAI 兼容 | ❌ |
+| DeepInfra | OpenAI 兼容 | ❌ |
+| Azure OpenAI | OpenAI 兼容 | ❌ |
+| Amazon Bedrock | OpenAI 兼容 | ❌ |
+| GitHub Copilot | OpenAI 兼容（Token 交换）| 订阅 |
+| Aider | **CLI Provider** | 取决于后端 |
+| Claude Code CLI | **CLI Provider** | 取决于订阅 |
+| Codex CLI | **CLI Provider** | ❌ |
+| Gemini CLI | **CLI Provider** | ✅ |
+| Qwen Code | **CLI Provider** | ✅ |
+| Vertex AI | 原生 Gemini（企业版）| ❌ |
 
 ---
 

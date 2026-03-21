@@ -11,9 +11,9 @@ LibreFang provides official SDK support for multiple programming languages for e
 | SDK | Status | Description |
 |-----|--------|-------------|
 | JavaScript/TypeScript | ✅ Official | @librefang/sdk |
-| Python | ✅ Official | librefang-client |
+| Python | ✅ Official | librefang |
 | Rust | ✅ Official | librefang crate |
-| Go | 🚧 In Development | Community contribution |
+| Go | ✅ Available | Community contribution |
 
 ---
 
@@ -87,7 +87,7 @@ client.workflows.run(id, input)
 ### Installation
 
 ```bash
-pip install librefang-client
+pip install librefang
 ```
 
 ### Usage
@@ -147,7 +147,7 @@ client.workflows.run(id: str, input: Dict) -> WorkflowResult
 
 ```toml
 [dependencies]
-librefang = { version = "0.1", features = ["client"] }
+librefang = "0.7"
 ```
 
 ### Usage

@@ -10,19 +10,37 @@ All responses include security headers (CSP, X-Frame-Options, X-Content-Type-Opt
 - [Agent Endpoints](#agent-endpoints)
 - [Workflow Endpoints](#workflow-endpoints)
 - [Trigger Endpoints](#trigger-endpoints)
+- [Schedule Endpoints](#schedule-endpoints)
 - [Memory Endpoints](#memory-endpoints)
 - [Channel Endpoints](#channel-endpoints)
 - [Template Endpoints](#template-endpoints)
 - [System Endpoints](#system-endpoints)
+- [Config Management Endpoints](#config-management-endpoints)
 - [Model Catalog Endpoints](#model-catalog-endpoints)
 - [Provider Configuration Endpoints](#provider-configuration-endpoints)
 - [Skills & Marketplace Endpoints](#skills--marketplace-endpoints)
 - [ClawHub Endpoints](#clawhub-endpoints)
+- [Hands Endpoints](#hands-endpoints)
+- [Extensions Endpoints](#extensions-endpoints)
+- [Plugins Endpoints](#plugins-endpoints)
 - [MCP & A2A Protocol Endpoints](#mcp--a2a-protocol-endpoints)
 - [Audit & Security Endpoints](#audit--security-endpoints)
 - [Usage & Analytics Endpoints](#usage--analytics-endpoints)
-- [Migration Endpoints](#migration-endpoints)
+- [Budget Endpoints](#budget-endpoints)
 - [Session Management Endpoints](#session-management-endpoints)
+- [Goals Endpoints](#goals-endpoints)
+- [Cron Endpoints](#cron-endpoints)
+- [Webhooks Endpoints](#webhooks-endpoints)
+- [Backup & Restore Endpoints](#backup--restore-endpoints)
+- [Integrations Endpoints](#integrations-endpoints)
+- [Pairing Endpoints](#pairing-endpoints)
+- [OAuth / OIDC Endpoints](#oauth--oidc-endpoints)
+- [Task Queue Endpoints](#task-queue-endpoints)
+- [Comms Endpoints](#comms-endpoints)
+- [Approvals Endpoints](#approvals-endpoints)
+- [Bindings & Commands Endpoints](#bindings--commands-endpoints)
+- [Network & Peers Endpoints](#network--peers-endpoints)
+- [Migration Endpoints](#migration-endpoints)
 - [WebSocket Protocol](#websocket-protocol)
 - [SSE Streaming](#sse-streaming)
 - [OpenAI-Compatible API](#openai-compatible-api)
@@ -78,6 +96,43 @@ List all running agents.
 ]
 ```
 
+### POST /api/agents
+
+Spawn a new agent from a TOML manifest.
+
+**Request Body** (JSON):
+
+```json
+{
+  "manifest_toml": "name = \"my-agent\"\nversion = \"0.1.0\"\ndescription = \"Test agent\"\nauthor = \"me\"\nmodule = \"builtin:chat\"\n\n[model]\nprovider = \"groq\"\nmodel = \"llama-3.3-70b-versatile\"\n\n[capabilities]\ntools = [\"file_read\", \"web_fetch\"]\nmemory_read = [\"*\"]\nmemory_write = [\"self.*\"]\n"
+}
+```
+
+**Response** `201 Created`:
+
+```json
+{
+  "agent_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "name": "my-agent"
+}
+```
+
+### POST /api/agents/bulk
+
+Bulk create multiple agents in a single request.
+
+### DELETE /api/agents/bulk
+
+Bulk delete multiple agents by ID list.
+
+### POST /api/agents/bulk/start
+
+Start multiple stopped agents simultaneously.
+
+### POST /api/agents/bulk/stop
+
+Stop multiple running agents simultaneously.
+
 ### GET /api/agents/&lbrace;id&rbrace;
 
 Returns detailed information about a single agent.
@@ -104,26 +159,22 @@ Returns detailed information about a single agent.
 }
 ```
 
-### POST /api/agents
+### DELETE /api/agents/&lbrace;id&rbrace;
 
-Spawn a new agent from a TOML manifest.
+Terminate an agent and remove it from the registry.
 
-**Request Body** (JSON):
-
-```json
-{
-  "manifest_toml": "name = \"my-agent\"\nversion = \"0.1.0\"\ndescription = \"Test agent\"\nauthor = \"me\"\nmodule = \"builtin:chat\"\n\n[model]\nprovider = \"groq\"\nmodel = \"llama-3.3-70b-versatile\"\n\n[capabilities]\ntools = [\"file_read\", \"web_fetch\"]\nmemory_read = [\"*\"]\nmemory_write = [\"self.*\"]\n"
-}
-```
-
-**Response** `201 Created`:
+**Response** `200 OK`:
 
 ```json
 {
-  "agent_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "name": "my-agent"
+  "status": "killed",
+  "agent_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
 }
 ```
+
+### PATCH /api/agents/&lbrace;id&rbrace;
+
+Partially update an agent's fields.
 
 ### PUT /api/agents/&lbrace;id&rbrace;/update
 
@@ -170,6 +221,18 @@ Set an agent's operating mode. `Stable` mode pins the current model and freezes 
 }
 ```
 
+### PATCH /api/agents/&lbrace;id&rbrace;/identity
+
+Update an agent's identity fields (name, avatar, persona).
+
+### PATCH /api/agents/&lbrace;id&rbrace;/config
+
+Partially patch an agent's configuration object.
+
+### POST /api/agents/&lbrace;id&rbrace;/clone
+
+Clone an existing agent into a new one with a fresh session.
+
 ### POST /api/agents/&lbrace;id&rbrace;/message
 
 Send a message to an agent and receive the complete response.
@@ -193,9 +256,13 @@ Send a message to an agent and receive the complete response.
 }
 ```
 
+### POST /api/agents/&lbrace;id&rbrace;/message/stream
+
+Send a message and receive the response as a Server-Sent Events stream (see [SSE Streaming](#sse-streaming)).
+
 ### GET /api/agents/&lbrace;id&rbrace;/session
 
-Returns the agent's conversation history.
+Returns the agent's current conversation history.
 
 **Response** `200 OK`:
 
@@ -218,18 +285,162 @@ Returns the agent's conversation history.
 }
 ```
 
-### DELETE /api/agents/&lbrace;id&rbrace;
+### GET /api/agents/&lbrace;id&rbrace;/sessions
 
-Terminate an agent and remove it from the registry.
+List all sessions for an agent.
+
+### POST /api/agents/&lbrace;id&rbrace;/sessions
+
+Create a new session for an agent.
+
+### POST /api/agents/&lbrace;id&rbrace;/sessions/&lbrace;session_id&rbrace;/switch
+
+Switch the agent to use a different session by ID.
+
+### GET /api/agents/&lbrace;id&rbrace;/sessions/by-label/&lbrace;label&rbrace;
+
+Find a session by its user-assigned label.
+
+### DELETE /api/agents/&lbrace;id&rbrace;/history
+
+Clear all conversation history for an agent without creating a new session.
+
+### POST /api/agents/&lbrace;id&rbrace;/session/reset
+
+Reset an agent's session, clearing all conversation history.
 
 **Response** `200 OK`:
 
 ```json
 {
-  "status": "killed",
-  "agent_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  "status": "reset",
+  "agent_id": "a1b2c3d4-...",
+  "new_session_id": "s5e6f7g8-..."
 }
 ```
+
+### POST /api/agents/&lbrace;id&rbrace;/session/compact
+
+Trigger LLM-based session compaction. The agent's conversation is summarized by an LLM, keeping only the most recent messages plus a generated summary.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "compacted",
+  "message": "Session compacted: 80 messages summarized, 20 kept"
+}
+```
+
+### POST /api/agents/&lbrace;id&rbrace;/stop
+
+Cancel the agent's current LLM run. Aborts any in-progress generation.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "stopped",
+  "message": "Agent run cancelled"
+}
+```
+
+### PUT /api/agents/&lbrace;id&rbrace;/model
+
+Switch an agent's LLM model at runtime.
+
+**Request Body**:
+
+```json
+{
+  "model": "claude-sonnet-4-20250514"
+}
+```
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "updated",
+  "model": "claude-sonnet-4-20250514"
+}
+```
+
+### GET /api/agents/&lbrace;id&rbrace;/tools
+
+Get an agent's current tool list.
+
+### PUT /api/agents/&lbrace;id&rbrace;/tools
+
+Replace an agent's tool list at runtime.
+
+### GET /api/agents/&lbrace;id&rbrace;/skills
+
+Get an agent's current skill list.
+
+### PUT /api/agents/&lbrace;id&rbrace;/skills
+
+Replace an agent's skill list at runtime.
+
+### GET /api/agents/&lbrace;id&rbrace;/mcp_servers
+
+Get the MCP servers attached to a specific agent.
+
+### PUT /api/agents/&lbrace;id&rbrace;/mcp_servers
+
+Set the MCP servers attached to a specific agent.
+
+### GET /api/agents/&lbrace;id&rbrace;/traces
+
+Get execution traces for an agent (tool calls, LLM iterations, timings).
+
+### GET /api/agents/&lbrace;id&rbrace;/metrics
+
+Get runtime metrics for an agent (token counts, latency, error rates).
+
+### GET /api/agents/&lbrace;id&rbrace;/logs
+
+Get recent log lines emitted by an agent's process.
+
+### GET /api/agents/&lbrace;id&rbrace;/deliveries
+
+Get inbound message deliveries received by an agent from channels.
+
+### GET /api/agents/&lbrace;id&rbrace;/files
+
+List files stored in an agent's private file workspace.
+
+### GET /api/agents/&lbrace;id&rbrace;/files/&lbrace;filename&rbrace;
+
+Download a specific file from an agent's workspace.
+
+### PUT /api/agents/&lbrace;id&rbrace;/files/&lbrace;filename&rbrace;
+
+Upload or overwrite a file in an agent's workspace.
+
+### DELETE /api/agents/&lbrace;id&rbrace;/files/&lbrace;filename&rbrace;
+
+Delete a file from an agent's workspace.
+
+### POST /api/agents/&lbrace;id&rbrace;/upload
+
+Upload a file to an agent's workspace (multipart form data).
+
+### GET /api/uploads/&lbrace;file_id&rbrace;
+
+Retrieve a previously uploaded file by its upload ID.
+
+### GET /api/agents/&lbrace;id&rbrace;/ws
+
+WebSocket connection for real-time bidirectional chat (see [WebSocket Protocol](#websocket-protocol)).
+
+### GET /api/agents/&lbrace;id&rbrace;/memory/export
+
+Export all memory entries for an agent as JSON.
+
+### POST /api/agents/&lbrace;id&rbrace;/memory/import
+
+Import memory entries for an agent from JSON.
 
 ---
 
@@ -272,22 +483,6 @@ Create a new workflow definition.
       "timeout_secs": 120,
       "error_mode": "fail",
       "output_var": "analysis"
-    },
-    {
-      "name": "security-check",
-      "agent_name": "security-auditor",
-      "prompt": "Review this code analysis for security vulnerabilities: {&lbrace;analysis&rbrace;}",
-      "mode": "sequential",
-      "timeout_secs": 120,
-      "error_mode": "skip"
-    },
-    {
-      "name": "summarize",
-      "agent_name": "writer",
-      "prompt": "Write a concise code review summary based on: {&lbrace;analysis&rbrace;}",
-      "mode": "sequential",
-      "timeout_secs": 60,
-      "error_mode": "fail"
     }
   ]
 }
@@ -317,6 +512,18 @@ Create a new workflow definition.
   "workflow_id": "w1b2c3d4-..."
 }
 ```
+
+### GET /api/workflows/&lbrace;id&rbrace;
+
+Get a specific workflow definition.
+
+### PUT /api/workflows/&lbrace;id&rbrace;
+
+Update an existing workflow definition.
+
+### DELETE /api/workflows/&lbrace;id&rbrace;
+
+Delete a workflow definition.
 
 ### POST /api/workflows/&lbrace;id&rbrace;/run
 
@@ -462,7 +669,50 @@ Remove a trigger.
 
 ---
 
+## Schedule Endpoints
+
+Time-based agent activation using cron expressions or interval syntax.
+
+### GET /api/schedules
+
+List all configured schedules.
+
+### POST /api/schedules
+
+Create a new schedule.
+
+**Request Body**:
+
+```json
+{
+  "agent_id": "a1b2c3d4-...",
+  "cron": "0 9 * * 1-5",
+  "prompt": "Good morning! Summarize overnight events.",
+  "enabled": true
+}
+```
+
+### GET /api/schedules/&lbrace;id&rbrace;
+
+Get a specific schedule.
+
+### PUT /api/schedules/&lbrace;id&rbrace;
+
+Update a schedule.
+
+### DELETE /api/schedules/&lbrace;id&rbrace;
+
+Delete a schedule.
+
+### POST /api/schedules/&lbrace;id&rbrace;/run
+
+Trigger a schedule to run immediately (ignores its cron expression for this one invocation).
+
+---
+
 ## Memory Endpoints
+
+LibreFang provides two memory systems: a simple key-value store per agent and a proactive semantic memory system (mem0-style) with relationship graphs and decay.
 
 ### GET /api/memory/agents/&lbrace;id&rbrace;/kv
 
@@ -534,13 +784,121 @@ Delete a key-value pair.
 }
 ```
 
+### GET /api/memory
+
+List all proactive memory entries (global, across agents and users).
+
+### POST /api/memory
+
+Add a new proactive memory entry.
+
+**Request Body**:
+
+```json
+{
+  "content": "User prefers concise answers",
+  "agent_id": "a1b2c3d4-...",
+  "user_id": "user-1",
+  "tags": ["preference"]
+}
+```
+
+### GET /api/memory/search
+
+Search proactive memory using semantic similarity.
+
+**Query Parameters:**
+- `q` (required): Search query string
+- `agent_id` (optional): Limit to a specific agent
+- `limit` (optional): Max results (default: 10)
+
+### GET /api/memory/stats
+
+Get aggregate statistics for the proactive memory store.
+
+### POST /api/memory/cleanup
+
+Remove expired or stale memory entries.
+
+### POST /api/memory/decay
+
+Apply time-decay to memory entry scores (reduces relevance of old entries).
+
+### POST /api/memory/bulk-delete
+
+Delete multiple memory entries by ID list.
+
+### PUT /api/memory/items/&lbrace;memory_id&rbrace;
+
+Update a specific memory entry.
+
+### DELETE /api/memory/items/&lbrace;memory_id&rbrace;
+
+Delete a specific memory entry.
+
+### GET /api/memory/items/&lbrace;memory_id&rbrace;/history
+
+Get the edit history for a specific memory entry.
+
+### GET /api/memory/user/&lbrace;user_id&rbrace;
+
+Get all memory entries associated with a user.
+
+### GET /api/memory/agents/&lbrace;id&rbrace;
+
+List all proactive memory entries for a specific agent.
+
+### DELETE /api/memory/agents/&lbrace;id&rbrace;
+
+Delete all proactive memory entries for a specific agent.
+
+### GET /api/memory/agents/&lbrace;id&rbrace;/search
+
+Search proactive memory for a specific agent.
+
+### GET /api/memory/agents/&lbrace;id&rbrace;/stats
+
+Get memory statistics for a specific agent.
+
+### DELETE /api/memory/agents/&lbrace;id&rbrace;/level/&lbrace;level&rbrace;
+
+Clear all memory entries at a specific importance level for an agent.
+
+### GET /api/memory/agents/&lbrace;id&rbrace;/duplicates
+
+Find duplicate memory entries for an agent.
+
+### POST /api/memory/agents/&lbrace;id&rbrace;/consolidate
+
+Consolidate and deduplicate memory entries for an agent.
+
+### GET /api/memory/agents/&lbrace;id&rbrace;/count
+
+Get the total memory entry count for an agent.
+
+### GET /api/memory/agents/&lbrace;id&rbrace;/relations
+
+Query relationship graph entries for an agent.
+
+### POST /api/memory/agents/&lbrace;id&rbrace;/relations
+
+Store new relationship graph entries for an agent.
+
+### GET /api/memory/agents/&lbrace;id&rbrace;/export
+
+Export all proactive memory entries for an agent as JSON.
+
+### POST /api/memory/agents/&lbrace;id&rbrace;/import
+
+Import proactive memory entries for an agent from JSON.
+
 ---
 
 ## Channel Endpoints
 
 ### GET /api/channels
 
-List configured channel adapters and their status. Supports 40 channel adapters including Telegram, Discord, Slack, WhatsApp, Matrix, Email, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP, LINE, Viber, Messenger, Reddit, Mastodon, Bluesky, and more.
+List configured channel adapters and their status. Supports 44 channel adapters including Telegram, Discord, Slack, WhatsApp, Matrix, Email, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP, LINE, Viber, Messenger, Reddit, Mastodon, Bluesky, and more.
 
 **Response** `200 OK`:
 
@@ -561,6 +919,43 @@ List configured channel adapters and their status. Supports 40 channel adapters 
   "total": 2
 }
 ```
+
+### GET /api/channels/&lbrace;name&rbrace;
+
+Get configuration and status for a specific channel adapter.
+
+### POST /api/channels/&lbrace;name&rbrace;/configure
+
+Configure a channel adapter (set token, bot name, options).
+
+**Request Body** (example for Telegram):
+
+```json
+{
+  "token": "123456:ABC-DEF...",
+  "agent_name": "my-agent"
+}
+```
+
+### DELETE /api/channels/&lbrace;name&rbrace;/configure
+
+Remove the configuration for a channel adapter.
+
+### POST /api/channels/&lbrace;name&rbrace;/test
+
+Send a test message through a channel adapter to verify connectivity.
+
+### POST /api/channels/reload
+
+Reload all channel adapters from config without restarting the daemon.
+
+### POST /api/channels/whatsapp/qr/start
+
+Start a WhatsApp QR code authentication session.
+
+### GET /api/channels/whatsapp/qr/status
+
+Get the current status of the WhatsApp QR code session (pending/scanned/authenticated).
 
 ---
 
@@ -736,6 +1131,10 @@ List available agent profiles (predefined configurations for common use cases).
 }
 ```
 
+### GET /api/profiles/&lbrace;name&rbrace;
+
+Get a specific profile by name.
+
 ### GET /api/tools
 
 List all available tools that agents can use.
@@ -755,9 +1154,29 @@ List all available tools that agents can use.
     "kv_set",
     "agent_call"
   ],
-  "total": 23
+  "total": 60
 }
 ```
+
+### GET /api/tools/&lbrace;name&rbrace;
+
+Get detailed information about a specific tool including its input schema.
+
+### GET /api/metrics
+
+Prometheus-format metrics endpoint for integration with Grafana, Prometheus, or compatible monitoring stacks.
+
+### GET /api/versions
+
+API version discovery. Returns all available API versions and their stability status.
+
+### GET /api/openapi.json
+
+Auto-generated OpenAPI 3.0 specification for all API endpoints.
+
+---
+
+## Config Management Endpoints
 
 ### GET /api/config
 
@@ -777,64 +1196,32 @@ Retrieve current kernel configuration (secrets are redacted).
 }
 ```
 
-### GET /api/peers
+### GET /api/config/schema
 
-List OFP (LibreFang Protocol) wire peers and their connection status.
+Get the JSON Schema for the full config file (`~/.librefang/config.toml`). Useful for editor integrations and config validation.
 
-**Response** `200 OK`:
+### POST /api/config/set
 
-```json
-{
-  "peers": [
-    {
-      "node_id": "peer-1",
-      "address": "192.168.1.100:4000",
-      "state": "connected",
-      "authenticated": true,
-      "last_seen": "2025-01-15T10:30:00Z"
-    }
-  ]
-}
-```
+Set one or more config values at runtime without restarting.
 
-### GET /api/sessions
-
-List all active sessions across agents.
-
-**Response** `200 OK`:
+**Request Body**:
 
 ```json
 {
-  "sessions": [
-    {
-      "id": "s1b2c3d4-...",
-      "agent_id": "a1b2c3d4-...",
-      "agent_name": "coder",
-      "message_count": 12,
-      "created_at": "2025-01-15T10:30:00Z"
-    }
-  ]
+  "key": "default_model",
+  "value": "gemini-2.5-flash"
 }
 ```
 
-### DELETE /api/sessions/&lbrace;id&rbrace;
+### POST /api/config/reload
 
-Delete a specific session and its conversation history.
-
-**Response** `200 OK`:
-
-```json
-{
-  "status": "deleted",
-  "session_id": "s1b2c3d4-..."
-}
-```
+Reload configuration from disk (`~/.librefang/config.toml`).
 
 ---
 
 ## Model Catalog Endpoints
 
-LibreFang maintains a built-in catalog of 51+ models across 20 providers. These endpoints allow you to browse available models, check provider authentication status, and resolve model aliases.
+LibreFang maintains a built-in catalog of 130+ models across 28 providers. These endpoints allow you to browse available models, check provider authentication status, and resolve model aliases.
 
 ### GET /api/models
 
@@ -870,36 +1257,7 @@ List the full model catalog. Returns all known models with their provider, tier,
       "supports_streaming": true
     }
   ],
-  "total": 51
-}
-```
-
-### GET /api/models/&lbrace;id&rbrace;
-
-Get detailed information about a specific model.
-
-**Response** `200 OK`:
-
-```json
-{
-  "id": "llama-3.3-70b-versatile",
-  "provider": "groq",
-  "display_name": "Llama 3.3 70B",
-  "tier": "fast",
-  "context_window": 131072,
-  "input_cost_per_1m": 0.59,
-  "output_cost_per_1m": 0.79,
-  "supports_tools": true,
-  "supports_vision": false,
-  "supports_streaming": true
-}
-```
-
-**Response** `404 Not Found`:
-
-```json
-{
-  "error": "Model 'unknown-model' not found in catalog"
+  "total": 130
 }
 ```
 
@@ -925,6 +1283,77 @@ List all model aliases. Aliases provide short names that resolve to full model I
   "total": 23
 }
 ```
+
+### POST /api/models/aliases
+
+Create a new model alias.
+
+**Request Body**:
+
+```json
+{
+  "alias": "mymodel",
+  "model_id": "llama-3.3-70b-versatile"
+}
+```
+
+### DELETE /api/models/aliases/&lbrace;alias&rbrace;
+
+Delete a model alias.
+
+### POST /api/models/custom
+
+Register a custom model definition.
+
+**Request Body**:
+
+```json
+{
+  "id": "my-local-model",
+  "provider": "ollama",
+  "display_name": "My Local LLM",
+  "context_window": 32768
+}
+```
+
+### DELETE /api/models/custom/&lbrace;id&rbrace;
+
+Remove a custom model definition. The `id` parameter supports slashes (e.g., `ollama/my-model`).
+
+### GET /api/models/&lbrace;id&rbrace;
+
+Get detailed information about a specific model. The `id` parameter supports slashes.
+
+**Response** `200 OK`:
+
+```json
+{
+  "id": "llama-3.3-70b-versatile",
+  "provider": "groq",
+  "display_name": "Llama 3.3 70B",
+  "tier": "fast",
+  "context_window": 131072,
+  "input_cost_per_1m": 0.59,
+  "output_cost_per_1m": 0.79,
+  "supports_tools": true,
+  "supports_vision": false,
+  "supports_streaming": true
+}
+```
+
+### POST /api/catalog/update
+
+Trigger an update of the model catalog from the remote registry.
+
+### GET /api/catalog/status
+
+Get the current catalog version, last update time, and available updates.
+
+---
+
+## Provider Configuration Endpoints
+
+Manage LLM provider API keys at runtime without editing config files or restarting the daemon.
 
 ### GET /api/providers
 
@@ -959,15 +1388,25 @@ List all known LLM providers and their authentication status. Auth status is det
       "model_count": 0
     }
   ],
-  "total": 20
+  "total": 28
 }
 ```
 
----
+### GET /api/providers/ollama/detect
 
-## Provider Configuration Endpoints
+Auto-detect a locally running Ollama instance and enumerate its available models.
 
-Manage LLM provider API keys at runtime without editing config files or restarting the daemon.
+### POST /api/providers/github-copilot/oauth/start
+
+Initiate GitHub Copilot device OAuth flow. Returns a `device_code` and `user_code` for the user to enter at `github.com/login/device`.
+
+### GET /api/providers/github-copilot/oauth/poll/&lbrace;poll_id&rbrace;
+
+Poll the OAuth device flow status. Returns `pending`, `authorized`, or `expired`.
+
+### GET /api/providers/&lbrace;name&rbrace;
+
+Get configuration and status for a specific provider.
 
 ### POST /api/providers/&lbrace;name&rbrace;/key
 
@@ -1018,13 +1457,15 @@ Test provider connectivity by making a minimal API call. Verifies that the confi
 }
 ```
 
-**Response** `401 Unauthorized`:
+### PUT /api/providers/&lbrace;name&rbrace;/url
+
+Override the base URL for a provider (useful for self-hosted or proxy endpoints).
+
+**Request Body**:
 
 ```json
 {
-  "status": "failed",
-  "provider": "anthropic",
-  "error": "Invalid API key"
+  "url": "https://my-openai-proxy.example.com/v1"
 }
 ```
 
@@ -1169,23 +1610,6 @@ Search ClawHub for compatible skills.
 **Query Parameters:**
 - `q` (required): Search query
 
-**Response** `200 OK`:
-
-```json
-{
-  "results": [
-    {
-      "slug": "data-pipeline",
-      "name": "Data Pipeline",
-      "description": "ETL data pipeline automation",
-      "author": "clawhub-community",
-      "version": "1.2.0"
-    }
-  ],
-  "total": 1
-}
-```
-
 ### GET /api/clawhub/browse
 
 Browse ClawHub categories.
@@ -1194,41 +1618,13 @@ Browse ClawHub categories.
 - `category` (optional): Filter by category
 - `page` (optional): Page number (default: 1)
 
-**Response** `200 OK`:
-
-```json
-{
-  "skills": [
-    {
-      "slug": "data-pipeline",
-      "name": "Data Pipeline",
-      "category": "data",
-      "description": "ETL data pipeline automation"
-    }
-  ],
-  "total": 15,
-  "page": 1
-}
-```
-
 ### GET /api/clawhub/skill/&lbrace;slug&rbrace;
 
 Get detailed information about a specific ClawHub skill.
 
-**Response** `200 OK`:
+### GET /api/clawhub/skill/&lbrace;slug&rbrace;/code
 
-```json
-{
-  "slug": "data-pipeline",
-  "name": "Data Pipeline",
-  "description": "ETL data pipeline automation",
-  "author": "clawhub-community",
-  "version": "1.2.0",
-  "runtime": "python",
-  "readme": "# Data Pipeline\n\nAutomated ETL...",
-  "sha256": "a1b2c3d4..."
-}
-```
+Get the raw source code of a ClawHub skill.
 
 ### POST /api/clawhub/install
 
@@ -1255,6 +1651,124 @@ Install a skill from ClawHub. Downloads, verifies SHA256 checksum, scans for pro
 
 ---
 
+## Hands Endpoints
+
+Hands are persistent automation processes (browser automation, RPA, long-running bots) managed by the kernel.
+
+### GET /api/hands
+
+List all installed hand definitions.
+
+### POST /api/hands/install
+
+Install a hand from a manifest or registry slug.
+
+### GET /api/hands/active
+
+List currently active (running) hand instances.
+
+### GET /api/hands/&lbrace;hand_id&rbrace;
+
+Get detailed information about a specific hand definition.
+
+### POST /api/hands/&lbrace;hand_id&rbrace;/activate
+
+Activate a hand, creating a new running instance.
+
+### POST /api/hands/&lbrace;hand_id&rbrace;/check-deps
+
+Check whether all dependencies required by a hand are installed.
+
+### POST /api/hands/&lbrace;hand_id&rbrace;/install-deps
+
+Install missing dependencies for a hand.
+
+### GET /api/hands/&lbrace;hand_id&rbrace;/settings
+
+Get the current settings for a hand.
+
+### PUT /api/hands/&lbrace;hand_id&rbrace;/settings
+
+Update the settings for a hand.
+
+### POST /api/hands/instances/&lbrace;id&rbrace;/pause
+
+Pause a running hand instance.
+
+### POST /api/hands/instances/&lbrace;id&rbrace;/resume
+
+Resume a paused hand instance.
+
+### DELETE /api/hands/instances/&lbrace;id&rbrace;
+
+Deactivate and remove a hand instance.
+
+### GET /api/hands/instances/&lbrace;id&rbrace;/stats
+
+Get runtime statistics for a hand instance (uptime, events processed, errors).
+
+### GET /api/hands/instances/&lbrace;id&rbrace;/browser
+
+Get the current browser state for a browser-automation hand instance.
+
+---
+
+## Extensions Endpoints
+
+Extensions add new capabilities to the daemon itself (custom tools, routes, integrations) without modifying core code.
+
+### GET /api/extensions
+
+List all installed extensions.
+
+### GET /api/extensions/&lbrace;name&rbrace;
+
+Get information about a specific extension.
+
+### POST /api/extensions/install
+
+Install an extension from a path or registry.
+
+### POST /api/extensions/uninstall
+
+Uninstall an extension by name.
+
+---
+
+## Plugins Endpoints
+
+Context engine plugins extend the context assembly pipeline (RAG, preprocessing, document loaders, etc.).
+
+### GET /api/plugins/registries
+
+List configured plugin registries (local and remote).
+
+### GET /api/plugins
+
+List all installed plugins.
+
+### GET /api/plugins/&lbrace;name&rbrace;
+
+Get information about a specific plugin.
+
+### POST /api/plugins/install
+
+Install a plugin from a registry or local path.
+
+### POST /api/plugins/uninstall
+
+Uninstall a plugin by name.
+
+### POST /api/plugins/scaffold
+
+Scaffold a new plugin project from a template.
+
+### POST /api/plugins/&lbrace;name&rbrace;/install-deps
+
+Install runtime dependencies for a plugin (e.g., Python packages, Node modules).
+
+---
+
 ## MCP & A2A Protocol Endpoints
 
 LibreFang supports both Model Context Protocol (MCP) for tool interoperability and Agent-to-Agent (A2A) protocol for cross-system agent communication.
@@ -1278,10 +1792,6 @@ List configured and connected MCP servers with their available tools.
         {
           "name": "mcp_filesystem_read_file",
           "description": "Read a file from the filesystem"
-        },
-        {
-          "name": "mcp_filesystem_write_file",
-          "description": "Write content to a file"
         }
       ]
     }
@@ -1289,6 +1799,70 @@ List configured and connected MCP servers with their available tools.
   "total": 1
 }
 ```
+
+### POST /api/mcp/servers
+
+Add a new MCP server configuration.
+
+**Request Body**:
+
+```json
+{
+  "name": "filesystem",
+  "transport": "stdio",
+  "command": "npx",
+  "args": ["-y", "@modelcontextprotocol/server-filesystem"]
+}
+```
+
+### GET /api/mcp/servers/&lbrace;name&rbrace;
+
+Get configuration and connection status for a specific MCP server.
+
+### PUT /api/mcp/servers/&lbrace;name&rbrace;
+
+Update an MCP server configuration.
+
+### DELETE /api/mcp/servers/&lbrace;name&rbrace;
+
+Remove an MCP server configuration.
+
+### GET /api/a2a/agents
+
+List external A2A agents that have been discovered or registered.
+
+### GET /api/a2a/agents/&lbrace;id&rbrace;
+
+Get details for a specific external A2A agent.
+
+### POST /api/a2a/discover
+
+Discover an external A2A agent by URL (fetches its `/.well-known/agent.json`).
+
+**Request Body**:
+
+```json
+{
+  "url": "https://other-instance.example.com"
+}
+```
+
+### POST /api/a2a/send
+
+Send a task to an external A2A agent.
+
+**Request Body**:
+
+```json
+{
+  "agent_id": "external-agent-id",
+  "message": "Summarize this document: ..."
+}
+```
+
+### GET /api/a2a/tasks/&lbrace;id&rbrace;/status
+
+Check the status of a task sent to an external A2A agent.
 
 ### POST /mcp
 
@@ -1355,26 +1929,11 @@ A2A agent card discovery endpoint. Returns the server's A2A agent card, which de
 
 ### GET /a2a/agents
 
-List agents available via A2A protocol.
-
-**Response** `200 OK`:
-
-```json
-{
-  "agents": [
-    {
-      "id": "a1b2c3d4-...",
-      "name": "coder",
-      "description": "Expert coding assistant",
-      "skills": ["code-review", "debugging", "refactoring"]
-    }
-  ]
-}
-```
+List local agents available via the A2A protocol (unversioned, protocol-level endpoint).
 
 ### POST /a2a/tasks/send
 
-Send a task to an agent via A2A protocol. Follows the Google A2A specification for inter-agent task delegation.
+Send a task to a local agent via A2A protocol (unversioned).
 
 **Request Body**:
 
@@ -1407,28 +1966,11 @@ Send a task to an agent via A2A protocol. Follows the Google A2A specification f
 
 ### GET /a2a/tasks/&lbrace;id&rbrace;
 
-Get the status and result of an A2A task.
-
-**Response** `200 OK`:
-
-```json
-{
-  "task_id": "task-1234-...",
-  "status": "completed",
-  "created_at": "2025-01-15T10:30:00Z",
-  "completed_at": "2025-01-15T10:30:05Z",
-  "result": {
-    "role": "agent",
-    "parts": [
-      {"text": "Analysis complete..."}
-    ]
-  }
-}
-```
+Get the status and result of an A2A task (unversioned).
 
 ### POST /a2a/tasks/&lbrace;id&rbrace;/cancel
 
-Cancel a running A2A task.
+Cancel a running A2A task (unversioned).
 
 **Response** `200 OK`:
 
@@ -1486,17 +2028,6 @@ Verify the integrity of the Merkle hash chain audit trail. Walks the entire chai
 }
 ```
 
-**Response** `200 OK` (chain broken):
-
-```json
-{
-  "status": "broken",
-  "chain_length": 1042,
-  "break_at": 847,
-  "error": "Hash mismatch at entry 847"
-}
-```
-
 ### GET /api/security
 
 Security status overview showing the state of all 16 security systems.
@@ -1527,6 +2058,10 @@ Security status overview showing the state of all 16 security systems.
   "all_active": true
 }
 ```
+
+### GET /api/logs/stream
+
+SSE stream of structured log lines emitted by the daemon. Useful for live dashboards and log tailing.
 
 ---
 
@@ -1592,18 +2127,607 @@ Get usage breakdown by model.
       "output_tokens": 55000,
       "cost_usd": 0.09,
       "request_count": 120
-    },
-    {
-      "model": "gemini-2.5-flash",
-      "provider": "gemini",
-      "input_tokens": 45000,
-      "output_tokens": 32000,
-      "cost_usd": 0.33,
-      "request_count": 36
     }
   ]
 }
 ```
+
+### GET /api/usage/daily
+
+Get per-day usage breakdown for charting and reporting.
+
+---
+
+## Budget Endpoints
+
+Set spending limits per agent and globally to prevent runaway costs.
+
+### GET /api/budget
+
+Get global budget status and spending summary.
+
+**Response** `200 OK`:
+
+```json
+{
+  "daily_limit_usd": 10.0,
+  "monthly_limit_usd": 200.0,
+  "today_spent_usd": 1.42,
+  "month_spent_usd": 38.50,
+  "status": "ok"
+}
+```
+
+### PUT /api/budget
+
+Update global budget limits.
+
+**Request Body**:
+
+```json
+{
+  "daily_limit_usd": 15.0,
+  "monthly_limit_usd": 300.0
+}
+```
+
+### GET /api/budget/agents
+
+Get a ranked list of agents by their current spending.
+
+**Response** `200 OK`:
+
+```json
+[
+  {
+    "agent_id": "a1b2c3d4-...",
+    "agent_name": "coder",
+    "total_cost_usd": 0.87,
+    "today_cost_usd": 0.12
+  }
+]
+```
+
+### GET /api/budget/agents/&lbrace;id&rbrace;
+
+Get budget status and spending detail for a specific agent.
+
+### PUT /api/budget/agents/&lbrace;id&rbrace;
+
+Set or update budget limits for a specific agent.
+
+**Request Body**:
+
+```json
+{
+  "daily_limit_usd": 2.0,
+  "monthly_limit_usd": 40.0
+}
+```
+
+---
+
+## Session Management Endpoints
+
+### GET /api/sessions
+
+List all active sessions across agents.
+
+**Response** `200 OK`:
+
+```json
+{
+  "sessions": [
+    {
+      "id": "s1b2c3d4-...",
+      "agent_id": "a1b2c3d4-...",
+      "agent_name": "coder",
+      "message_count": 12,
+      "created_at": "2025-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+### POST /api/sessions/cleanup
+
+Remove old or orphaned sessions from the database.
+
+### GET /api/sessions/&lbrace;id&rbrace;
+
+Get full details for a specific session including message count and metadata.
+
+### DELETE /api/sessions/&lbrace;id&rbrace;
+
+Delete a specific session and its conversation history.
+
+**Response** `200 OK`:
+
+```json
+{
+  "status": "deleted",
+  "session_id": "s1b2c3d4-..."
+}
+```
+
+### PUT /api/sessions/&lbrace;id&rbrace;/label
+
+Assign a human-readable label to a session for later retrieval.
+
+**Request Body**:
+
+```json
+{
+  "label": "code-review-session-2025-01"
+}
+```
+
+---
+
+## Goals Endpoints
+
+Hierarchical goal tracking system for multi-step agent objectives.
+
+### GET /api/goals
+
+List all goals.
+
+### POST /api/goals
+
+Create a new goal.
+
+**Request Body**:
+
+```json
+{
+  "title": "Migrate database to PostgreSQL",
+  "description": "Complete migration with zero downtime",
+  "agent_id": "a1b2c3d4-...",
+  "parent_id": null,
+  "due_at": "2025-02-01T00:00:00Z"
+}
+```
+
+### GET /api/goals/&lbrace;id&rbrace;
+
+Get a specific goal.
+
+### PUT /api/goals/&lbrace;id&rbrace;
+
+Update a goal (title, status, description, due date).
+
+### DELETE /api/goals/&lbrace;id&rbrace;
+
+Delete a goal and all its children.
+
+### GET /api/goals/&lbrace;id&rbrace;/children
+
+List sub-goals for a given parent goal.
+
+---
+
+## Cron Endpoints
+
+Schedule recurring jobs using standard cron expression syntax.
+
+### GET /api/cron/jobs
+
+List all cron jobs.
+
+### POST /api/cron/jobs
+
+Create a new cron job.
+
+**Request Body**:
+
+```json
+{
+  "name": "daily-digest",
+  "schedule": "0 8 * * *",
+  "agent_id": "a1b2c3d4-...",
+  "prompt": "Prepare the daily digest of overnight activity.",
+  "enabled": true
+}
+```
+
+### GET /api/cron/jobs/&lbrace;id&rbrace;
+
+Get details for a specific cron job.
+
+### PUT /api/cron/jobs/&lbrace;id&rbrace;
+
+Update a cron job (schedule, prompt, agent, etc.).
+
+### DELETE /api/cron/jobs/&lbrace;id&rbrace;
+
+Delete a cron job.
+
+### PUT /api/cron/jobs/&lbrace;id&rbrace;/enable
+
+Toggle a cron job's enabled state.
+
+**Request Body**:
+
+```json
+{
+  "enabled": false
+}
+```
+
+### GET /api/cron/jobs/&lbrace;id&rbrace;/status
+
+Get the last run result and next scheduled time for a cron job.
+
+---
+
+## Webhooks Endpoints
+
+### GET /api/webhooks/events
+
+List event webhook subscriptions (inbound events that trigger agent actions).
+
+### POST /api/webhooks/events
+
+Create a new event webhook subscription.
+
+**Request Body**:
+
+```json
+{
+  "event_type": "agent_spawned",
+  "url": "https://my-service.example.com/events",
+  "secret": "webhook-secret"
+}
+```
+
+### PUT /api/webhooks/events/&lbrace;id&rbrace;
+
+Update an event webhook subscription.
+
+### DELETE /api/webhooks/events/&lbrace;id&rbrace;
+
+Delete an event webhook subscription.
+
+### GET /api/webhooks
+
+List outbound webhook configurations.
+
+### POST /api/webhooks
+
+Create a new outbound webhook.
+
+### GET /api/webhooks/&lbrace;id&rbrace;
+
+Get a specific outbound webhook configuration.
+
+### PUT /api/webhooks/&lbrace;id&rbrace;
+
+Update an outbound webhook configuration.
+
+### DELETE /api/webhooks/&lbrace;id&rbrace;
+
+Delete an outbound webhook.
+
+### POST /api/webhooks/&lbrace;id&rbrace;/test
+
+Send a test payload to an outbound webhook and return the result.
+
+### POST /api/hooks/wake
+
+Webhook trigger endpoint (unversioned). Wakes an agent from an external HTTP call.
+
+### POST /api/hooks/agent
+
+Webhook trigger endpoint (unversioned). Sends a message to an agent from an external HTTP caller.
+
+---
+
+## Backup & Restore Endpoints
+
+### POST /api/backup
+
+Create a full backup of the daemon state (agents, sessions, memory, config).
+
+**Response** `200 OK`:
+
+```json
+{
+  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz",
+  "size_bytes": 2048576
+}
+```
+
+### GET /api/backups
+
+List all available backup files.
+
+### DELETE /api/backups/&lbrace;filename&rbrace;
+
+Delete a backup file.
+
+### POST /api/restore
+
+Restore daemon state from a backup file.
+
+**Request Body**:
+
+```json
+{
+  "filename": "librefang-backup-2025-01-15T10-30-00.tar.gz"
+}
+```
+
+---
+
+## Integrations Endpoints
+
+Connect LibreFang to external services (GitHub, Jira, Notion, Google Drive, etc.).
+
+### GET /api/integrations
+
+List all connected integrations and their status.
+
+### GET /api/integrations/available
+
+List all integrations available for installation.
+
+### GET /api/integrations/health
+
+Get health status for all connected integrations.
+
+### POST /api/integrations/add
+
+Add and connect a new integration.
+
+**Request Body**:
+
+```json
+{
+  "type": "github",
+  "token": "ghp_...",
+  "name": "my-github"
+}
+```
+
+### POST /api/integrations/reload
+
+Reload all integrations from config.
+
+### GET /api/integrations/&lbrace;id&rbrace;
+
+Get details for a specific integration.
+
+### DELETE /api/integrations/&lbrace;id&rbrace;
+
+Remove an integration.
+
+### POST /api/integrations/&lbrace;id&rbrace;/reconnect
+
+Re-authenticate and reconnect a disconnected integration.
+
+---
+
+## Pairing Endpoints
+
+Pair mobile apps or secondary devices to the daemon for remote control and notifications.
+
+### POST /api/pairing/request
+
+Initiate a pairing request. Returns a pairing code for the user to enter on the remote device.
+
+**Response** `200 OK`:
+
+```json
+{
+  "pairing_code": "XK9-47B",
+  "expires_at": "2025-01-15T10:35:00Z"
+}
+```
+
+### POST /api/pairing/complete
+
+Complete pairing by confirming the code from the remote device.
+
+### POST /api/pairing/notify
+
+Send a push notification to all paired devices.
+
+### GET /api/pairing/devices
+
+List all paired devices.
+
+### DELETE /api/pairing/devices/&lbrace;id&rbrace;
+
+Remove a paired device.
+
+---
+
+## OAuth / OIDC Endpoints
+
+External authentication via OAuth 2.0 and OpenID Connect providers. Enables single sign-on for the WebChat dashboard.
+
+### GET /api/auth/providers
+
+List configured OAuth/OIDC providers (e.g., Google, GitHub, Authentik).
+
+### GET /api/auth/login
+
+Redirect to the default configured OAuth provider's login page.
+
+### GET /api/auth/login/&lbrace;provider&rbrace;
+
+Redirect to a specific provider's OAuth login page.
+
+### GET /api/auth/callback
+
+OAuth callback handler (GET). Receives the authorization code from the provider.
+
+### POST /api/auth/callback
+
+OAuth callback handler (POST). Handles form-post style callbacks.
+
+### GET /api/auth/userinfo
+
+Return the authenticated user's profile from the OIDC userinfo endpoint.
+
+### POST /api/auth/introspect
+
+Token introspection endpoint. Validates and returns metadata for an OAuth access token.
+
+---
+
+## Task Queue Endpoints
+
+Inspect and manage the daemon's internal async task queue.
+
+### GET /api/tasks/status
+
+Get summary status of the task queue (pending, running, failed counts).
+
+### GET /api/tasks/list
+
+List queued and recently completed tasks.
+
+### DELETE /api/tasks/&lbrace;id&rbrace;
+
+Cancel and remove a queued task.
+
+### POST /api/tasks/&lbrace;id&rbrace;/retry
+
+Retry a failed task.
+
+### GET /api/queue/status
+
+Get the current queue depth and throughput metrics.
+
+---
+
+## Comms Endpoints
+
+The comms layer manages inter-agent communication, event routing, and messaging topology.
+
+### GET /api/comms/topology
+
+Get the current communication topology (agent graph, routing table).
+
+### GET /api/comms/events
+
+Get recent communication events (messages routed between agents and channels).
+
+### GET /api/comms/events/stream
+
+SSE stream of live communication events as they occur.
+
+### POST /api/comms/send
+
+Send a message directly through the comms layer to an agent or channel.
+
+**Request Body**:
+
+```json
+{
+  "to": "agent:a1b2c3d4-...",
+  "content": "Please review the latest PR",
+  "from": "system"
+}
+```
+
+### POST /api/comms/task
+
+Dispatch a task via the comms layer (routed to the appropriate agent).
+
+---
+
+## Approvals Endpoints
+
+Human-in-the-loop approval workflow. Agents can request approval before executing sensitive actions.
+
+### GET /api/approvals
+
+List pending and recent approval requests.
+
+### POST /api/approvals
+
+Create an approval request (typically called by an agent tool).
+
+**Request Body**:
+
+```json
+{
+  "agent_id": "a1b2c3d4-...",
+  "action": "delete_file",
+  "description": "Agent wants to delete /important/config.toml",
+  "payload": {"path": "/important/config.toml"}
+}
+```
+
+### GET /api/approvals/&lbrace;id&rbrace;
+
+Get details for a specific approval request.
+
+### POST /api/approvals/&lbrace;id&rbrace;/approve
+
+Approve a pending request. The waiting agent proceeds with the action.
+
+### POST /api/approvals/&lbrace;id&rbrace;/reject
+
+Reject a pending request. The waiting agent receives a rejection and halts the action.
+
+---
+
+## Bindings & Commands Endpoints
+
+### GET /api/bindings
+
+List current keyboard/event bindings for the WebChat UI.
+
+### POST /api/bindings
+
+Add a new binding.
+
+### DELETE /api/bindings/&lbrace;index&rbrace;
+
+Remove a binding by its index in the bindings list.
+
+### GET /api/commands
+
+List all available slash commands for the WebChat input.
+
+### GET /api/commands/&lbrace;name&rbrace;
+
+Get details for a specific slash command.
+
+---
+
+## Network & Peers Endpoints
+
+### GET /api/peers
+
+List OFP (LibreFang Protocol) wire peers and their connection status.
+
+**Response** `200 OK`:
+
+```json
+{
+  "peers": [
+    {
+      "node_id": "peer-1",
+      "address": "192.168.1.100:4000",
+      "state": "connected",
+      "authenticated": true,
+      "last_seen": "2025-01-15T10:30:00Z"
+    }
+  ]
+}
+```
+
+### GET /api/peers/&lbrace;id&rbrace;
+
+Get details for a specific OFP peer.
+
+### GET /api/network/status
+
+Get the overall OFP network status (node ID, connected peers, message throughput).
 
 ---
 
@@ -1691,80 +2815,6 @@ Run the migration. Converts manifests, imports skills, and optionally imports se
   "warnings": [
     "Skill 'legacy-plugin' uses unsupported runtime 'ruby', skipped"
   ]
-}
-```
-
----
-
-## Session Management Endpoints
-
-### POST /api/agents/&lbrace;id&rbrace;/session/reset
-
-Reset an agent's session, clearing all conversation history.
-
-**Response** `200 OK`:
-
-```json
-{
-  "status": "reset",
-  "agent_id": "a1b2c3d4-...",
-  "new_session_id": "s5e6f7g8-..."
-}
-```
-
-### POST /api/agents/&lbrace;id&rbrace;/session/compact
-
-Trigger LLM-based session compaction. The agent's conversation is summarized by an LLM, keeping only the most recent messages plus a generated summary.
-
-**Response** `200 OK`:
-
-```json
-{
-  "status": "compacted",
-  "message": "Session compacted: 80 messages summarized, 20 kept"
-}
-```
-
-**Response** `200 OK` (no compaction needed):
-
-```json
-{
-  "status": "ok",
-  "message": "Session does not need compaction (below threshold)"
-}
-```
-
-### POST /api/agents/&lbrace;id&rbrace;/stop
-
-Cancel the agent's current LLM run. Aborts any in-progress generation.
-
-**Response** `200 OK`:
-
-```json
-{
-  "status": "stopped",
-  "message": "Agent run cancelled"
-}
-```
-
-### PUT /api/agents/&lbrace;id&rbrace;/model
-
-Switch an agent's LLM model at runtime.
-
-**Request Body**:
-
-```json
-{
-  "model": "claude-sonnet-4-20250514"
-}
-```
-
-**Response** `200 OK`:
-
-```json
-{
-  "status": "updated",
-  "model": "claude-sonnet-4-20250514"
 }
 ```
 
@@ -2136,7 +3186,7 @@ The `Retry-After` header indicates the window duration in seconds.
 
 ## Endpoint Summary
 
-**76 endpoints total** across 15 groups.
+**230+ endpoints total** across 34 groups.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -2148,56 +3198,150 @@ The `Retry-After` header indicates the window duration in seconds.
 | GET | `/api/version` | Version info |
 | POST | `/api/shutdown` | Graceful shutdown |
 | GET | `/api/profiles` | List agent profiles |
+| GET | `/api/profiles/{name}` | Get a specific profile |
 | GET | `/api/tools` | List available tools |
+| GET | `/api/tools/{name}` | Get tool details |
+| GET | `/api/metrics` | Prometheus metrics |
+| GET | `/api/versions` | API version discovery |
+| GET | `/api/openapi.json` | OpenAPI specification |
+| **Config** | | |
 | GET | `/api/config` | Configuration (secrets redacted) |
-| GET | `/api/peers` | List OFP wire peers |
+| GET | `/api/config/schema` | Config JSON Schema |
+| POST | `/api/config/set` | Set a config value at runtime |
+| POST | `/api/config/reload` | Reload config from disk |
 | **Agents** | | |
 | GET | `/api/agents` | List agents |
 | POST | `/api/agents` | Spawn agent |
-| GET | `/api/agents/&lbrace;id&rbrace;` | Get agent details |
-| PUT | `/api/agents/&lbrace;id&rbrace;/update` | Update agent config |
-| PUT | `/api/agents/&lbrace;id&rbrace;/mode` | Set agent mode (Stable/Normal) |
-| DELETE | `/api/agents/&lbrace;id&rbrace;` | Kill agent |
-| POST | `/api/agents/&lbrace;id&rbrace;/message` | Send message (blocking) |
-| POST | `/api/agents/&lbrace;id&rbrace;/message/stream` | Send message (SSE stream) |
-| GET | `/api/agents/&lbrace;id&rbrace;/session` | Get conversation history |
-| GET | `/api/agents/&lbrace;id&rbrace;/ws` | WebSocket chat |
-| POST | `/api/agents/&lbrace;id&rbrace;/session/reset` | Reset session |
-| POST | `/api/agents/&lbrace;id&rbrace;/session/compact` | LLM-based compaction |
-| POST | `/api/agents/&lbrace;id&rbrace;/stop` | Cancel current run |
-| PUT | `/api/agents/&lbrace;id&rbrace;/model` | Switch model |
+| POST | `/api/agents/bulk` | Bulk create agents |
+| DELETE | `/api/agents/bulk` | Bulk delete agents |
+| POST | `/api/agents/bulk/start` | Bulk start agents |
+| POST | `/api/agents/bulk/stop` | Bulk stop agents |
+| GET | `/api/agents/{id}` | Get agent details |
+| DELETE | `/api/agents/{id}` | Kill agent |
+| PATCH | `/api/agents/{id}` | Partial update agent |
+| PUT | `/api/agents/{id}/update` | Full update agent config |
+| PUT | `/api/agents/{id}/mode` | Set agent mode (Stable/Normal) |
+| PATCH | `/api/agents/{id}/identity` | Update agent identity |
+| PATCH | `/api/agents/{id}/config` | Patch agent config |
+| POST | `/api/agents/{id}/clone` | Clone agent |
+| POST | `/api/agents/{id}/message` | Send message (blocking) |
+| POST | `/api/agents/{id}/message/stream` | Send message (SSE stream) |
+| GET | `/api/agents/{id}/session` | Get current conversation history |
+| GET | `/api/agents/{id}/sessions` | List all agent sessions |
+| POST | `/api/agents/{id}/sessions` | Create new session |
+| POST | `/api/agents/{id}/sessions/{session_id}/switch` | Switch active session |
+| GET | `/api/agents/{id}/sessions/by-label/{label}` | Find session by label |
+| DELETE | `/api/agents/{id}/history` | Clear conversation history |
+| POST | `/api/agents/{id}/session/reset` | Reset session |
+| POST | `/api/agents/{id}/session/compact` | LLM-based compaction |
+| POST | `/api/agents/{id}/stop` | Cancel current run |
+| PUT | `/api/agents/{id}/model` | Switch model |
+| GET | `/api/agents/{id}/tools` | Get agent tools |
+| PUT | `/api/agents/{id}/tools` | Set agent tools |
+| GET | `/api/agents/{id}/skills` | Get agent skills |
+| PUT | `/api/agents/{id}/skills` | Set agent skills |
+| GET | `/api/agents/{id}/mcp_servers` | Get agent MCP servers |
+| PUT | `/api/agents/{id}/mcp_servers` | Set agent MCP servers |
+| GET | `/api/agents/{id}/traces` | Execution traces |
+| GET | `/api/agents/{id}/metrics` | Agent metrics |
+| GET | `/api/agents/{id}/logs` | Agent log lines |
+| GET | `/api/agents/{id}/deliveries` | Inbound deliveries |
+| GET | `/api/agents/{id}/files` | List workspace files |
+| GET | `/api/agents/{id}/files/{filename}` | Get workspace file |
+| PUT | `/api/agents/{id}/files/{filename}` | Set workspace file |
+| DELETE | `/api/agents/{id}/files/{filename}` | Delete workspace file |
+| POST | `/api/agents/{id}/upload` | Upload file (multipart) |
+| GET | `/api/uploads/{file_id}` | Retrieve uploaded file |
+| GET | `/api/agents/{id}/ws` | WebSocket chat |
+| GET | `/api/agents/{id}/memory/export` | Export KV memory |
+| POST | `/api/agents/{id}/memory/import` | Import KV memory |
 | **Workflows** | | |
 | GET | `/api/workflows` | List workflows |
 | POST | `/api/workflows` | Create workflow |
-| POST | `/api/workflows/&lbrace;id&rbrace;/run` | Run workflow |
-| GET | `/api/workflows/&lbrace;id&rbrace;/runs` | List workflow runs |
+| GET | `/api/workflows/{id}` | Get workflow |
+| PUT | `/api/workflows/{id}` | Update workflow |
+| DELETE | `/api/workflows/{id}` | Delete workflow |
+| POST | `/api/workflows/{id}/run` | Run workflow |
+| GET | `/api/workflows/{id}/runs` | List workflow runs |
 | **Triggers** | | |
 | GET | `/api/triggers` | List triggers |
 | POST | `/api/triggers` | Create trigger |
-| PUT | `/api/triggers/&lbrace;id&rbrace;` | Update trigger |
-| DELETE | `/api/triggers/&lbrace;id&rbrace;` | Delete trigger |
-| **Memory** | | |
-| GET | `/api/memory/agents/&lbrace;id&rbrace;/kv` | List KV pairs |
-| GET | `/api/memory/agents/&lbrace;id&rbrace;/kv/&lbrace;key&rbrace;` | Get KV value |
-| PUT | `/api/memory/agents/&lbrace;id&rbrace;/kv/&lbrace;key&rbrace;` | Set KV value |
-| DELETE | `/api/memory/agents/&lbrace;id&rbrace;/kv/&lbrace;key&rbrace;` | Delete KV value |
+| PUT | `/api/triggers/{id}` | Update trigger |
+| DELETE | `/api/triggers/{id}` | Delete trigger |
+| **Schedules** | | |
+| GET | `/api/schedules` | List schedules |
+| POST | `/api/schedules` | Create schedule |
+| GET | `/api/schedules/{id}` | Get schedule |
+| PUT | `/api/schedules/{id}` | Update schedule |
+| DELETE | `/api/schedules/{id}` | Delete schedule |
+| POST | `/api/schedules/{id}/run` | Run schedule now |
+| **Memory (KV)** | | |
+| GET | `/api/memory/agents/{id}/kv` | List KV pairs |
+| GET | `/api/memory/agents/{id}/kv/{key}` | Get KV value |
+| PUT | `/api/memory/agents/{id}/kv/{key}` | Set KV value |
+| DELETE | `/api/memory/agents/{id}/kv/{key}` | Delete KV value |
+| **Memory (Proactive)** | | |
+| GET | `/api/memory` | List all proactive memories |
+| POST | `/api/memory` | Add proactive memory |
+| GET | `/api/memory/search` | Search memories (global) |
+| GET | `/api/memory/stats` | Memory aggregate stats |
+| POST | `/api/memory/cleanup` | Remove stale memories |
+| POST | `/api/memory/decay` | Apply time decay |
+| POST | `/api/memory/bulk-delete` | Bulk delete memories |
+| PUT | `/api/memory/items/{memory_id}` | Update memory entry |
+| DELETE | `/api/memory/items/{memory_id}` | Delete memory entry |
+| GET | `/api/memory/items/{memory_id}/history` | Memory edit history |
+| GET | `/api/memory/user/{user_id}` | Memories by user |
+| GET | `/api/memory/agents/{id}` | Agent proactive memories |
+| DELETE | `/api/memory/agents/{id}` | Clear agent memories |
+| GET | `/api/memory/agents/{id}/search` | Search agent memories |
+| GET | `/api/memory/agents/{id}/stats` | Agent memory stats |
+| DELETE | `/api/memory/agents/{id}/level/{level}` | Clear memory by level |
+| GET | `/api/memory/agents/{id}/duplicates` | Find duplicate memories |
+| POST | `/api/memory/agents/{id}/consolidate` | Consolidate memories |
+| GET | `/api/memory/agents/{id}/count` | Count agent memories |
+| GET | `/api/memory/agents/{id}/relations` | Query relations graph |
+| POST | `/api/memory/agents/{id}/relations` | Store relations |
+| GET | `/api/memory/agents/{id}/export` | Export agent memories |
+| POST | `/api/memory/agents/{id}/import` | Import agent memories |
 | **Channels** | | |
-| GET | `/api/channels` | List channels (40 adapters) |
+| GET | `/api/channels` | List channels (44 adapters) |
+| GET | `/api/channels/{name}` | Get channel config |
+| POST | `/api/channels/{name}/configure` | Configure channel |
+| DELETE | `/api/channels/{name}/configure` | Remove channel config |
+| POST | `/api/channels/{name}/test` | Test channel |
+| POST | `/api/channels/reload` | Reload all channels |
+| POST | `/api/channels/whatsapp/qr/start` | Start WhatsApp QR session |
+| GET | `/api/channels/whatsapp/qr/status` | WhatsApp QR status |
 | **Templates** | | |
 | GET | `/api/templates` | List templates |
-| GET | `/api/templates/&lbrace;name&rbrace;` | Get template |
+| GET | `/api/templates/{name}` | Get template |
 | **Sessions** | | |
-| GET | `/api/sessions` | List sessions |
-| DELETE | `/api/sessions/&lbrace;id&rbrace;` | Delete session |
+| GET | `/api/sessions` | List all sessions |
+| POST | `/api/sessions/cleanup` | Cleanup orphaned sessions |
+| GET | `/api/sessions/{id}` | Get session details |
+| DELETE | `/api/sessions/{id}` | Delete session |
+| PUT | `/api/sessions/{id}/label` | Label a session |
 | **Model Catalog** | | |
-| GET | `/api/models` | Full model catalog (51+ models) |
-| GET | `/api/models/&lbrace;id&rbrace;` | Model details |
-| GET | `/api/models/aliases` | List 23 model aliases |
+| GET | `/api/models` | Full model catalog (130+ models) |
+| GET | `/api/models/aliases` | List model aliases |
+| POST | `/api/models/aliases` | Create model alias |
+| DELETE | `/api/models/aliases/{alias}` | Delete model alias |
+| POST | `/api/models/custom` | Register custom model |
+| DELETE | `/api/models/custom/{id}` | Remove custom model |
+| GET | `/api/models/{id}` | Model details |
+| GET | `/api/catalog/status` | Catalog version and update info |
+| POST | `/api/catalog/update` | Trigger catalog update |
+| **Providers** | | |
 | GET | `/api/providers` | Provider list with auth status |
-| **Provider Config** | | |
-| POST | `/api/providers/&lbrace;name&rbrace;/key` | Set provider API key |
-| DELETE | `/api/providers/&lbrace;name&rbrace;/key` | Remove provider API key |
-| POST | `/api/providers/&lbrace;name&rbrace;/test` | Test provider connectivity |
+| GET | `/api/providers/ollama/detect` | Auto-detect Ollama |
+| POST | `/api/providers/github-copilot/oauth/start` | Start Copilot OAuth |
+| GET | `/api/providers/github-copilot/oauth/poll/{poll_id}` | Poll Copilot OAuth |
+| GET | `/api/providers/{name}` | Get provider details |
+| POST | `/api/providers/{name}/key` | Set provider API key |
+| DELETE | `/api/providers/{name}/key` | Remove provider API key |
+| POST | `/api/providers/{name}/test` | Test provider connectivity |
+| PUT | `/api/providers/{name}/url` | Override provider base URL |
 | **Skills & Marketplace** | | |
 | GET | `/api/skills` | List installed skills (60 bundled) |
 | POST | `/api/skills/install` | Install skill |
@@ -2207,24 +3351,156 @@ The `Retry-After` header indicates the window duration in seconds.
 | **ClawHub** | | |
 | GET | `/api/clawhub/search` | Search ClawHub |
 | GET | `/api/clawhub/browse` | Browse ClawHub |
-| GET | `/api/clawhub/skill/&lbrace;slug&rbrace;` | Skill details |
+| GET | `/api/clawhub/skill/{slug}` | Skill details |
+| GET | `/api/clawhub/skill/{slug}/code` | Skill source code |
 | POST | `/api/clawhub/install` | Install from ClawHub |
-| **MCP & A2A** | | |
+| **Hands** | | |
+| GET | `/api/hands` | List hand definitions |
+| POST | `/api/hands/install` | Install a hand |
+| GET | `/api/hands/active` | List active hand instances |
+| GET | `/api/hands/{hand_id}` | Get hand details |
+| POST | `/api/hands/{hand_id}/activate` | Activate hand |
+| POST | `/api/hands/{hand_id}/check-deps` | Check hand dependencies |
+| POST | `/api/hands/{hand_id}/install-deps` | Install hand dependencies |
+| GET | `/api/hands/{hand_id}/settings` | Get hand settings |
+| PUT | `/api/hands/{hand_id}/settings` | Update hand settings |
+| POST | `/api/hands/instances/{id}/pause` | Pause hand instance |
+| POST | `/api/hands/instances/{id}/resume` | Resume hand instance |
+| DELETE | `/api/hands/instances/{id}` | Deactivate hand instance |
+| GET | `/api/hands/instances/{id}/stats` | Hand instance stats |
+| GET | `/api/hands/instances/{id}/browser` | Hand browser state |
+| **Extensions** | | |
+| GET | `/api/extensions` | List extensions |
+| GET | `/api/extensions/{name}` | Get extension |
+| POST | `/api/extensions/install` | Install extension |
+| POST | `/api/extensions/uninstall` | Uninstall extension |
+| **Plugins** | | |
+| GET | `/api/plugins/registries` | List plugin registries |
+| GET | `/api/plugins` | List plugins |
+| GET | `/api/plugins/{name}` | Get plugin |
+| POST | `/api/plugins/install` | Install plugin |
+| POST | `/api/plugins/uninstall` | Uninstall plugin |
+| POST | `/api/plugins/scaffold` | Scaffold plugin |
+| POST | `/api/plugins/{name}/install-deps` | Install plugin deps |
+| **MCP (managed)** | | |
 | GET | `/api/mcp/servers` | MCP server connections |
+| POST | `/api/mcp/servers` | Add MCP server |
+| GET | `/api/mcp/servers/{name}` | Get MCP server |
+| PUT | `/api/mcp/servers/{name}` | Update MCP server |
+| DELETE | `/api/mcp/servers/{name}` | Delete MCP server |
+| **A2A (external)** | | |
+| GET | `/api/a2a/agents` | List external A2A agents |
+| GET | `/api/a2a/agents/{id}` | Get external A2A agent |
+| POST | `/api/a2a/discover` | Discover external A2A agent |
+| POST | `/api/a2a/send` | Send task to external A2A agent |
+| GET | `/api/a2a/tasks/{id}/status` | External A2A task status |
+| **MCP & A2A Protocol** | | |
 | POST | `/mcp` | MCP HTTP transport (JSON-RPC 2.0) |
 | GET | `/.well-known/agent.json` | A2A agent card |
-| GET | `/a2a/agents` | A2A agent list |
+| GET | `/a2a/agents` | A2A local agent list |
 | POST | `/a2a/tasks/send` | Send A2A task |
-| GET | `/a2a/tasks/&lbrace;id&rbrace;` | Get A2A task status |
-| POST | `/a2a/tasks/&lbrace;id&rbrace;/cancel` | Cancel A2A task |
+| GET | `/a2a/tasks/{id}` | Get A2A task status |
+| POST | `/a2a/tasks/{id}/cancel` | Cancel A2A task |
 | **Audit & Security** | | |
 | GET | `/api/audit/recent` | Recent audit logs |
 | GET | `/api/audit/verify` | Verify Merkle chain integrity |
 | GET | `/api/security` | Security status (16 systems) |
+| GET | `/api/logs/stream` | SSE live log stream |
 | **Usage & Analytics** | | |
 | GET | `/api/usage` | Usage statistics |
 | GET | `/api/usage/summary` | Usage summary with quota |
 | GET | `/api/usage/by-model` | Usage by model breakdown |
+| GET | `/api/usage/daily` | Daily usage breakdown |
+| **Budget** | | |
+| GET | `/api/budget` | Global budget status |
+| PUT | `/api/budget` | Update global budget |
+| GET | `/api/budget/agents` | Agent budget ranking |
+| GET | `/api/budget/agents/{id}` | Agent budget details |
+| PUT | `/api/budget/agents/{id}` | Set agent budget |
+| **Goals** | | |
+| GET | `/api/goals` | List goals |
+| POST | `/api/goals` | Create goal |
+| GET | `/api/goals/{id}` | Get goal |
+| PUT | `/api/goals/{id}` | Update goal |
+| DELETE | `/api/goals/{id}` | Delete goal |
+| GET | `/api/goals/{id}/children` | List sub-goals |
+| **Cron** | | |
+| GET | `/api/cron/jobs` | List cron jobs |
+| POST | `/api/cron/jobs` | Create cron job |
+| GET | `/api/cron/jobs/{id}` | Get cron job |
+| PUT | `/api/cron/jobs/{id}` | Update cron job |
+| DELETE | `/api/cron/jobs/{id}` | Delete cron job |
+| PUT | `/api/cron/jobs/{id}/enable` | Toggle cron job |
+| GET | `/api/cron/jobs/{id}/status` | Cron job status |
+| **Webhooks** | | |
+| GET | `/api/webhooks/events` | List event webhook subscriptions |
+| POST | `/api/webhooks/events` | Create event webhook |
+| PUT | `/api/webhooks/events/{id}` | Update event webhook |
+| DELETE | `/api/webhooks/events/{id}` | Delete event webhook |
+| GET | `/api/webhooks` | List outbound webhooks |
+| POST | `/api/webhooks` | Create outbound webhook |
+| GET | `/api/webhooks/{id}` | Get outbound webhook |
+| PUT | `/api/webhooks/{id}` | Update outbound webhook |
+| DELETE | `/api/webhooks/{id}` | Delete outbound webhook |
+| POST | `/api/webhooks/{id}/test` | Test outbound webhook |
+| POST | `/api/hooks/wake` | Wake trigger (unversioned) |
+| POST | `/api/hooks/agent` | Agent trigger (unversioned) |
+| **Backup & Restore** | | |
+| POST | `/api/backup` | Create backup |
+| GET | `/api/backups` | List backups |
+| DELETE | `/api/backups/{filename}` | Delete backup |
+| POST | `/api/restore` | Restore from backup |
+| **Integrations** | | |
+| GET | `/api/integrations` | List integrations |
+| GET | `/api/integrations/available` | Available integrations |
+| GET | `/api/integrations/health` | Integrations health |
+| POST | `/api/integrations/add` | Add integration |
+| POST | `/api/integrations/reload` | Reload integrations |
+| GET | `/api/integrations/{id}` | Get integration |
+| DELETE | `/api/integrations/{id}` | Remove integration |
+| POST | `/api/integrations/{id}/reconnect` | Reconnect integration |
+| **Pairing** | | |
+| POST | `/api/pairing/request` | Initiate pairing |
+| POST | `/api/pairing/complete` | Complete pairing |
+| POST | `/api/pairing/notify` | Notify paired devices |
+| GET | `/api/pairing/devices` | List paired devices |
+| DELETE | `/api/pairing/devices/{id}` | Remove paired device |
+| **OAuth / OIDC** | | |
+| GET | `/api/auth/providers` | List OAuth providers |
+| GET | `/api/auth/login` | Redirect to default OAuth login |
+| GET | `/api/auth/login/{provider}` | Redirect to specific OAuth login |
+| GET | `/api/auth/callback` | OAuth callback (GET) |
+| POST | `/api/auth/callback` | OAuth callback (POST) |
+| GET | `/api/auth/userinfo` | OIDC user info |
+| POST | `/api/auth/introspect` | Token introspection |
+| **Task Queue** | | |
+| GET | `/api/tasks/status` | Task queue summary |
+| GET | `/api/tasks/list` | List queued tasks |
+| DELETE | `/api/tasks/{id}` | Cancel queued task |
+| POST | `/api/tasks/{id}/retry` | Retry failed task |
+| GET | `/api/queue/status` | Queue depth and throughput |
+| **Comms** | | |
+| GET | `/api/comms/topology` | Communication topology |
+| GET | `/api/comms/events` | Recent comms events |
+| GET | `/api/comms/events/stream` | SSE comms event stream |
+| POST | `/api/comms/send` | Send via comms layer |
+| POST | `/api/comms/task` | Dispatch comms task |
+| **Approvals** | | |
+| GET | `/api/approvals` | List approval requests |
+| POST | `/api/approvals` | Create approval request |
+| GET | `/api/approvals/{id}` | Get approval request |
+| POST | `/api/approvals/{id}/approve` | Approve request |
+| POST | `/api/approvals/{id}/reject` | Reject request |
+| **Bindings & Commands** | | |
+| GET | `/api/bindings` | List UI bindings |
+| POST | `/api/bindings` | Add binding |
+| DELETE | `/api/bindings/{index}` | Remove binding |
+| GET | `/api/commands` | List slash commands |
+| GET | `/api/commands/{name}` | Get slash command |
+| **Network & Peers** | | |
+| GET | `/api/peers` | List OFP peers |
+| GET | `/api/peers/{id}` | Get OFP peer |
+| GET | `/api/network/status` | OFP network status |
 | **Migration** | | |
 | GET | `/api/migrate/detect` | Detect migration sources |
 | POST | `/api/migrate/scan` | Scan for importable data |
