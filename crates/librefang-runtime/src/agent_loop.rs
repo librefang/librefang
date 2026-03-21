@@ -1210,6 +1210,20 @@ pub async fn run_agent_loop(
                         content: final_content,
                         is_error: result.is_error,
                     });
+
+                    // Stop executing remaining tool calls on failure (#948)
+                    // but not for approval denials — those should continue the loop
+                    let is_approval_denial = result.is_error
+                        && result
+                            .content
+                            .contains("requires human approval and was denied");
+                    if result.is_error && !is_approval_denial {
+                        warn!(
+                            tool = %tool_call.name,
+                            "Tool execution failed — skipping remaining tool calls"
+                        );
+                        break;
+                    }
                 }
 
                 // Detect approval denials and inject guidance to prevent infinite retry loops
@@ -1251,6 +1265,15 @@ pub async fn run_agent_loop(
                     });
                 }
 
+                // Check if ALL tool results are non-denial errors — stop the loop (#948)
+                let total_tool_results = tool_result_blocks
+                    .iter()
+                    .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                    .count();
+                let all_failed = total_tool_results > 0
+                    && non_denial_errors > 0
+                    && non_denial_errors == total_tool_results - denial_count;
+
                 // Add tool results as a user message (Anthropic API requirement)
                 let tool_results_msg = Message {
                     role: Role::User,
@@ -1263,6 +1286,68 @@ pub async fn run_agent_loop(
                 // Interim save after tool execution to prevent data loss on crash
                 if let Err(e) = memory.save_session_async(session).await {
                     warn!("Failed to interim-save session: {e}");
+                }
+
+                // When all tool calls failed, stop the agent loop and report errors (#948)
+                if all_failed {
+                    warn!(
+                        agent = %manifest.name,
+                        error_count,
+                        "All tool calls failed — stopping agent loop"
+                    );
+                    // Collect error messages from tool results
+                    let error_details: Vec<String> = tool_result_blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::ToolResult {
+                                tool_name,
+                                content,
+                                is_error: true,
+                                ..
+                            } => Some(format!("Tool '{}' failed: {}", tool_name, content)),
+                            _ => None,
+                        })
+                        .collect();
+                    let error_response = format!(
+                        "Tool execution failed. {}\n\n{}",
+                        if error_count == 1 {
+                            "The tool call returned an error.".to_string()
+                        } else {
+                            format!("All {} tool calls returned errors.", error_count)
+                        },
+                        error_details.join("\n")
+                    );
+                    session.messages.push(Message::assistant(&error_response));
+                    if let Err(e) = memory.save_session_async(session).await {
+                        warn!("Failed to save session on tool failure stop: {e}");
+                    }
+                    // Fire AgentLoopEnd hook
+                    if let Some(hook_reg) = hooks {
+                        let ctx = crate::hooks::HookContext {
+                            agent_name: &manifest.name,
+                            agent_id: agent_id_str.as_str(),
+                            event: librefang_types::agent::HookEvent::AgentLoopEnd,
+                            data: serde_json::json!({
+                                "iterations": iteration + 1,
+                                "reason": "tool_failure",
+                                "error_count": error_count,
+                            }),
+                        };
+                        let _ = hook_reg.fire(&ctx);
+                    }
+                    return Ok(AgentLoopResult {
+                        response: error_response,
+                        total_usage,
+                        iterations: iteration + 1,
+                        cost_usd: None,
+                        silent: false,
+                        directives: Default::default(),
+                        decision_traces,
+                        memories_saved: Vec::new(),
+                        memories_used: memories_used.clone(),
+                        memory_conflicts: Vec::new(),
+                        provider_not_configured: false,
+                    });
                 }
             }
             StopReason::MaxTokens => {
@@ -2441,6 +2526,20 @@ pub async fn run_agent_loop_streaming(
                         content: final_content,
                         is_error: result.is_error,
                     });
+
+                    // Stop executing remaining tool calls on failure (#948)
+                    // but not for approval denials — those should continue the loop
+                    let is_approval_denial = result.is_error
+                        && result
+                            .content
+                            .contains("requires human approval and was denied");
+                    if result.is_error && !is_approval_denial {
+                        warn!(
+                            tool = %tool_call.name,
+                            "Tool execution failed — skipping remaining tool calls (streaming)"
+                        );
+                        break;
+                    }
                 }
 
                 // Detect approval denials and inject guidance to prevent infinite retry loops
@@ -2482,6 +2581,15 @@ pub async fn run_agent_loop_streaming(
                     });
                 }
 
+                // Check if ALL tool results are non-denial errors — stop the loop (#948)
+                let total_tool_results = tool_result_blocks
+                    .iter()
+                    .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                    .count();
+                let all_failed = total_tool_results > 0
+                    && non_denial_errors > 0
+                    && non_denial_errors == total_tool_results - denial_count;
+
                 let tool_results_msg = Message {
                     role: Role::User,
                     content: MessageContent::Blocks(tool_result_blocks.clone()),
@@ -2492,6 +2600,74 @@ pub async fn run_agent_loop_streaming(
 
                 if let Err(e) = memory.save_session_async(session).await {
                     warn!("Failed to interim-save session: {e}");
+                }
+
+                // When all tool calls failed, stop the agent loop and report errors (#948)
+                if all_failed {
+                    warn!(
+                        agent = %manifest.name,
+                        error_count,
+                        "All tool calls failed — stopping agent loop (streaming)"
+                    );
+                    // Collect error messages from tool results
+                    let error_details: Vec<String> = tool_result_blocks
+                        .iter()
+                        .filter_map(|b| match b {
+                            ContentBlock::ToolResult {
+                                tool_name,
+                                content,
+                                is_error: true,
+                                ..
+                            } => Some(format!("Tool '{}' failed: {}", tool_name, content)),
+                            _ => None,
+                        })
+                        .collect();
+                    let error_response = format!(
+                        "Tool execution failed. {}\n\n{}",
+                        if error_count == 1 {
+                            "The tool call returned an error.".to_string()
+                        } else {
+                            format!("All {} tool calls returned errors.", error_count)
+                        },
+                        error_details.join("\n")
+                    );
+                    session.messages.push(Message::assistant(&error_response));
+                    if let Err(e) = memory.save_session_async(session).await {
+                        warn!("Failed to save session on tool failure stop: {e}");
+                    }
+                    // Stream the error to the client
+                    let _ = stream_tx
+                        .send(StreamEvent::TextDelta {
+                            text: error_response.clone(),
+                        })
+                        .await;
+                    // Fire AgentLoopEnd hook
+                    if let Some(hook_reg) = hooks {
+                        let ctx = crate::hooks::HookContext {
+                            agent_name: &manifest.name,
+                            agent_id: agent_id_str.as_str(),
+                            event: librefang_types::agent::HookEvent::AgentLoopEnd,
+                            data: serde_json::json!({
+                                "iterations": iteration + 1,
+                                "reason": "tool_failure",
+                                "error_count": error_count,
+                            }),
+                        };
+                        let _ = hook_reg.fire(&ctx);
+                    }
+                    return Ok(AgentLoopResult {
+                        response: error_response,
+                        total_usage,
+                        iterations: iteration + 1,
+                        cost_usd: None,
+                        silent: false,
+                        directives: Default::default(),
+                        decision_traces,
+                        memories_saved: Vec::new(),
+                        memories_used: memories_used.clone(),
+                        memory_conflicts: Vec::new(),
+                        provider_not_configured: false,
+                    });
                 }
             }
             StopReason::MaxTokens => {
