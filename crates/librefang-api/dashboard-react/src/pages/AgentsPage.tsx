@@ -170,7 +170,7 @@ export function AgentsPage() {
           {coreAgents.length > 0 && (
             <div>
               <h3 className="text-[10px] font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("agents.core_agents")}</h3>
-              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3 stagger-children">
                 {coreAgents.map(agent => renderAgentCard(agent))}
               </div>
             </div>
@@ -179,7 +179,7 @@ export function AgentsPage() {
           {handAgents.length > 0 && (
             <div>
               <h3 className="text-[10px] font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("agents.hands")} ({handAgents.length})</h3>
-              <div className="space-y-2">
+              <div className="space-y-2 stagger-children">
                 {handAgents.map(agent => {
                   const isSuspended = (agent.state || "").toLowerCase() === "suspended";
                   return (
@@ -230,7 +230,7 @@ export function AgentsPage() {
       {/* Agent Detail Modal */}
       {detailAgent && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setDetailAgent(null)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[560px] max-w-[90vw] max-h-[80vh] overflow-y-auto animate-fade-in-up" onClick={e => e.stopPropagation()}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[560px] max-w-[90vw] max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             {/* Modal Header */}
             <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface/95 backdrop-blur-sm z-10">
               <div className="flex items-center justify-between">
@@ -332,7 +332,7 @@ export function AgentsPage() {
       {/* Create Agent Modal */}
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreate(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[480px] max-w-[90vw] animate-fade-in-up" onClick={e => e.stopPropagation()}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[480px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("agents.create_agent")}</h3>
               <button onClick={() => setShowCreate(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>

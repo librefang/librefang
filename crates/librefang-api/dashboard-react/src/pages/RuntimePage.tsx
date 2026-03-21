@@ -39,7 +39,7 @@ export function RuntimePage() {
         <div className="grid gap-4 md:grid-cols-4"><CardSkeleton /><CardSkeleton /><CardSkeleton /><CardSkeleton /></div>
       ) : (
         <>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 stagger-children">
             <Card hover padding="md">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{t("runtime.system_uptime")}</span>
@@ -73,7 +73,7 @@ export function RuntimePage() {
             </Card>
           </div>
 
-          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3 stagger-children">
             <Card padding="lg">
               <div className="flex items-center gap-2 mb-5">
                 <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Cpu className="h-4 w-4 text-brand" /></div>

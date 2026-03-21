@@ -123,7 +123,7 @@ export function SessionsPage() {
           <p className="text-sm text-text-dim mt-2 max-w-xs text-center">{t("sessions.empty_desc")}</p>
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-2 stagger-children">
           {sessions.map(s => {
             const agent = agentMap.get(s.agent_id || "");
             return (

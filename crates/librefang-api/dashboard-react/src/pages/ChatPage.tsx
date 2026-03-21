@@ -446,7 +446,7 @@ export function ChatPage() {
           <div className="p-4 border-b border-border-subtle">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
           </div>
-          <div className="flex-1 overflow-y-auto p-3 space-y-2">
+          <div className="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-thin">
             {agents.length === 0 ? (
               <div className="p-4 text-center text-text-dim text-sm">{t("common.no_data")}</div>
             ) : (

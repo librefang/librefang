@@ -89,7 +89,7 @@ export function LogsPage() {
           <span className="shrink-0 w-16">{t("logs.agent")}</span>
           <span className="flex-1">{t("logs.message")}</span>
         </div>
-        <div className="p-4 font-mono text-xs space-y-1 max-h-[60vh] overflow-y-auto">
+        <div className="p-4 font-mono text-xs space-y-1 max-h-[60vh] overflow-y-auto scrollbar-thin">
           {auditQuery.isLoading ? (
             <div className="text-center py-8 text-text-dim">{t("common.loading")}</div>
           ) : filteredLogs.length === 0 ? (

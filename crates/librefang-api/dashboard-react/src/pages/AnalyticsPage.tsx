@@ -45,13 +45,13 @@ export function AnalyticsPage() {
       />
 
       {isLoading ? (
-        <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
+        <div className="grid gap-4 grid-cols-2 md:grid-cols-4 stagger-children">
           {[1, 2, 3, 4].map(i => <CardSkeleton key={i} />)}
         </div>
       ) : (
         <>
           {/* KPI Cards */}
-          <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
+          <div className="grid gap-4 grid-cols-2 md:grid-cols-4 stagger-children">
             {[
               { icon: Zap, label: t("analytics.total_calls"), value: usage?.call_count ?? 0, color: "text-brand", bg: "bg-brand/10" },
               { icon: Cpu, label: t("analytics.total_tokens_label"), value: `${(((usage?.total_input_tokens ?? 0) + (usage?.total_output_tokens ?? 0)) / 1000).toFixed(0)}K`, color: "text-purple-500", bg: "bg-purple-500/10" },

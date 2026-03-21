@@ -132,7 +132,7 @@ export function OverviewPage() {
       </header>
 
       {/* Stats Cards */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4 stagger-children">
         {isLoading ? (
           // Loading skeletons
           <>
@@ -179,7 +179,7 @@ export function OverviewPage() {
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim">{t("overview.quick_actions")}</h3>
             </div>
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 stagger-children">
               {quickActions.map((action, i) => (
                 <button
                   key={i}

@@ -141,7 +141,7 @@ export function PluginsPage() {
               <p className="text-sm text-text-dim mt-1">{t("plugins.no_plugins_desc")}</p>
             </div>
           ) : (
-            <div className="space-y-2">
+            <div className="space-y-2 stagger-children">
               {plugins.map(p => (
                 <div key={p.name} className="flex items-center gap-4 p-4 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-all">
                   <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
@@ -242,7 +242,7 @@ export function PluginsPage() {
       {/* Install Modal */}
       {showInstall && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowInstall(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-up" onClick={e => e.stopPropagation()}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("plugins.install_title")}</h3>
               <button onClick={() => setShowInstall(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
@@ -317,7 +317,7 @@ export function PluginsPage() {
       {/* Scaffold Modal */}
       {showScaffold && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowScaffold(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[400px] max-w-[90vw] animate-fade-in-up" onClick={e => e.stopPropagation()}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[400px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("plugins.scaffold_title")}</h3>
               <button onClick={() => setShowScaffold(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>

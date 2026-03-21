@@ -164,7 +164,7 @@ export function GoalsPage() {
         </div>
       ) : (
         <>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 stagger-children">
             {[
               { label: t("goals.total"), value: stats.total, color: "text-brand", bg: "bg-brand/10", icon: Target },
               { label: t("goals.pending"), value: stats.pending, color: "text-text-dim", bg: "bg-main", icon: Shield },

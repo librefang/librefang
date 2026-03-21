@@ -32,7 +32,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-md max-w-[90vw] p-6 shadow-2xl animate-fade-in-up" onClick={e => e.stopPropagation()}>
+      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-md max-w-[90vw] p-6 shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-black">{t("memory.add_memory")}</h3>
           <button onClick={onClose} className="p-1 hover:bg-main/30 rounded-lg">
@@ -106,7 +106,7 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-md max-w-[90vw] p-6 shadow-2xl animate-fade-in-up" onClick={e => e.stopPropagation()}>
+      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-md max-w-[90vw] p-6 shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-black">{t("memory.edit_memory")}</h3>
           <button onClick={onClose} className="p-1 hover:bg-main/30 rounded-lg">
@@ -142,7 +142,7 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
   if (!stats) return null;
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 stagger-children">
       {[
         { icon: Database, label: t("memory.total_memories"), value: stats.total ?? 0, color: "text-brand", bg: "bg-brand/10" },
         { icon: Sparkles, label: t("memory.episodic"), value: (stats as any).episodic_count ?? 0, color: "text-success", bg: "bg-success/10" },

@@ -97,7 +97,7 @@ export function HandsPage() {
           <p className="text-sm text-text-dim">{t("common.no_data")}</p>
         </div>
       ) : (
-        <div className="grid gap-3 md:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-2 stagger-children">
           {filtered.map(h => {
             const isActive = activeHandIds.has(h.id);
             const instance = instances.find(i => i.hand_id === h.id);

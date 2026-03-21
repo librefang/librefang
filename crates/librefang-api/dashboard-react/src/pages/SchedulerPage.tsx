@@ -104,7 +104,7 @@ export function SchedulerPage() {
             <p className="text-sm text-text-dim">{t("scheduler.no_schedules")}</p>
           </div>
         ) : (
-          <div className="space-y-2">
+          <div className="space-y-2 stagger-children">
             {schedules.map(s => {
               const agent = agentMap.get(s.agent_id || "");
               return (
@@ -197,7 +197,7 @@ export function SchedulerPage() {
       {/* Create Modal */}
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreate(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-up" onClick={e => e.stopPropagation()}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("scheduler.create_job")}</h3>
               <button onClick={() => setShowCreate(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>

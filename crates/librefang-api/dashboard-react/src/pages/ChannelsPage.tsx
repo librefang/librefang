@@ -198,7 +198,7 @@ function DetailsModal({ channel, onClose, onConfigure, t }: {
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-lg max-w-[90vw] shadow-2xl max-h-[90vh] overflow-y-auto animate-fade-in-up" onClick={e => e.stopPropagation()}>
+      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-lg max-w-[90vw] shadow-2xl max-h-[90vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div className={`h-2 bg-gradient-to-r ${channel.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"} rounded-t-2xl`} />
         <div className="p-6 border-b border-border-subtle">
@@ -348,7 +348,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-surface border border-border-subtle rounded-2xl w-full max-w-md max-w-[90vw] shadow-2xl animate-fade-in-up" onClick={e => e.stopPropagation()}>
+      <div className="bg-surface border border-border-subtle rounded-2xl w-full max-w-md max-w-[90vw] shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         <div className="px-6 py-5 border-b border-border-subtle">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">

@@ -126,7 +126,7 @@ export function SettingsPage() {
               className="!text-xs" />
           </div>
 
-          <div className="space-y-1.5 max-h-80 overflow-y-auto">
+          <div className="space-y-1.5 max-h-80 overflow-y-auto scrollbar-thin">
             {toolsQuery.isLoading ? (
               <ListSkeleton rows={3} />
             ) : filteredTools.length === 0 ? (
