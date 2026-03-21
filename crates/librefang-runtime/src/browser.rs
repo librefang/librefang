@@ -239,6 +239,7 @@ impl BrowserSession {
 
         let mut args = vec![
             "--remote-debugging-port=0".to_string(),
+            "--remote-debugging-host=127.0.0.1".to_string(),
             "--no-first-run".to_string(),
             "--no-default-browser-check".to_string(),
             "--disable-extensions".to_string(),
@@ -322,7 +323,15 @@ impl BrowserSession {
             .ok_or("Cannot parse port from CDP URL")?;
         let list_url = format!("http://127.0.0.1:{port}/json/list");
 
-        let page_ws = Self::find_page_ws(&list_url).await?;
+        // Try 127.0.0.1 first; fall back to localhost in case Chrome bound to IPv6
+        let page_ws = match Self::find_page_ws(&list_url).await {
+            Ok(ws) => ws,
+            Err(_) => {
+                let fallback_url = format!("http://localhost:{port}/json/list");
+                debug!("127.0.0.1 unreachable, falling back to localhost for /json/list");
+                Self::find_page_ws(&fallback_url).await?
+            }
+        };
         debug!(page_ws = %page_ws, "Connecting to page");
 
         let cdp = CdpConnection::connect(&page_ws).await?;
