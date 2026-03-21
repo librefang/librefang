@@ -5,7 +5,8 @@ import remarkGfm from "remark-gfm";
 import { useTranslation } from "react-i18next";
 import { useSearch } from "@tanstack/react-router";
 import { listAgents, sendAgentMessage, loadAgentSession } from "../api";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight } from "lucide-react";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap } from "lucide-react";
+import { Badge } from "../components/ui/Badge";
 
 interface ChatMessage {
   id: string;
@@ -76,10 +77,58 @@ function Typewriter({ text, speed = 15 }: { text: string; speed?: number }) {
   return <span>{displayed}</span>;
 }
 
-// 聊天消息管理 - 包含历史加载和发送
+// WebSocket hook for real-time streaming
+function useWebSocket(agentId: string | null) {
+  const wsRef = useRef<WebSocket | null>(null);
+  const [wsConnected, setWsConnected] = useState(false);
+
+  useEffect(() => {
+    if (!agentId) {
+      setWsConnected(false);
+      return;
+    }
+
+    // Determine WS URL from current location
+    const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const host = window.location.host;
+    const url = `${proto}//${host}/agents/${encodeURIComponent(agentId)}/ws`;
+
+    try {
+      const ws = new WebSocket(url);
+
+      ws.onopen = () => {
+        setWsConnected(true);
+      };
+
+      ws.onclose = () => {
+        setWsConnected(false);
+      };
+
+      ws.onerror = () => {
+        setWsConnected(false);
+      };
+
+      wsRef.current = ws;
+    } catch {
+      setWsConnected(false);
+    }
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [agentId]);
+
+  return { ws: wsRef, wsConnected };
+}
+
+// 聊天消息管理 - 包含历史加载和发送 (with WS streaming)
 function useChatMessages(agentId: string | null, agents: any[] = []) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const { ws, wsConnected } = useWebSocket(agentId);
 
   // 加载历史记录
   useEffect(() => {
@@ -99,9 +148,7 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
       .catch(() => {});
   }, [agentId]);
 
-  // Slash 命令提示
-
-  // 发送消息并实现流式输出
+  // 发送消息 - WS优先，HTTP回退
   const sendMessage = useCallback(async (content: string) => {
     if (!content.trim()) return;
     const trimmed = content.trim();
@@ -151,6 +198,87 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
     setMessages(prev => [...prev, userMsg, botMsg]);
     setIsLoading(true);
 
+    // Try WebSocket streaming first
+    if (wsConnected && ws.current && ws.current.readyState === WebSocket.OPEN) {
+      try {
+        // Set up message handler for this response
+        const handleMessage = (event: MessageEvent) => {
+          try {
+            const data = JSON.parse(event.data as string);
+            if (data.type === "chunk" || data.delta) {
+              // Streaming chunk
+              const chunk = data.delta || data.content || data.text || "";
+              setMessages(prev => prev.map(m =>
+                m.id === botMsg.id ? { ...m, content: m.content + chunk } : m
+              ));
+            } else if (data.type === "done" || data.done) {
+              // Stream complete
+              setMessages(prev => prev.map(m =>
+                m.id === botMsg.id
+                  ? {
+                      ...m, isStreaming: false,
+                      tokens: { output: data.output_tokens, input: data.input_tokens },
+                      cost_usd: data.cost_usd,
+                      memories_saved: data.memories_saved,
+                      memories_used: data.memories_used,
+                    }
+                  : m
+              ));
+              setIsLoading(false);
+              ws.current?.removeEventListener("message", handleMessage);
+            } else if (data.type === "error" || data.error) {
+              setMessages(prev => prev.map(m =>
+                m.id === botMsg.id ? { ...m, isStreaming: false, error: data.error || "WebSocket error" } : m
+              ));
+              setIsLoading(false);
+              ws.current?.removeEventListener("message", handleMessage);
+            } else if (data.response) {
+              // Full response (non-streaming WS)
+              setMessages(prev => prev.map(m =>
+                m.id === botMsg.id
+                  ? {
+                      ...m, content: data.response, isStreaming: false,
+                      tokens: { output: data.output_tokens, input: data.input_tokens },
+                      cost_usd: data.cost_usd,
+                    }
+                  : m
+              ));
+              setIsLoading(false);
+              ws.current?.removeEventListener("message", handleMessage);
+            }
+          } catch {
+            // Non-JSON text chunk
+            setMessages(prev => prev.map(m =>
+              m.id === botMsg.id ? { ...m, content: m.content + event.data } : m
+            ));
+          }
+        };
+
+        ws.current.addEventListener("message", handleMessage);
+        ws.current.send(JSON.stringify({ message: trimmed }));
+
+        // Timeout fallback - if no response in 60s, clean up
+        setTimeout(() => {
+          ws.current?.removeEventListener("message", handleMessage);
+          setMessages(prev => {
+            const msg = prev.find(m => m.id === botMsg.id);
+            if (msg?.isStreaming) {
+              setIsLoading(false);
+              return prev.map(m =>
+                m.id === botMsg.id ? { ...m, isStreaming: false } : m
+              );
+            }
+            return prev;
+          });
+        }, 60000);
+
+        return;
+      } catch {
+        // Fall through to HTTP
+      }
+    }
+
+    // HTTP fallback
     try {
       const response = await sendAgentMessage(agentId, trimmed);
       const fullContent = response.response || "";
@@ -185,11 +313,11 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
       ));
       setIsLoading(false);
     }
-  }, [agentId, agents]);
+  }, [agentId, agents, wsConnected, ws]);
 
   const clearHistory = useCallback(() => setMessages([]), []);
 
-  return { messages, isLoading, sendMessage, clearHistory };
+  return { messages, isLoading, sendMessage, clearHistory, wsConnected };
 }
 
 // 消息气泡组件
@@ -349,7 +477,7 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
 }
 
 // 连接状态栏
-function ConnectionBar({ agentName, isLoading, messageCount, onClear }: { agentName: string; isLoading: boolean; messageCount: number; onClear: () => void }) {
+function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected }: { agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean }) {
   const { t } = useTranslation();
   return (
     <div className="px-4 py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface/80 to-transparent flex items-center justify-between backdrop-blur-xl backdrop-saturate-150">
@@ -359,11 +487,17 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear }: { agentN
           <span className="absolute inset-0 rounded-full bg-success/30 animate-ping" />
         </div>
         <span className="text-xs font-semibold text-success uppercase tracking-wide">{t("chat.secure_link")}</span>
-        <span className="text-text-dim/30">•</span>
+        {wsConnected && (
+          <Badge variant="brand" dot>
+            <Zap className="h-2.5 w-2.5 mr-0.5" />
+            {t("chat.ws_connected")}
+          </Badge>
+        )}
+        <span className="text-text-dim/30">&bull;</span>
         <span className="text-xs font-medium text-text-dim">{agentName}</span>
         {isLoading && (
           <span className="ml-2 px-2 py-0.5 rounded-full bg-brand/10 text-brand text-[10px] font-medium animate-pulse">
-            {t("chat.generating")}
+            {wsConnected ? t("chat.ws_streaming") : t("chat.generating")}
           </span>
         )}
       </div>
@@ -397,7 +531,7 @@ export function ChatPage() {
     if (aHand !== bHand) return aHand - bHand;
     return a.name.localeCompare(b.name);
   });
-  const { messages, isLoading, sendMessage, clearHistory } = useChatMessages(selectedAgentId || null, agents);
+  const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
   useEffect(() => {
@@ -499,6 +633,7 @@ export function ChatPage() {
               isLoading={isLoading}
               messageCount={messages.length}
               onClear={clearHistory}
+              wsConnected={wsConnected}
             />
           )}
 

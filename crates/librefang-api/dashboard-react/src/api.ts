@@ -1120,6 +1120,109 @@ export async function deleteGoal(goalId: string): Promise<ApiActionResponse> {
   return del<ApiActionResponse>(`/api/goals/${encodeURIComponent(goalId)}`);
 }
 
+// ── Network / Peers ──────────────────────────────────
+
+export interface NetworkStatusResponse {
+  online?: boolean;
+  node_id?: string;
+  protocol_version?: string;
+  listen_addr?: string;
+  peer_count?: number;
+  [key: string]: unknown;
+}
+
+export interface PeerItem {
+  id: string;
+  addr?: string;
+  name?: string;
+  status?: string;
+  connected_at?: string;
+  last_seen?: string;
+  version?: string;
+  [key: string]: unknown;
+}
+
+export async function getNetworkStatus(): Promise<NetworkStatusResponse> {
+  return get<NetworkStatusResponse>("/api/network/status");
+}
+
+export async function listPeers(): Promise<PeerItem[]> {
+  const data = await get<{ peers?: PeerItem[] }>("/api/peers");
+  return data.peers ?? [];
+}
+
+export async function getPeerDetail(peerId: string): Promise<PeerItem> {
+  return get<PeerItem>(`/api/peers/${encodeURIComponent(peerId)}`);
+}
+
+// ── A2A (Agent-to-Agent) ─────────────────────────────
+
+export interface A2AAgentItem {
+  url?: string;
+  name?: string;
+  description?: string;
+  version?: string;
+  skills?: string[];
+  status?: string;
+  discovered_at?: string;
+  [key: string]: unknown;
+}
+
+export interface A2ATaskStatus {
+  id?: string;
+  status?: string;
+  result?: string;
+  error?: string;
+  created_at?: string;
+  completed_at?: string;
+  [key: string]: unknown;
+}
+
+export async function listA2AAgents(): Promise<A2AAgentItem[]> {
+  const data = await get<{ agents?: A2AAgentItem[] }>("/api/a2a/agents");
+  return data.agents ?? [];
+}
+
+export async function discoverA2AAgent(url: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/a2a/discover", { url });
+}
+
+export async function sendA2ATask(payload: {
+  agent_url: string;
+  message: string;
+}): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/a2a/send", payload);
+}
+
+export async function getA2ATaskStatus(taskId: string): Promise<A2ATaskStatus> {
+  return get<A2ATaskStatus>(`/api/a2a/tasks/${encodeURIComponent(taskId)}/status`);
+}
+
+// ── Auth check ───────────────────────────────────────
+
+export async function checkAuthRequired(): Promise<boolean> {
+  try {
+    const response = await fetch("/api/health", {
+      headers: { ...authHeader() },
+    });
+    return response.status === 401;
+  } catch {
+    return false;
+  }
+}
+
+export function setApiKey(key: string) {
+  localStorage.setItem("librefang-api-key", key);
+}
+
+export function clearApiKey() {
+  localStorage.removeItem("librefang-api-key");
+}
+
+export function hasApiKey(): boolean {
+  return !!localStorage.getItem("librefang-api-key");
+}
+
 // ── Plugins ──────────────────────────────────────────
 
 export interface PluginItem {

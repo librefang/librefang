@@ -23,6 +23,8 @@ import { WizardPage } from "./pages/WizardPage";
 import { WorkflowsPage } from "./pages/WorkflowsPage";
 import { PluginsPage } from "./pages/PluginsPage";
 import { ModelsPage } from "./pages/ModelsPage";
+import { NetworkPage } from "./pages/NetworkPage";
+import { A2APage } from "./pages/A2APage";
 
 const rootRoute = createRootRoute({
   component: App
@@ -172,6 +174,18 @@ const pluginsRoute = createRoute({
   component: PluginsPage
 });
 
+const networkRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/network",
+  component: NetworkPage
+});
+
+const a2aRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/a2a",
+  component: A2APage
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   overviewRoute,
@@ -195,7 +209,9 @@ const routeTree = rootRoute.addChildren([
   handsRoute,
   goalsRoute,
   pluginsRoute,
-  modelsRoute
+  modelsRoute,
+  networkRoute,
+  a2aRoute
 ]);
 
 export const router = createRouter({

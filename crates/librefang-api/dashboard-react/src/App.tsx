@@ -1,15 +1,84 @@
 import { Link, Outlet, useLocation } from "@tanstack/react-router";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu } from "lucide-react";
+import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2 } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
+import { checkAuthRequired, setApiKey } from "./api";
+
+function AuthDialog({ onAuthenticated }: { onAuthenticated: () => void }) {
+  const { t } = useTranslation();
+  const [key, setKey] = useState("");
+  const [error, setError] = useState(false);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!key.trim()) return;
+    setApiKey(key.trim());
+    const stillNeeded = await checkAuthRequired();
+    if (stillNeeded) {
+      setError(true);
+      return;
+    }
+    onAuthenticated();
+  }
+
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 backdrop-blur-md">
+      <div className="w-full max-w-md mx-4 animate-fade-in-scale">
+        <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl p-8">
+          <div className="flex flex-col items-center mb-6">
+            <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mb-4 ring-2 ring-brand/20">
+              <Lock className="h-7 w-7 text-brand" />
+            </div>
+            <h2 className="text-xl font-black tracking-tight">{t("auth.title")}</h2>
+            <p className="text-sm text-text-dim mt-1">{t("auth.description")}</p>
+          </div>
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <input
+              type="password"
+              value={key}
+              onChange={(e) => { setKey(e.target.value); setError(false); }}
+              placeholder={t("auth.placeholder")}
+              autoFocus
+              className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-all ${
+                error
+                  ? "border-error focus:border-error focus:ring-error/10"
+                  : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+              }`}
+            />
+            {error && (
+              <p className="text-xs text-error font-medium">{t("auth.invalid")}</p>
+            )}
+            <button
+              type="submit"
+              className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-all shadow-lg shadow-brand/20"
+            >
+              {t("auth.submit")}
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export function App() {
   const { t } = useTranslation();
   const { theme, toggleTheme, language, setLanguage, isMobileMenuOpen, setMobileMenuOpen, isSidebarCollapsed, toggleSidebar, navLayout, collapsedNavGroups, toggleNavGroup } = useUIStore();
   const { isOpen: isPaletteOpen, setIsOpen: setPaletteOpen } = useCommandPalette();
   const location = useLocation();
+
+  const [authNeeded, setAuthNeeded] = useState(false);
+  const [authChecked, setAuthChecked] = useState(false);
+
+  // Check auth on mount
+  useEffect(() => {
+    checkAuthRequired().then((needed) => {
+      setAuthNeeded(needed);
+      setAuthChecked(true);
+    });
+  }, []);
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -65,6 +134,8 @@ export function App() {
         { to: "/analytics", label: t("nav.analytics"), icon: BarChart3 },
         { to: "/memory", label: t("nav.memory"), icon: Database },
         { to: "/comms", label: t("nav.comms"), icon: Activity },
+        { to: "/network", label: t("nav.network"), icon: Share2 },
+        { to: "/a2a", label: t("nav.a2a"), icon: Globe },
         { to: "/runtime", label: t("nav.runtime"), icon: Activity },
         { to: "/logs", label: t("nav.logs"), icon: FileText },
       ],
@@ -239,6 +310,9 @@ export function App() {
       </div>
 
       <CommandPalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
+      {authChecked && authNeeded && (
+        <AuthDialog onAuthenticated={() => setAuthNeeded(false)} />
+      )}
     </div>
   );
 }

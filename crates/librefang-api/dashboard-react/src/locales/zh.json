@@ -5,7 +5,8 @@
     "overview": "概览", "canvas": "画布", "chat": "对话", "sessions": "会话", "approvals": "审批",
     "workflows": "工作流", "scheduler": "调度器", "goals": "目标", "agents": "智能体",
     "providers": "供应商", "channels": "通道", "skills": "技能", "hands": "Hands", "plugins": "插件", "models": "模型",
-    "analytics": "分析", "memory": "记忆", "comms": "通信", "runtime": "运行时", "logs": "日志", "settings": "设置"
+    "analytics": "分析", "memory": "记忆", "comms": "通信", "runtime": "运行时", "logs": "日志", "settings": "设置",
+    "network": "网络", "a2a": "A2A"
   },
   "common": {
     "refresh": "刷新", "status": "状态", "daemon_online": "守护进程在线", "infrastructure": "控制台",
@@ -231,7 +232,8 @@
     "transmit_command": "输入消息...", "send": "发送", "secure_link": "已连接", "standby": "待机中",
     "end_history": "历史记录末尾", "welcome_system": "连接已建立。", "input_placeholder_with_agent": "向 {{name}} 发送消息...",
     "generating": "生成中...", "clear_chat": "清空对话", "send_hint": "Enter 发送 · ⌘+↵ 换行",
-    "you": "你", "bot": "Bot"
+    "you": "你", "bot": "Bot",
+    "ws_connected": "WS", "ws_streaming": "流式"
   },
   "goals": {
     "title": "目标", "subtitle": "战略规划和任务跟踪。", "total": "总目标", "pending": "待处理", "in_progress": "进行中", "completed": "已完成",
@@ -261,6 +263,29 @@
     "tier_all": "全部", "tier_frontier": "前沿", "tier_smart": "智能", "tier_balanced": "均衡", "tier_fast": "快速", "tier_local": "本地", "tier_basic": "基础", "tier_standard": "标准", "tier_advanced": "高级", "tier_enterprise": "企业",
     "col_model": "模型", "col_provider": "供应商", "col_tier": "等级", "col_context": "上下文", "col_input": "输入 $/M",
     "col_tools": "工具", "col_vision": "视觉", "col_streaming": "流式"
+  },
+  "auth": {
+    "title": "需要 API Key",
+    "description": "此实例需要身份验证才能访问。",
+    "placeholder": "输入 API Key...",
+    "submit": "认证",
+    "invalid": "无效的 API Key，请重试。"
+  },
+  "network": {
+    "section": "OFP 网络", "title": "网络", "subtitle": "开放联邦协议网络状态和连接的节点。",
+    "status_label": "状态", "node_id": "节点 ID", "protocol": "协议",
+    "peers": "已连接节点", "connected": "已连接",
+    "no_peers": "暂无连接节点", "no_peers_desc": "当前没有 OFP 节点连接到此实例。"
+  },
+  "a2a": {
+    "section": "智能体互联", "title": "A2A", "subtitle": "发现并与外部 A2A 智能体通信。",
+    "discover": "发现", "discover_agent": "发现智能体",
+    "discover_placeholder": "https://example.com/.well-known/agent.json",
+    "external_agents": "外部智能体",
+    "no_agents": "暂无外部智能体", "no_agents_desc": "输入 URL 以发现 A2A 智能体。",
+    "send_task": "发送任务", "send_to": "发送任务到",
+    "task_placeholder": "描述此智能体要完成的任务...",
+    "send": "发送", "tracked_tasks": "任务追踪"
   },
   "plugins": {
     "section": "扩展", "title": "插件", "subtitle": "通过自定义插件扩展智能体能力。",

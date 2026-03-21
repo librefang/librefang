@@ -5,7 +5,8 @@
     "overview": "Overview", "canvas": "Canvas", "chat": "Chat", "sessions": "Sessions", "approvals": "Approvals",
     "workflows": "Workflows", "scheduler": "Scheduler", "goals": "Goals", "agents": "Agents",
     "providers": "Providers", "channels": "Channels", "skills": "Skills", "hands": "Hands", "plugins": "Plugins", "models": "Models",
-    "analytics": "Analytics", "memory": "Memory", "comms": "Comms", "runtime": "Runtime", "logs": "Logs", "settings": "Settings"
+    "analytics": "Analytics", "memory": "Memory", "comms": "Comms", "runtime": "Runtime", "logs": "Logs", "settings": "Settings",
+    "network": "Network", "a2a": "A2A"
   },
   "common": {
     "refresh": "Refresh", "status": "Status", "daemon_online": "Daemon Online", "infrastructure": "Infrastructure",
@@ -231,7 +232,8 @@
     "transmit_command": "Transmit neural pulse...", "send": "Send", "secure_link": "Secure Link", "standby": "Standby",
     "end_history": "End of history", "welcome_system": "Neural bridge established.", "input_placeholder_with_agent": "Transmit command to {{name}}...",
     "generating": "Generating...", "clear_chat": "Clear Chat", "send_hint": "Enter to send, Cmd+Enter for newline",
-    "you": "You", "bot": "Bot"
+    "you": "You", "bot": "Bot",
+    "ws_connected": "WS", "ws_streaming": "Streaming"
   },
   "goals": {
     "title": "Goals", "subtitle": "Strategic planning and task tracking.", "total": "Total", "pending": "Pending", "in_progress": "In Progress", "completed": "Completed",
@@ -261,6 +263,29 @@
     "tier_all": "All", "tier_frontier": "Frontier", "tier_smart": "Smart", "tier_balanced": "Balanced", "tier_fast": "Fast", "tier_local": "Local", "tier_basic": "Basic", "tier_standard": "Standard", "tier_advanced": "Advanced", "tier_enterprise": "Enterprise",
     "col_model": "Model", "col_provider": "Provider", "col_tier": "Tier", "col_context": "Context", "col_input": "Input $/M",
     "col_tools": "Tools", "col_vision": "Vision", "col_streaming": "Streaming"
+  },
+  "auth": {
+    "title": "API Key Required",
+    "description": "This instance requires authentication to access.",
+    "placeholder": "Enter API key...",
+    "submit": "Authenticate",
+    "invalid": "Invalid API key. Please try again."
+  },
+  "network": {
+    "section": "OFP Network", "title": "Network", "subtitle": "Open Federation Protocol network status and connected peers.",
+    "status_label": "Status", "node_id": "Node ID", "protocol": "Protocol",
+    "peers": "Connected Peers", "connected": "connected",
+    "no_peers": "No peers connected", "no_peers_desc": "No OFP peers are currently connected to this node."
+  },
+  "a2a": {
+    "section": "Agent-to-Agent", "title": "A2A", "subtitle": "Discover and communicate with external A2A agents.",
+    "discover": "Discover", "discover_agent": "Discover Agent",
+    "discover_placeholder": "https://example.com/.well-known/agent.json",
+    "external_agents": "External Agents",
+    "no_agents": "No external agents", "no_agents_desc": "Discover A2A agents by entering their URL.",
+    "send_task": "Send Task", "send_to": "Send task to",
+    "task_placeholder": "Describe the task for this agent...",
+    "send": "Send", "tracked_tasks": "Tracked Tasks"
   },
   "plugins": {
     "section": "Extensions", "title": "Plugins", "subtitle": "Extend agent capabilities with custom plugins.",
