@@ -116,7 +116,10 @@ impl KnowledgeStore {
             .map_err(|e| LibreFangError::Serialization(e.to_string()))?;
         let count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM relations WHERE source_entity = ?1 AND relation_type = ?2 AND target_entity = ?3",
+                "SELECT COUNT(*) FROM relations r
+                 WHERE (r.source_entity = ?1 OR EXISTS (SELECT 1 FROM entities e WHERE e.id = ?1 AND e.name = r.source_entity))
+                 AND r.relation_type = ?2
+                 AND (r.target_entity = ?3 OR EXISTS (SELECT 1 FROM entities e WHERE e.id = ?3 AND e.name = r.target_entity))",
                 rusqlite::params![source_id, rel_str, target_id],
                 |row| row.get(0),
             )
@@ -137,8 +140,8 @@ impl KnowledgeStore {
                 r.id, r.source_entity, r.relation_type, r.target_entity, r.properties, r.confidence, r.created_at,
                 t.id, t.entity_type, t.name, t.properties, t.created_at, t.updated_at
              FROM relations r
-             JOIN entities s ON (r.source_entity = s.id OR r.source_entity = s.name)
-             JOIN entities t ON (r.target_entity = t.id OR r.target_entity = t.name)
+             JOIN entities s ON (r.source_entity = s.id OR (r.source_entity = s.name AND s.agent_id = r.agent_id))
+             JOIN entities t ON (r.target_entity = t.id OR (r.target_entity = t.name AND t.agent_id = r.agent_id))
              WHERE 1=1",
         );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
