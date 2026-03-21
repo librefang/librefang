@@ -90,7 +90,7 @@ export function App() {
       `}>
         {/* Sidebar Header */}
         <div className={`flex h-16 items-center border-b border-border-subtle transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-          isSidebarCollapsed ? "lg:justify-center lg:px-2" : "justify-between px-4"
+          isSidebarCollapsed ? "lg:justify-center lg:px-0" : "justify-between px-4"
         }`}>
           <div className={`flex items-center gap-3 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>
             <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand/20 shadow-[0_0_15px_rgba(14,165,233,0.3)] ring-1 ring-brand/40 shrink-0">
@@ -101,16 +101,9 @@ export function App() {
               <span className="text-[10px] font-semibold uppercase tracking-wider text-text-dim whitespace-nowrap">{t("common.infrastructure")}</span>
             </div>
           </div>
-          {isSidebarCollapsed && (
-            <div className="hidden lg:flex h-8 w-8 items-center justify-center rounded-lg bg-brand/20 ring-1 ring-brand/40 shrink-0">
-              <div className="h-3 w-3 rounded-full bg-brand animate-pulse" />
-            </div>
-          )}
           <button
             onClick={toggleSidebar}
-            className={`hidden lg:flex h-8 w-8 items-center justify-center rounded-lg text-text-dim hover:text-brand hover:bg-surface-hover transition-all ${
-              isSidebarCollapsed ? "mt-0" : ""
-            }`}
+            className="hidden lg:flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all"
             title={isSidebarCollapsed ? "Expand" : "Collapse"}
           >
             {isSidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
