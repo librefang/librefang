@@ -8,6 +8,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use dashmap::DashMap;
+use librefang_channels::types::SenderContext;
 use librefang_kernel::LibreFangKernel;
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_types::agent::{AgentId, AgentIdentity, AgentManifest};
@@ -923,12 +924,21 @@ pub async fn send_message(
         }
     }
 
-    let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-    match state
-        .kernel
-        .send_message_with_handle(agent_id, &req.message, Some(kernel_handle))
-        .await
-    {
+    let sender_context = request_sender_context(&req);
+    let result = if let Some(sender) = sender_context.as_ref() {
+        state
+            .kernel
+            .send_message_with_sender_context(agent_id, &req.message, sender)
+            .await
+    } else {
+        let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
+        state
+            .kernel
+            .send_message_with_handle(agent_id, &req.message, Some(kernel_handle))
+            .await
+    };
+
+    match result {
         Ok(result) => {
             // When the agent intentionally chose not to reply (NO_REPLY / [[silent]]),
             // return an empty response with the silent flag so callers can distinguish
@@ -993,6 +1003,21 @@ pub async fn send_message(
             })
         }
     }
+}
+
+fn request_sender_context(req: &MessageRequest) -> Option<SenderContext> {
+    let sender_id = req.sender_id.as_ref()?;
+    Some(SenderContext {
+        channel: req
+            .channel_type
+            .clone()
+            .unwrap_or_else(|| "api".to_string()),
+        user_id: sender_id.clone(),
+        display_name: req.sender_name.clone().unwrap_or_else(|| sender_id.clone()),
+        is_group: false,
+        thread_id: None,
+        account_id: None,
+    })
 }
 
 /// GET /api/agents/:id/session — Get agent session (conversation history).
@@ -1429,21 +1454,21 @@ pub async fn send_message_stream(
     }
 
     let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-    let (rx, _handle) =
-        match state
-            .kernel
-            .send_message_streaming(agent_id, &req.message, Some(kernel_handle))
-        {
-            Ok(pair) => pair,
-            Err(e) => {
-                tracing::warn!("Streaming message failed for agent {id}: {e}");
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"error": err_streaming_failed})),
-                )
-                    .into_response();
-            }
-        };
+    let (rx, _handle) = match state
+        .kernel
+        .send_message_streaming_with_routing(agent_id, &req.message, Some(kernel_handle))
+        .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::warn!("Streaming message failed for agent {id}: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": err_streaming_failed})),
+            )
+                .into_response();
+        }
+    };
 
     let sse_stream = stream::unfold(rx, |mut rx| async move {
         match rx.recv().await {
@@ -1648,6 +1673,47 @@ pub async fn reset_session(
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "ok", "message": "Session reset"})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
+        ),
+    }
+}
+
+/// POST /api/agents/{id}/session/reboot — Hard-reboot an agent's session (full clear, no summary).
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/session/reboot",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Hard-reboot an agent's session without saving summary", body = serde_json::Value)
+    )
+)]
+pub async fn reboot_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    match state.kernel.reboot_session(agent_id) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(
+                serde_json::json!({"status": "ok", "message": "Session rebooted. Context cleared."}),
+            ),
         ),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3792,6 +3858,33 @@ mod tests {
         assert!(cloned.tool_allowlist.is_empty());
         assert!(cloned.tool_blocklist.is_empty());
         assert!(cloned.tools_disabled);
+    }
+
+    #[test]
+    fn test_request_sender_context_none_without_sender_id() {
+        let req = MessageRequest {
+            message: "hello".to_string(),
+            attachments: Vec::new(),
+            sender_id: None,
+            sender_name: None,
+            channel_type: Some("whatsapp".to_string()),
+        };
+        assert!(request_sender_context(&req).is_none());
+    }
+
+    #[test]
+    fn test_request_sender_context_builds_defaults() {
+        let req = MessageRequest {
+            message: "hello".to_string(),
+            attachments: Vec::new(),
+            sender_id: Some("u-123".to_string()),
+            sender_name: None,
+            channel_type: None,
+        };
+        let sender = request_sender_context(&req).expect("sender context");
+        assert_eq!(sender.user_id, "u-123");
+        assert_eq!(sender.display_name, "u-123");
+        assert_eq!(sender.channel, "api");
     }
 }
 

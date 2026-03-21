@@ -1,6 +1,6 @@
 {
   "name": "@librefang/whatsapp-gateway",
-  "version": "0.6.6-20260320",
+  "version": "2026.3.2101",
   "description": "WhatsApp Web gateway for LibreFang — QR code login, bidirectional messaging via Baileys",
   "bin": {
     "librefang-whatsapp-gateway": "./index.js"

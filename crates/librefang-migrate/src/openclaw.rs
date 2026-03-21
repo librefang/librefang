@@ -85,7 +85,7 @@ struct OpenClawAgentDefaults {
     model: Option<OpenClawAgentModel>,
     workspace: Option<String>,
     tools: Option<OpenClawAgentTools>,
-    identity: Option<String>,
+    identity: Option<OpenClawIdentity>,
 }
 
 /// Agent model reference — either `"provider/model"` or `{ primary, fallbacks }`.
@@ -103,6 +103,14 @@ struct OpenClawAgentModelDetailed {
     fallbacks: Vec<String>,
 }
 
+/// Agent identity/system prompt reference — either a raw string or a structured object.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum OpenClawIdentity {
+    Text(String),
+    Structured(serde_json::Value),
+}
+
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct OpenClawAgentEntry {
@@ -112,7 +120,7 @@ struct OpenClawAgentEntry {
     tools: Option<OpenClawAgentTools>,
     workspace: Option<String>,
     skills: Option<serde_json::Value>,
-    identity: Option<String>,
+    identity: Option<OpenClawIdentity>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -144,6 +152,65 @@ fn extract_string_list(val: &serde_json::Value) -> Vec<String> {
         serde_json::Value::String(s) => vec![s.clone()],
         serde_json::Value::Object(map) => map.keys().cloned().collect(),
         _ => vec![],
+    }
+}
+
+/// Extract a prompt string from OpenClaw's `identity` field.
+///
+/// Recent OpenClaw configs may store identity as a structured object instead of a
+/// raw string. We accept both and look for common prompt-bearing keys without
+/// failing the whole migration when the shape differs.
+fn extract_identity_prompt(identity: &OpenClawIdentity) -> Option<String> {
+    match identity {
+        OpenClawIdentity::Text(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        OpenClawIdentity::Structured(value) => extract_identity_prompt_value(value),
+    }
+}
+
+fn extract_identity_prompt_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        serde_json::Value::Array(items) => {
+            let parts: Vec<String> = items
+                .iter()
+                .filter_map(extract_identity_prompt_value)
+                .collect();
+            (!parts.is_empty()).then(|| parts.join("\n\n"))
+        }
+        serde_json::Value::Object(map) => {
+            for key in [
+                "systemPrompt",
+                "system_prompt",
+                "prompt",
+                "instructions",
+                "instruction",
+                "content",
+                "text",
+                "value",
+                "persona",
+                "identity",
+                "description",
+            ] {
+                if let Some(prompt) = map.get(key).and_then(extract_identity_prompt_value) {
+                    return Some(prompt);
+                }
+            }
+
+            for nested in map.values().filter(|v| v.is_object() || v.is_array()) {
+                if let Some(prompt) = extract_identity_prompt_value(nested) {
+                    return Some(prompt);
+                }
+            }
+
+            None
+        }
+        _ => None,
     }
 }
 
@@ -1849,8 +1916,13 @@ fn convert_agent_from_json(
     // System prompt from identity
     let system_prompt = entry
         .identity
-        .clone()
-        .or_else(|| defaults.and_then(|d| d.identity.clone()))
+        .as_ref()
+        .and_then(extract_identity_prompt)
+        .or_else(|| {
+            defaults
+                .and_then(|d| d.identity.as_ref())
+                .and_then(extract_identity_prompt)
+        })
         .unwrap_or_else(|| {
             format!(
                 "You are {display_name}, an AI agent running on the LibreFang Agent OS. You are helpful, concise, and accurate."
@@ -3842,6 +3914,47 @@ mod tests {
         assert!(agent_toml.contains("provider = \"mycompany\""));
         assert!(agent_toml.contains("model = \"custom-llm-v3\""));
         assert!(agent_toml.contains("api_key_env = \"MYCOMPANY_API_KEY\""));
+    }
+
+    #[test]
+    fn test_json5_identity_object_parsing() {
+        let source = TempDir::new().unwrap();
+        let target = TempDir::new().unwrap();
+
+        let json5_content = r#"{
+  agents: {
+    defaults: {
+      model: "anthropic/claude-sonnet-4-20250514"
+    },
+    list: [
+      {
+        id: "admin",
+        name: "Admin",
+        identity: {
+          prompt: {
+            text: "You are the admin agent. Keep control-plane changes explicit."
+          }
+        }
+      }
+    ]
+  }
+}"#;
+        std::fs::write(source.path().join("openclaw.json"), json5_content).unwrap();
+
+        let options = MigrateOptions {
+            source: crate::MigrateSource::OpenClaw,
+            source_dir: source.path().to_path_buf(),
+            target_dir: target.path().to_path_buf(),
+            dry_run: false,
+        };
+
+        let report = migrate(&options).unwrap();
+        assert!(report.imported.iter().any(|i| i.kind == ItemKind::Agent));
+
+        let agent_toml =
+            std::fs::read_to_string(target.path().join("agents/admin/agent.toml")).unwrap();
+        assert!(agent_toml.contains("You are the admin agent."));
+        assert!(agent_toml.contains("Keep control-plane changes explicit."));
     }
 
     // ================================================================

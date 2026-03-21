@@ -37,6 +37,9 @@ pub struct EmbeddingConfig {
     pub api_key: String,
     /// Base URL for the API.
     pub base_url: String,
+    /// Optional override for embedding dimensions.
+    /// When set, this value is used instead of auto-inferring from the model name.
+    pub dimensions_override: Option<usize>,
 }
 
 /// Trait for computing text embeddings.
@@ -89,8 +92,10 @@ struct EmbedData {
 impl OpenAIEmbeddingDriver {
     /// Create a new OpenAI-compatible embedding driver.
     pub fn new(config: EmbeddingConfig) -> Result<Self, EmbeddingError> {
-        // Infer dimensions from model name (common models)
-        let dims = infer_dimensions(&config.model);
+        // Use explicit override if provided, otherwise infer from model name.
+        let dims = config
+            .dimensions_override
+            .unwrap_or_else(|| infer_dimensions(&config.model));
 
         Ok(Self {
             api_key: Zeroizing::new(config.api_key),
@@ -180,6 +185,7 @@ pub fn create_embedding_driver(
     model: &str,
     api_key_env: &str,
     custom_base_url: Option<&str>,
+    dimensions_override: Option<usize>,
 ) -> Result<Box<dyn EmbeddingDriver + Send + Sync>, EmbeddingError> {
     let api_key = if api_key_env.is_empty() {
         String::new()
@@ -243,6 +249,7 @@ pub fn create_embedding_driver(
         model: model.to_string(),
         api_key,
         base_url,
+        dimensions_override,
     };
 
     let driver = OpenAIEmbeddingDriver::new(config)?;
@@ -376,7 +383,7 @@ mod tests {
     #[test]
     fn test_create_embedding_driver_ollama() {
         // Should succeed even without API key (ollama is local)
-        let driver = create_embedding_driver("ollama", "all-MiniLM-L6-v2", "", None);
+        let driver = create_embedding_driver("ollama", "all-MiniLM-L6-v2", "", None, None);
         assert!(driver.is_ok());
         assert_eq!(driver.unwrap().dimensions(), 384);
     }
@@ -389,6 +396,7 @@ mod tests {
             "nomic-embed-text",
             "",
             Some("http://192.168.0.1:11434/v1"),
+            None,
         );
         assert!(driver.is_ok());
     }
@@ -401,6 +409,7 @@ mod tests {
             "nomic-embed-text",
             "",
             Some("http://192.168.0.1:11434"),
+            None,
         );
         assert!(driver.is_ok());
     }
@@ -413,7 +422,25 @@ mod tests {
             "nomic-embed-text",
             "",
             Some("http://192.168.0.1:11434/"),
+            None,
         );
         assert!(driver.is_ok());
+    }
+
+    #[test]
+    fn test_create_embedding_driver_dimensions_override() {
+        // Explicit dimensions override should take precedence over model inference
+        let driver = create_embedding_driver("ollama", "all-MiniLM-L6-v2", "", None, Some(768));
+        assert!(driver.is_ok());
+        // all-MiniLM-L6-v2 normally infers 384, but override says 768
+        assert_eq!(driver.unwrap().dimensions(), 768);
+    }
+
+    #[test]
+    fn test_create_embedding_driver_dimensions_override_none() {
+        // No override should fall back to model inference
+        let driver = create_embedding_driver("ollama", "nomic-embed-text", "", None, None);
+        assert!(driver.is_ok());
+        assert_eq!(driver.unwrap().dimensions(), 768);
     }
 }

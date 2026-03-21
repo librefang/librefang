@@ -59,6 +59,7 @@ use crate::types;
         routes::create_agent_session,
         routes::switch_agent_session,
         routes::reset_session,
+        routes::reboot_session,
         routes::clear_agent_history,
         routes::compact_session,
         routes::stop_agent,

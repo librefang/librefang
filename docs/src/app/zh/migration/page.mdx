@@ -1,0 +1,333 @@
+# 迁移指南
+
+从其他系统迁移到 LibreFang。
+
+---
+
+## 概述
+
+LibreFang 提供以下迁移支持：
+
+- **OpenFang** - 通过 `librefang-migrate` crate 自动迁移（`librefang migrate --from openfang`）
+- **OpenClaw** - 通过 `librefang-migrate` crate 自动迁移（`librefang migrate --from openclaw`）
+- **LangChain** - 手动迁移指南（无自动化工具支持）
+- **AutoGPT** - 手动迁移指南（无自动化工具支持）
+
+---
+
+## 从 OpenFang 迁移
+
+OpenFang 和 LibreFang 共享相同的目录结构和配置格式（LibreFang 是 OpenFang 的社区分支）。迁移过程是将 `~/.openfang` 递归复制到 `~/.librefang`，同时自动重写 `.toml` 和 `.env` 文件中的引用。
+
+### 自动迁移
+
+```bash
+# 迁移所有内容
+librefang migrate --from openfang
+
+# 从特定路径迁移
+librefang migrate --from openfang --path ~/.openfang
+
+# 预览模式 (不执行)
+librefang migrate --from openfang --dry-run
+```
+
+### 迁移内容
+
+| 内容 | 支持 | 说明 |
+|------|------|------|
+| Agent 清单 | ✅ | 直接复制（共享 TOML 格式） |
+| 技能配置 | ✅ | 直接复制 |
+| 通道配置 | ✅ | 直接复制 |
+| 记忆数据 | ✅ | 直接复制 |
+| 会话数据 | ✅ | 直接复制 |
+| 配置文件 | ✅ | 内容重写（`openfang` → `librefang`） |
+| 环境变量文件 | ✅ | 变量重写（`OPENFANG_` → `LIBREFANG_`） |
+
+<Note>
+  `~/.librefang` 中已存在的文件不会被覆盖。迁移只会复制目标位置不存在的文件。
+</Note>
+
+---
+
+## 从 OpenClaw 迁移
+
+### 自动迁移
+
+```bash
+# 迁移所有内容
+librefang migrate --from openclaw
+
+# 从特定路径迁移
+librefang migrate --from openclaw --path ~/.openclaw
+
+# 预览模式 (不执行)
+librefang migrate --from openclaw --dry-run
+```
+
+### 迁移内容
+
+| 内容 | 支持 | 说明 |
+|------|------|------|
+| Agent 清单 | ✅ | YAML → TOML |
+| 技能配置 | ✅ | 自动转换 |
+| 通道配置 | ✅ | 兼容配置 |
+| 记忆数据 | ✅ | SQLite 导出/导入 |
+| 工作流 | ✅ | JSON 转换 |
+
+### 手动迁移
+
+```bash
+# 导出 OpenClaw 数据
+cd ~/.openclaw
+tar -czf openclaw-data.tar.gz agents/ skills/ config/
+
+# 复制到 LibreFang
+cp openclaw-data.tar.gz ~/.librefang/
+
+# 导入
+librefang migrate --from openclaw --import
+```
+
+---
+
+## 从 LangChain 迁移
+
+> **注意**: LangChain 迁移是**手动过程**，没有自动化工具支持。
+> 以下指南展示如何手动将 LangChain 配置转换为 LibreFang 格式。
+
+### Agent 配置转换
+
+将 LangChain agent 配置转换为 LibreFang 格式：
+
+```python
+# LangChain 配置
+agent_config = {
+    "agent_type": "conversational",
+    "llm": {"provider": "openai", "model": "gpt-4"},
+    "tools": ["serpapi", "python_repl"],
+    "memory": {"type": "buffer", "k": 10}
+}
+
+# 转换为 LibreFang TOML
+"""
+[model]
+provider = "openai"
+model = "gpt-4"
+
+[capabilities]
+tools = ["web_search", "python_repl"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+"""
+```
+
+### 工具映射
+
+| LangChain 工具 | LibreFang 工具 |
+|---------------|----------------|
+| `serpapi` | `web_search` |
+| `python_repl` | `python` |
+| `wikipedia` | `web_fetch` |
+| `llm_math` | `calculator` |
+
+### API 兼容层
+
+```python
+# LangChain 风格 API
+from librefang import LibreFang
+
+lf = LibreFang(api_key="your-key")
+
+# 创建 agent
+agent = lf.create_agent(
+    agent_type="conversational",
+    llm="gpt-4",
+    tools=["web_search", "python"]
+)
+
+# 运行
+result = agent.run("What is the capital of France?")
+```
+
+---
+
+## 从 AutoGPT 迁移
+
+> **注意**: AutoGPT 迁移是**手动过程**，没有自动化工具支持。
+> 以下指南展示如何手动将 AutoGPT 配置转换为 LibreFang 格式。
+
+### 配置转换
+
+```json
+// AutoGPT 配置
+{
+  "ai_name": "MyAgent",
+  "ai_goals": ["goal1", "goal2"],
+  "llm_model_name": "gpt-4",
+  "api_usage": []
+}
+```
+
+转换为 LibreFang：
+
+```toml
+# LibreFang agent.toml
+name = "my-agent"
+version = "0.1.0"
+description = "Migrated from AutoGPT"
+module = "builtin:chat"
+
+[model]
+provider = "openai"
+model = "gpt-4"
+
+[system_prompt]
+prompt = "You are MyAgent. Your goals are: goal1, goal2."
+```
+
+### 工作流迁移
+
+```yaml
+# AutoGPT 工作流
+tasks:
+  - goal: "Research topic"
+    result: "Research completed"
+  - goal: "Summarize findings"
+    result: "Summary ready"
+```
+
+转换为 LibreFang 工作流：
+
+```json
+{
+  "name": "migrated-workflow",
+  "steps": [
+    {
+      "id": "research",
+      "agent": "researcher",
+      "input": "Research topic"
+    },
+    {
+      "id": "summarize",
+      "agent": "writer",
+      "input": "Summarize: {{research.results}}"
+    }
+  ]
+}
+```
+
+---
+
+## 数据迁移
+
+### SQLite 数据
+
+```bash
+# 导出 SQLite
+sqlite3 openclaw.db ".dump" > data.sql
+
+# 导入到 LibreFang
+librefang migrate --import-sql data.sql
+```
+
+### 记忆迁移
+
+```bash
+# 导出记忆
+librefang memory export --format json > memory.json
+
+# 导入记忆
+librefang memory import --format json memory.json
+```
+
+### 技能迁移
+
+```bash
+# 复制技能目录
+cp -r ~/.openclaw/skills/* ~/.librefang/skills/
+
+# 验证
+librefang skill verify
+```
+
+---
+
+## 验证迁移
+
+### 检查清单
+
+- [ ] Agent 清单已转换
+- [ ] 技能可加载
+- [ ] 通道配置正确
+- [ ] 记忆数据完整
+- [ ] 工作流可执行
+
+### 验证命令
+
+```bash
+# 列出所有迁移的 agent
+librefang agent list
+
+# 测试 agent
+librefang agent chat <agent-id>
+
+# 检查技能
+librefang skill list
+
+# 验证配置
+librefang doctor
+```
+
+---
+
+## 回滚
+
+### 备份
+
+```bash
+# 备份当前配置
+cp -r ~/.librefang ~/.librefang.backup
+
+# 备份数据库
+cp ~/.librefang/data/librefang.db ~/.librefang.backup.db
+```
+
+### 恢复
+
+```bash
+# 恢复配置
+rm -rf ~/.librefang
+cp -r ~/.librefang.backup ~/.librefang
+
+# 恢复数据库
+cp ~/.librefang.backup.db ~/.librefang/data/librefang.db
+```
+
+---
+
+## 常见问题
+
+### 迁移失败
+
+```bash
+# 查看详细错误
+librefang migrate --from openclaw --verbose
+
+# 跳过有问题的文件
+librefang migrate --from openclaw --skip-errors
+```
+
+### 配置冲突
+
+```bash
+# 使用 --force 覆盖
+librefang migrate --from openclaw --force
+```
+
+### 记忆丢失
+
+```bash
+# 重新导入
+librefang memory import --backup <path>
+```

@@ -1,0 +1,334 @@
+# Migration Guide
+
+Migrating to LibreFang from other systems.
+
+---
+
+## Overview
+
+LibreFang provides the following migration support:
+
+- **OpenFang** - Automated migration via `librefang-migrate` crate (`librefang migrate --from openfang`)
+- **OpenClaw** - Automated migration via `librefang-migrate` crate (`librefang migrate --from openclaw`)
+- **LangChain** - Manual migration guide (no automated tooling)
+- **AutoGPT** - Manual migration guide (no automated tooling)
+
+---
+
+## Migrating from OpenFang
+
+OpenFang and LibreFang share the same directory structure and config format (LibreFang is a community fork of OpenFang). Migration is a straightforward recursive copy of `~/.openfang` → `~/.librefang` with content rewriting in `.toml` and `.env` files.
+
+### Automatic Migration
+
+```bash
+# Migrate everything
+librefang migrate --from openfang
+
+# Migrate from specific path
+librefang migrate --from openfang --path ~/.openfang
+
+# Preview mode (no execution)
+librefang migrate --from openfang --dry-run
+```
+
+### Migration Content
+
+| Content | Supported | Description |
+|---------|-----------|-------------|
+| Agent Manifests | ✅ | Direct copy (TOML format shared) |
+| Skill Configurations | ✅ | Direct copy |
+| Channel Configurations | ✅ | Direct copy |
+| Memory Data | ✅ | Direct copy |
+| Sessions | ✅ | Direct copy |
+| Config Files | ✅ | Content rewriting (`openfang` → `librefang`) |
+| Environment Files | ✅ | Variable rewriting (`OPENFANG_` → `LIBREFANG_`) |
+
+<Note>
+  Existing files in `~/.librefang` are never overwritten. The migration only copies files that do not already exist at the destination.
+</Note>
+
+---
+
+## Migrating from OpenClaw
+
+### Automatic Migration
+
+```bash
+# Migrate everything
+librefang migrate --from openclaw
+
+# Migrate from specific path
+librefang migrate --from openclaw --path ~/.openclaw
+
+# Preview mode (no execution)
+librefang migrate --from openclaw --dry-run
+```
+
+### Migration Content
+
+| Content | Supported | Description |
+|---------|-----------|-------------|
+| Agent Manifests | ✅ | YAML → TOML |
+| Skill Configurations | ✅ | Auto conversion |
+| Channel Configurations | ✅ | Compatible config |
+| Memory Data | ✅ | SQLite export/import |
+| Workflows | ✅ | JSON conversion |
+
+### Manual Migration
+
+```bash
+# Export OpenClaw data
+cd ~/.openclaw
+tar -czf openclaw-data.tar.gz agents/ skills/ config/
+
+# Copy to LibreFang
+cp openclaw-data.tar.gz ~/.librefang/
+
+# Import
+librefang migrate --from openclaw --import
+```
+
+---
+
+## Migrating from LangChain
+
+> **Note**: LangChain migration is a **manual process**. There is no automated tool support.
+> The guide below shows how to manually convert LangChain configurations to LibreFang format.
+
+### Agent Configuration Conversion
+
+Convert LangChain agent configuration to LibreFang format:
+
+```python
+# LangChain configuration
+agent_config = {
+    "agent_type": "conversational",
+    "llm": {"provider": "openai", "model": "gpt-4"},
+    "tools": ["serpapi", "python_repl"],
+    "memory": {"type": "buffer", "k": 10}
+}
+
+# Convert to LibreFang TOML
+"""
+[model]
+provider = "openai"
+model = "gpt-4"
+
+[capabilities]
+tools = ["web_search", "python_repl"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+"""
+```
+
+### Tool Mapping
+
+| LangChain Tool | LibreFang Tool |
+|---------------|----------------|
+| `serpapi` | `web_search` |
+| `python_repl` | `python` |
+| `wikipedia` | `web_fetch` |
+| `llm_math` | `calculator` |
+
+### API Compatibility Layer
+
+```python
+# LangChain-style API
+from librefang import LibreFang
+
+lf = LibreFang(api_key="your-key")
+
+# Create agent
+agent = lf.create_agent(
+    agent_type="conversational",
+    llm="gpt-4",
+    tools=["web_search", "python"]
+)
+
+# Run
+result = agent.run("What is the capital of France?")
+```
+
+---
+
+## Migrating from AutoGPT
+
+> **Note**: AutoGPT migration is a **manual process**. There is no automated tool support.
+> The guide below shows how to manually convert AutoGPT configurations to LibreFang format.
+
+### Configuration Conversion
+
+```json
+// AutoGPT configuration
+{
+  "ai_name": "MyAgent",
+  "ai_goals": ["goal1", "goal2"],
+  "llm_model_name": "gpt-4",
+  "api_usage": []
+}
+```
+
+Convert to LibreFang:
+
+```toml
+# LibreFang agent.toml
+name = "my-agent"
+version = "0.1.0"
+description = "Migrated from AutoGPT"
+module = "builtin:chat"
+
+[model]
+provider = "openai"
+model = "gpt-4"
+
+[system_prompt]
+prompt = "You are MyAgent. Your goals are: goal1, goal2."
+```
+
+### Workflow Migration
+
+```yaml
+# AutoGPT workflow
+tasks:
+  - goal: "Research topic"
+    result: "Research completed"
+  - goal: "Summarize findings"
+    result: "Summary ready"
+```
+
+Convert to LibreFang workflow:
+
+```json
+{
+  "name": "migrated-workflow",
+  "steps": [
+    {
+      "id": "research",
+      "agent": "researcher",
+      "input": "Research topic"
+    },
+    {
+      "id": "summarize",
+      "agent": "writer",
+      "input": "Summarize: {{research.results}}"
+    }
+  ]
+}
+```
+
+---
+
+## Data Migration
+
+### SQLite Data
+
+```bash
+# Export SQLite
+sqlite3 openclaw.db ".dump" > data.sql
+
+# Import to LibreFang
+librefang migrate --import-sql data.sql
+```
+
+### Memory Migration
+
+```bash
+# Export memory
+librefang memory export --format json > memory.json
+
+# Import memory
+librefang memory import --format json memory.json
+```
+
+### Skill Migration
+
+```bash
+# Copy skill directory
+cp -r ~/.openclaw/skills/* ~/.librefang/skills/
+
+# Verify
+librefang skill verify
+```
+
+---
+
+## Verifying Migration
+
+### Checklist
+
+- [ ] Agent manifests converted
+- [ ] Skills can be loaded
+- [ ] Channel configurations correct
+- [ ] Memory data intact
+- [ ] Workflows executable
+
+### Verification Commands
+
+```bash
+# List all migrated agents
+librefang agent list
+
+# Test agent
+librefang agent chat <agent-id>
+
+# Check skills
+librefang skill list
+
+# Verify configuration
+librefang doctor
+```
+
+---
+
+## Rollback
+
+### Backup
+
+```bash
+# Backup current configuration
+cp -r ~/.librefang ~/.librefang.backup
+
+# Backup database
+cp ~/.librefang/data/librefang.db ~/.librefang.backup.db
+```
+
+### Restore
+
+```bash
+# Restore configuration
+rm -rf ~/.librefang
+cp -r ~/.librefang.backup ~/.librefang
+
+# Restore database
+cp ~/.librefang.backup.db ~/.librefang/data/librefang.db
+```
+
+---
+
+## Common Issues
+
+### Migration Failed
+
+```bash
+# View detailed errors
+librefang migrate --from openclaw --verbose
+
+# Skip problematic files
+librefang migrate --from openclaw --skip-errors
+```
+
+### Configuration Conflicts
+
+```bash
+# Use --force to override
+librefang migrate --from openclaw --force
+```
+
+### Memory Lost
+
+```bash
+# Re-import
+librefang memory import --backup <path>
+```
+

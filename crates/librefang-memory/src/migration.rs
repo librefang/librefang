@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 10;
+const SCHEMA_VERSION: u32 = 11;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -49,6 +49,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 10 {
         migrate_v10(conn)?;
+    }
+
+    if current_version < 11 {
+        migrate_v11(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -370,6 +374,19 @@ fn migrate_v10(conn: &Connection) -> Result<(), rusqlite::Error> {
 
         INSERT OR IGNORE INTO migrations (version, applied_at, description)
         VALUES (10, datetime('now'), 'Add agent_id to entities and relations');
+        ",
+    )?;
+    Ok(())
+}
+
+/// Version 11: Add index on entities.name for name-based JOIN lookups.
+fn migrate_v11(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+
+        INSERT OR IGNORE INTO migrations (version, applied_at, description)
+        VALUES (11, datetime('now'), 'Add index on entities.name for knowledge graph queries');
         ",
     )?;
     Ok(())

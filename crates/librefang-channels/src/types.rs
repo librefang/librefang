@@ -126,6 +126,9 @@ pub struct SenderContext {
     /// Thread ID for threaded conversations (platform-specific).
     #[serde(default)]
     pub thread_id: Option<String>,
+    /// Account ID for multi-bot deployments on the same channel.
+    #[serde(default)]
+    pub account_id: Option<String>,
 }
 
 /// Agent lifecycle phase for UX indicators.

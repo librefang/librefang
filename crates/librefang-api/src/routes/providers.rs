@@ -337,6 +337,29 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "base_url": p.base_url,
         });
 
+        // Attach region map so the dashboard can show available regions
+        if !p.regions.is_empty() {
+            let regions: serde_json::Map<String, serde_json::Value> = p
+                .regions
+                .iter()
+                .map(|(name, rc)| {
+                    (
+                        name.clone(),
+                        serde_json::json!({
+                            "base_url": rc.base_url,
+                            "api_key_env": rc.api_key_env,
+                        }),
+                    )
+                })
+                .collect();
+            entry["regions"] = serde_json::Value::Object(regions);
+
+            // Mark which region is active (if configured via [provider_regions])
+            if let Some(active) = state.kernel.config.provider_regions.get(&p.id) {
+                entry["active_region"] = serde_json::json!(active);
+            }
+        }
+
         // For local providers, attach the probe result
         if let Some(probe) = probe_map.remove(&i) {
             attach_probe_result(&mut entry, &probe, &p.id, &state.kernel.model_catalog);
@@ -853,10 +876,7 @@ pub async fn test_provider(
 
     // ── CLI-based providers (no HTTP base URL) ──
     if base_url.is_empty() {
-        let cli_ok = match name.as_str() {
-            "claude-code" => librefang_runtime::drivers::claude_code::claude_code_available(),
-            _ => false,
-        };
+        let cli_ok = librefang_runtime::drivers::cli_provider_available(name.as_str());
         return if cli_ok {
             (
                 StatusCode::OK,
@@ -1300,7 +1320,7 @@ pub async fn copilot_oauth_poll(
 /// After syncing, the kernel's in-memory catalog is refreshed.
 #[utoipa::path(post, path = "/api/catalog/update", tag = "models", responses((status = 200, description = "Catalog updated", body = serde_json::Value)))]
 pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match librefang_runtime::catalog_sync::sync_catalog().await {
+    match librefang_runtime::catalog_sync::sync_catalog_to(&state.kernel.config.home_dir).await {
         Ok(result) => {
             // Refresh the in-memory catalog so the new models are available immediately
             {
@@ -1309,7 +1329,7 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
                     .model_catalog
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
-                catalog.load_default_cached_catalog();
+                catalog.load_cached_catalog_for(&state.kernel.config.home_dir);
                 catalog.detect_auth();
             }
             (
@@ -1336,8 +1356,9 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
 
 /// GET /api/catalog/status — Check last catalog sync time.
 #[utoipa::path(get, path = "/api/catalog/status", tag = "models", responses((status = 200, description = "Catalog sync status", body = serde_json::Value)))]
-pub async fn catalog_status() -> impl IntoResponse {
-    let last_sync = librefang_runtime::catalog_sync::last_sync_time();
+pub async fn catalog_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let last_sync =
+        librefang_runtime::catalog_sync::last_sync_time_for(&state.kernel.config.home_dir);
     Json(serde_json::json!({
         "last_sync": last_sync,
     }))

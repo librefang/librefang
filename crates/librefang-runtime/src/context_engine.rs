@@ -425,14 +425,6 @@ impl ScriptableContextEngine {
     }
 
     /// Run a Python hook script with JSON input, return parsed JSON output.
-    ///
-    /// **Note on envelope format:** The input JSON is passed as the `message`
-    /// parameter to `run_python_agent`, which wraps it in its own envelope:
-    /// `{"type": "message", "message": <input_json>, ...}`. Hook scripts
-    /// therefore receive a double-nested structure and should extract their
-    /// payload from the inner `message` field.
-    // TODO: Consider writing JSON directly to process stdin to avoid the
-    // double-nesting, but this requires changes to the Python runtime protocol.
     async fn run_hook(
         script_path: &str,
         input: serde_json::Value,
@@ -452,18 +444,9 @@ impl ScriptableContextEngine {
             ..Default::default()
         };
 
-        let input_str =
-            serde_json::to_string(&input).map_err(|e| format!("Serialize input: {e}"))?;
-
-        let result = crate::python_runtime::run_python_agent(
-            &resolved,
-            input.get("agent_id").and_then(|v| v.as_str()).unwrap_or(""),
-            &input_str,
-            &serde_json::json!({}),
-            &config,
-        )
-        .await
-        .map_err(|e| format!("Hook script failed: {e}"))?;
+        let result = crate::python_runtime::run_python_json(&resolved, &input, &config)
+            .await
+            .map_err(|e| format!("Hook script failed: {e}"))?;
 
         // Parse response as JSON; wrap plain-text output gracefully
         Ok(serde_json::from_str(&result.response)
@@ -815,6 +798,8 @@ mod tests {
     use super::*;
     use librefang_memory::MemorySubstrate;
     use librefang_types::message::Message;
+    use std::process::Command;
+    use tempfile::tempdir;
 
     fn make_memory() -> Arc<MemorySubstrate> {
         Arc::new(MemorySubstrate::open_in_memory(0.01).unwrap())
@@ -941,6 +926,43 @@ mod tests {
         let child = AgentId::new();
         assert!(engine.prepare_subagent_context(parent, child).await.is_ok());
         assert!(engine.merge_subagent_context(parent, child).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_scriptable_hook_receives_direct_json_payload() {
+        if Command::new("python3").arg("--version").output().is_err()
+            && Command::new("python").arg("--version").output().is_err()
+        {
+            eprintln!("Python not available, skipping scriptable hook payload test");
+            return;
+        }
+
+        let tmp = tempdir().unwrap();
+        let script_path = tmp.path().join("hook.py");
+        std::fs::write(
+            &script_path,
+            r#"import json
+import sys
+
+payload = json.loads(sys.stdin.read())
+print(json.dumps({"type": payload.get("type"), "message": payload.get("message")}))
+"#,
+        )
+        .unwrap();
+
+        let output = ScriptableContextEngine::run_hook(
+            script_path.to_str().unwrap(),
+            serde_json::json!({
+                "type": "ingest",
+                "agent_id": "agent-123",
+                "message": "hello",
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(output["type"], "ingest");
+        assert_eq!(output["message"], "hello");
     }
 
     #[test]

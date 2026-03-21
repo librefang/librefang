@@ -180,6 +180,8 @@ pub struct ChannelOverrides {
     pub dm_policy: DmPolicy,
     /// Group message policy.
     pub group_policy: GroupPolicy,
+    /// Global rate limit for this channel (messages per minute, 0 = unlimited).
+    pub rate_limit_per_minute: u32,
     /// Per-user rate limit (messages per minute, 0 = unlimited).
     pub rate_limit_per_user: u32,
     /// Enable thread replies.
@@ -1071,13 +1073,15 @@ pub struct SidecarChannelConfig {
 
 /// Session retention policy configuration.
 ///
-/// Controls automatic cleanup of idle or excess sessions.
+/// Controls automatic cleanup of idle or excess sessions and optional
+/// startup prompt injection.
 /// Configure in `config.toml`:
 /// ```toml
 /// [session]
 /// retention_days = 30
 /// max_sessions_per_agent = 100
 /// cleanup_interval_hours = 24
+/// reset_prompt = "You are a helpful coding assistant. Always respond in English."
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1088,6 +1092,11 @@ pub struct SessionConfig {
     pub max_sessions_per_agent: u32,
     /// How often the cleanup job runs (in hours).
     pub cleanup_interval_hours: u32,
+    /// Optional message injected as the first system message when a new session
+    /// starts or when the session is reset. Useful for setting up persistent
+    /// context or instructions across all agents.
+    #[serde(default)]
+    pub reset_prompt: Option<String>,
 }
 
 impl Default for SessionConfig {
@@ -1096,6 +1105,7 @@ impl Default for SessionConfig {
             retention_days: 0,
             max_sessions_per_agent: 0,
             cleanup_interval_hours: 24,
+            reset_prompt: None,
         }
     }
 }
@@ -1241,6 +1251,11 @@ pub struct KernelConfig {
     /// API listen address (e.g., "0.0.0.0:4545").
     #[serde(alias = "listen_addr")]
     pub api_listen: String,
+    /// Allowed CORS origins. When non-empty, these origins are added to the
+    /// CORS allow list (in addition to localhost). Accepts exact origin strings
+    /// like `"https://dash.example.com"`.
+    #[serde(default)]
+    pub cors_origin: Vec<String>,
     /// Whether to enable the OFP network layer.
     pub network_enabled: bool,
     /// Default LLM provider configuration.
@@ -1299,6 +1314,14 @@ pub struct KernelConfig {
     /// Root directory for agent workspaces. Default: `~/.librefang/workspaces`
     #[serde(default)]
     pub workspaces_dir: Option<PathBuf>,
+    /// Global shared workspace directory for cross-session file persistence.
+    /// Default: `~/.librefang/workspace`
+    #[serde(default)]
+    pub workspace_dir: Option<PathBuf>,
+    /// Custom log directory. When set, log files are written here instead of
+    /// the default `~/.librefang/` directory.
+    #[serde(default)]
+    pub log_dir: Option<PathBuf>,
     /// Media understanding configuration.
     #[serde(default)]
     pub media: crate::media::MediaConfig,
@@ -1359,6 +1382,11 @@ pub struct KernelConfig {
     /// e.g. `ollama = "http://192.168.1.100:11434/v1"`
     #[serde(default)]
     pub provider_urls: HashMap<String, String>,
+    /// Provider region selection (provider ID → region name).
+    /// Selects a regional endpoint from the provider's `[provider.regions]` map.
+    /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
+    #[serde(default)]
+    pub provider_regions: HashMap<String, String>,
     /// Provider API key env var overrides (provider ID → env var name).
     /// For custom/unknown providers, maps the provider name to the environment
     /// variable holding the API key. e.g. `nvidia = "NVIDIA_API_KEY"`.
@@ -1368,6 +1396,9 @@ pub struct KernelConfig {
     /// Vertex AI provider configuration.
     #[serde(default)]
     pub vertex_ai: VertexAiConfig,
+    /// Azure OpenAI provider configuration.
+    #[serde(default)]
+    pub azure_openai: AzureOpenAiConfig,
     /// OAuth client ID overrides for PKCE flows.
     #[serde(default)]
     pub oauth: OAuthConfig,
@@ -1403,6 +1434,62 @@ pub struct KernelConfig {
     /// Pluggable context engine configuration.
     #[serde(default)]
     pub context_engine: ContextEngineTomlConfig,
+    /// Audit log configuration.
+    #[serde(default)]
+    pub audit: AuditConfig,
+    /// Health check configuration.
+    #[serde(default)]
+    pub health_check: HealthCheckConfig,
+    /// Plugin registry configuration.
+    #[serde(default)]
+    pub plugins: PluginsConfig,
+    /// Strict config mode: when `true`, the daemon refuses to start if the
+    /// config file contains unknown or unrecognised fields. When `false`
+    /// (the default), unknown fields are logged as warnings but the daemon
+    /// boots normally. This is the "tolerant mode" toggle.
+    #[serde(default)]
+    pub strict_config: bool,
+    /// Override path to the Qwen Code CLI binary.
+    ///
+    /// When LibreFang runs as a daemon/service the subprocess may not inherit
+    /// the user's full PATH, so the `qwen` binary is not found even though it
+    /// is installed.  Set this to the absolute path of the CLI
+    /// (e.g. `"/home/user/.local/bin/qwen"`).
+    ///
+    /// Alternatively you can set `provider_urls.qwen-code` to the same value.
+    #[serde(default)]
+    pub qwen_code_path: Option<String>,
+}
+
+/// Azure OpenAI provider configuration.
+///
+/// Azure OpenAI uses a different URL format and authentication header
+/// than standard OpenAI. Configure in config.toml:
+/// ```toml
+/// [azure_openai]
+/// endpoint = "https://my-resource.openai.azure.com"
+/// deployment = "gpt-4o"
+/// api_version = "2024-02-01"
+/// ```
+///
+/// Environment variable fallbacks:
+/// - `AZURE_OPENAI_ENDPOINT` for the resource URL
+/// - `AZURE_OPENAI_API_VERSION` for the API version (default: "2024-02-01")
+/// - `AZURE_OPENAI_DEPLOYMENT` for the deployment name
+/// - `AZURE_OPENAI_API_KEY` for the API key
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AzureOpenAiConfig {
+    /// Azure resource endpoint URL (e.g., "https://my-resource.openai.azure.com").
+    /// Falls back to `AZURE_OPENAI_ENDPOINT` env var.
+    pub endpoint: Option<String>,
+    /// Azure OpenAI API version (default: "2024-02-01").
+    /// Falls back to `AZURE_OPENAI_API_VERSION` env var.
+    pub api_version: Option<String>,
+    /// Azure deployment name (e.g., "gpt-4o").
+    /// Falls back to `AZURE_OPENAI_DEPLOYMENT` env var.
+    /// If not set, the model name from `default_model.model` is used.
+    pub deployment: Option<String>,
 }
 
 /// Vertex AI provider configuration.
@@ -1784,6 +1871,63 @@ fn default_max_cron_jobs() -> usize {
     500
 }
 
+/// Audit log configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [audit]
+/// retention_days = 90
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AuditConfig {
+    /// How many days to retain audit log entries. Default: 90. Set to 0 for unlimited.
+    pub retention_days: u32,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        Self { retention_days: 90 }
+    }
+}
+
+/// Health check configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [health_check]
+/// health_check_interval_secs = 60
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HealthCheckConfig {
+    /// Interval in seconds between periodic health checks of LLM providers. Default: 60.
+    pub health_check_interval_secs: u64,
+}
+
+impl Default for HealthCheckConfig {
+    fn default() -> Self {
+        Self {
+            health_check_interval_secs: 60,
+        }
+    }
+}
+
+/// Plugin registry configuration.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [plugins]
+/// plugin_registries = ["librefang/plugin-registry"]
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginsConfig {
+    /// Additional GitHub `owner/repo` plugin registries to search.
+    /// Merged with `context_engine.plugin_registries`.
+    pub plugin_registries: Vec<String>,
+}
+
 fn default_prompt_caching() -> bool {
     true
 }
@@ -1966,6 +2110,8 @@ impl Default for KernelConfig {
             extensions: ExtensionsConfig::default(),
             vault: VaultConfig::default(),
             workspaces_dir: None,
+            workspace_dir: None,
+            log_dir: None,
             media: crate::media::MediaConfig::default(),
             links: crate::media::LinkConfig::default(),
             reload: ReloadConfig::default(),
@@ -1985,8 +2131,10 @@ impl Default for KernelConfig {
             thinking: None,
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
+            provider_regions: HashMap::new(),
             provider_api_keys: HashMap::new(),
             vertex_ai: VertexAiConfig::default(),
+            azure_openai: AzureOpenAiConfig::default(),
             oauth: OAuthConfig::default(),
             sidecar_channels: Vec::new(),
             proxy: ProxyConfig::default(),
@@ -1997,6 +2145,12 @@ impl Default for KernelConfig {
             tool_policy: crate::tool_policy::ToolPolicy::default(),
             proactive_memory: crate::memory::ProactiveMemoryConfig::default(),
             context_engine: ContextEngineTomlConfig::default(),
+            audit: AuditConfig::default(),
+            health_check: HealthCheckConfig::default(),
+            plugins: PluginsConfig::default(),
+            cors_origin: Vec::new(),
+            strict_config: false,
+            qwen_code_path: None,
         }
     }
 }
@@ -2007,6 +2161,13 @@ impl KernelConfig {
         self.workspaces_dir
             .clone()
             .unwrap_or_else(|| self.home_dir.join("workspaces"))
+    }
+
+    /// Resolved global shared workspace directory for cross-session persistence.
+    pub fn effective_workspace_dir(&self) -> PathBuf {
+        self.workspace_dir
+            .clone()
+            .unwrap_or_else(|| self.home_dir.join("workspace"))
     }
 
     /// Resolve the API key env var name for a provider.
@@ -2071,6 +2232,8 @@ impl std::fmt::Debug for KernelConfig {
             .field("extensions", &self.extensions)
             .field("vault", &format!("enabled={}", self.vault.enabled))
             .field("workspaces_dir", &self.workspaces_dir)
+            .field("workspace_dir", &self.workspace_dir)
+            .field("log_dir", &self.log_dir)
             .field(
                 "media",
                 &format!(
@@ -2121,6 +2284,8 @@ impl std::fmt::Debug for KernelConfig {
                 "external_auth",
                 &format!("enabled={}", self.external_auth.enabled),
             )
+            .field("strict_config", &self.strict_config)
+            .field("qwen_code_path", &self.qwen_code_path)
             .finish()
     }
 }
@@ -2180,9 +2345,16 @@ pub struct MemoryConfig {
     /// Environment variable name for the embedding API key.
     #[serde(default)]
     pub embedding_api_key_env: Option<String>,
+    /// Override embedding dimensions instead of auto-inferring from model name.
+    #[serde(default)]
+    pub embedding_dimensions: Option<usize>,
     /// How often to run memory consolidation (hours). 0 = disabled.
     #[serde(default = "default_consolidation_interval")]
     pub consolidation_interval_hours: u64,
+    /// When true, use SQLite FTS5 full-text search instead of embedding-based
+    /// vector similarity. Eliminates the need for an external embedding provider.
+    #[serde(default)]
+    pub fts_only: Option<bool>,
 }
 
 fn default_consolidation_interval() -> u64 {
@@ -2198,7 +2370,9 @@ impl Default for MemoryConfig {
             decay_rate: 0.1,
             embedding_provider: None,
             embedding_api_key_env: None,
+            embedding_dimensions: None,
             consolidation_interval_hours: default_consolidation_interval(),
+            fts_only: None,
         }
     }
 }
@@ -2411,6 +2585,11 @@ pub struct DiscordConfig {
     /// Set to false to allow bot-to-bot interactions in multi-agent setups.
     #[serde(default = "default_true")]
     pub ignore_bots: bool,
+    /// Custom text patterns that trigger the bot (case-insensitive contains match).
+    /// When any pattern matches the message content, the bot treats it as if it was mentioned.
+    /// Example: `["hey bot", "!ask"]`
+    #[serde(default)]
+    pub mention_patterns: Vec<String>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2426,6 +2605,7 @@ impl Default for DiscordConfig {
             default_agent: None,
             intents: 37376,
             ignore_bots: true,
+            mention_patterns: vec![],
             overrides: ChannelOverrides::default(),
         }
     }
@@ -2447,9 +2627,18 @@ pub struct SlackConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Whether to disable link unfurling (preview expansion) in sent messages.
+    /// When set to `false`, Slack will not expand link previews.
+    /// When `None` (default), Slack uses its own default behavior.
+    #[serde(default)]
+    pub unfurl_links: Option<bool>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// When true, bot replies are posted as top-level channel messages instead
+    /// of threaded replies. Defaults to `None` (i.e. use normal threading).
+    #[serde(default)]
+    pub force_flat_replies: Option<bool>,
 }
 
 impl Default for SlackConfig {
@@ -2460,7 +2649,9 @@ impl Default for SlackConfig {
             allowed_channels: vec![],
             account_id: None,
             default_agent: None,
+            unfurl_links: None,
             overrides: ChannelOverrides::default(),
+            force_flat_replies: None,
         }
     }
 }
@@ -2488,6 +2679,11 @@ pub struct WhatsAppConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Owner phone numbers for owner-routing mode (digits only, no '+' prefix).
+    /// When set, messages from non-owner numbers are forwarded to the first
+    /// owner number with sender context, and the sender receives an auto-ack.
+    #[serde(default, deserialize_with = "deserialize_string_or_int_vec")]
+    pub owner_numbers: Vec<String>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2504,6 +2700,7 @@ impl Default for WhatsAppConfig {
             allowed_users: vec![],
             account_id: None,
             default_agent: None,
+            owner_numbers: vec![],
             overrides: ChannelOverrides::default(),
         }
     }
@@ -2561,6 +2758,9 @@ pub struct MatrixConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Whether to auto-accept room invites (default: false).
+    #[serde(default)]
+    pub auto_accept_invites: bool,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2575,6 +2775,7 @@ impl Default for MatrixConfig {
             allowed_rooms: vec![],
             account_id: None,
             default_agent: None,
+            auto_accept_invites: false,
             overrides: ChannelOverrides::default(),
         }
     }
@@ -3863,9 +4064,101 @@ impl Default for LinkedInConfig {
 }
 
 impl KernelConfig {
+    /// Returns the set of known top-level field names for `KernelConfig`.
+    ///
+    /// Used by the config loader to detect unknown/misspelled fields in the
+    /// TOML file and warn (tolerant mode) or reject (strict mode).
+    pub fn known_top_level_fields() -> &'static [&'static str] {
+        &[
+            "home_dir",
+            "data_dir",
+            "log_level",
+            "api_listen",
+            "listen_addr", // alias for api_listen
+            "cors_origin",
+            "network_enabled",
+            "default_model",
+            "memory",
+            "network",
+            "channels",
+            "api_key",
+            "mode",
+            "language",
+            "users",
+            "mcp_servers",
+            "a2a",
+            "usage_footer",
+            "stable_prefix_mode",
+            "web",
+            "fallback_providers",
+            "browser",
+            "extensions",
+            "vault",
+            "workspaces_dir",
+            "media",
+            "links",
+            "reload",
+            "webhook_triggers",
+            "approval",
+            "approval_policy", // alias for approval
+            "max_cron_jobs",
+            "include",
+            "exec_policy",
+            "bindings",
+            "broadcast",
+            "auto_reply",
+            "canvas",
+            "tts",
+            "docker",
+            "pairing",
+            "auth_profiles",
+            "thinking",
+            "budget",
+            "provider_urls",
+            "provider_regions",
+            "provider_api_keys",
+            "vertex_ai",
+            "oauth",
+            "sidecar_channels",
+            "proxy",
+            "prompt_caching",
+            "session",
+            "queue",
+            "external_auth",
+            "tool_policy",
+            "proactive_memory",
+            "context_engine",
+            "audit",
+            "health_check",
+            "plugins",
+            "strict_config",
+        ]
+    }
+
+    /// Detect unknown top-level keys in a raw TOML value.
+    ///
+    /// Returns a list of field names that appear at the top level of the
+    /// config file but are not recognised by `KernelConfig`.
+    pub fn detect_unknown_fields(raw: &toml::Value) -> Vec<String> {
+        let known: std::collections::HashSet<&str> =
+            Self::known_top_level_fields().iter().copied().collect();
+        let mut unknown = Vec::new();
+        if let toml::Value::Table(tbl) = raw {
+            for key in tbl.keys() {
+                if !known.contains(key.as_str()) {
+                    unknown.push(key.clone());
+                }
+            }
+        }
+        unknown.sort();
+        unknown
+    }
+
     /// Validate the configuration, returning a list of warnings.
     ///
-    /// Checks that env vars referenced by configured channels are set.
+    /// Checks for common misconfigurations such as missing API keys for
+    /// configured channels, invalid port numbers, unreachable paths,
+    /// and unrecognised log levels.
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
@@ -4302,8 +4595,72 @@ impl KernelConfig {
             SearchProvider::DuckDuckGo | SearchProvider::Auto => {}
         }
 
-        // --- Production bounds validation ---
-        // Clamp dangerous zero/extreme values to safe defaults instead of crashing.
+        // --- Structural validation ---
+
+        // Validate api_listen has a parseable port
+        if let Some(colon_pos) = self.api_listen.rfind(':') {
+            let port_str = &self.api_listen[colon_pos + 1..];
+            match port_str.parse::<u16>() {
+                Ok(0) => {
+                    warnings
+                        .push("api_listen port is 0 (OS will assign a random port)".to_string());
+                }
+                Err(_) => {
+                    warnings.push(format!("api_listen port '{}' is not a valid u16", port_str));
+                }
+                Ok(_) => {}
+            }
+        } else {
+            warnings.push(format!(
+                "api_listen '{}' does not contain a port (expected host:port)",
+                self.api_listen
+            ));
+        }
+
+        // Validate log_level is a recognised value
+        match self.log_level.to_lowercase().as_str() {
+            "trace" | "debug" | "info" | "warn" | "error" | "off" => {}
+            other => {
+                warnings.push(format!(
+                    "log_level '{}' is not a recognised level (expected trace/debug/info/warn/error/off)",
+                    other
+                ));
+            }
+        }
+
+        // Validate home_dir exists (or can be created)
+        if !self.home_dir.as_os_str().is_empty() && !self.home_dir.exists() {
+            warnings.push(format!(
+                "home_dir '{}' does not exist (will be created on first use)",
+                self.home_dir.display()
+            ));
+        }
+
+        // Validate data_dir parent is writable (basic path sanity)
+        if !self.data_dir.as_os_str().is_empty() && !self.data_dir.exists() {
+            if let Some(parent) = self.data_dir.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    warnings.push(format!(
+                        "data_dir parent '{}' does not exist",
+                        parent.display()
+                    ));
+                }
+            }
+        }
+
+        // Validate max_cron_jobs is within a reasonable range
+        if self.max_cron_jobs > 10_000 {
+            warnings.push(format!(
+                "max_cron_jobs {} exceeds reasonable limit (10000)",
+                self.max_cron_jobs
+            ));
+        }
+
+        // Validate network config: shared_secret must be set if network is enabled
+        if self.network_enabled && self.network.shared_secret.is_empty() {
+            warnings.push("network_enabled is true but network.shared_secret is empty".to_string());
+        }
+
         warnings
     }
 
@@ -4404,6 +4761,34 @@ mod tests {
         assert_eq!(sl.app_token_env, "SLACK_APP_TOKEN");
         assert_eq!(sl.bot_token_env, "SLACK_BOT_TOKEN");
         assert!(sl.allowed_channels.is_empty());
+        assert!(sl.unfurl_links.is_none());
+    }
+
+    #[test]
+    fn test_slack_config_unfurl_links_deserialization() {
+        let toml_str = r#"
+            app_token_env = "SLACK_APP_TOKEN"
+            bot_token_env = "SLACK_BOT_TOKEN"
+            unfurl_links = false
+        "#;
+        let sl: SlackConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(sl.unfurl_links, Some(false));
+
+        let toml_str2 = r#"
+            app_token_env = "SLACK_APP_TOKEN"
+            bot_token_env = "SLACK_BOT_TOKEN"
+            unfurl_links = true
+        "#;
+        let sl2: SlackConfig = toml::from_str(toml_str2).unwrap();
+        assert_eq!(sl2.unfurl_links, Some(true));
+
+        // Default (field omitted) should be None
+        let toml_str3 = r#"
+            app_token_env = "SLACK_APP_TOKEN"
+            bot_token_env = "SLACK_BOT_TOKEN"
+        "#;
+        let sl3: SlackConfig = toml::from_str(toml_str3).unwrap();
+        assert!(sl3.unfurl_links.is_none());
     }
 
     #[test]
@@ -4834,6 +5219,19 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_regions_toml_roundtrip() {
+        let toml_str = r#"
+            [provider_regions]
+            qwen = "intl"
+            minimax = "china"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.provider_regions.len(), 2);
+        assert_eq!(config.provider_regions.get("qwen").unwrap(), "intl");
+        assert_eq!(config.provider_regions.get("minimax").unwrap(), "china");
+    }
+
+    #[test]
     fn test_one_or_many_single_toml_table() {
         // Single [channels.telegram] table should parse as OneOrMany with one element
         let toml_str = r#"
@@ -4957,5 +5355,201 @@ mod tests {
             debug.contains("***"),
             "Debug output should contain redacted marker"
         );
+    }
+
+    // --- Config validation with tolerant mode tests ---
+
+    #[test]
+    fn test_strict_config_defaults_to_false() {
+        let config = KernelConfig::default();
+        assert!(!config.strict_config);
+    }
+
+    #[test]
+    fn test_strict_config_toml_roundtrip() {
+        let config = KernelConfig {
+            strict_config: true,
+            ..Default::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let back: KernelConfig = toml::from_str(&toml_str).unwrap();
+        assert!(back.strict_config);
+    }
+
+    #[test]
+    fn test_known_top_level_fields_not_empty() {
+        let fields = KernelConfig::known_top_level_fields();
+        assert!(fields.len() > 30, "expected many known fields");
+        assert!(fields.contains(&"api_listen"));
+        assert!(fields.contains(&"log_level"));
+        assert!(fields.contains(&"strict_config"));
+        // Aliases must also be present
+        assert!(fields.contains(&"listen_addr"));
+        assert!(fields.contains(&"approval_policy"));
+    }
+
+    #[test]
+    fn test_detect_unknown_fields_clean() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            log_level = "info"
+            api_listen = "0.0.0.0:4545"
+        "#,
+        )
+        .unwrap();
+        let unknown = KernelConfig::detect_unknown_fields(&raw);
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn test_detect_unknown_fields_with_typos() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            log_level = "info"
+            api_listn = "0.0.0.0:4545"
+            frobnicate = true
+        "#,
+        )
+        .unwrap();
+        let unknown = KernelConfig::detect_unknown_fields(&raw);
+        assert_eq!(unknown.len(), 2);
+        assert!(unknown.contains(&"api_listn".to_string()));
+        assert!(unknown.contains(&"frobnicate".to_string()));
+    }
+
+    #[test]
+    fn test_detect_unknown_fields_aliases_accepted() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            listen_addr = "0.0.0.0:4545"
+            approval_policy = {}
+        "#,
+        )
+        .unwrap();
+        let unknown = KernelConfig::detect_unknown_fields(&raw);
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn test_validate_invalid_port_string() {
+        let config = KernelConfig {
+            api_listen: "0.0.0.0:notaport".to_string(),
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(
+            warnings.iter().any(|w| w.contains("not a valid u16")),
+            "expected port parse warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_port_zero_warns() {
+        let config = KernelConfig {
+            api_listen: "0.0.0.0:0".to_string(),
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(
+            warnings.iter().any(|w| w.contains("port is 0")),
+            "expected port-zero warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_missing_port_colon() {
+        let config = KernelConfig {
+            api_listen: "localhost".to_string(),
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("does not contain a port")),
+            "expected missing-port warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_bad_log_level() {
+        let config = KernelConfig {
+            log_level: "verbose".to_string(),
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("not a recognised level")),
+            "expected bad log_level warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_good_log_levels() {
+        for level in &["trace", "debug", "info", "warn", "error", "off"] {
+            let config = KernelConfig {
+                log_level: level.to_string(),
+                ..Default::default()
+            };
+            let warnings = config.validate();
+            assert!(
+                !warnings
+                    .iter()
+                    .any(|w| w.contains("not a recognised level")),
+                "level '{}' should be accepted, got: {:?}",
+                level,
+                warnings
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_max_cron_jobs_too_large() {
+        let config = KernelConfig {
+            max_cron_jobs: 100_000,
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(
+            warnings.iter().any(|w| w.contains("max_cron_jobs")),
+            "expected max_cron_jobs warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_network_enabled_without_secret() {
+        let config = KernelConfig {
+            network_enabled: true,
+            network: NetworkConfig {
+                shared_secret: String::new(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(
+            warnings.iter().any(|w| w.contains("shared_secret")),
+            "expected shared_secret warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_default_config_no_structural_errors() {
+        // Default config should only have path warnings (home_dir may not exist
+        // in test environment) but no port/log_level/structural issues.
+        let config = KernelConfig::default();
+        let warnings = config.validate();
+        for w in &warnings {
+            assert!(
+                !w.contains("not a valid u16"),
+                "default config should have valid port"
+            );
+            assert!(
+                !w.contains("not a recognised level"),
+                "default config should have valid log_level"
+            );
+        }
     }
 }

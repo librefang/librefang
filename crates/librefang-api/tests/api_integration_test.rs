@@ -185,6 +185,10 @@ async fn start_test_server_with_provider(
 async fn start_full_router(api_key: &str) -> FullRouterHarness {
     let tmp = tempfile::tempdir().expect("Failed to create temp dir");
 
+    // Sync registry content into the temp home_dir so the kernel boots
+    // with a populated model catalog.
+    librefang_runtime::registry_sync::sync_registry(tmp.path());
+
     let config = KernelConfig {
         home_dir: tmp.path().to_path_buf(),
         data_dir: tmp.path().join("data"),
@@ -296,7 +300,7 @@ async fn test_status_endpoint() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "running");
-    assert_eq!(body["agent_count"], 1); // default router auto-spawned
+    assert_eq!(body["agent_count"], 1); // default assistant auto-spawned
     assert!(body["uptime_seconds"].is_number());
     assert_eq!(body["default_provider"], "ollama");
     assert_eq!(body["agents"].as_array().unwrap().len(), 1);
@@ -432,6 +436,83 @@ async fn test_build_router_unauthorized_responses_include_api_version_header() {
 }
 
 #[tokio::test]
+async fn test_run_migrate_uses_daemon_home_when_target_dir_is_empty() {
+    let harness = start_full_router("").await;
+
+    let source_dir = harness.state.kernel.config.home_dir.join("openclaw-source");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(
+        source_dir.join("openclaw.json"),
+        r#"{
+          agents: {
+            list: [
+              { id: "main", name: "Main Agent" }
+            ],
+            defaults: {
+              model: "anthropic/claude-sonnet-4-20250514"
+            }
+          }
+        }"#,
+    )
+    .unwrap();
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/migrate")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "source": "openclaw",
+                "source_dir": source_dir.display().to_string(),
+                "target_dir": "",
+                "dry_run": false
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+
+    let response = harness.app.clone().oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["status"], "completed");
+    assert_eq!(json["dry_run"], false);
+
+    let config_path = harness.state.kernel.config.home_dir.join("config.toml");
+    let agent_path = harness
+        .state
+        .kernel
+        .config
+        .home_dir
+        .join("agents")
+        .join("main")
+        .join("agent.toml");
+    let report_path = harness
+        .state
+        .kernel
+        .config
+        .home_dir
+        .join("migration_report.md");
+
+    assert!(
+        config_path.exists(),
+        "config.toml should be written to daemon home"
+    );
+    assert!(
+        agent_path.exists(),
+        "agent.toml should be written to daemon home"
+    );
+    assert!(
+        report_path.exists(),
+        "migration_report.md should be written to daemon home"
+    );
+}
+
+#[tokio::test]
 async fn test_config_reload_reports_proxy_changes_require_restart() {
     let server = start_test_server().await;
     let client = reqwest::Client::new();
@@ -501,7 +582,7 @@ async fn test_spawn_list_kill_agent() {
     let agent_id = body["agent_id"].as_str().unwrap().to_string();
     assert!(!agent_id.is_empty());
 
-    // --- List (2 agents: default router + test-agent) ---
+    // --- List (2 agents: default assistant + test-agent) ---
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
         .send()
@@ -525,7 +606,7 @@ async fn test_spawn_list_kill_agent() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "killed");
 
-    // --- List (only default router remains) ---
+    // --- List (only default assistant remains) ---
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
         .send()
@@ -535,7 +616,7 @@ async fn test_spawn_list_kill_agent() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let agents = body["items"].as_array().unwrap();
     assert_eq!(agents.len(), 1);
-    assert_eq!(agents[0]["name"], "router");
+    assert_eq!(agents[0]["name"], "assistant");
 }
 
 #[tokio::test]
@@ -935,7 +1016,7 @@ memory_write = ["self.*"]
         ids.push(body["agent_id"].as_str().unwrap().to_string());
     }
 
-    // List should show 4 (3 spawned + default router)
+    // List should show 4 (3 spawned + default assistant)
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
         .send()
@@ -962,7 +1043,7 @@ memory_write = ["self.*"]
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    // List should show 3 (2 spawned + default router)
+    // List should show 3 (2 spawned + default assistant)
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
         .send()
@@ -981,7 +1062,7 @@ memory_write = ["self.*"]
             .unwrap();
     }
 
-    // List should have only default router
+    // List should have only default assistant
     let resp = client
         .get(format!("{}/api/agents", server.base_url))
         .send()

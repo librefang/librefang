@@ -1,0 +1,400 @@
+# LibreFang - Agent Operating System
+
+LibreFang 是一个用 Rust 编写的开源 Agent 操作系统，是 OpenFang 的社区维护分支。
+
+<Note>
+- **官网**: [https://librefang.ai/](https://librefang.ai/)
+- **GitHub**: [https://github.com/librefang/librefang](https://github.com/librefang/librefang)
+- **特性**: 14 个 Rust crates，137K+ 代码行，16 层安全防护，7 个内置 Hands
+</Note>
+
+## 核心概念
+
+### Hands - 自主工作的 Agent
+
+Hands 是 LibreFang 的核心创新——预构建的自主能力包，独立运行、按计划执行，无需人工干预。
+
+| Hand | 功能 |
+|------|------|
+| **Clip** | YouTube 视频下载、剪辑、自动生成字幕和垂直短视频 |
+| **Lead** | 每日潜在客户发现、丰富信息、评分排序 |
+| **Collector** | OSINT 级情报收集、目标监控、知识图谱构建 |
+| **Predictor** | 超级预测引擎、置信区间、校准推理链 |
+| **Researcher** | 深度自主研究、多源交叉引用、CRAAP 评估 |
+| **Twitter** | 自主 Twitter/X 账号管理、内容创作、排程发布 |
+| **Browser** | Web 自动化、填写表单、点击按钮、多步骤工作流 |
+
+### 架构
+
+```text
+librefang-kernel      编排、工作流、计量、RBAC、调度
+librefang-runtime     Agent 循环、3 个 LLM 驱动、53 个工具、WASM 沙箱
+librefang-api         140+ REST/WS/SSE 端点
+librefang-channels    40 个消息适配器
+librefang-memory      SQLite 持久化、向量嵌入
+librefang-skills      60 个内置技能
+librefang-hands       7 个自主 Hands
+librefang-cli         CLI、TUI 仪表板
+librefang-desktop     Tauri 2.0 原生应用
+```
+
+---
+
+## 安装
+
+### Cargo 安装（推荐）
+
+```bash
+cargo install --git https://github.com/librefang/librefang librefang-cli
+```
+
+### 从源码构建
+
+```bash
+git clone https://github.com/librefang/librefang.git
+cd librefang
+cargo install --path crates/librefang-cli
+```
+
+<Note>
+**提示**: 首次运行 `librefang init` 会自动创建配置文件并引导你完成初始设置。
+</Note>
+
+### Docker
+
+```bash
+docker pull ghcr.io/librefang/librefang:latest
+
+docker run -d \
+  --name librefang \
+  -p 4545:4545 \
+  -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+  -v librefang-data:/data \
+  ghcr.io/librefang/librefang:latest
+```
+
+### 验证安装
+
+```bash
+librefang --version
+```
+
+---
+
+## 快速开始
+
+### 1. 初始化
+
+```bash
+librefang init
+```
+
+这会创建 `~/.librefang/` 目录和默认配置文件。
+
+### 2. 配置 API Key
+
+LibreFang 需要至少一个 LLM 提供商 API Key：
+
+```bash
+# Anthropic (Claude)
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# 或 OpenAI
+export OPENAI_API_KEY=sk-...
+
+# 或 Groq (有免费额度)
+export GROQ_API_KEY=gsk_...
+```
+
+### 3. 编辑配置
+
+编辑 `~/.librefang/config.toml`：
+
+```toml
+[default_model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+
+[network]
+listen_addr = "127.0.0.1:4545"
+```
+
+### 4. 启动守护进程
+
+```bash
+librefang start
+```
+
+启动后访问 http://127.0.0.1:4545/ 查看仪表板。
+
+### 5. 激活 Hand
+
+```bash
+# 激活 Researcher Hand
+librefang hand activate researcher
+
+# 查看状态
+librefang hand status researcher
+```
+
+---
+
+## 30 个内置 Agent 模板
+
+LibreFang 预装了 30 个 Agent 模板：
+
+| Agent | 用途 |
+|-------|------|
+| hello-world | 入门示例，可读取文件、搜索网页 |
+| coder | 代码开发和调试 |
+| researcher | 深度研究和分析 |
+| writer | 内容创作和编辑 |
+| analyst | 数据分析和洞察 |
+| architect | 系统架构设计 |
+| ops | 运维自动化 |
+| security-auditor | 安全审计 |
+| planner | 项目规划和任务管理 |
+| debugger | 问题诊断和调试 |
+| translator | 多语言翻译 |
+| tutor | 学习和辅导 |
+| personal-finance | 个人财务管理 |
+| travel-planner | 旅行规划 |
+| social-media | 社交媒体管理 |
+| meeting-assistant | 会议助手 |
+| email-assistant | 邮件助手 |
+| recruiter | 招聘和人才发现 |
+| data-scientist | 数据科学分析 |
+| test-engineer | 测试工程 |
+| doc-writer | 文档编写 |
+| customer-support | 客户支持 |
+| sales-assistant | 销售助手 |
+| legal-assistant | 法律助手 |
+| health-tracker | 健康追踪 |
+| home-automation | 家居自动化 |
+| hello-world | 入门示例 |
+
+---
+
+### 创建自定义 Agent
+
+创建 `my-agent.toml`：
+
+```toml
+name = "my-assistant"
+version = "0.1.0"
+description = "A helpful assistant"
+author = "you"
+module = "builtin:chat"
+
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+
+[capabilities]
+tools = ["file_read", "file_list", "web_fetch"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+```
+
+然后生成：
+
+```bash
+librefang agent spawn my-agent.toml
+```
+
+### 内置工具
+
+- `file_read` - 读取文件
+- `file_list` - 列出目录
+- `web_fetch` - 获取网页
+- `web_search` - 搜索网页
+- `memory_store` - 存储记忆
+- `memory_recall` - 回忆记忆
+- `shell` - 执行 shell 命令
+- `browser` - 浏览器自动化
+
+---
+
+## CLI 命令参考
+
+### Agent 管理
+
+```bash
+# 生成 Agent
+librefang agent spawn agents/hello-world/agent.toml
+
+# 列出所有 Agent
+librefang agent list
+
+# 与 Agent 聊天
+librefang agent chat <agent-id>
+
+# 终止 Agent
+librefang agent kill <agent-id>
+```
+
+### Hand 管理
+
+```bash
+# 列出所有 Hands
+librefang hand list
+
+# 激活 Hand
+librefang hand activate researcher
+
+# 查看状态
+librefang hand status researcher
+
+# 暂停 Hand
+librefang hand pause researcher
+```
+
+### 工作流
+
+```bash
+# 列出工作流
+librefang workflow list
+
+# 创建工作流
+librefang workflow create <file.json>
+
+# 运行工作流
+librefang workflow run <id> <input>
+```
+
+### 技能
+
+```bash
+# 安装技能
+librefang skill install <source>
+
+# 列出已安装技能
+librefang skill list
+
+# 搜索 FangHub
+librefang skill search <query>
+```
+
+### 通道
+
+```bash
+# 列出通道状态
+librefang channel list
+
+# 设置通道
+librefang channel setup telegram
+```
+
+### 诊断
+
+```bash
+# 运行诊断
+librefang doctor
+
+# 查看状态
+librefang status
+```
+
+---
+
+## 16 层安全系统
+
+LibreFang 采用深度防御策略，包含 16 个独立的安全层：
+
+1. **WASM 双计量沙箱** - 燃料计量 + 时代中断
+2. **Merkle 哈希链审计追踪** - 加密链接的完整操作链
+3. **信息流污点追踪** - 敏感信息从源到汇的追踪
+4. **Ed25519 签名 Agent 清单** - 加密签名的身份和能力集
+5. **SSRF 保护** - 阻止私有 IP 和云元数据端点
+6. **Secret 零化** - 自动清除内存中的 API 密钥
+7. **OFP 双向认证** - HMAC-SHA256 验证
+8. **能力门** - 基于角色的访问控制
+9. **安全头** - CSP、X-Frame-Options、HSTS
+10. **健康端点重写** - 公开/私有健康检查分离
+11. **子进程沙箱** - 环境清理 + 进程树隔离
+12. **提示注入扫描器** - 检测覆盖尝试
+13. **循环守卫** - SHA256 循环检测
+14. **会话修复** - 7 阶段消息历史验证
+15. **路径遍历防护** - 规范化和符号链接转义防止
+16. **GCRA 速率限制器** - 成本感知的令牌桶
+
+---
+
+## 40 个通道适配器
+
+**核心**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
+
+**企业**: Microsoft Teams, Mattermost, Google Chat, Webex, Feishu/Lark, Zulip
+
+**社交**: LINE, Viber, Facebook Messenger, Mastodon, Bluesky, Reddit, LinkedIn, Twitch
+
+**社区**: IRC, XMPP, Guilded, Revolt, Keybase, Discourse, Gitter
+
+---
+
+## 27 个 LLM 提供商
+
+Anthropic, Gemini, OpenAI, Groq, DeepSeek, OpenRouter, Together, Mistral, Fireworks, Cohere, Perplexity, xAI, AI21, Cerebras, SambaNova, HuggingFace, Replicate, Ollama, vLLM, LM Studio, Qwen, MiniMax, Zhipu, Moonshot, Qianfan, Bedrock
+
+---
+
+## OpenAI 兼容 API
+
+```bash
+curl -X POST localhost:4545/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "researcher",
+    "messages": [{"role": "user", "content": "分析 Q4 市场趋势"}],
+    "stream": true
+  }'
+```
+
+---
+
+## 开发
+
+```bash
+# 构建工作空间
+cargo build --workspace --lib
+
+# 运行所有测试
+cargo test --workspace
+
+# 代码检查（必须零警告）
+cargo clippy --workspace --all-targets -- -D warnings
+
+# 格式化
+cargo fmt --all -- --check
+```
+
+---
+
+## 从 OpenFang 迁移
+
+```bash
+# 迁移一切（自动检测 ~/.openfang）
+librefang migrate --from openfang
+
+# 从特定路径迁移
+librefang migrate --from openfang --path ~/.openfang
+
+# 预览模式
+librefang migrate --from openfang --dry-run
+```
+
+---
+
+## 从 OpenClaw 迁移
+
+```bash
+# 迁移一切
+librefang migrate --from openclaw
+
+# 从特定路径迁移
+librefang migrate --from openclaw --path ~/.openclaw
+
+# 预览模式
+librefang migrate --from openclaw --dry-run
+```

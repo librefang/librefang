@@ -1,13 +1,8 @@
 name: Update Contributors & Star History
 
 on:
-  push:
-    branches: [main]
-    paths-ignore:
-      - 'web/public/assets/contributors.svg'
-      - 'web/public/assets/star-history.svg'
   schedule:
-    - cron: "0 * * * *"  # Hourly
+    - cron: "0 8 * * *"  # Daily 08:00 UTC
   workflow_dispatch:
 
 permissions:
@@ -32,9 +27,13 @@ jobs:
           python-version: "3.x"
 
       - name: Generate contributors SVG
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/generate_contributors.py librefang/librefang web/public/assets/contributors.svg
 
       - name: Generate star history SVG
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: python3 scripts/generate_star_history.py librefang/librefang web/public/assets/star-history.svg
 
       - name: Create PR with updated SVGs

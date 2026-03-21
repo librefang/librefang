@@ -300,11 +300,28 @@ mod tests {
     use super::*;
     use crate::registry::IntegrationRegistry;
 
+    fn ensure_registry() {
+        use std::sync::Once;
+        static SYNC_ONCE: Once = Once::new();
+        let home = librefang_runtime::registry_sync::resolve_home_dir_for_tests();
+        SYNC_ONCE.call_once(|| {
+            let _ = std::fs::create_dir_all(&home);
+            if !home.join("integrations").exists()
+                || std::fs::read_dir(home.join("integrations"))
+                    .map(|d| d.count() == 0)
+                    .unwrap_or(true)
+            {
+                librefang_runtime::registry_sync::sync_registry(&home);
+            }
+        });
+    }
+
     #[test]
     fn install_and_remove() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_bundled();
+        registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
         let mut resolver = CredentialResolver::new(None, None);
 
@@ -325,9 +342,10 @@ mod tests {
 
     #[test]
     fn install_with_key() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_bundled();
+        registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
         let mut resolver = CredentialResolver::new(None, None);
 
@@ -341,9 +359,10 @@ mod tests {
 
     #[test]
     fn install_already_installed() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_bundled();
+        registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
         let mut resolver = CredentialResolver::new(None, None);
 
@@ -355,22 +374,24 @@ mod tests {
 
     #[test]
     fn remove_not_installed() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_bundled();
+        registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let err = remove_integration(&mut registry, "github").unwrap_err();
         assert!(err.to_string().contains("not installed"));
     }
 
     #[test]
     fn list_integrations_all() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_bundled();
+        registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
         let resolver = CredentialResolver::new(None, None);
 
         let list = list_integrations(&registry, &resolver);
-        assert_eq!(list.len(), 25);
+        assert!(list.len() >= 20);
         assert!(list
             .iter()
             .all(|e| e.status == IntegrationStatus::Available));
@@ -378,9 +399,10 @@ mod tests {
 
     #[test]
     fn search_integrations_query() {
+        ensure_registry();
         let dir = tempfile::tempdir().unwrap();
         let mut registry = IntegrationRegistry::new(dir.path());
-        registry.load_bundled();
+        registry.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
         let results = search_integrations(&registry, "git");
         assert!(results.iter().any(|e| e.id == "github"));

@@ -1,0 +1,1221 @@
+# LibreFang 配置参考
+
+LibreFang 配置文件完整参考。
+
+---
+
+## 概述
+
+LibreFang 从 TOML 配置文件中读取配置：
+
+```bash
+~/.librefang/config.toml
+```
+
+**关键特性：**
+- 所有字段都是可选的，使用 `#[serde(default)]`
+- 通道配置缺失时表示禁用
+- 密钥存储在环境变量中，不直接存储在配置文件中
+
+---
+
+## 目录
+
+- [最小配置](#最小配置)
+- [完整配置示例](#完整配置示例)
+- [顶层字段](#顶层字段)
+- [[default_model]](#default_model)
+- [[memory]](#memory)
+- [[network]](#network)
+- [通道配置](#通道配置)
+  - [[channels.telegram]](#channelstelegram)
+  - [[channels.discord]](#channelsdiscord)
+  - [[channels.slack]](#channelsslack)
+  - [[channels.whatsapp]](#channelswhatsapp)
+  - [[channels.qq]](#channelsqq)
+  - [[channels.wecom]](#channelswecom)
+  - [通道行为覆盖](#通道行为覆盖-channelovervides)
+- [[[mcp_servers]]](#mcp_servers)
+- [[a2a]](#a2a)
+- [[[fallback_providers]]](#fallback_providers)
+- [[[users]]](#users)
+- [[web]](#web)
+- [[browser]](#browser)
+- [[reload]](#reload)
+- [[exec_policy]](#exec_policy)
+- [[approval]](#approval)
+- [[budget]](#budget)
+- [[thinking]](#thinking)
+- [[tts]](#tts)
+- [[docker]](#docker)
+- [[canvas]](#canvas)
+- [[auto_reply]](#auto_reply)
+- [[broadcast]](#broadcast)
+- [[[bindings]]](#bindings)
+- [[pairing]](#pairing)
+- [[extensions]](#extensions)
+- [[vault]](#vault)
+- [[webhook_triggers]](#webhook_triggers)
+- [[proxy]](#proxy)
+- [[[sidecar_channels]]](#sidecar_channels)
+- [[session]](#session)
+- [[queue]](#queue)
+- [[external_auth]](#external_auth)
+- [[vertex_ai]](#vertex_ai)
+- [[oauth]](#oauth)
+- [[auth_profiles]](#auth_profiles)
+- [[tool_policy]](#tool_policy)
+- [[proactive_memory]](#proactive_memory)
+- [[context_engine]](#context_engine)
+- [[audit]](#audit)
+- [[health_check]](#health_check)
+- [[plugins]](#plugins)
+- [[media]](#media)
+- [[links]](#links)
+- [环境变量](#环境变量)
+- [验证](#验证)
+
+---
+
+## 最小配置
+
+```toml
+[default_model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+```
+
+---
+
+## 完整配置示例
+
+```toml
+# ── 顶层字段 ──────────────────────────────────────────────────────────────
+api_key          = "your-bearer-token"
+api_listen       = "127.0.0.1:4545"
+cors_origin      = ["https://dash.example.com"]
+mode             = "default"          # stable | default | dev
+language         = "zh"
+stable_prefix_mode = false
+prompt_caching   = true
+usage_footer     = "full"             # off | tokens | cost | full
+workspaces_dir   = "~/.librefang/workspaces"
+max_cron_jobs    = 500
+include          = ["secrets.toml"]
+
+[provider_urls]
+openai = "https://my-openai-proxy.example.com/v1"
+
+[provider_api_keys]
+openai = "MY_CUSTOM_OPENAI_KEY"
+
+# ── 默认模型 ──────────────────────────────────────────────────────────────
+[default_model]
+provider    = "anthropic"
+model       = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url    = "https://api.anthropic.com"
+
+# ── 记忆 ──────────────────────────────────────────────────────────────────
+[memory]
+decay_rate                   = 0.1
+sqlite_path                  = "~/.librefang/data/librefang.db"
+embedding_provider           = "openai"
+embedding_api_key_env        = "OPENAI_API_KEY"
+consolidation_interval_hours = 24
+
+# ── OFP 网络 ──────────────────────────────────────────────────────────────
+[network]
+listen_addresses = ["/ip4/0.0.0.0/tcp/0"]
+shared_secret    = "your-secret"
+mdns_enabled     = true
+max_peers        = 50
+
+# ── 通道 ──────────────────────────────────────────────────────────────────
+[channels.telegram]
+bot_token_env = "TELEGRAM_BOT_TOKEN"
+allowed_users = ["123456"]
+
+[channels.discord]
+bot_token_env = "DISCORD_BOT_TOKEN"
+allowed_guilds = ["987654321"]
+
+[channels.slack]
+bot_token_env = "SLACK_BOT_TOKEN"
+app_token_env = "SLACK_APP_TOKEN"
+
+[channels.whatsapp]
+gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"
+allowed_users   = ["+8613800000000"]
+owner_numbers   = ["+8613900000000"]
+
+[channels.qq]
+app_id         = "123456789"
+app_secret_env = "QQ_BOT_APP_SECRET"
+
+[channels.wecom]
+corp_id      = "ww1234567890abcdef"
+agent_id     = "1000002"
+secret_env   = "WECOM_SECRET"
+webhook_port = 8454
+
+# ── 媒体理解 ──────────────────────────────────────────────────────────────
+[media]
+image_description   = true
+audio_transcription = true
+video_description   = false
+max_concurrency     = 2
+
+# ── 链接理解 ──────────────────────────────────────────────────────────────
+[links]
+enabled  = false
+max_links = 3
+
+# ── MCP 服务器 ────────────────────────────────────────────────────────────
+[[mcp_servers]]
+name = "filesystem"
+timeout_secs = 30
+
+[mcp_servers.transport]
+type    = "stdio"
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[[mcp_servers]]
+name = "my-api"
+
+[mcp_servers.transport]
+type     = "http_compat"
+base_url = "https://api.example.com"
+
+[[mcp_servers.transport.tools]]
+name   = "search"
+path   = "/search"
+method = "get"
+
+# ── A2A ───────────────────────────────────────────────────────────────────
+[a2a]
+enabled     = true
+name        = "My LibreFang"
+description = "An AI agent"
+listen_path = "/a2a"
+
+[[a2a.external_agents]]
+name = "remote-agent"
+url  = "https://agent.example.com/a2a"
+
+# ── 后备提供商 ────────────────────────────────────────────────────────────
+[[fallback_providers]]
+provider    = "groq"
+model       = "llama-3.1-70b-versatile"
+api_key_env = "GROQ_API_KEY"
+
+# ── 用户 ──────────────────────────────────────────────────────────────────
+[[users]]
+name = "alice"
+role = "admin"
+
+[[users]]
+name = "bob"
+role = "user"
+
+# ── 预算 ──────────────────────────────────────────────────────────────────
+[budget]
+max_hourly_usd  = 1.0
+max_daily_usd   = 10.0
+max_monthly_usd = 100.0
+alert_threshold = 0.8
+
+# ── 执行审批 ──────────────────────────────────────────────────────────────
+[approval]
+require_approval        = ["shell_exec"]
+timeout_secs            = 60
+auto_approve_autonomous = false
+auto_approve            = false
+
+# ── 执行策略 ──────────────────────────────────────────────────────────────
+[exec_policy]
+mode             = "allowlist"
+timeout_secs     = 30
+max_output_bytes = 102400
+
+# ── Docker 沙箱 ───────────────────────────────────────────────────────────
+[docker]
+enabled      = false
+image        = "python:3.12-slim"
+memory_limit = "512m"
+timeout_secs = 60
+
+# ── 文字转语音 ────────────────────────────────────────────────────────────
+[tts]
+enabled  = false
+provider = "openai"
+
+[tts.openai]
+voice = "alloy"
+model = "tts-1"
+
+# ── 扩展思考 ──────────────────────────────────────────────────────────────
+[thinking]
+budget_tokens   = 10000
+stream_thinking = false
+
+# ── 配置热重载 ────────────────────────────────────────────────────────────
+[reload]
+mode        = "hybrid"
+debounce_ms = 500
+
+# ── 代理 ──────────────────────────────────────────────────────────────────
+[proxy]
+http_proxy  = "http://proxy.corp.example:8080"
+https_proxy = "http://proxy.corp.example:8080"
+no_proxy    = "localhost,127.0.0.1,.internal.corp"
+
+# ── 会话保留 ──────────────────────────────────────────────────────────────
+[session]
+retention_days          = 30
+max_sessions_per_agent  = 100
+cleanup_interval_hours  = 24
+
+# ── 工具策略 ──────────────────────────────────────────────────────────────
+[tool_policy]
+subagent_max_depth      = 10
+subagent_max_concurrent = 5
+
+[[tool_policy.global_rules]]
+pattern = "shell_*"
+effect  = "deny"
+
+[[tool_policy.agent_rules]]
+pattern = "web_*"
+effect  = "allow"
+
+[[tool_policy.groups]]
+name  = "web_tools"
+tools = ["web_search", "web_fetch"]
+
+# ── 主动记忆 ──────────────────────────────────────────────────────────────
+[proactive_memory]
+enabled                = true
+auto_memorize          = true
+auto_retrieve          = true
+max_retrieve           = 10
+extraction_threshold   = 0.7
+session_ttl_hours      = 24
+duplicate_threshold    = 0.5
+confidence_decay_rate  = 0.01
+max_memories_per_agent = 1000
+
+# ── 审计日志 ──────────────────────────────────────────────────────────────
+[audit]
+retention_days = 90
+
+# ── 健康检查 ──────────────────────────────────────────────────────────────
+[health_check]
+health_check_interval_secs = 60
+```
+
+---
+
+## 配置项参考
+
+### 顶层字段
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key` | String | `""` | Bearer 认证令牌，空时 API 不需要认证（仅限本地开发） |
+| `api_listen` | String | `"127.0.0.1:4545"` | API 监听地址，也接受别名 `listen_addr` |
+| `cors_origin` | Array\<String\> | `[]` | 允许的 CORS 来源（追加到 localhost 之外） |
+| `mode` | Enum | `"default"` | 运行模式：`stable` / `default` / `dev` |
+| `language` | String | `"en"` | CLI 和消息语言/地区 |
+| `usage_footer` | Enum | `"full"` | 响应尾部用量信息：`off` / `tokens` / `cost` / `full` |
+| `stable_prefix_mode` | bool | `false` | 启用后避免每轮动态追加内容，提升提示缓存命中率 |
+| `prompt_caching` | bool | `true` | 启用 LLM 提供商提示缓存（Anthropic / OpenAI） |
+| `workspaces_dir` | Path | `~/.librefang/workspaces` | Agent 工作区根目录 |
+| `max_cron_jobs` | Integer | `500` | 所有 Agent 的最大 Cron 任务总数 |
+| `include` | Array\<String\> | `[]` | 在主配置前合并的子配置文件路径（相对路径，禁止 `..`） |
+| `provider_urls` | Map | `{}` | Provider 基础 URL 覆盖（`provider_id` → 自定义 URL），如 `openai = "https://my-proxy.com/v1"` |
+| `provider_api_keys` | Map | `{}` | Provider API Key 环境变量覆盖（`provider_id` → 环境变量名），如 `openai = "MY_OPENAI_KEY"` |
+| `network_enabled` | bool | `false` | 是否启用 OFP 网络层 |
+| `log_level` | String | `"info"` | 日志级别：`trace` / `debug` / `info` / `warn` / `error` |
+
+---
+
+### [default_model]
+
+默认 LLM 提供商配置。不含 `max_tokens` 和 `temperature`（这两个字段由 Agent 配置控制）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `provider` | String | `"anthropic"` | LLM 提供商（如 `anthropic`、`openai`、`groq`） |
+| `model` | String | `"claude-sonnet-4-20250514"` | 模型标识符 |
+| `api_key_env` | String | `"ANTHROPIC_API_KEY"` | 持有 API 密钥的环境变量名 |
+| `base_url` | String? | `null` | API 基础 URL 覆盖（使用提供商默认值时留空） |
+
+---
+
+### [memory]
+
+记忆底层存储配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `sqlite_path` | Path? | `null` | SQLite 数据库文件路径（默认 `~/.librefang/data/librefang.db`） |
+| `embedding_model` | String | `"all-MiniLM-L6-v2"` | 语义搜索嵌入模型 |
+| `consolidation_threshold` | Integer | `10000` | 触发整合的记忆数量阈值 |
+| `decay_rate` | Float | `0.1` | 记忆置信度衰减率（0.0 = 无衰减，1.0 = 激进衰减） |
+| `embedding_provider` | String? | `null` | 嵌入提供商（如 `openai`、`ollama`），`null` 则自动检测 |
+| `embedding_api_key_env` | String? | `null` | 嵌入 API 密钥环境变量名 |
+| `consolidation_interval_hours` | Integer | `24` | 记忆整合运行间隔（小时，0 = 禁用） |
+
+---
+
+### [network]
+
+OFP P2P 网络层配置（仅在 `network_enabled = true` 时生效）。
+
+> **注意：** API 监听地址在顶层 `api_listen` 字段中设置，而非此处。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `listen_addresses` | Array\<String\> | `["/ip4/0.0.0.0/tcp/0"]` | libp2p 监听地址 |
+| `bootstrap_peers` | Array\<String\> | `[]` | DHT 引导节点 |
+| `mdns_enabled` | bool | `true` | 是否启用 mDNS 本地发现 |
+| `max_peers` | Integer | `50` | 最大已连接节点数 |
+| `shared_secret` | String | `""` | OFP HMAC 认证共享密钥（启用网络时必填） |
+
+---
+
+### 通道配置
+
+通道支持单实例（`[channels.telegram]`）和多实例（`[[channels.telegram]]`）两种写法，实现多 Bot 路由。
+
+#### [channels.telegram]
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bot_token_env` | String | `"TELEGRAM_BOT_TOKEN"` | 持有 Bot Token 的环境变量名 |
+| `allowed_users` | Array\<String\> | `[]` | 允许交互的 Telegram 用户 ID（空 = 允许所有） |
+| `account_id` | String? | `null` | Bot 实例唯一标识（用于多 Bot 路由） |
+| `default_agent` | String? | `null` | 默认路由到的 Agent 名称 |
+| `poll_interval_secs` | Integer | `1` | 轮询间隔（秒） |
+| `api_url` | String? | `null` | 自定义 Telegram Bot API 基础 URL（代理/镜像） |
+| `overrides` | ChannelOverrides | — | 通道行为覆盖 |
+
+#### [channels.discord]
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `bot_token_env` | String | `"DISCORD_BOT_TOKEN"` | 持有 Bot Token 的环境变量名 |
+| `allowed_guilds` | Array\<String\> | `[]` | 允许交互的服务器 ID（空 = 允许所有） |
+| `allowed_users` | Array\<String\> | `[]` | 允许交互的用户 ID（空 = 允许所有） |
+| `account_id` | String? | `null` | Bot 实例唯一标识 |
+| `default_agent` | String? | `null` | 默认路由到的 Agent 名称 |
+| `intents` | Integer | `37376` | Gateway intents 位掩码 |
+| `ignore_bots` | bool | `true` | 是否忽略其他 Bot 的消息 |
+| `overrides` | ChannelOverrides | — | 通道行为覆盖 |
+
+#### [channels.slack]
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `app_token_env` | String | `"SLACK_APP_TOKEN"` | 持有 App 级 Token（xapp-）的环境变量名 |
+| `bot_token_env` | String | `"SLACK_BOT_TOKEN"` | 持有 Bot Token（xoxb-）的环境变量名 |
+| `allowed_channels` | Array\<String\> | `[]` | 允许交互的频道 ID（空 = 允许所有） |
+| `account_id` | String? | `null` | Bot 实例唯一标识 |
+| `default_agent` | String? | `null` | 默认路由到的 Agent 名称 |
+| `overrides` | ChannelOverrides | — | 通道行为覆盖 |
+
+#### [channels.whatsapp]
+
+通过 WhatsApp Web 网关接入（需要自托管网关服务）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `gateway_url_env` | String | `"WHATSAPP_WEB_GATEWAY_URL"` | 持有网关 URL 的环境变量名 |
+| `allowed_users` | Array\<String\> | `[]` | 允许交互的 WhatsApp 号码（E.164 格式，空 = 允许所有） |
+| `account_id` | String? | `null` | Bot 实例唯一标识（用于多 Bot 路由） |
+| `default_agent` | String? | `null` | 默认路由到的 Agent 名称 |
+| `owner_numbers` | Array\<String\> | `[]` | 机器人所有者号码（E.164 格式，授予管理员权限） |
+| `overrides` | ChannelOverrides | — | 通道行为覆盖 |
+
+#### [channels.qq]
+
+QQ 频道机器人（官方 QQ Bot API）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `app_id` | String | 必填 | QQ Bot 应用 ID |
+| `app_secret_env` | String | `"QQ_BOT_APP_SECRET"` | 持有应用密钥的环境变量名 |
+| `allowed_users` | Array\<String\> | `[]` | 允许交互的 QQ 用户 ID（空 = 允许所有） |
+| `account_id` | String? | `null` | Bot 实例唯一标识（用于多 Bot 路由） |
+| `default_agent` | String? | `null` | 默认路由到的 Agent 名称 |
+| `overrides` | ChannelOverrides | — | 通道行为覆盖 |
+
+```toml
+[channels.qq]
+app_id         = "123456789"
+app_secret_env = "QQ_BOT_APP_SECRET"
+allowed_users  = ["10001", "10002"]
+```
+
+#### [channels.wecom]
+
+企业微信（WeCom / 微信工作）机器人。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `corp_id` | String | 必填 | 企业 ID（CorpID） |
+| `agent_id` | String | 必填 | 应用 AgentID |
+| `secret_env` | String | `"WECOM_SECRET"` | 持有应用密钥的环境变量名 |
+| `webhook_port` | Integer | `8454` | 接收企业微信回调的端口 |
+| `token_env` | String? | `null` | 持有回调验证 Token 的环境变量名 |
+| `encoding_aes_key_env` | String? | `null` | 持有消息加解密 AES Key 的环境变量名 |
+| `account_id` | String? | `null` | Bot 实例唯一标识（用于多 Bot 路由） |
+| `default_agent` | String? | `null` | 默认路由到的 Agent 名称 |
+| `overrides` | ChannelOverrides | — | 通道行为覆盖 |
+
+```toml
+[channels.wecom]
+corp_id              = "ww1234567890abcdef"
+agent_id             = "1000002"
+secret_env           = "WECOM_SECRET"
+webhook_port         = 8454
+token_env            = "WECOM_TOKEN"
+encoding_aes_key_env = "WECOM_AES_KEY"
+```
+
+> **通用说明：** 所有通道均支持 `account_id`（多 Bot 路由标识）、`default_agent`（默认 Agent 名称）和 `overrides`（行为覆盖）字段。
+
+#### 通道行为覆盖（ChannelOverrides）
+
+每个通道配置均支持 `[channels.<name>.overrides]` 覆盖块：
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `model` | String? | `null` | 模型覆盖（为空则使用 Agent 默认模型） |
+| `system_prompt` | String? | `null` | 系统提示覆盖 |
+| `dm_policy` | Enum | `"respond"` | 私信策略：`respond` / `allowed_only` / `ignore` |
+| `group_policy` | Enum | `"mention_only"` | 群消息策略：`all` / `mention_only` / `commands_only` / `ignore` |
+| `rate_limit_per_minute` | Integer | `0` | 通道全局频率限制（每分钟消息数，0 = 无限制） |
+| `rate_limit_per_user` | Integer | `0` | 每用户频率限制（每分钟，0 = 无限制） |
+| `typing_mode` | Enum? | `null` | 打字状态模式：`instant` / `message` / `thinking` / `never` |
+| `threading` | bool | `false` | 是否启用线程回复 |
+| `output_format` | Enum? | `null` | 输出格式：`markdown` / `telegram_html` / `slack_mrkdwn` / `plain_text` |
+| `usage_footer` | Enum? | `null` | 用量尾部模式覆盖 |
+
+---
+
+### [[mcp_servers]]
+
+MCP（Model Context Protocol）服务器配置。`command` 和 `args` 位于 `[mcp_servers.transport]` 下，而非顶层。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | String | 必填 | 服务器显示名称 |
+| `timeout_secs` | Integer | `30` | 请求超时（秒） |
+| `env` | Array\<String\> | `[]` | 传递给服务器的环境变量名列表 |
+
+**传输类型通过 `[mcp_servers.transport]` 配置，`type` 字段指定：**
+
+**`stdio` — 子进程 JSON-RPC（stdin/stdout）：**
+
+```toml
+[[mcp_servers]]
+name = "filesystem"
+
+[mcp_servers.transport]
+type    = "stdio"
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+```
+
+**`sse` — HTTP Server-Sent Events：**
+
+```toml
+[[mcp_servers]]
+name = "remote"
+
+[mcp_servers.transport]
+type = "sse"
+url  = "https://mcp.example.com/sse"
+```
+
+**`http_compat` — 内置 HTTP/JSON 兼容适配器：**
+
+```toml
+[[mcp_servers]]
+name = "my-api"
+
+[mcp_servers.transport]
+type     = "http_compat"
+base_url = "https://api.example.com"
+
+[[mcp_servers.transport.headers]]
+name      = "Authorization"
+value_env = "MY_API_KEY"
+
+[[mcp_servers.transport.tools]]
+name         = "search"
+description  = "Search the API"
+path         = "/search"
+method       = "get"    # get | post | put | patch | delete
+request_mode = "query"  # json_body | query | none
+```
+
+---
+
+### [a2a]
+
+A2A（Agent-to-Agent）协议配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用 A2A 协议 |
+| `name` | String | `"LibreFang Agent OS"` | well-known Agent 卡片的服务名称 |
+| `description` | String | `""` | well-known Agent 卡片的服务描述 |
+| `listen_path` | String | `"/a2a"` | A2A 端点服务路径 |
+
+**外部 Agent（`[[a2a.external_agents]]`）：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | String | 显示名称 |
+| `url` | String | Agent 端点 URL |
+
+---
+
+### [[fallback_providers]]
+
+主提供商失败时按顺序尝试的后备提供商链。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `provider` | String | `""` | 提供商名称（如 `ollama`、`groq`） |
+| `model` | String | `""` | 使用该提供商的模型 |
+| `api_key_env` | String | `""` | API 密钥环境变量（本地提供商可留空） |
+| `base_url` | String? | `null` | 基础 URL 覆盖 |
+
+---
+
+### [[users]]
+
+RBAC 多用户支持配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | String | 必填 | 用户显示名称 |
+| `role` | String | `"user"` | 用户角色：`owner` / `admin` / `user` / `viewer` |
+| `channel_bindings` | Map | `{}` | 通道平台 ID 映射，如 `{telegram = "123456"}` |
+| `api_key_hash` | String? | `null` | API 认证密钥哈希（可选） |
+
+---
+
+### [web]
+
+网络工具配置（搜索 + 抓取）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `search_provider` | Enum | `"auto"` | 搜索提供商：`brave` / `tavily` / `perplexity` / `duck_duck_go` / `auto` |
+| `cache_ttl_minutes` | Integer | `15` | 缓存 TTL（分钟，0 = 禁用） |
+
+**[web.brave]：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key_env` | String | `"BRAVE_API_KEY"` | API 密钥环境变量 |
+| `max_results` | Integer | `5` | 最大返回结果数 |
+| `country` | String | `""` | 搜索地区代码（如 `US`） |
+| `search_lang` | String | `""` | 搜索语言（如 `en`） |
+| `freshness` | String | `""` | 新鲜度过滤（如 `pd` = 过去一天，`pw` = 过去一周） |
+
+**[web.tavily]：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key_env` | String | `"TAVILY_API_KEY"` | API 密钥环境变量 |
+| `search_depth` | String | `"basic"` | 搜索深度：`basic` / `advanced` |
+| `max_results` | Integer | `5` | 最大返回结果数 |
+| `include_answer` | bool | `true` | 是否包含 AI 生成的摘要答案 |
+
+**[web.perplexity]：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `api_key_env` | String | `"PERPLEXITY_API_KEY"` | API 密钥环境变量 |
+| `model` | String | `"sonar"` | 搜索使用的模型 |
+
+**[web.fetch]：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_chars` | Integer | `50000` | 返回内容的最大字符数 |
+| `max_response_bytes` | Integer | `10485760` | 最大响应体大小（10 MB） |
+| `timeout_secs` | Integer | `30` | HTTP 请求超时（秒） |
+| `readability` | bool | `true` | 是否启用 HTML→Markdown 可读性提取 |
+
+---
+
+### [browser]
+
+浏览器自动化配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `headless` | bool | `true` | 是否以无头模式运行浏览器 |
+| `viewport_width` | Integer | `1280` | 视口宽度（像素） |
+| `viewport_height` | Integer | `720` | 视口高度（像素） |
+| `timeout_secs` | Integer | `30` | 每次操作超时（秒） |
+| `idle_timeout_secs` | Integer | `300` | 空闲超时，超时后自动关闭会话（秒） |
+| `max_sessions` | Integer | `5` | 最大并发浏览器会话数 |
+| `chromium_path` | String? | `null` | Chromium/Chrome 二进制路径（`null` = 自动检测） |
+
+---
+
+### [reload]
+
+配置文件热重载设置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `mode` | Enum | `"hybrid"` | 重载模式：`off` / `restart` / `hot` / `hybrid` |
+| `debounce_ms` | Integer | `500` | 文件变更防抖窗口（毫秒） |
+
+---
+
+### [exec_policy]
+
+Shell/命令执行安全策略。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `mode` | Enum | `"allowlist"` | 安全模式：`deny`（禁止所有）/ `allowlist`（仅白名单）/ `full`（允许所有，危险） |
+| `safe_bins` | Array\<String\> | 见下 | 绕过白名单的安全二进制文件（仅 stdin 工具） |
+| `allowed_commands` | Array\<String\> | `[]` | 全局命令白名单（`mode = allowlist` 时生效） |
+| `timeout_secs` | Integer | `30` | 最大执行超时（秒） |
+| `max_output_bytes` | Integer | `102400` | 最大输出大小（字节，默认 100 KB） |
+| `no_output_timeout_secs` | Integer | `30` | 无输出超时，超过后杀死进程（0 = 禁用） |
+
+默认 `safe_bins`：`sleep, true, false, cat, sort, uniq, cut, tr, head, tail, wc, date, echo, printf, basename, dirname, pwd, env`
+
+---
+
+### [approval]
+
+工具执行审批策略。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `require_approval` | Array\<String\> 或 bool | `["shell_exec"]` | 需要审批的工具列表；`false` = 无；`true` = 默认集 |
+| `timeout_secs` | Integer | `60` | 审批超时（秒，范围 10–300） |
+| `auto_approve_autonomous` | bool | `false` | 自主模式下自动批准 |
+| `auto_approve` | bool | `false` | 启动时清空审批列表（快捷方式） |
+
+---
+
+### [budget]
+
+全局消费预算配置。设为 `0.0` 表示不限制。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_hourly_usd` | Float | `0.0` | 每小时最大消费（美元，0 = 不限制） |
+| `max_daily_usd` | Float | `0.0` | 每天最大消费（美元） |
+| `max_monthly_usd` | Float | `0.0` | 每月最大消费（美元） |
+| `alert_threshold` | Float | `0.8` | 告警阈值（0.0–1.0，达到限额的百分比时触发警告） |
+| `default_max_llm_tokens_per_hour` | Integer | `0` | 所有 Agent 的默认每小时 Token 限制（0 = 使用各 Agent 自身设置） |
+
+---
+
+### [thinking]
+
+扩展思考（Extended Thinking）配置，仅部分提供商支持（如 Anthropic Claude）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `budget_tokens` | Integer | `10000` | 思考 Token 预算上限 |
+| `stream_thinking` | bool | `false` | 是否将思考 Token 流式传输给客户端 |
+
+---
+
+### [tts]
+
+文字转语音（TTS）配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用 TTS |
+| `provider` | String? | `null` | 默认提供商：`openai` 或 `elevenlabs` |
+| `max_text_length` | Integer | `4096` | TTS 最大文本长度（字符） |
+| `timeout_secs` | Integer | `30` | 每次 TTS 请求超时（秒） |
+
+**[tts.openai]：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `voice` | String | `"alloy"` | 语音：`alloy` / `echo` / `fable` / `onyx` / `nova` / `shimmer` |
+| `model` | String | `"tts-1"` | 模型：`tts-1` / `tts-1-hd` |
+| `format` | String | `"mp3"` | 输出格式：`mp3` / `opus` / `aac` / `flac` |
+| `speed` | Float | `1.0` | 速度（0.25–4.0） |
+
+**[tts.elevenlabs]：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `voice_id` | String | `"21m00Tcm4TlvDq8ikWAM"` | 语音 ID（默认 Rachel） |
+| `model_id` | String | `"eleven_monolingual_v1"` | 模型 ID |
+| `stability` | Float | `0.5` | 稳定性（0.0–1.0） |
+| `similarity_boost` | Float | `0.75` | 相似度增强（0.0–1.0） |
+
+---
+
+### [docker]
+
+Docker 容器沙箱配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用 Docker 沙箱 |
+| `mode` | Enum | `"off"` | 沙箱模式：`off` / `non_main` / `all` |
+| `image` | String | `"python:3.12-slim"` | 执行沙箱的 Docker 镜像 |
+| `container_prefix` | String | `"librefang-sandbox"` | 容器名称前缀 |
+| `workdir` | String | `"/workspace"` | 容器内工作目录 |
+| `network` | String | `"none"` | 网络模式：`none` / `bridge` / 自定义 |
+| `memory_limit` | String | `"512m"` | 内存限制（如 `256m`、`1g`） |
+| `cpu_limit` | Float | `1.0` | CPU 限制（如 `0.5`、`2.0`） |
+| `timeout_secs` | Integer | `60` | 最大执行时间（秒） |
+| `read_only_root` | bool | `true` | 根文件系统只读 |
+| `pids_limit` | Integer | `100` | PID 限制 |
+| `tmpfs` | Array\<String\> | `["/tmp:size=64m"]` | tmpfs 挂载点 |
+| `cap_add` | Array\<String\> | `[]` | 额外添加的 Linux capabilities |
+| `scope` | Enum | `"session"` | 容器生命周期：`session` / `agent` / `shared` |
+| `reuse_cool_secs` | Integer | `300` | 容器释放后再使用的冷却时间（秒） |
+| `idle_timeout_secs` | Integer | `86400` | 容器空闲超时，超时后销毁（秒，默认 24 小时） |
+| `max_age_secs` | Integer | `604800` | 容器最大生存时间（秒，默认 7 天） |
+| `blocked_mounts` | Array\<String\> | `[]` | 禁止绑定挂载的路径 |
+
+---
+
+### [canvas]
+
+Canvas（Agent→UI）配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用 canvas 工具 |
+| `max_html_bytes` | Integer | `524288` | 最大 HTML 大小（字节，默认 512 KB） |
+| `allowed_tags` | Array\<String\> | `[]` | 允许的 HTML 标签（空 = 所有安全标签） |
+
+---
+
+### [auto_reply]
+
+自动回复引擎配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用自动回复引擎 |
+| `max_concurrent` | Integer | `3` | 最大并发自动回复任务数 |
+| `timeout_secs` | Integer | `120` | 每次回复默认超时（秒） |
+| `suppress_patterns` | Array\<String\> | `["/stop", "/pause"]` | 触发后抑制自动回复的消息模式 |
+
+---
+
+### [broadcast]
+
+广播路由配置——向多个 Agent 发送同一条消息。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `strategy` | Enum | `"parallel"` | 广播策略：`parallel`（并行）/ `sequential`（顺序） |
+| `routes` | Map | `{}` | `peer_id` → Agent 名称列表的映射 |
+
+---
+
+### [[bindings]]
+
+Agent 绑定——将特定通道/账户/节点模式路由到指定 Agent。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `agent` | String | 目标 Agent 名称或 ID |
+| `match_rule.channel` | String? | 通道类型（如 `discord`、`telegram`） |
+| `match_rule.account_id` | String? | 通道内的特定账户/Bot ID |
+| `match_rule.peer_id` | String? | 用于私信路由的节点/用户 ID |
+| `match_rule.guild_id` | String? | 服务器/空间 ID（Discord/Slack） |
+| `match_rule.roles` | Array\<String\> | 基于角色的路由（用户至少拥有其中一个） |
+
+---
+
+### [pairing]
+
+设备配对配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用设备配对 |
+| `max_devices` | Integer | `10` | 最大配对设备数 |
+| `token_expiry_secs` | Integer | `300` | 配对 Token 有效期（秒，默认 5 分钟） |
+| `push_provider` | String | `"none"` | 推送通知提供商：`none` / `ntfy` / `gotify` |
+| `ntfy_url` | String? | `null` | Ntfy 服务器 URL |
+| `ntfy_topic` | String? | `null` | Ntfy 主题 |
+
+---
+
+### [extensions]
+
+扩展和集成配置（主要影响 MCP 重连行为）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `auto_reconnect` | bool | `true` | 是否自动重连 MCP 集成 |
+| `reconnect_max_attempts` | Integer | `10` | 最大重连次数 |
+| `reconnect_max_backoff_secs` | Integer | `300` | 最大回退时长（秒） |
+| `health_check_interval_secs` | Integer | `60` | 健康检查间隔（秒） |
+
+---
+
+### [vault]
+
+凭证保险库配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 是否启用 vault（存在 `vault.enc` 时自动启用） |
+| `path` | Path? | `null` | 自定义 vault 文件路径（默认 `~/.librefang/vault.enc`） |
+
+---
+
+### [webhook_triggers]
+
+Webhook 触发器配置，用于外部系统触发 Agent 动作（`/hooks/wake` 和 `/hooks/agent` 端点）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用 webhook 触发端点 |
+| `token_env` | String | `"LIBREFANG_WEBHOOK_TOKEN"` | 持有 Bearer Token 的环境变量名（长度 ≥ 32 字符） |
+| `max_payload_bytes` | Integer | `65536` | 最大 payload 大小（字节） |
+| `rate_limit_per_minute` | Integer | `30` | 每 IP 每分钟最大请求数 |
+
+---
+
+### [proxy]
+
+所有出站连接的 HTTP 代理配置。支持 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 环境变量作为回退。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `http_proxy` | String? | `null` | HTTP 代理 URL（如 `http://proxy:8080`） |
+| `https_proxy` | String? | `null` | HTTPS 代理 URL |
+| `no_proxy` | String? | `null` | 绕过代理的主机/域名列表（逗号分隔） |
+
+---
+
+### [[sidecar_channels]]
+
+Sidecar 通道适配器——外部进程（任意语言）通过 stdin/stdout 的换行分隔 JSON 与内核通信。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | String | 必填 | 适配器显示名称 |
+| `command` | String | 必填 | 执行命令（如 `python3`） |
+| `args` | Array\<String\> | `[]` | 命令参数 |
+| `env` | Map | `{}` | 传递给子进程的额外环境变量 |
+| `channel_type` | String? | `null` | 通道类型标识符（默认 `Custom(name)`） |
+
+---
+
+### [session]
+
+会话保留策略配置，控制旧会话的自动清理。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `retention_days` | Integer | `0` | 空闲会话最大保留天数（0 = 不限制） |
+| `max_sessions_per_agent` | Integer | `0` | 每个 Agent 最大会话数，超出后删除最旧的（0 = 不限制） |
+| `cleanup_interval_hours` | Integer | `24` | 清理任务运行间隔（小时） |
+
+---
+
+### [queue]
+
+消息队列配置，控制队列深度限制、任务 TTL 和并发数。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `max_depth_per_agent` | Integer | `0` | 每 Agent 最大队列深度（0 = 不限制） |
+| `max_depth_global` | Integer | `0` | 全局最大队列深度（0 = 不限制） |
+| `task_ttl_secs` | Integer | `3600` | 任务 TTL（秒，未处理的任务过期，0 = 不限制） |
+
+**[queue.concurrency] — 各通道并发限制：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `main_lane` | Integer | `3` | 主通道并发数（用户消息） |
+| `cron_lane` | Integer | `2` | Cron 通道并发数（定时任务） |
+| `subagent_lane` | Integer | `3` | 子 Agent 通道并发数 |
+
+---
+
+### [external_auth]
+
+外部身份认证提供商配置（OAuth2/OIDC）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用外部认证 |
+| `issuer_url` | String | `""` | OIDC 颁发者 URL（如 `https://accounts.google.com`） |
+| `client_id` | String | `""` | OAuth2 客户端 ID |
+| `client_secret_env` | String | `"LIBREFANG_OAUTH_CLIENT_SECRET"` | 持有客户端密钥的环境变量名 |
+| `redirect_url` | String | `"http://127.0.0.1:4545/api/auth/callback"` | OAuth2 回调 URL |
+| `scopes` | Array\<String\> | `["openid","profile","email"]` | 请求的 OAuth2 权限范围 |
+| `allowed_domains` | Array\<String\> | `[]` | 允许的邮件域名（空 = 允许所有） |
+| `audience` | String | `""` | JWT audience claim（默认使用 `client_id`） |
+| `session_ttl_secs` | Integer | `86400` | 会话 Token 有效期（秒，默认 24 小时） |
+| `providers` | Array | `[]` | 多 OIDC/OAuth2 提供商配置（优先于顶层字段） |
+
+---
+
+### [vertex_ai]
+
+Vertex AI 提供商配置（Google Cloud）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `project_id` | String? | `null` | GCP 项目 ID |
+| `region` | String? | `null` | GCP 区域（如 `us-central1`） |
+| `credentials_path` | String? | `null` | 服务账号 JSON 文件路径或 JSON 字符串内容 |
+
+凭证解析顺序：
+1. 配置中的 `credentials_path`
+2. `VERTEX_AI_SERVICE_ACCOUNT_JSON` 环境变量
+3. `GOOGLE_APPLICATION_CREDENTIALS` 环境变量（文件路径）
+4. `gcloud auth print-access-token` CLI 回退
+
+---
+
+### [oauth]
+
+PKCE 流程的 OAuth 客户端 ID 覆盖。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `google_client_id` | String? | `null` | Google OAuth2 客户端 ID |
+| `github_client_id` | String? | `null` | GitHub OAuth 客户端 ID |
+| `microsoft_client_id` | String? | `null` | Microsoft (Entra ID) OAuth 客户端 ID |
+| `slack_client_id` | String? | `null` | Slack OAuth 客户端 ID |
+
+---
+
+### [auth_profiles]
+
+每个提供商的多密钥轮换配置，当某个密钥被限速或账单异常时自动切换。
+
+```toml
+[auth_profiles]
+anthropic = [
+  { name = "primary",   api_key_env = "ANTHROPIC_API_KEY",   priority = 0 },
+  { name = "secondary", api_key_env = "ANTHROPIC_API_KEY_2", priority = 1 },
+]
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `name` | String | 必填 | 配置名称（如 `primary`、`secondary`） |
+| `api_key_env` | String | 必填 | 持有 API 密钥的环境变量名 |
+| `priority` | Integer | `0` | 优先级（值越小越优先） |
+
+---
+
+### [tool_policy]
+
+全局工具策略配置，支持 glob 模式匹配、工具分组和子 Agent 深度限制。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `global_rules` | Array | `[]` | 全局规则（在 agent_rules 之后检查） |
+| `agent_rules` | Array | `[]` | Agent 级规则（最高优先级） |
+| `groups` | Array | `[]` | 命名工具分组 |
+| `subagent_max_depth` | Integer | `10` | 子 Agent 最大嵌套深度 |
+| `subagent_max_concurrent` | Integer | `5` | 最大并发子 Agent 数 |
+
+**规则格式：**
+
+```toml
+[[tool_policy.global_rules]]
+pattern = "shell_*"
+effect  = "deny"    # allow | deny
+
+[[tool_policy.groups]]
+name  = "web_tools"
+tools = ["web_search", "web_fetch"]
+```
+
+---
+
+### [proactive_memory]
+
+主动记忆（mem0 风格）配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `true` | 总开关（false 时禁用整个主动记忆子系统） |
+| `auto_memorize` | bool | `true` | Agent 执行后自动记忆 |
+| `auto_retrieve` | bool | `true` | Agent 执行前自动检索 |
+| `max_retrieve` | Integer | `10` | 每次查询最大检索记忆数 |
+| `extraction_threshold` | Float | `0.7` | 近似重复检测置信度阈值（0.0–1.0） |
+| `extraction_model` | String? | `null` | LLM 提取模型（null = 基于规则的提取） |
+| `extract_categories` | Array\<String\> | 见下 | 从对话中提取的类别 |
+| `session_ttl_hours` | Integer | `24` | 会话记忆 TTL（小时） |
+| `duplicate_threshold` | Float | `0.5` | 重复检测相似度阈值（0.0–1.0） |
+| `confidence_decay_rate` | Float | `0.01` | 每天置信度衰减率（指数衰减） |
+| `max_memories_per_agent` | Integer | `1000` | 每个 Agent 最大记忆数（0 = 不限制） |
+
+默认 `extract_categories`：`user_preference`、`important_fact`、`task_context`、`relationship`
+
+---
+
+### [context_engine]
+
+可插拔上下文引擎配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `engine` | String | `"default"` | 内置引擎名称 |
+| `plugin` | String? | `null` | 插件名称（解析到 `~/.librefang/plugins/<name>/plugin.toml`） |
+
+**[context_engine.hooks] — Python 脚本钩子：**
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `ingest` | String? | `null` | 新用户消息时调用的 Python 脚本路径 |
+| `after_turn` | String? | `null` | 每轮结束后调用的 Python 脚本路径 |
+
+**[[context_engine.plugin_registries]] — 插件注册表：**
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | String | 注册表显示名称 |
+| `github_repo` | String | GitHub `owner/repo`（如 `librefang/librefang-registry`） |
+
+---
+
+### [audit]
+
+审计日志配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `retention_days` | Integer | `90` | 审计日志条目保留天数（0 = 永久保留） |
+
+---
+
+### [health_check]
+
+健康检查配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `health_check_interval_secs` | Integer | `60` | LLM 提供商定期健康检查间隔（秒） |
+
+---
+
+### [plugins]
+
+插件注册表配置。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `plugin_registries` | Array\<String\> | `[]` | 额外的 GitHub `owner/repo` 插件注册表，与 `context_engine.plugin_registries` 合并 |
+
+---
+
+### [media]
+
+多媒体理解配置——控制图片描述、音频转录和视频理解功能。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `image_description` | bool | `true` | 是否启用图片自动描述 |
+| `audio_transcription` | bool | `true` | 是否启用音频自动转录 |
+| `video_description` | bool | `false` | 是否启用视频自动描述（开销较大，默认关闭） |
+| `max_concurrency` | Integer | `2` | 最大并发媒体处理任务数 |
+| `image_provider` | String? | `null` | 图片描述首选提供商（`null` = 自动检测） |
+| `audio_provider` | String? | `null` | 音频转录首选提供商（`null` = 自动检测） |
+
+```toml
+[media]
+image_description   = true
+audio_transcription = true
+video_description   = false
+max_concurrency     = 2
+image_provider      = "openai"   # 可选：显式指定提供商
+audio_provider      = "openai"   # 可选：显式指定提供商
+```
+
+---
+
+### [links]
+
+链接内容理解配置——控制消息中 URL 链接的自动抓取与分析。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用自动链接理解 |
+| `max_links` | Integer | `3` | 每条消息最多处理的链接数 |
+| `max_content_bytes` | Integer | `102400` | 每个链接最大抓取内容大小（字节，默认 100 KB） |
+| `timeout_secs` | Integer | `10` | 每个链接抓取超时（秒） |
+
+```toml
+[links]
+enabled           = true
+max_links         = 3
+max_content_bytes = 102400
+timeout_secs      = 10
+```
+
+---
+
+## 环境变量
+
+LibreFang 使用以下环境变量：
+
+| 变量 | 说明 |
+|------|------|
+| `ANTHROPIC_API_KEY` | Anthropic Claude API 密钥 |
+| `OPENAI_API_KEY` | OpenAI API 密钥 |
+| `GROQ_API_KEY` | Groq API 密钥 |
+| `GEMINI_API_KEY` | Google Gemini API 密钥 |
+| `DEEPSEEK_API_KEY` | DeepSeek API 密钥 |
+| `BRAVE_API_KEY` | Brave Search API 密钥 |
+| `TAVILY_API_KEY` | Tavily Search API 密钥 |
+| `PERPLEXITY_API_KEY` | Perplexity Search API 密钥 |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot Token |
+| `DISCORD_BOT_TOKEN` | Discord Bot Token |
+| `SLACK_BOT_TOKEN` | Slack Bot Token |
+| `SLACK_APP_TOKEN` | Slack App Token |
+| `LIBREFANG_HOME` | LibreFang 主目录覆盖（默认 `~/.librefang`） |
+| `LIBREFANG_WEBHOOK_TOKEN` | Webhook 触发端点 Bearer Token |
+| `LIBREFANG_OAUTH_CLIENT_SECRET` | OAuth2 客户端密钥 |
+| `VERTEX_AI_SERVICE_ACCOUNT_JSON` | Vertex AI 服务账号 JSON |
+| `GOOGLE_APPLICATION_CREDENTIALS` | GCP 服务账号文件路径 |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | HTTP 代理设置 |
+| `RUST_LOG` | 日志级别（`info` / `debug` / `trace`） |
+
+---
+
+## 验证
+
+运行诊断命令检查配置：
+
+```bash
+librefang doctor
+```
+
+这将检查：
+- 配置文件存在性
+- API 密钥配置
+- 网络连接
+- 依赖项可用性

@@ -258,7 +258,9 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         plan.hot_actions.push(HotAction::ReloadFallbackProviders);
     }
 
-    if field_changed(&old.provider_urls, &new.provider_urls) {
+    if field_changed(&old.provider_urls, &new.provider_urls)
+        || field_changed(&old.provider_regions, &new.provider_regions)
+    {
         plan.hot_actions.push(HotAction::ReloadProviderUrls);
     }
 

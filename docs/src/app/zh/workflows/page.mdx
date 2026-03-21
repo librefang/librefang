@@ -1,0 +1,343 @@
+# 工作流
+
+LibreFang 工作流系统允许您将多个 Agent 连接在一起，创建复杂的自动化流程。
+
+<Note>
+**提示**: 工作流支持 DAG (有向无环图) 结构，可实现复杂的条件分支和并行执行。
+</Note>
+
+---
+
+## 概述
+
+工作流是由触发器、条件、动作和 Agent 组成的可配置流程。
+
+```text
+触发器 → 条件检查 → Agent 执行 → 条件检查 → Agent 执行 → ... → 结束
+```
+
+---
+
+## 工作流结构
+
+```json
+{
+  "name": "lead-generation",
+  "version": "1.0.0",
+  "trigger": {
+    "type": "schedule",
+    "cron": "0 9 * * *"
+  },
+  "steps": [
+    {
+      "id": "research",
+      "agent": "researcher",
+      "input": "Find companies matching ICP: {{icp}}"
+    },
+    {
+      "id": "enrich",
+      "agent": "analyst",
+      "input": "Enrich leads with {{research.results}}"
+    },
+    {
+      "id": "score",
+      "agent": "classifier",
+      "input": "Score leads: {{enrich.results}}"
+    }
+  ],
+  "on_complete": {
+    "action": "notify",
+    "channel": "telegram",
+    "message": "Generated {{score.count}} qualified leads"
+  }
+}
+```
+
+---
+
+## 触发器类型
+
+### 1. 定时触发
+
+```json
+{
+  "type": "schedule",
+  "cron": "0 9 * * *"
+}
+```
+
+**Cron 表达式：**
+
+| 表达式 | 说明 |
+|--------|------|
+| `0 9 * * *` | 每天 9:00 |
+| `0 9 * * 1-5` | 工作日 9:00 |
+| `*/15 * * * *` | 每 15 分钟 |
+| `0 0 1 * *` | 每月 1 日 |
+
+### 2. 事件触发
+
+```json
+{
+  "type": "event",
+  "event": "email_received",
+  "filter": {
+    "from": "*.@example.com"
+  }
+}
+```
+
+### 3. Webhook 触发
+
+```json
+{
+  "type": "webhook",
+  "path": "/webhook/github",
+  "method": "POST"
+}
+```
+
+### 4. 手动触发
+
+```json
+{
+  "type": "manual"
+}
+```
+
+---
+
+## 步骤类型
+
+### Agent 步骤
+
+```json
+{
+  "id": "step1",
+  "type": "agent",
+  "agent": "researcher",
+  "input": "Research {{context.query}}",
+  "output_var": "research_results"
+}
+```
+
+### 条件步骤
+
+```json
+{
+  "id": "check",
+  "type": "condition",
+  "expression": "{{research_results.count}} > 10"
+}
+```
+
+### 延迟步骤
+
+```json
+{
+  "id": "wait",
+  "type": "delay",
+  "duration": "1h"
+}
+```
+
+### 通知步骤
+
+```json
+{
+  "id": "notify",
+  "type": "notification",
+  "channel": "telegram",
+  "message": "Workflow complete!"
+}
+```
+
+---
+
+## 条件逻辑
+
+### IF/ELSE
+
+```json
+{
+  "type": "condition",
+  "if": "{{count}} > 10",
+  "then": {
+    "agent": "big_team"
+  },
+  "else": {
+    "agent": "small_team"
+  }
+}
+```
+
+### SWITCH
+
+```json
+{
+  "type": "switch",
+  "value": "{{priority}}",
+  "cases": {
+    "high": { "agent": "urgent_team" },
+    "medium": { "agent": "normal_team" },
+    "low": { "agent": "background_team" }
+  }
+}
+```
+
+---
+
+## 变量
+
+### 输入变量
+
+```json
+{
+  "input": "Hello {{name}}"
+}
+```
+
+### 输出变量
+
+```json
+{
+  "output_var": "step1_result"
+}
+```
+
+### 全局变量
+
+```json
+{
+  "variables": {
+    "icp": "companies in AI space, >100 employees",
+    "target_count": 50
+  }
+}
+```
+
+---
+
+## 错误处理
+
+### 重试
+
+```json
+{
+  "id": "step1",
+  "retry": {
+    "max_attempts": 3,
+    "delay": "5s",
+    "backoff": "exponential"
+  }
+}
+```
+
+### 错误处理
+
+```json
+{
+  "on_error": {
+    "fallback_agent": "fallback",
+    "notify": true
+  }
+}
+```
+
+---
+
+## CLI 命令
+
+```bash
+# 列出工作流
+librefang workflow list
+
+# 创建工作流
+librefang workflow create workflow.json
+
+# 运行工作流
+librefang workflow run <id> <input>
+
+# 查看工作流状态
+librefang workflow status <id>
+
+# 删除工作流
+librefang workflow delete <id>
+```
+
+---
+
+## 示例工作流
+
+### 每日线索生成
+
+```json
+{
+  "name": "daily-lead-generation",
+  "trigger": {
+    "type": "schedule",
+    "cron": "0 9 * * *"
+  },
+  "steps": [
+    {
+      "id": "discover",
+      "agent": "lead_discovery",
+      "input": "Find companies matching our ICP"
+    },
+    {
+      "id": "enrich",
+      "agent": "data_enrichment",
+      "input": "Enrich with {{discover.companies}}"
+    },
+    {
+      "id": "score",
+      "agent": "lead_scoring",
+      "input": "Score: {{enrich.leads}}"
+    }
+  ],
+  "on_complete": {
+    "action": "notify",
+    "channel": "telegram",
+    "message": "Generated {{score.count}} leads"
+  }
+}
+```
+
+### 客户支持路由
+
+```json
+{
+  "name": "support-routing",
+  "trigger": {
+    "type": "webhook",
+    "path": "/webhook/support"
+  },
+  "steps": [
+    {
+      "id": "classify",
+      "agent": "ticket_classifier",
+      "input": "Classify: {{input.subject}}"
+    },
+    {
+      "id": "route",
+      "type": "switch",
+      "value": "{{classify.category}}",
+      "cases": {
+        "billing": { "agent": "billing_team" },
+        "technical": { "agent": "tech_team" },
+        "general": { "agent": "general_team" }
+      }
+    }
+  ]
+}
+```
+
+---
+
+## 最佳实践
+
+1. **保持简单** - 避免过于复杂的工作流
+2. **添加重试** - 网络可能不稳定
+3. **设置超时** - 防止步骤卡住
+4. **记录日志** - 便于调试
+5. **监控执行** - 跟踪工作流状态

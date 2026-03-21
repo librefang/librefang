@@ -185,6 +185,10 @@
               <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3"/><path d="M1 14h6M9 8h6M17 16h6"/></svg></span>
               <span class="nav-label" data-i18n="nav.settings">Settings</span>
             </a>
+            <a class="nav-item" href="https://github.com/librefang/librefang/discussions" target="_blank" rel="noopener noreferrer">
+              <span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></span>
+              <span class="nav-label">Discussions</span>
+            </a>
           </div>
         </template>
       </div>
@@ -3494,6 +3498,15 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   </div>
                   <div class="card-meta" x-text="providerModelsText(p)"></div>
                   <div class="text-xs text-dim mt-2" x-show="p.api_key_env" x-text="envText(p.api_key_env)"></div>
+                  <!-- Region badges for multi-region providers -->
+                  <template x-if="p.regions && Object.keys(p.regions).length > 0">
+                    <div class="mt-2" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+                      <span class="text-xs text-dim">Regions:</span>
+                      <template x-for="rn in Object.keys(p.regions)" :key="rn">
+                        <span class="badge" :style="p.active_region === rn ? 'font-size:10px;padding:1px 6px;background:var(--accent);color:white;border:1px solid var(--accent)' : 'font-size:10px;padding:1px 6px;background:var(--surface2);color:var(--text-dim);border:1px solid var(--border)'" x-text="p.active_region === rn ? rn + ' (active)' : rn"></span>
+                      </template>
+                    </div>
+                  </template>
                   <!-- Key input for unconfigured providers -->
                   <template x-if="p.auth_status !== 'configured' && p.api_key_env">
                     <div class="key-input-group">
@@ -4276,7 +4289,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               </ul>
               <div class="flex gap-2 mt-4">
                 <button class="btn btn-primary" @click="autoDetect()" :disabled="detecting">
-                  <span x-show="!detecting" data-i18n="settingsPage.autoDetectOpenClaw">Auto-Detect OpenClaw</span>
+                  <span x-show="!detecting" data-i18n="settingsPage.autoDetect">Auto-Detect</span>
                   <span x-show="detecting" data-i18n="settingsPage.scanning">Scanning...</span>
                 </button>
                 <button class="btn btn-ghost" @click="migStep = 'manual'" data-i18n="settingsPage.enterPathManually">Enter Path Manually</button>
@@ -4284,10 +4297,17 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             </div>
 
             <div class="card mb-4" x-show="migStep === 'manual'" style="border-left:3px solid var(--accent)">
-              <div class="font-bold" style="font-size:14px;margin-bottom:8px" data-i18n="settingsPage.specifyOpenClawPath">Specify OpenClaw Path</div>
+              <div class="font-bold" style="font-size:14px;margin-bottom:8px" data-i18n="settingsPage.specifySourcePath">Specify Source Path</div>
               <div class="form-group">
-                <label data-i18n="settingsPage.openClawHomeDirectory">OpenClaw Home Directory</label>
-                <input class="form-input" type="text" x-model="sourcePath" placeholder="~/.openclaw" style="font-family:monospace;font-size:12px">
+                <label data-i18n="settingsPage.sourceFramework">Source Framework</label>
+                <select class="form-input" x-model="detectedSource" style="font-size:12px">
+                  <option value="openclaw">OpenClaw</option>
+                  <option value="openfang">OpenFang</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label data-i18n="settingsPage.sourceHomeDirectory">Source Home Directory</label>
+                <input class="form-input" type="text" x-model="sourcePath" :placeholder="detectedSource === 'openfang' ? '~/.openfang' : '~/.openclaw'" style="font-family:monospace;font-size:12px">
               </div>
               <div class="form-group mt-2">
                 <label data-i18n="settingsPage.libreFangTargetDirectory">LibreFang Target Directory</label>
@@ -4302,18 +4322,18 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
               </div>
             </div>
 
-            <div x-show="migStep === 'preview' && scanResult">
+            <div x-show="migStep === 'preview'">
               <div class="card mb-4" style="border-left:3px solid var(--success, #22c55e)">
                 <div class="flex justify-between items-center mb-2">
-                  <div class="font-bold" style="font-size:14px" data-i18n="settingsPage.openClawWorkspaceFound">OpenClaw Workspace Found</div>
+                  <div class="font-bold" style="font-size:14px" x-text="detectedSource === 'openfang' ? 'OpenFang Workspace Found' : 'OpenClaw Workspace Found'">Workspace Found</div>
                   <span class="badge badge-connected" data-i18n="settingsPage.readyToMigrate">Ready to Migrate</span>
                 </div>
-                <div class="text-sm text-dim" style="font-family:monospace" x-text="scanResult.path"></div>
+                <div class="text-sm text-dim" style="font-family:monospace" x-text="scanResult ? scanResult.path : sourcePath"></div>
               </div>
-              <div class="stats-row mb-4">
-                <div class="stat-card"><div class="stat-value" x-text="scanResult.agents ? scanResult.agents.length : 0"></div><div class="stat-label" data-i18n="runtimePage.agents">Agents</div></div>
-                <div class="stat-card"><div class="stat-value" x-text="scanResult.channels ? scanResult.channels.length : 0"></div><div class="stat-label" data-i18n="stat.channels">Channels</div></div>
-                <div class="stat-card"><div class="stat-value" x-text="scanResult.skills ? scanResult.skills.length : 0"></div><div class="stat-label" data-i18n="stat.skills">Skills</div></div>
+              <div class="stats-row mb-4" x-show="scanResult">
+                <div class="stat-card"><div class="stat-value" x-text="scanResult && scanResult.agents ? scanResult.agents.length : 0"></div><div class="stat-label" data-i18n="runtimePage.agents">Agents</div></div>
+                <div class="stat-card"><div class="stat-value" x-text="scanResult && scanResult.channels ? scanResult.channels.length : 0"></div><div class="stat-label" data-i18n="stat.channels">Channels</div></div>
+                <div class="stat-card"><div class="stat-value" x-text="scanResult && scanResult.skills ? scanResult.skills.length : 0"></div><div class="stat-label" data-i18n="stat.skills">Skills</div></div>
               </div>
               <div class="flex gap-2 mb-4">
                 <button class="btn btn-primary" @click="runMigration(false)" :disabled="migrating">
@@ -4321,7 +4341,7 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   <span x-show="migrating" data-i18n="settingsPage.migrating">Migrating...</span>
                 </button>
                 <button class="btn btn-ghost" @click="runMigration(true)" :disabled="migrating" data-i18n="settingsPage.dryRun">Dry Run</button>
-                <button class="btn btn-ghost" @click="migStep = 'intro'; scanResult = null" data-i18n="settingsPage.startOver">Start Over</button>
+                <button class="btn btn-ghost" @click="migStep = 'intro'; scanResult = null; detectedSource = 'openclaw'" data-i18n="settingsPage.startOver">Start Over</button>
               </div>
             </div>
 
@@ -4340,8 +4360,8 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
             </div>
 
             <div class="card" x-show="migStep === 'not_found'" style="border-left:3px solid var(--warning, #f59e0b)">
-              <div class="font-bold mb-2" style="font-size:14px" data-i18n="settingsPage.openClawNotFound">OpenClaw Not Found</div>
-              <div class="text-sm text-dim" data-i18n="settingsPage.openClawNotFoundDesc">Could not auto-detect an OpenClaw installation.</div>
+              <div class="font-bold mb-2" style="font-size:14px" data-i18n="settingsPage.notFound">Not Found</div>
+              <div class="text-sm text-dim" data-i18n="settingsPage.notFoundDesc">Could not auto-detect an OpenClaw or OpenFang installation.</div>
               <div class="flex gap-2 mt-4">
                 <button class="btn btn-primary" @click="migStep = 'manual'" data-i18n="settingsPage.enterPathManually">Enter Path Manually</button>
                 <button class="btn btn-ghost" @click="migStep = 'intro'" data-i18n="btn.back">Back</button>

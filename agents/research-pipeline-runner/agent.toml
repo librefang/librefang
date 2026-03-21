@@ -1,0 +1,38 @@
+# Workflow-only agent for research steps. Isolated from researcher-hand to avoid
+# shared quota and session bloat. Use this in cron/workflow steps that need research.
+name = "research-pipeline-runner"
+version = "0.6.6"
+description = "Workflow-only research agent for pipeline steps (no continuous session)."
+author = "librefang"
+module = "builtin:chat"
+tags = ["workflow", "research", "pipeline"]
+
+[metadata.routing]
+aliases = ["pipeline research step", "workflow research task"]
+weak_aliases = ["pipeline step", "workflow research"]
+
+[model]
+provider = "default"
+model = "default"
+max_tokens = 2048
+temperature = 0.5
+system_prompt = """You are a research step in a workflow pipeline. You receive a single task and produce a concise output for the next step.
+
+Use web_search ONLY — do NOT use web_fetch unless the task explicitly requires it. Search snippets contain enough information for most research tasks. Run 2-3 targeted searches, synthesize findings with source URLs, and output a brief structured report. Keep output under 500 words. Do not carry over context from other runs — each invocation is independent."""
+
+[[fallback_models]]
+provider = "default"
+model = "default"
+api_key_env = "GROQ_API_KEY"
+
+[resources]
+max_llm_tokens_per_hour = 500000
+
+[exec_policy]
+mode = "full"
+
+[capabilities]
+tools = ["web_search", "shell_exec", "file_read", "file_write", "file_list", "memory_store", "memory_recall"]
+network = ["*"]
+memory_read = ["*"]
+memory_write = ["self.*", "shared.*"]

@@ -1,0 +1,287 @@
+# LibreFang 架构
+
+本文档描述 LibreFang 内部架构——用 Rust 编写的开源 Agent 操作系统。
+
+---
+
+## 目录
+
+- [Crate 结构](#crate-结构)
+- [内核启动序列](#内核启动序列)
+- [Agent 生命周期](#agent-生命周期)
+- [Agent 循环稳定性](#agent-循环稳定性)
+- [内存子系统](#内存子系统)
+- [LLM 驱动抽象](#llm-驱动抽象)
+- [模型目录](#模型目录)
+- [基于能力的安全模型](#基于能力的安全模型)
+- [安全加固](#安全加固)
+- [通道系统](#通道系统)
+- [技能系统](#技能系统)
+- [MCP 和 A2A 协议](#mcp-和-a2a-协议)
+- [Wire 协议 (OFP)](#wire-协议-ofp)
+- [桌面应用](#桌面应用)
+
+---
+
+## Crate 结构
+
+LibreFang 组织为 Cargo 工作空间，包含 14 个 crates（13 个代码 crates + xtask）。
+
+```
+librefang-cli            CLI 接口、守护进程自动检测、MCP 服务器
+    |
+librefang-desktop        Tauri 2.0 桌面应用 (WebView + 系统托盘)
+    |
+librefang-api            REST/WS/SSE API 服务器 (Axum 0.8), 76 个端点
+    |
+librefang-kernel         内核: 组装所有子系统、工作流引擎、RBAC、计量
+    |
+    +-- librefang-runtime    Agent 循环、3 个 LLM 驱动、60 个工具、WASM 沙箱、MCP、A2A
+    +-- librefang-channels   42 个通道适配器、桥接器、格式化器、速率限制器
+    +-- librefang-wire       OFP 点对点网络，HMAC-SHA256 认证
+    +-- librefang-migrate    迁移引擎 (OpenClaw YAML→TOML)
+    +-- librefang-skills     60 个内置技能、FangHub 市场、ClawHub 客户端
+    |
+librefang-memory         SQLite 内存子系统、会话、语义搜索、使用追踪
+    |
+librefang-types          共享类型: Agent、Capability、Event、Memory、Message、Tool、Config
+```
+
+### Crate 职责
+
+| Crate | 说明 |
+|-------|------|
+| **librefang-types** | 核心类型定义。定义 `AgentManifest`、`AgentId`、`Capability`、`ToolDefinition`、`KernelConfig`、污点追踪、Ed25519 清单签名、模型目录类型、MCP/A2A 配置类型。 |
+| **librefang-memory** | SQLite 内存子系统（schema v5）。提供结构化 KV 存储、向量嵌入语义搜索、知识图谱、会话管理、任务板、使用事件持久化。5 个 schema 版本。 |
+| **librefang-runtime** | Agent 执行引擎。包含 agent 循环、3 个原生 LLM 驱动（Anthropic、Gemini、OpenAI 兼容）、60 个内置工具、WASM 沙箱（Wasmtime 双燃料+epoch 计量）、MCP 客户端/服务器、A2A 协议、Web 搜索引擎、SSRF 保护、循环守卫、会话修复、LLM 会话压缩器、Merkle 哈希链审计追踪。 |
+| **librefang-kernel** | 中央协调器。`LibreFangKernel` 组装所有子系统：`AgentRegistry`、`AgentScheduler`、`CapabilityManager`、`EventBus`、`Supervisor`、`WorkflowEngine`、`TriggerEngine`、`BackgroundExecutor`、`WasmSandbox`、`ModelCatalog`、`MeteringEngine`、`ModelRouter`、`AuthManager`、`HeartbeatMonitor`。 |
+| **librefang-api** | 基于 Axum 0.8 的 HTTP API 服务器，76 个端点。包含 REST、WebSocket、SSE 端点。OpenAI 兼容端点 (`/v1/chat/completions`)。中间件：Bearer 认证、请求 ID 注入、结构化日志、GCRA 速率限制、安全头。 |
+| **librefang-channels** | 通道桥接层，42 个适配器。包括 Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email 等。功能：消息路由、生命周期协调、速率限制、格式化器、通道覆盖。 |
+| **librefang-wire** | LibreFang 协议 (OFP) 点对点通信。TCP 上的 JSON 帧消息，HMAC-SHA256 双向认证。 |
+| **librefang-cli** | 基于 Clap 的 CLI。支持所有命令：`init`、`start`、`status`、`doctor`、`agent spawn/list/chat/kill`、`workflow`、`trigger`、`skill`、`channel`、`config`、`chat`、`mcp`。 |
+| **librefang-desktop** | Tauri 2.0 原生桌面应用。在进程内启动内核，后台线程运行 axum 服务器，系统托盘、桌面通知、单实例强制。 |
+| **librefang-migrate** | 迁移引擎。支持 OpenClaw (~/openclaw/)。将 YAML 配置转换为 TOML，映射工具名称，导入 agent 清单。 |
+| **librefang-skills** | 可插拔工具捆绑的技能系统。60 个内置技能。技能是 `skill.toml` + Python/WASM/Node.js/PromptOnly 代码。技能注册表管理已安装和捆绑的技能。FangHub 客户端连接到市场。提示注入扫描器检测覆盖尝试。 |
+| **xtask** | 构建自动化任务 (cargo-xtask 模式)。 |
+
+---
+
+## 内核启动序列
+
+当调用 `LibreFangKernel::boot_with_config()` 时，执行以下序列：
+
+```
+1. 加载配置
+   - 读取 ~/.librefang/config.toml
+   - 应用 #[serde(default)] 默认值
+   - 验证配置并记录警告
+
+2. 创建数据目录
+   - 确保 ~/.librefang/data/ 存在
+
+3. 初始化内存子系统
+   - 打开 SQLite 数据库 (librefang.db)
+   - 运行 schema 迁移 (到 v5)
+   - 设置记忆衰减率
+
+4. 初始化 LLM 驱动
+   - 从环境变量读取 API 密钥
+   - 为配置的提供商创建驱动
+   - 验证驱动配置
+
+5. 初始化模型目录
+   - 构建包含 130+ 个内置模型、20+ 别名、28 个提供商的 ModelCatalog
+   - 运行 detect_auth() 检查环境变量存在（从不读取密钥）
+
+6. 初始化计量引擎
+   - 创建带有成本目录的 MeteringEngine
+
+7. 初始化模型路由器
+   - 创建带有任务复杂度评分的 ModelRouter
+
+8. 初始化核心子系统
+   - AgentRegistry (基于 DashMap 的并发 agent 存储)
+   - CapabilityManager (基于 DashMap 的能力授予)
+   - EventBus (异步广播频道)
+   - AgentScheduler (每个 agent 的配额追踪)
+   - Supervisor (健康监控)
+   - WorkflowEngine (工作流注册和执行)
+   - TriggerEngine (事件模式匹配)
+   - BackgroundExecutor (持续/周期性 agent 循环)
+   - WasmSandbox (Wasmtime 引擎)
+
+9. 初始化 RBAC 认证管理器
+   - 创建带有 UserRole 层次结构的 AuthManager
+
+10. 初始化技能注册表
+    - 通过 parse_bundled() 加载 60 个内置技能
+    - 从磁盘加载用户安装的技能
+
+11. 初始化 Web 工具上下文
+    - 创建 WebSearchEngine (4 提供商级联)
+    - 创建 WebFetchEngine (SSRF 保护)
+
+12. 恢复持久化的 agent
+    - 从 SQLite 加载所有 agent
+
+13. 发布 KernelStarted 事件
+
+14. 返回内核实例
+```
+
+---
+
+## Agent 生命周期
+
+```
+[Created] → [Initializing] → [Running] → [Paused]
+                                  ↓
+                              [Stopped]
+```
+
+### 状态说明
+
+| 状态 | 说明 |
+|------|------|
+| Created | Agent 清单已创建 |
+| Initializing | 正在加载配置和能力 |
+| Running | 活跃处理消息 |
+| Paused | 暂停，可恢复 |
+| Stopped | 已终止，状态已保存 |
+
+---
+
+## Agent 循环稳定性
+
+LibreFang 使用多层稳定性保护：
+
+1. **循环守卫** - SHA256 工具循环检测，带熔断器
+2. **会话修复** - 7 阶段消息历史验证
+3. **LLM 会话压缩器** - 块感知的上下文压缩
+4. **Merkle 哈希链审计追踪** - 加密链接的完整操作链
+
+---
+
+## 内存子系统
+
+- **SQLite 持久化** - 结构化 KV 存储
+- **向量嵌入** - 语义搜索能力
+- **知识图谱** - 实体和关系
+- **会话管理** - 跨通道记忆
+- **使用追踪** - 成本和使用统计
+
+---
+
+## LLM 驱动抽象
+
+3 个原生驱动：
+
+| 驱动 | 提供商 |
+|------|--------|
+| Anthropic | Claude 系列 |
+| Gemini | Google Gemini 系列 |
+| OpenAI 兼容 | 28 个提供商 (Groq、DeepSeek、OpenRouter 等) |
+
+---
+
+## 基于能力的安全模型
+
+- **能力门** - 基于角色的访问控制
+- **污点追踪** - 敏感信息从源到汇
+- **Ed25519 签名** - Agent 清单加密签名
+
+---
+
+## 安全加固
+
+16 层安全系统：
+
+1. WASM 双计量沙箱
+2. Merkle 哈希链审计追踪
+3. 信息流污点追踪
+4. Ed25519 签名 Agent 清单
+5. SSRF 保护
+6. Secret 零化
+7. OFP 双向认证
+8. 能力门
+9. 安全头
+10. 健康端点重写
+11. 子进程沙箱
+12. 提示注入扫描器
+13. 循环守卫
+14. 会话修复
+15. 路径遍历防护
+16. GCRA 速率限制器
+
+---
+
+## 通道系统
+
+42 个通道适配器：
+
+**核心**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
+
+**企业**: Microsoft Teams, Mattermost, Google Chat, Webex, Feishu/Lark, Zulip
+
+**社交**: LINE, Viber, Facebook Messenger, Mastodon, Bluesky, Reddit, LinkedIn, Twitch
+
+**社区**: IRC, XMPP, Guilded, Revolt, Keybase, Discourse, Gitter
+
+---
+
+## 技能系统
+
+60 个内置技能，编译到二进制中。
+
+技能类型：
+- Python
+- WASM
+- Node.js
+- PromptOnly
+
+技能结构：
+- `skill.toml` - 清单
+- 代码文件
+- `SKILL.md` - 领域知识参考
+
+---
+
+## MCP 和 A2A 协议
+
+### MCP (Model Context Protocol)
+
+- JSON-RPC 2.0 over stdio/SSE
+- MCP 客户端/服务器
+- 工具命名空间: `mcp_{server}_{tool}`
+
+### A2A (Agent to Agent)
+
+- AgentCard 发现
+- 任务管理
+- 端点: `/.well-known/agent.json`, `/a2a/*`
+
+---
+
+## Wire 协议 (OFP)
+
+LibreFang 协议 (OFP) 用于 Agent 间点对点通信：
+
+- TCP 上的 JSON 帧消息
+- HMAC-SHA256 双向认证
+- Nonce + 常数时间验证
+- `PeerNode` 监听连接
+- `PeerRegistry` 跟踪已知远程节点
+
+---
+
+## 桌面应用
+
+Tauri 2.0 原生应用：
+
+- 进程内启动内核
+- 后台线程运行 axum 服务器
+- WebView 指向本地服务器
+- 系统托盘 (显示/浏览器/状态/退出)
+- 单实例强制
+- 桌面通知
+- 关闭时隐藏到托盘

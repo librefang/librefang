@@ -11,6 +11,21 @@ const PORT = parseInt(process.env.WHATSAPP_GATEWAY_PORT || '3009', 10);
 const LIBREFANG_URL = (process.env.LIBREFANG_URL || 'http://127.0.0.1:4545').replace(/\/+$/, '');
 const DEFAULT_AGENT = process.env.LIBREFANG_DEFAULT_AGENT || 'assistant';
 
+// Owner routing: responses to external DMs go to the owner, not back to the sender.
+// Set WHATSAPP_OWNER_JID to the owner's phone number (e.g. "393760105565").
+const OWNER_JID_RAW = process.env.WHATSAPP_OWNER_JID || '';
+const OWNER_JID = OWNER_JID_RAW ? OWNER_JID_RAW.replace(/^\+/, '') + '@s.whatsapp.net' : '';
+
+// Validate OWNER_JID format at startup
+if (OWNER_JID_RAW) {
+  const digits = OWNER_JID_RAW.replace(/^\+/, '');
+  if (!/^\d{7,15}$/.test(digits)) {
+    console.error(`[gateway] WARNING: WHATSAPP_OWNER_JID="${OWNER_JID_RAW}" looks invalid (expected 7-15 digits, optionally prefixed with +). Owner routing may not work.`);
+  } else {
+    console.log(`[gateway] Owner routing enabled → ${OWNER_JID}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -24,6 +39,7 @@ let reconnectAttempts = 0;
 let isConnecting = false;
 const MAX_RECONNECT_DELAY = 60_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
+const MAX_FORWARD_RETRIES = 1;
 
 // Cached agent UUID — resolved from DEFAULT_AGENT name on first use
 let cachedAgentId = null;
@@ -176,8 +192,7 @@ async function startConnection() {
         if (fs.existsSync(authPath)) {
           fs.rmSync(authPath, { recursive: true, force: true });
         }
-      } else if (statusCode === DisconnectReason.loggedOut ||
-                 statusCode === DisconnectReason.forbidden) {
+      } else if (statusCode === DisconnectReason.forbidden) {
         // Non-recoverable — don't auto-reconnect
         connStatus = 'disconnected';
         statusMessage = `Disconnected: ${reason}. Use POST /login/start to reconnect.`;
@@ -270,9 +285,34 @@ async function startConnection() {
       try {
         const response = await forwardToLibreFang(text, phone, pushName);
         if (response && sock) {
-          // Send agent response back to WhatsApp
-          await sock.sendMessage(sender, { text: response });
-          console.log(`[gateway] Replied to ${pushName}`);
+          // Owner routing: for DMs from external contacts, send the agent's
+          // response to the owner instead of back to the external contact.
+          // This prevents the bot from accidentally replying to shops/services
+          // with messages meant for the owner (e.g. "Signore, X ha risposto...").
+          const isGroup = sender.endsWith('@g.us');
+          let replyJid = sender;
+          let replyText = response;
+          if (!isGroup && OWNER_JID && sender !== OWNER_JID) {
+            replyJid = OWNER_JID;
+            // Prefix with sender context so the owner knows who triggered it
+            replyText = `[From ${pushName} (${phone})]\n${response}`;
+            console.log(`[gateway] Owner routing: redirecting response from ${pushName} (${phone}) -> owner`);
+
+            // Send a brief LLM-generated ack to the external sender in their language
+            try {
+              const ack = await generateSenderAck(text, pushName);
+              if (ack) {
+                await sock.sendMessage(sender, { text: ack });
+              }
+            } catch (ackErr) {
+              console.error(`[gateway] Failed to send ack to ${pushName}:`, ackErr.message);
+            }
+          }
+
+          await sock.sendMessage(replyJid, { text: replyText });
+          const target = replyJid === OWNER_JID && replyJid !== sender
+            ? `owner (via ${pushName})` : pushName;
+          console.log(`[gateway] Replied to ${target}`);
         }
       } catch (err) {
         console.error(`[gateway] Forward/reply failed:`, err.message);
@@ -287,7 +327,7 @@ async function startConnection() {
 // ---------------------------------------------------------------------------
 // Forward incoming message to LibreFang API, return agent response
 // ---------------------------------------------------------------------------
-async function forwardToLibreFang(text, phone, pushName) {
+async function forwardToLibreFang(text, phone, pushName, retryCount = 0) {
   // Resolve agent UUID if not cached (or if invalidated on reconnect)
   if (!cachedAgentId) {
     try {
@@ -328,14 +368,18 @@ async function forwardToLibreFang(text, phone, pushName) {
         res.on('end', () => {
           // If the agent UUID became stale (404), invalidate cache and retry once
           if (res.statusCode === 404) {
-            console.log('[gateway] Agent UUID stale (404), re-resolving...');
-            cachedAgentId = null;
-            // Retry once with fresh UUID
-            resolveAgentId()
-              .then(() => forwardToLibreFang(text, phone, pushName))
-              .then(resolve)
-              .catch(reject);
-            return;
+            if (retryCount < MAX_FORWARD_RETRIES) {
+              console.log('[gateway] Agent UUID stale (404), re-resolving...');
+              cachedAgentId = null;
+              // Retry once with fresh UUID
+              resolveAgentId()
+                .then(() => forwardToLibreFang(text, phone, pushName, retryCount + 1))
+                .then(resolve)
+                .catch(reject);
+              return;
+            }
+            console.error('[gateway] Agent UUID still 404 after retry, giving up');
+            return reject(new Error('Agent not found after retry'));
           }
 
           try {
@@ -360,6 +404,69 @@ async function forwardToLibreFang(text, phone, pushName) {
 }
 
 // ---------------------------------------------------------------------------
+// Generate a brief ack for external senders via LLM (language-aware)
+// ---------------------------------------------------------------------------
+async function generateSenderAck(originalMessage, pushName) {
+  if (!cachedAgentId) {
+    try { await resolveAgentId(); } catch { return ''; }
+  }
+
+  const prompt = [
+    `[SYSTEM-ACK] An external contact named "${pushName}" just sent a WhatsApp message.`,
+    `Their message: "${(originalMessage || '').substring(0, 300)}"`,
+    `Generate a very brief, warm acknowledgment (1-2 sentences max) in the SAME language as their message.`,
+    `Do NOT answer their question. Just confirm receipt and say someone will get back to them.`,
+    `Do NOT mention being an AI or bot. Sign off as "Ambrogio".`,
+  ].join(' ');
+
+  return new Promise((resolve) => {
+    const payload = JSON.stringify({
+      message: prompt,
+      metadata: { channel: 'whatsapp', sender: 'system', sender_name: 'system-ack' },
+    });
+
+    const url = new URL(`${LIBREFANG_URL}/api/agents/${encodeURIComponent(cachedAgentId)}/message`);
+
+    const req = http.request(
+      {
+        hostname: url.hostname,
+        port: url.port || 4545,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload),
+        },
+        timeout: 30_000,
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => (body += chunk));
+        res.on('end', () => {
+          try {
+            const data = JSON.parse(body);
+            resolve(data.response || data.message || data.text || '');
+          } catch {
+            resolve(body.trim() || '');
+          }
+        });
+      },
+    );
+    req.on('error', (err) => {
+      console.error(`[gateway] generateSenderAck failed: ${err.message}`);
+      resolve('');
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      console.error('[gateway] generateSenderAck timeout');
+      resolve('');
+    });
+    req.write(payload);
+    req.end();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Send a message via Baileys (called by LibreFang for outgoing)
 // ---------------------------------------------------------------------------
 async function sendMessage(to, text) {
@@ -376,11 +483,24 @@ async function sendMessage(to, text) {
 // ---------------------------------------------------------------------------
 // HTTP server
 // ---------------------------------------------------------------------------
+const MAX_BODY_SIZE = 64 * 1024;
+
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', (chunk) => (body += chunk));
+    let size = 0;
+    let aborted = false;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_SIZE) {
+        aborted = true;
+        req.destroy();
+        return reject(new Error('Request body too large'));
+      }
+      body += chunk;
+    });
     req.on('end', () => {
+      if (aborted) return;
       try {
         resolve(body ? JSON.parse(body) : {});
       } catch (e) {

@@ -45,25 +45,6 @@ use tracing::{debug, info, warn};
 
 const STABLE_PREFIX_MODE_METADATA_KEY: &str = "stable_prefix_mode";
 
-/// Cosine similarity between two f32 vectors. Returns 0.0 on dimension mismatch.
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let (mut dot, mut na, mut nb) = (0.0f32, 0.0f32, 0.0f32);
-    for i in 0..a.len() {
-        dot += a[i] * b[i];
-        na += a[i] * a[i];
-        nb += b[i] * b[i];
-    }
-    let denom = na.sqrt() * nb.sqrt();
-    if denom < f32::EPSILON {
-        0.0
-    } else {
-        dot / denom
-    }
-}
-
 /// The main LibreFang kernel — coordinates all subsystems.
 /// Stub LLM driver used when no providers are configured.
 /// Returns a helpful error so the dashboard still boots and users can configure providers.
@@ -100,6 +81,27 @@ impl std::fmt::Debug for RotationKeySpec {
             .field("api_key", &"<redacted>")
             .field("use_primary_driver", &self.use_primary_driver)
             .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AssistantRouteTarget {
+    Specialist(String),
+    Hand(String),
+}
+
+impl AssistantRouteTarget {
+    fn route_type(&self) -> &'static str {
+        match self {
+            Self::Specialist(_) => "specialist",
+            Self::Hand(_) => "hand",
+        }
+    }
+
+    fn name(&self) -> &str {
+        match self {
+            Self::Specialist(name) | Self::Hand(name) => name,
+        }
     }
 }
 
@@ -252,18 +254,14 @@ pub struct LibreFangKernel {
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
     agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
-    /// Cooldown tracker for hand routing failures. Maps hand_id → (expiry, consecutive_failures).
-    /// Prevents the router from repeatedly dispatching to a hand that keeps failing.
-    /// After `MAX_HAND_FAILURES` consecutive failures the hand is auto-deactivated.
-    hand_route_cooldowns: dashmap::DashMap<String, (std::time::Instant, u32)>,
+    /// Sticky assistant routing per conversation (assistant + sender/thread).
+    /// Preserves follow-up context for brief messages after a route to a specialist/hand.
+    assistant_routes: dashmap::DashMap<String, AssistantRouteTarget>,
     /// Per-agent decision traces from the most recent message exchange.
     /// Stored for retrieval via `/api/agents/{id}/traces`.
     pub decision_traces: dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
     /// Command queue with lane-based concurrency control.
     pub command_queue: librefang_runtime::command_lane::CommandQueue,
-    /// Cached embeddings of hand descriptions for semantic routing.
-    /// Maps hand_id → embedding vector. Populated lazily on first routing call.
-    hand_desc_embeddings: tokio::sync::RwLock<Option<std::collections::HashMap<String, Vec<f32>>>>,
     /// Pluggable context engine for memory recall, assembly, and compaction.
     pub context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>>,
     /// Runtime config passed to context-engine lifecycle hooks.
@@ -703,6 +701,16 @@ impl LibreFangKernel {
         std::fs::create_dir_all(&config.data_dir)
             .map_err(|e| KernelError::BootFailed(format!("Failed to create data dir: {e}")))?;
 
+        // Ensure global shared workspace directory exists
+        let workspace_dir = config.effective_workspace_dir();
+        std::fs::create_dir_all(&workspace_dir).map_err(|e| {
+            KernelError::BootFailed(format!(
+                "Failed to create workspace dir {}: {e}",
+                workspace_dir.display()
+            ))
+        })?;
+        info!("Global workspace dir: {}", workspace_dir.display());
+
         // Initialize memory substrate
         let db_path = config
             .memory
@@ -736,6 +744,7 @@ impl LibreFangKernel {
             api_key: default_api_key.clone(),
             base_url: default_base_url.clone(),
             vertex_ai: config.vertex_ai.clone(),
+            azure_openai: config.azure_openai.clone(),
             skip_permissions: true,
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
@@ -768,6 +777,7 @@ impl LibreFangKernel {
                     api_key: Some(spec.api_key),
                     base_url: default_base_url.clone(),
                     vertex_ai: config.vertex_ai.clone(),
+                    azure_openai: config.azure_openai.clone(),
                     skip_permissions: true,
                 };
                 match drivers::create_driver(&profile_config) {
@@ -816,6 +826,7 @@ impl LibreFangKernel {
                             api_key: std::env::var(env_var).ok(),
                             base_url: config.provider_urls.get(provider).cloned(),
                             vertex_ai: config.vertex_ai.clone(),
+                            azure_openai: config.azure_openai.clone(),
                             skip_permissions: true,
                         };
                         match drivers::create_driver(&auto_config) {
@@ -863,6 +874,7 @@ impl LibreFangKernel {
                     .clone()
                     .or_else(|| config.provider_urls.get(&fb.provider).cloned()),
                 vertex_ai: config.vertex_ai.clone(),
+                azure_openai: config.azure_openai.clone(),
                 skip_permissions: true,
             };
             match drivers::create_driver(&fb_config) {
@@ -915,9 +927,32 @@ impl LibreFangKernel {
             info!("RBAC enabled with {} users", auth.user_count());
         }
 
+        // Auto-sync registry content on first boot or after upgrade when
+        // critical directories (providers/, hands/, agents/) are missing.
+        if librefang_runtime::registry_sync::needs_sync(&config.home_dir) {
+            info!("Registry content missing — running auto-sync from librefang-registry");
+            librefang_runtime::registry_sync::sync_registry(&config.home_dir);
+        }
+
         // Initialize model catalog, detect provider auth, and apply URL overrides
-        let mut model_catalog = librefang_runtime::model_catalog::ModelCatalog::new();
+        let mut model_catalog =
+            librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
         model_catalog.detect_auth();
+        // Apply region selections first (lower priority than explicit provider_urls)
+        if !config.provider_regions.is_empty() {
+            let region_urls = model_catalog.resolve_region_urls(&config.provider_regions);
+            if !region_urls.is_empty() {
+                model_catalog.apply_url_overrides(&region_urls);
+                info!("applied {} provider region override(s)", region_urls.len());
+            }
+            // Also apply region-specific api_key_env overrides (e.g. minimax china
+            // uses MINIMAX_CN_API_KEY instead of MINIMAX_API_KEY). Only inserts if
+            // the user hasn't already set an explicit provider_api_keys entry.
+            let region_api_keys = model_catalog.resolve_region_api_keys(&config.provider_regions);
+            for (provider, env_var) in region_api_keys {
+                config.provider_api_keys.entry(provider).or_insert(env_var);
+            }
+        }
         if !config.provider_urls.is_empty() {
             model_catalog.apply_url_overrides(&config.provider_urls);
             info!(
@@ -926,7 +961,7 @@ impl LibreFangKernel {
             );
         }
         // Load cached catalog from remote sync (overrides builtins)
-        model_catalog.load_default_cached_catalog();
+        model_catalog.load_cached_catalog_for(&config.home_dir);
         // Load user's custom models from ~/.librefang/custom_models.json (highest priority)
         let custom_models_path = config.home_dir.join("custom_models.json");
         model_catalog.load_custom_models(&custom_models_path);
@@ -946,7 +981,7 @@ impl LibreFangKernel {
         let mut skill_registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
 
         // Load bundled skills first (compile-time embedded)
-        let bundled_count = skill_registry.load_bundled();
+        let bundled_count = skill_registry.load_bundled(&config.home_dir);
         if bundled_count > 0 {
             info!("Loaded {bundled_count} bundled skill(s)");
         }
@@ -969,7 +1004,8 @@ impl LibreFangKernel {
 
         // Initialize hand registry (curated autonomous packages)
         let hand_registry = librefang_hands::registry::HandRegistry::new();
-        let hand_count = hand_registry.load_bundled();
+        router::set_hand_route_home_dir(&config.home_dir);
+        let hand_count = hand_registry.load_bundled(&config.home_dir);
         if hand_count > 0 {
             info!("Loaded {hand_count} bundled hand(s)");
         }
@@ -977,7 +1013,7 @@ impl LibreFangKernel {
         // Initialize extension/integration registry
         let mut extension_registry =
             librefang_extensions::registry::IntegrationRegistry::new(&config.home_dir);
-        let ext_bundled = extension_registry.load_bundled();
+        let ext_bundled = extension_registry.load_bundled(&config.home_dir);
         match extension_registry.load_installed() {
             Ok(count) => {
                 if count > 0 {
@@ -1003,12 +1039,18 @@ impl LibreFangKernel {
             }
         }
 
-        // Initialize integration health monitor
+        // Initialize integration health monitor.
+        // [health_check] section overrides [extensions] when explicitly set (non-default).
+        let hc_interval = if config.health_check.health_check_interval_secs != 60 {
+            config.health_check.health_check_interval_secs
+        } else {
+            config.extensions.health_check_interval_secs
+        };
         let health_config = librefang_extensions::health::HealthMonitorConfig {
             auto_reconnect: config.extensions.auto_reconnect,
             max_reconnect_attempts: config.extensions.reconnect_max_attempts,
             max_backoff_secs: config.extensions.reconnect_max_backoff_secs,
-            check_interval_secs: config.extensions.health_check_interval_secs,
+            check_interval_secs: hc_interval,
         };
         let extension_health = librefang_extensions::health::HealthMonitor::new(health_config);
         // Register all installed integrations for health monitoring
@@ -1044,7 +1086,10 @@ impl LibreFangKernel {
         // Auto-detect embedding driver for vector similarity search
         let embedding_driver: Option<
             Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>,
-        > = {
+        > = if config.memory.fts_only == Some(true) {
+            info!("FTS-only memory mode active — skipping embedding driver, using SQLite FTS5 text search");
+            None
+        } else {
             use librefang_runtime::embedding::create_embedding_driver;
             let configured_model = &config.memory.embedding_model;
             if let Some(ref provider) = config.memory.embedding_provider {
@@ -1062,7 +1107,13 @@ impl LibreFangKernel {
                     .provider_urls
                     .get(provider.as_str())
                     .map(|s| s.as_str());
-                match create_embedding_driver(provider, model, api_key_env, custom_url) {
+                match create_embedding_driver(
+                    provider,
+                    model,
+                    api_key_env,
+                    custom_url,
+                    config.memory.embedding_dimensions,
+                ) {
                     Ok(d) => {
                         info!(provider = %provider, model = %model, "Embedding driver configured from memory config");
                         Some(Arc::from(d))
@@ -1079,7 +1130,13 @@ impl LibreFangKernel {
                     configured_model.as_str()
                 };
                 let openai_url = config.provider_urls.get("openai").map(|s| s.as_str());
-                match create_embedding_driver("openai", model, "OPENAI_API_KEY", openai_url) {
+                match create_embedding_driver(
+                    "openai",
+                    model,
+                    "OPENAI_API_KEY",
+                    openai_url,
+                    config.memory.embedding_dimensions,
+                ) {
                     Ok(d) => {
                         info!(model = %model, "Embedding driver auto-detected: OpenAI");
                         Some(Arc::from(d))
@@ -1097,7 +1154,13 @@ impl LibreFangKernel {
                     configured_model.as_str()
                 };
                 let ollama_url = config.provider_urls.get("ollama").map(|s| s.as_str());
-                match create_embedding_driver("ollama", model, "", ollama_url) {
+                match create_embedding_driver(
+                    "ollama",
+                    model,
+                    "",
+                    ollama_url,
+                    config.memory.embedding_dimensions,
+                ) {
                     Ok(d) => {
                         info!(model = %model, "Embedding driver auto-detected: Ollama (local)");
                         Some(Arc::from(d))
@@ -1270,10 +1333,9 @@ impl LibreFangKernel {
             default_model_override: std::sync::RwLock::new(None),
             tool_policy_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
-            hand_route_cooldowns: dashmap::DashMap::new(),
+            assistant_routes: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
             command_queue,
-            hand_desc_embeddings: tokio::sync::RwLock::new(None),
             context_engine,
             context_engine_config,
             self_handle: OnceLock::new(),
@@ -1291,6 +1353,12 @@ impl LibreFangKernel {
                 .clone()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| kernel.config.default_model.model.clone());
+            // Strip provider prefix (e.g. "minimax/minimax-M2.5-highspeed" → "minimax-M2.5-highspeed")
+            // so the model name is valid for the upstream API.
+            let extraction_model = librefang_runtime::agent_loop::strip_provider_prefix(
+                &extraction_model,
+                &kernel.config.default_model.provider,
+            );
             let llm = Some((Arc::clone(&kernel.default_driver) as _, extraction_model));
             let store = if let Some(ref emb) = kernel.embedding_driver {
                 librefang_runtime::proactive_memory::init_proactive_memory_with_embedding(
@@ -1471,16 +1539,34 @@ impl LibreFangKernel {
             }
         }
 
-        // If no agents exist (fresh install), spawn a default router.
+        // If no agents exist (fresh install), spawn a default assistant.
         if kernel.registry.list().is_empty() {
-            info!("No agents found — spawning default router");
-            let manifest = router::load_template_manifest(&kernel.config.home_dir, "router")
+            info!("No agents found — spawning default assistant");
+            let manifest = router::load_template_manifest(&kernel.config.home_dir, "assistant")
+                .or_else(|_| {
+                    // Fallback: minimal assistant for zero-network boot (init not yet run)
+                    toml::from_str::<librefang_types::agent::AgentManifest>(
+                        r#"
+name = "assistant"
+description = "General-purpose assistant"
+module = "builtin:chat"
+tags = ["general", "assistant"]
+[model]
+provider = "default"
+model = "default"
+max_tokens = 8192
+temperature = 0.5
+system_prompt = "You are a helpful assistant."
+"#,
+                    )
+                    .map_err(|e| format!("fallback manifest parse error: {e}"))
+                })
                 .map_err(|e| {
-                    KernelError::BootFailed(format!("failed to load router template: {e}"))
+                    KernelError::BootFailed(format!("failed to load assistant template: {e}"))
                 })?;
             match kernel.spawn_agent(manifest) {
-                Ok(id) => info!(id = %id, "Default router spawned"),
-                Err(e) => warn!("Failed to spawn default router: {e}"),
+                Ok(id) => info!(id = %id, "Default assistant spawned"),
+                Err(e) => warn!("Failed to spawn default assistant: {e}"),
             }
         }
 
@@ -1562,10 +1648,12 @@ impl LibreFangKernel {
 
         info!(agent = %name, id = %agent_id, parent = ?parent, "Spawning agent");
 
-        // Create session
-        self.memory
+        // Create session and inject reset prompt if configured
+        let mut session = self
+            .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
+        self.inject_reset_prompt(&mut session);
 
         // Inherit kernel exec_policy as fallback if agent manifest doesn't have one
         let mut manifest = manifest;
@@ -1848,6 +1936,10 @@ impl LibreFangKernel {
         content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
         sender_context: Option<&SenderContext>,
     ) -> KernelResult<AgentLoopResult> {
+        let agent_id = self
+            .resolve_assistant_target(agent_id, message, sender_context)
+            .await?;
+
         // Acquire per-agent lock to serialize concurrent messages for the same agent.
         // This prevents session corruption when multiple messages arrive in quick
         // succession (e.g. rapid voice messages via Telegram). Messages for different
@@ -1859,7 +1951,7 @@ impl LibreFangKernel {
             .clone();
         let _guard = lock.lock().await;
 
-        // Enforce quota before running the agent loop
+        // Enforce quota on the effective target agent (after routing)
         self.scheduler
             .check_quota(agent_id)
             .map_err(KernelError::LibreFang)?;
@@ -1876,10 +1968,6 @@ impl LibreFangKernel {
             }
             module if module.starts_with("python:") => {
                 self.execute_python_agent(&entry, agent_id, message).await
-            }
-            "builtin:router" => {
-                self.execute_router_agent(&entry, agent_id, message, kernel_handle, content_blocks)
-                    .await
             }
             _ => {
                 // Default: LLM agent loop (builtin:chat or any unrecognized module)
@@ -1954,6 +2042,38 @@ impl LibreFangKernel {
         }
     }
 
+    /// Send a message with LLM intent routing + streaming.
+    ///
+    /// When the target is the assistant, first classifies the message via a
+    /// lightweight LLM call and routes to the appropriate specialist.
+    pub async fn send_message_streaming_with_routing(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        self.send_message_streaming_resolved(agent_id, message, kernel_handle, None)
+            .await
+    }
+
+    /// Sender-aware streaming entry point for channel bridges.
+    pub async fn send_message_streaming_with_sender_context_and_routing(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender: &SenderContext,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        self.send_message_streaming_resolved(agent_id, message, kernel_handle, Some(sender))
+            .await
+    }
+
     /// Send a message to an agent with streaming responses.
     ///
     /// Returns a receiver for incremental `StreamEvent`s and a `JoinHandle`
@@ -1967,6 +2087,19 @@ impl LibreFangKernel {
         agent_id: AgentId,
         message: &str,
         kernel_handle: Option<Arc<dyn KernelHandle>>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        self.send_message_streaming_with_sender(agent_id, message, kernel_handle, None)
+    }
+
+    fn send_message_streaming_with_sender(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_context: Option<&SenderContext>,
     ) -> KernelResult<(
         tokio::sync::mpsc::Receiver<StreamEvent>,
         tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
@@ -2171,9 +2304,9 @@ impl LibreFangKernel {
                         .and_then(|(s, _)| s)
                 },
                 user_name,
-                channel_type: None,
-                sender_user_id: None,
-                sender_display_name: None,
+                channel_type: sender_context.map(|s| s.channel.clone()),
+                sender_user_id: sender_context.map(|s| s.user_id.clone()),
+                sender_display_name: sender_context.map(|s| s.display_name.clone()),
                 is_subagent: manifest
                     .metadata
                     .get("is_subagent")
@@ -2336,7 +2469,7 @@ impl LibreFangKernel {
                 Some(&kernel_clone.process_manager),
                 None, // content_blocks (streaming path uses text only for now)
                 kernel_clone.proactive_memory.get().cloned(),
-                kernel_clone.context_engine.as_deref(),
+                kernel_clone.context_engine_for_agent(&manifest),
             )
             .await;
 
@@ -2584,195 +2717,6 @@ impl LibreFangKernel {
         })
     }
 
-    /// Duration to suppress routing to a hand after a dispatch failure.
-    const HAND_ROUTE_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
-    /// Auto-deactivate a hand after this many consecutive routing failures.
-    const MAX_HAND_FAILURES: u32 = 3;
-
-    async fn execute_router_agent(
-        &self,
-        entry: &AgentEntry,
-        agent_id: AgentId,
-        message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
-        content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
-    ) -> KernelResult<AgentLoopResult> {
-        // ── Semantic scoring (optional) ──────────────────────────────────
-        // When an embedding driver is available, compute cosine similarity
-        // between the user message and cached hand description embeddings.
-        // This enables cross-lingual routing (e.g. Chinese input matching
-        // English hand descriptions) without hardcoding per-language keywords.
-        let semantic_scores = self.compute_hand_semantic_scores(message).await;
-        let semantic_ref = if semantic_scores.is_empty() {
-            None
-        } else {
-            Some(&semantic_scores)
-        };
-
-        let hand_selection = router::auto_select_hand(message, semantic_ref);
-        let template_selection =
-            router::auto_select_template(message, &self.config.home_dir.join("agents"));
-
-        // ── Route decision trace ──
-        info!(
-            router = %entry.name,
-            hand_candidate = hand_selection.hand_id.as_deref().unwrap_or("none"),
-            hand_score = hand_selection.score,
-            hand_reason = %hand_selection.reason,
-            template_candidate = %template_selection.template,
-            template_score = template_selection.score,
-            template_reason = %template_selection.reason,
-            semantic_available = semantic_ref.is_some(),
-            "Route decision: scoring complete"
-        );
-
-        // ── Compare hand vs template score and pick the best ──
-        let hand_id_ref = hand_selection.hand_id.as_deref();
-        let hand_usable = hand_id_ref
-            .is_some_and(|hid| !self.is_hand_cooled_down(hid) && self.hand_requirements_met(hid));
-
-        let prefer_hand = hand_usable && hand_selection.score >= template_selection.score;
-
-        if prefer_hand {
-            let hand_id = hand_id_ref.unwrap();
-            info!(
-                router = %entry.name,
-                route_type = "hand",
-                target = hand_id,
-                hand_score = hand_selection.score,
-                template = %template_selection.template,
-                template_score = template_selection.score,
-                reason = %hand_selection.reason,
-                "Router selected hand (score comparison)"
-            );
-            match self
-                .execute_routed_hand(
-                    hand_id,
-                    message,
-                    kernel_handle.clone(),
-                    content_blocks.clone(),
-                )
-                .await
-            {
-                Ok(result) => {
-                    // Success — clear any previous failure count
-                    self.hand_route_cooldowns.remove(hand_id);
-                    return Ok(result);
-                }
-                Err(err) => {
-                    self.record_hand_failure(hand_id, &entry.name, &err);
-                }
-            }
-        } else if let Some(ref hand_id) = hand_selection.hand_id {
-            // Log why hand was skipped despite matching
-            info!(
-                router = %entry.name,
-                hand = %hand_id,
-                hand_score = hand_selection.score,
-                template = %template_selection.template,
-                template_score = template_selection.score,
-                hand_usable,
-                "Route decision: skipped hand"
-            );
-        }
-
-        if template_selection.score > 0 {
-            info!(
-                router = %entry.name,
-                route_type = "template",
-                target = %template_selection.template,
-                reason = %template_selection.reason,
-                "Router selected template"
-            );
-            match self
-                .execute_routed_template(
-                    agent_id,
-                    &template_selection.template,
-                    message,
-                    kernel_handle.clone(),
-                    content_blocks.clone(),
-                )
-                .await
-            {
-                Ok(result) => return Ok(result),
-                Err(err) => warn!(
-                    router = %entry.name,
-                    template = %template_selection.template,
-                    error = %err,
-                    "Router template dispatch failed, falling back to assistant"
-                ),
-            }
-        }
-
-        info!(
-            router = %entry.name,
-            route_type = "template",
-            target = "assistant",
-            reason = "no specialist match; routed to assistant",
-            "Router selected fallback template"
-        );
-        self.execute_routed_template(
-            agent_id,
-            "assistant",
-            message,
-            kernel_handle,
-            content_blocks,
-        )
-        .await
-    }
-
-    /// Record a hand dispatch failure: apply cooldown, increment failure count,
-    /// and auto-deactivate after `MAX_HAND_FAILURES` consecutive failures.
-    fn record_hand_failure(&self, hand_id: &str, router_name: &str, err: &KernelError) {
-        let failures = self
-            .hand_route_cooldowns
-            .get(hand_id)
-            .map(|e| e.1)
-            .unwrap_or(0)
-            + 1;
-
-        if failures >= Self::MAX_HAND_FAILURES {
-            warn!(
-                router = %router_name,
-                hand = %hand_id,
-                consecutive_failures = failures,
-                error = %err,
-                "Hand exceeded max failures — auto-deactivating"
-            );
-            // Try to deactivate the hand
-            if let Some(instance_id) = self.active_hand_instance_id(hand_id) {
-                if let Err(e) = self.hand_registry.deactivate(instance_id) {
-                    warn!(hand = %hand_id, error = %e, "Failed to auto-deactivate hand");
-                } else {
-                    info!(hand = %hand_id, "Hand auto-deactivated after repeated failures");
-                    self.persist_hand_state();
-                    self.notify_owner_bg(format!(
-                        "⚠️ Hand `{hand_id}` auto-deactivated after {failures} consecutive failures. Re-activate with: librefang hand activate {hand_id}"
-                    ));
-                }
-            }
-            self.hand_route_cooldowns.remove(hand_id);
-        } else {
-            warn!(
-                router = %router_name,
-                hand = %hand_id,
-                consecutive_failures = failures,
-                error = %err,
-                "Router hand dispatch failed, applying cooldown"
-            );
-            self.hand_route_cooldowns.insert(
-                hand_id.to_string(),
-                (
-                    std::time::Instant::now() + Self::HAND_ROUTE_COOLDOWN,
-                    failures,
-                ),
-            );
-        }
-    }
-
-    /// Fire-and-forget notification to the owner user via all configured channels.
-    ///
-    /// Best-effort: logs warnings on failure but never blocks the caller.
     fn notify_owner_bg(&self, message: String) {
         let weak = match self.self_handle.get() {
             Some(w) => w.clone(),
@@ -2783,11 +2727,10 @@ impl LibreFangKernel {
                 Some(k) => k,
                 None => return,
             };
-            // Find the owner user and their channel bindings
             let owner = kernel.config.users.iter().find(|u| u.role == "owner");
             let bindings = match owner {
                 Some(u) => u.channel_bindings.clone(),
-                None => return, // no owner configured — nothing to notify
+                None => return,
             };
             for (channel, platform_id) in &bindings {
                 if kernel.channel_adapters.contains_key(channel.as_str()) {
@@ -2802,205 +2745,228 @@ impl LibreFangKernel {
         });
     }
 
-    /// Compute semantic similarity scores between a message and all hand descriptions.
+    /// LLM-based intent classification for routing.
     ///
-    /// Uses the embedding driver to vectorize the message and computes cosine
-    /// similarity against cached hand description embeddings. Returns an empty
-    /// map if no embedding driver is configured (graceful degradation).
-    async fn compute_hand_semantic_scores(
-        &self,
-        message: &str,
-    ) -> std::collections::HashMap<String, f32> {
-        let driver = match &self.embedding_driver {
-            Some(d) => d,
-            None => return std::collections::HashMap::new(),
-        };
+    /// Given a user message, uses a lightweight LLM call to determine which
+    /// specialist agent should handle it. Returns the agent name (e.g. "coder",
+    /// "researcher") or "assistant" for general queries.
+    async fn llm_classify_intent(&self, message: &str) -> Option<String> {
+        use librefang_runtime::llm_driver::CompletionRequest;
+        use librefang_types::message::Message;
 
-        // Lazily build hand description embeddings on first call.
-        // If embedding fails, we leave the cache as None so it retries next time
-        // (transient network errors should not permanently disable semantic routing).
-        {
-            let read_guard = self.hand_desc_embeddings.read().await;
-            if read_guard.is_none() {
-                drop(read_guard);
-                let mut write_guard = self.hand_desc_embeddings.write().await;
-                if write_guard.is_none() {
-                    let hands = librefang_hands::bundled::bundled_hands();
-                    let mut ids = Vec::new();
-                    let mut descriptions = Vec::new();
-                    for (id, toml_content, _) in &hands {
-                        if let Ok(def) =
-                            librefang_hands::bundled::parse_bundled(id, toml_content, "")
-                        {
-                            ids.push(def.id.clone());
-                            descriptions.push(def.description.clone());
-                        }
-                    }
-                    let desc_refs: Vec<&str> = descriptions.iter().map(|s| s.as_str()).collect();
-                    match driver.embed(&desc_refs).await {
-                        Ok(embeddings) => {
-                            let mut desc_map = std::collections::HashMap::new();
-                            for (id, emb) in ids.into_iter().zip(embeddings) {
-                                desc_map.insert(id, emb);
-                            }
-                            info!(
-                                hands = desc_map.len(),
-                                "Cached hand description embeddings for semantic routing"
-                            );
-                            *write_guard = Some(desc_map);
-                        }
-                        Err(e) => {
-                            // Leave as None so next request retries
-                            warn!(error = %e, "Failed to embed hand descriptions — will retry next request");
-                        }
-                    }
-                }
-            }
+        // Skip classification for very short/simple messages — likely greetings
+        if Self::should_skip_intent_classification(message) {
+            return None;
         }
 
-        // Embed the user message (with timeout to avoid blocking routing)
-        let embed_fut = driver.embed_one(message);
-        let msg_embedding =
-            match tokio::time::timeout(std::time::Duration::from_secs(2), embed_fut).await {
-                Ok(Ok(emb)) => emb,
-                Ok(Err(e)) => {
-                    debug!(error = %e, "Failed to embed message for semantic routing");
-                    return std::collections::HashMap::new();
-                }
-                Err(_) => {
-                    debug!("Embedding timed out (2s) — skipping semantic routing");
-                    return std::collections::HashMap::new();
-                }
-            };
-
-        // Compute cosine similarity against each hand
-        let read_guard = self.hand_desc_embeddings.read().await;
-        let Some(ref desc_embeddings) = *read_guard else {
-            return std::collections::HashMap::new();
-        };
-
-        desc_embeddings
+        let dynamic_choices =
+            router::all_template_descriptions(&self.config.home_dir.join("agents"));
+        let routable_names: HashSet<String> = dynamic_choices
             .iter()
-            .map(|(hand_id, desc_emb)| {
-                let sim = cosine_similarity(&msg_embedding, desc_emb);
-                (hand_id.clone(), sim)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let route_choices = dynamic_choices
+            .iter()
+            .map(|(name, desc)| {
+                let prefix = format!("{name}: ");
+                let prompt_desc = desc.strip_prefix(&prefix).unwrap_or(desc);
+                format!("- {name}: {prompt_desc}")
             })
-            .collect()
-    }
+            .collect::<Vec<_>>()
+            .join("\n");
+        let classify_prompt = format!(
+            "You are an intent classifier. Given a user message, reply with ONLY the agent name that should handle it. Choose from:\n- assistant: greetings, simple questions, casual chat, general knowledge\n{}\n\nReply with ONLY the agent name, nothing else.",
+            route_choices
+        );
 
-    /// Check if a hand is in cooldown after a recent dispatch failure.
-    fn is_hand_cooled_down(&self, hand_id: &str) -> bool {
-        if let Some(entry) = self.hand_route_cooldowns.get(hand_id) {
-            let (expiry, failures) = *entry;
-            if std::time::Instant::now() < expiry {
-                debug!(hand = %hand_id, failures, "Hand still in route cooldown, skipping");
-                return true;
+        let request = CompletionRequest {
+            model: String::new(), // use driver default
+            messages: vec![Message::user(message.to_string())],
+            tools: vec![],
+            max_tokens: 20,
+            temperature: 0.0,
+            system: Some(classify_prompt),
+            thinking: None,
+            prompt_caching: false,
+        };
+
+        let result = match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.default_driver.complete(request),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => {
+                debug!(error = %e, "LLM classify failed — falling back to assistant");
+                return None;
             }
-            // Cooldown expired — remove entry
-            drop(entry);
-            self.hand_route_cooldowns.remove(hand_id);
+            Err(_) => {
+                debug!("LLM classify timed out (5s) — falling back to assistant");
+                return None;
+            }
+        };
+
+        let agent_name = result.text().trim().to_lowercase();
+        if agent_name != "assistant" && routable_names.contains(agent_name.as_str()) {
+            info!(
+                target_agent = %agent_name,
+                "LLM intent classification: routing to specialist"
+            );
+            Some(agent_name)
+        } else {
+            None // assistant handles it
         }
-        false
     }
 
-    /// Check if a hand's requirements (binaries, API keys) are satisfied.
-    /// Returns true if requirements cannot be checked (hand not in registry)
-    /// to avoid blocking legitimate routing.
-    fn hand_requirements_met(&self, hand_id: &str) -> bool {
-        match self.hand_registry.check_requirements(hand_id) {
-            Ok(results) => {
-                for (req, satisfied) in &results {
-                    if !satisfied {
+    /// Resolve a specialist agent by name — find existing or spawn from template.
+    fn resolve_or_spawn_specialist(&self, name: &str) -> KernelResult<AgentId> {
+        // Check if already running
+        if let Some(entry) = self.registry.find_by_name(name) {
+            return Ok(entry.id);
+        }
+        // Spawn from template
+        let manifest = router::load_template_manifest(&self.config.home_dir, name)
+            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?;
+        let id = self.spawn_agent(manifest)?;
+        info!(agent = %name, id = %id, "Spawned specialist agent for LLM routing");
+        Ok(id)
+    }
+
+    async fn send_message_streaming_resolved(
+        self: &Arc<Self>,
+        agent_id: AgentId,
+        message: &str,
+        kernel_handle: Option<Arc<dyn KernelHandle>>,
+        sender_context: Option<&SenderContext>,
+    ) -> KernelResult<(
+        tokio::sync::mpsc::Receiver<StreamEvent>,
+        tokio::task::JoinHandle<KernelResult<AgentLoopResult>>,
+    )> {
+        let effective_id = self
+            .resolve_assistant_target(agent_id, message, sender_context)
+            .await?;
+        self.send_message_streaming_with_sender(
+            effective_id,
+            message,
+            kernel_handle,
+            sender_context,
+        )
+    }
+
+    async fn resolve_assistant_target(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+        sender_context: Option<&SenderContext>,
+    ) -> KernelResult<AgentId> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+        if entry.name != "assistant" {
+            return Ok(agent_id);
+        }
+        drop(entry);
+
+        let route_key = Self::assistant_route_key(agent_id, sender_context);
+
+        if Self::should_reuse_cached_route(message) {
+            if let Some(target) = self
+                .assistant_routes
+                .get(&route_key)
+                .map(|entry| entry.value().clone())
+            {
+                match self.resolve_assistant_route_target(&target) {
+                    Ok(routed_id) => {
                         info!(
-                            hand = %hand_id,
-                            requirement = %req.label,
-                            "Hand requirement not met, skipping auto-route"
+                            route_type = target.route_type(),
+                            target = %target.name(),
+                            "Assistant reusing cached route for follow-up"
                         );
-                        return false;
+                        return Ok(routed_id);
+                    }
+                    Err(e) => {
+                        warn!(
+                            route_type = target.route_type(),
+                            target = %target.name(),
+                            error = %e,
+                            "Cached assistant route failed — clearing"
+                        );
+                        self.assistant_routes.remove(&route_key);
                     }
                 }
-                true
-            }
-            Err(_) => true, // hand not found in registry — let it through
-        }
-    }
-
-    async fn execute_routed_hand(
-        &self,
-        hand_id: &str,
-        message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
-        content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
-    ) -> KernelResult<AgentLoopResult> {
-        let target_id = if let Some(active_id) = self.active_hand_agent_id(hand_id) {
-            active_id
-        } else {
-            let instance = self
-                .activate_hand(hand_id, std::collections::HashMap::new())
-                .map_err(|e| {
-                    KernelError::LibreFang(LibreFangError::Internal(format!(
-                        "Failed to activate hand '{hand_id}': {e}"
-                    )))
-                })?;
-            instance.agent_id.ok_or_else(|| {
-                KernelError::LibreFang(LibreFangError::Internal(format!(
-                    "Hand '{hand_id}' activated without an agent id"
-                )))
-            })?
-        };
-
-        let downstream = Box::pin(self.send_message_with_handle_and_blocks(
-            target_id,
-            message,
-            kernel_handle,
-            content_blocks,
-        ))
-        .await?;
-        Ok(Self::wrap_routed_result(downstream))
-    }
-
-    async fn execute_routed_template(
-        &self,
-        router_agent_id: AgentId,
-        template: &str,
-        message: &str,
-        kernel_handle: Option<Arc<dyn KernelHandle>>,
-        content_blocks: Option<Vec<librefang_types::message::ContentBlock>>,
-    ) -> KernelResult<AgentLoopResult> {
-        let existing = self.registry.find_by_name(template).map(|entry| entry.id);
-        let keep_spawned = template == "assistant";
-        let mut spawned = false;
-
-        let target_id = if let Some(existing) = existing {
-            existing
-        } else {
-            let manifest = router::load_template_manifest(&self.config.home_dir, template)
-                .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e)))?;
-            let spawned_id = self.spawn_agent_with_parent(manifest, Some(router_agent_id))?;
-            spawned = true;
-            spawned_id
-        };
-
-        let result = Box::pin(self.send_message_with_handle_and_blocks(
-            target_id,
-            message,
-            kernel_handle,
-            content_blocks,
-        ))
-        .await;
-
-        if spawned && !keep_spawned {
-            if let Err(err) = self.kill_agent(target_id) {
-                warn!(
-                    template,
-                    agent_id = %target_id,
-                    error = %err,
-                    "Failed to clean up spawned routed agent"
-                );
             }
         }
 
-        result.map(Self::wrap_routed_result)
+        if let Some(specialist) = self.llm_classify_intent(message).await {
+            let routed_id = self.resolve_or_spawn_specialist(&specialist)?;
+            self.assistant_routes.insert(
+                route_key,
+                AssistantRouteTarget::Specialist(specialist.clone()),
+            );
+            return Ok(routed_id);
+        }
+
+        if let Some(target) = self.route_assistant_by_metadata(message) {
+            let routed_id = self.resolve_assistant_route_target(&target)?;
+            info!(
+                route_type = target.route_type(),
+                target = %target.name(),
+                "Assistant routed via metadata fallback"
+            );
+            self.assistant_routes.insert(route_key, target);
+            return Ok(routed_id);
+        }
+
+        self.assistant_routes.remove(&route_key);
+        Ok(agent_id)
+    }
+
+    fn route_assistant_by_metadata(&self, message: &str) -> Option<AssistantRouteTarget> {
+        let hand_selection = router::auto_select_hand(message, None);
+        let template_selection =
+            router::auto_select_template(message, &self.config.home_dir.join("agents"), None);
+
+        let hand_candidate = hand_selection
+            .hand_id
+            .filter(|hand_id| hand_selection.score > 0 && self.hand_requirements_met(hand_id));
+
+        if let Some(hand_id) = hand_candidate {
+            if hand_selection.score >= template_selection.score {
+                return Some(AssistantRouteTarget::Hand(hand_id));
+            }
+        }
+
+        if template_selection.score > 0 && template_selection.template != "assistant" {
+            return Some(AssistantRouteTarget::Specialist(
+                template_selection.template,
+            ));
+        }
+
+        None
+    }
+
+    fn resolve_assistant_route_target(
+        &self,
+        target: &AssistantRouteTarget,
+    ) -> KernelResult<AgentId> {
+        match target {
+            AssistantRouteTarget::Specialist(name) => self.resolve_or_spawn_specialist(name),
+            AssistantRouteTarget::Hand(hand_id) => self.resolve_or_activate_hand(hand_id),
+        }
+    }
+
+    fn resolve_or_activate_hand(&self, hand_id: &str) -> KernelResult<AgentId> {
+        if let Some(agent_id) = self.active_hand_agent_id(hand_id) {
+            return Ok(agent_id);
+        }
+
+        let instance = self.activate_hand(hand_id, std::collections::HashMap::new())?;
+        instance.agent_id.ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::Internal(format!(
+                "Hand '{hand_id}' activated without an agent id"
+            )))
+        })
     }
 
     fn active_hand_agent_id(&self, hand_id: &str) -> Option<AgentId> {
@@ -3012,44 +2978,67 @@ impl LibreFangKernel {
                     && instance.status == librefang_hands::HandStatus::Active
             })
             .and_then(|instance| instance.agent_id)
-            .or_else(|| {
-                self.hand_registry
-                    .get_definition(hand_id)
-                    .and_then(|definition| self.registry.find_by_name(&definition.agent.name))
-                    .map(|entry| entry.id)
-            })
     }
 
-    /// Get the instance UUID for an active hand (for deactivation).
-    fn active_hand_instance_id(&self, hand_id: &str) -> Option<uuid::Uuid> {
-        self.hand_registry
-            .list_instances()
-            .into_iter()
-            .find(|instance| {
-                instance.hand_id == hand_id
-                    && instance.status == librefang_hands::HandStatus::Active
-            })
-            .map(|instance| instance.instance_id)
-    }
-
-    fn wrap_routed_result(result: AgentLoopResult) -> AgentLoopResult {
-        AgentLoopResult {
-            response: result.response,
-            total_usage: librefang_types::message::TokenUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                ..Default::default()
-            },
-            iterations: result.iterations,
-            cost_usd: None,
-            silent: result.silent,
-            directives: result.directives,
-            decision_traces: result.decision_traces,
-            memories_saved: result.memories_saved,
-            memories_used: result.memories_used,
-            memory_conflicts: result.memory_conflicts,
-            provider_not_configured: result.provider_not_configured,
+    fn hand_requirements_met(&self, hand_id: &str) -> bool {
+        match self.hand_registry.check_requirements(hand_id) {
+            Ok(results) => {
+                for (req, satisfied) in &results {
+                    if !satisfied {
+                        info!(
+                            hand = %hand_id,
+                            requirement = %req.label,
+                            "Hand requirement not met, skipping assistant auto-route"
+                        );
+                        return false;
+                    }
+                }
+                true
+            }
+            Err(_) => true,
         }
+    }
+
+    fn assistant_route_key(agent_id: AgentId, sender_context: Option<&SenderContext>) -> String {
+        match sender_context {
+            Some(sender) => format!(
+                "{agent_id}:{}:{}:{}:{}",
+                sender.channel,
+                sender.account_id.as_deref().unwrap_or_default(),
+                sender.user_id,
+                sender.thread_id.as_deref().unwrap_or_default()
+            ),
+            None => agent_id.to_string(),
+        }
+    }
+
+    fn should_skip_intent_classification(message: &str) -> bool {
+        let trimmed = message.trim();
+        trimmed.len() < 15 && !trimmed.contains("http")
+    }
+
+    fn should_reuse_cached_route(message: &str) -> bool {
+        Self::should_skip_intent_classification(message) && !Self::is_brief_acknowledgement(message)
+    }
+
+    fn is_brief_acknowledgement(message: &str) -> bool {
+        let trimmed = message.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        matches!(
+            lower.as_str(),
+            "ok" | "okay"
+                | "thanks"
+                | "thank you"
+                | "thx"
+                | "cool"
+                | "great"
+                | "nice"
+                | "got it"
+                | "sounds good"
+        ) || matches!(
+            trimmed,
+            "好的" | "谢谢" | "谢了" | "收到" | "了解" | "行" | "好" | "多谢"
+        )
     }
 
     /// Execute the default LLM-based agent loop.
@@ -3361,7 +3350,7 @@ impl LibreFangKernel {
             Some(&self.process_manager),
             content_blocks,
             proactive_memory,
-            self.context_engine.as_deref(),
+            self.context_engine_for_agent(&manifest),
         )
         .await
         .map_err(KernelError::LibreFang)?;
@@ -3452,6 +3441,37 @@ impl LibreFangKernel {
         // Delete the old session
         let _ = self.memory.delete_session(entry.session_id);
 
+        // Create a fresh session and inject reset prompt if configured
+        let mut new_session = self
+            .memory
+            .create_session(agent_id)
+            .map_err(KernelError::LibreFang)?;
+        self.inject_reset_prompt(&mut new_session);
+
+        // Update registry with new session ID
+        self.registry
+            .update_session_id(agent_id, new_session.id)
+            .map_err(KernelError::LibreFang)?;
+
+        // Reset quota tracking so /new clears "token quota exceeded"
+        self.scheduler.reset_usage(agent_id);
+
+        info!(agent_id = %agent_id, "Session reset (summary saved to memory)");
+        Ok(())
+    }
+
+    /// Hard-reboot an agent's session — clears conversation history WITHOUT saving
+    /// a summary to memory.  Keeps agent config, system prompt, and tools intact.
+    /// More aggressive than `reset_session` (which auto-saves a summary) but less
+    /// destructive than `clear_agent_history` (which wipes ALL sessions).
+    pub fn reboot_session(&self, agent_id: AgentId) -> KernelResult<()> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        // Delete the old session WITHOUT saving a summary
+        let _ = self.memory.delete_session(entry.session_id);
+
         // Create a fresh session
         let new_session = self
             .memory
@@ -3463,10 +3483,10 @@ impl LibreFangKernel {
             .update_session_id(agent_id, new_session.id)
             .map_err(KernelError::LibreFang)?;
 
-        // Reset quota tracking so /new clears "token quota exceeded"
+        // Reset quota tracking
         self.scheduler.reset_usage(agent_id);
 
-        info!(agent_id = %agent_id, "Session reset (summary saved to memory)");
+        info!(agent_id = %agent_id, "Session rebooted (no summary saved)");
         Ok(())
     }
 
@@ -3484,11 +3504,12 @@ impl LibreFangKernel {
         // Delete canonical (cross-channel) session
         let _ = self.memory.delete_canonical_session(agent_id);
 
-        // Create a fresh session
-        let new_session = self
+        // Create a fresh session and inject reset prompt if configured
+        let mut new_session = self
             .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
+        self.inject_reset_prompt(&mut new_session);
 
         // Update registry with new session ID
         self.registry
@@ -3537,10 +3558,11 @@ impl LibreFangKernel {
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        let session = self
+        let mut session = self
             .memory
             .create_session_with_label(agent_id, label)
             .map_err(KernelError::LibreFang)?;
+        self.inject_reset_prompt(&mut session);
 
         // Switch to the new session
         self.registry
@@ -3587,6 +3609,23 @@ impl LibreFangKernel {
 
         info!(agent_id = %agent_id, session_id = %session_id.0, "Switched session");
         Ok(())
+    }
+
+    /// Inject the configured `session.reset_prompt` into a newly created session
+    /// as the first system message (if configured).
+    fn inject_reset_prompt(&self, session: &mut librefang_memory::session::Session) {
+        if let Some(ref prompt) = self.config.session.reset_prompt {
+            if !prompt.is_empty() {
+                session
+                    .messages
+                    .push(librefang_types::message::Message::system(prompt.clone()));
+                let _ = self.memory.save_session(session);
+                debug!(
+                    session_id = %session.id.0,
+                    "Injected session reset prompt"
+                );
+            }
+        }
     }
 
     /// Save a summary of the current session to agent memory before reset.
@@ -3922,7 +3961,11 @@ impl LibreFangKernel {
         }
 
         let driver = self.resolve_driver(&entry.manifest)?;
-        let model = entry.manifest.model.model.clone();
+        // Strip provider prefix so the model name is valid for the upstream API.
+        let model = librefang_runtime::agent_loop::strip_provider_prefix(
+            &entry.manifest.model.model,
+            &entry.manifest.model.provider,
+        );
 
         // Resolve the agent's actual context window from the model catalog
         let agent_ctx_window = self
@@ -3935,9 +3978,9 @@ impl LibreFangKernel {
             })
             .unwrap_or(200_000);
 
-        // Delegate to the context engine when available, otherwise fall back
-        // to the built-in compactor directly.
-        let result = if let Some(engine) = self.context_engine.as_deref() {
+        // Delegate to the context engine when available (and allowed for this agent),
+        // otherwise fall back to the built-in compactor directly.
+        let result = if let Some(engine) = self.context_engine_for_agent(&entry.manifest) {
             engine
                 .compact(
                     agent_id,
@@ -4457,7 +4500,30 @@ impl LibreFangKernel {
                         .model_catalog
                         .write()
                         .unwrap_or_else(|e| e.into_inner());
-                    catalog.apply_url_overrides(&new_config.provider_urls);
+                    // Apply region selections first (lower priority)
+                    if !new_config.provider_regions.is_empty() {
+                        let region_urls = catalog.resolve_region_urls(&new_config.provider_regions);
+                        if !region_urls.is_empty() {
+                            catalog.apply_url_overrides(&region_urls);
+                            info!(
+                                "Hot-reload: applied {} provider region URL override(s)",
+                                region_urls.len()
+                            );
+                        }
+                        let region_api_keys =
+                            catalog.resolve_region_api_keys(&new_config.provider_regions);
+                        if !region_api_keys.is_empty() {
+                            info!(
+                                "Hot-reload: {} region api_key override(s) detected \
+                                 (takes effect on next driver init)",
+                                region_api_keys.len()
+                            );
+                        }
+                    }
+                    // Apply explicit provider_urls (higher priority, overwrites region URLs)
+                    if !new_config.provider_urls.is_empty() {
+                        catalog.apply_url_overrides(&new_config.provider_urls);
+                    }
                 }
                 HotAction::UpdateDefaultModel => {
                     info!(
@@ -4500,7 +4566,7 @@ impl LibreFangKernel {
             }
         }
 
-        // Invalidate the router manifest cache so newly installed/removed
+        // Invalidate the manifest cache so newly installed/removed
         // agents are picked up on the next routing call.
         router::invalidate_manifest_cache();
         router::invalidate_hand_route_cache();
@@ -4914,6 +4980,30 @@ impl LibreFangKernel {
                     }
                 }
             });
+        }
+
+        // Periodic audit log pruning (daily, respects audit.retention_days)
+        {
+            let kernel = Arc::clone(self);
+            let retention = self.config.audit.retention_days;
+            if retention > 0 {
+                tokio::spawn(async move {
+                    let mut interval =
+                        tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+                    interval.tick().await; // Skip first immediate tick
+                    loop {
+                        interval.tick().await;
+                        if kernel.supervisor.is_shutting_down() {
+                            break;
+                        }
+                        let pruned = kernel.audit_log.prune(retention);
+                        if pruned > 0 {
+                            info!("Audit log pruning: removed {pruned} entries older than {retention} days");
+                        }
+                    }
+                });
+                info!("Audit log pruning scheduled daily (retention_days={retention})");
+            }
         }
 
         // Periodic session retention cleanup (prune expired / excess sessions)
@@ -5486,6 +5576,14 @@ impl LibreFangKernel {
                 }
             }
         }
+        // 3. Dedicated CLI path config fields (more discoverable than provider_urls).
+        if provider == "qwen-code" {
+            if let Some(ref path) = self.config.qwen_code_path {
+                if !path.is_empty() {
+                    return Some(path.clone());
+                }
+            }
+        }
         None
     }
 
@@ -5558,6 +5656,7 @@ impl LibreFangKernel {
                 api_key,
                 base_url,
                 vertex_ai: self.config.vertex_ai.clone(),
+                azure_openai: self.config.azure_openai.clone(),
                 skip_permissions: true,
             };
 
@@ -5584,35 +5683,64 @@ impl LibreFangKernel {
             }
         };
 
+        // Build effective fallback list: agent-level fallbacks + global fallback_providers.
+        // Resolve "default" provider in fallback entries to the actual default provider.
+        let mut effective_fallbacks = manifest.fallback_models.clone();
+        // Append global fallback_providers so every agent benefits from the configured chain
+        for gfb in &self.config.fallback_providers {
+            let already_present = effective_fallbacks
+                .iter()
+                .any(|fb| fb.provider == gfb.provider && fb.model == gfb.model);
+            if !already_present {
+                effective_fallbacks.push(librefang_types::agent::FallbackModel {
+                    provider: gfb.provider.clone(),
+                    model: gfb.model.clone(),
+                    api_key_env: if gfb.api_key_env.is_empty() {
+                        None
+                    } else {
+                        Some(gfb.api_key_env.clone())
+                    },
+                    base_url: gfb.base_url.clone(),
+                });
+            }
+        }
+
         // If fallback models are configured, wrap in FallbackDriver
-        if !manifest.fallback_models.is_empty() {
+        if !effective_fallbacks.is_empty() {
             // Primary driver uses the agent's own model name (already set in request)
             let mut chain: Vec<(
                 std::sync::Arc<dyn librefang_runtime::llm_driver::LlmDriver>,
                 String,
             )> = vec![(primary.clone(), String::new())];
-            for fb in &manifest.fallback_models {
+            for fb in &effective_fallbacks {
+                // Resolve "default" to the actual default provider
+                let fb_provider = if fb.provider.is_empty() || fb.provider == "default" {
+                    default_provider.clone()
+                } else {
+                    fb.provider.clone()
+                };
                 let fb_api_key = if let Some(env) = &fb.api_key_env {
                     std::env::var(env).ok()
                 } else {
                     // Resolve using provider_api_keys / convention for custom providers
-                    let env_var = self.config.resolve_api_key_env(&fb.provider);
+                    let env_var = self.config.resolve_api_key_env(&fb_provider);
                     std::env::var(&env_var).ok()
                 };
                 let config = DriverConfig {
-                    provider: fb.provider.clone(),
+                    provider: fb_provider.clone(),
                     api_key: fb_api_key,
                     base_url: fb
                         .base_url
                         .clone()
-                        .or_else(|| self.lookup_provider_url(&fb.provider)),
+                        .or_else(|| self.lookup_provider_url(&fb_provider)),
                     vertex_ai: self.config.vertex_ai.clone(),
+                    azure_openai: self.config.azure_openai.clone(),
                     skip_permissions: true,
                 };
                 match drivers::create_driver(&config) {
                     Ok(d) => chain.push((d, fb.model.clone())),
                     Err(e) => {
-                        warn!("Fallback driver '{}' failed to init: {e}", fb.provider);
+                        warn!("Fallback driver '{}' failed to init: {e}", fb_provider);
                     }
                 }
             }
@@ -6180,10 +6308,42 @@ impl LibreFangKernel {
         }
         let skills_dir = self.config.home_dir.join("skills");
         let mut fresh = librefang_skills::registry::SkillRegistry::new(skills_dir);
-        let bundled = fresh.load_bundled();
+        let bundled = fresh.load_bundled(&self.config.home_dir);
         let user = fresh.load_all().unwrap_or(0);
         info!(bundled, user, "Skill registry hot-reloaded");
         *registry = fresh;
+    }
+
+    /// Check whether the context engine plugin (if any) is allowed for an agent.
+    ///
+    /// Returns the context engine reference if:
+    /// - The agent has no `allowed_plugins` restriction (empty = all plugins), OR
+    /// - The configured context engine plugin name appears in the agent's allowlist.
+    ///
+    /// Returns `None` if the agent's `allowed_plugins` is non-empty and the
+    /// context engine plugin is not in the list.
+    fn context_engine_for_agent(
+        &self,
+        manifest: &librefang_types::agent::AgentManifest,
+    ) -> Option<&dyn librefang_runtime::context_engine::ContextEngine> {
+        let engine = self.context_engine.as_deref()?;
+        if manifest.allowed_plugins.is_empty() {
+            return Some(engine);
+        }
+        // Check if the configured context engine plugin is in the agent's allowlist
+        if let Some(ref plugin_name) = self.config.context_engine.plugin {
+            if manifest.allowed_plugins.iter().any(|p| p == plugin_name) {
+                return Some(engine);
+            }
+            tracing::debug!(
+                agent = %manifest.name,
+                plugin = plugin_name.as_str(),
+                "Context engine plugin not in agent's allowed_plugins — skipping"
+            );
+            return None;
+        }
+        // No plugin configured (manual hooks or default engine) — always allow
+        Some(engine)
     }
 
     /// Build a compact skill summary for the system prompt so the agent knows
@@ -7009,8 +7169,9 @@ impl KernelHandle for LibreFangKernel {
     ) -> Result<serde_json::Value, String> {
         let def = self
             .hand_registry
-            .install_from_content(toml_content, skill_content)
+            .install_from_content_persisted(&self.config.home_dir, toml_content, skill_content)
             .map_err(|e| format!("{e}"))?;
+        router::invalidate_hand_route_cache();
 
         Ok(serde_json::json!({
             "id": def.id,
@@ -7414,6 +7575,7 @@ impl librefang_wire::peer::PeerHandle for LibreFangKernel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use librefang_types::config::DefaultModelConfig;
     use std::collections::HashMap;
 
     struct EnvVarGuard {
@@ -7675,6 +7837,68 @@ mod tests {
     }
 
     #[test]
+    fn test_spawn_agent_applies_local_default_model_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-local-model-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+        *kernel
+            .default_model_override
+            .write()
+            .expect("default model override lock") = Some(DefaultModelConfig {
+            provider: "ollama".to_string(),
+            model: "Qwen3.5-4B-MLX-4bit".to_string(),
+            api_key_env: String::new(),
+            base_url: Some("http://127.0.0.1:11434/v1".to_string()),
+        });
+
+        let agent_id = kernel
+            .spawn_agent_inner(
+                AgentManifest {
+                    name: "local-model-agent".to_string(),
+                    description: "uses local model override".to_string(),
+                    author: "test".to_string(),
+                    module: "builtin:chat".to_string(),
+                    model: ModelConfig {
+                        provider: "default".to_string(),
+                        model: "default".to_string(),
+                        max_tokens: 4096,
+                        temperature: 0.7,
+                        system_prompt: String::new(),
+                        api_key_env: None,
+                        base_url: None,
+                    },
+                    ..Default::default()
+                },
+                None,
+                None,
+                None,
+            )
+            .expect("agent should spawn with local model override");
+
+        let entry = kernel.registry.get(agent_id).expect("agent registry entry");
+        assert_eq!(entry.manifest.model.provider, "ollama");
+        assert_eq!(entry.manifest.model.model, "Qwen3.5-4B-MLX-4bit");
+        assert_eq!(
+            entry.manifest.model.base_url.as_deref(),
+            Some("http://127.0.0.1:11434/v1")
+        );
+        assert!(
+            entry.manifest.model.api_key_env.is_none(),
+            "local model override should not require an API key env var"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[test]
     fn test_hand_activation_does_not_seed_runtime_tool_filters() {
         let tmp = tempfile::tempdir().unwrap();
         let home_dir = tmp.path().join("librefang-kernel-hand-test");
@@ -7703,6 +7927,68 @@ mod tests {
         assert!(
             entry.manifest.tool_blocklist.is_empty(),
             "hand activation should not set a runtime blocklist by default"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[test]
+    fn test_hand_reactivation_rebuilds_same_runtime_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-reactivation-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        let first_instance = kernel
+            .activate_hand("browser", HashMap::new())
+            .expect("browser hand should activate the first time");
+        let first_agent_id = first_instance.agent_id.expect("first browser agent id");
+        let first_entry = kernel
+            .registry
+            .get(first_agent_id)
+            .expect("first browser hand agent entry");
+        let first_manifest = first_entry.manifest.clone();
+
+        kernel
+            .deactivate_hand(first_instance.instance_id)
+            .expect("browser hand should deactivate cleanly");
+
+        let second_instance = kernel
+            .activate_hand("browser", HashMap::new())
+            .expect("browser hand should activate the second time");
+        let second_agent_id = second_instance.agent_id.expect("second browser agent id");
+        let second_entry = kernel
+            .registry
+            .get(second_agent_id)
+            .expect("second browser hand agent entry");
+        let second_manifest = second_entry.manifest.clone();
+
+        assert_eq!(
+            second_manifest.capabilities.tools, first_manifest.capabilities.tools,
+            "reactivation should rebuild the same explicit tool set"
+        );
+        assert_eq!(
+            second_manifest.profile, first_manifest.profile,
+            "reactivation should preserve the same runtime profile"
+        );
+        assert_eq!(
+            second_manifest.tool_allowlist, first_manifest.tool_allowlist,
+            "reactivation should preserve the runtime tool allowlist"
+        );
+        assert_eq!(
+            second_manifest.tool_blocklist, first_manifest.tool_blocklist,
+            "reactivation should preserve the runtime tool blocklist"
+        );
+        assert_eq!(
+            second_manifest.mcp_servers, first_manifest.mcp_servers,
+            "reactivation should preserve MCP server assignments"
         );
 
         kernel.shutdown();
@@ -7746,9 +8032,40 @@ mod tests {
     }
 
     #[test]
-    fn test_boot_spawns_router_as_default_agent() {
+    fn test_should_reuse_cached_route_for_brief_follow_up() {
+        assert!(LibreFangKernel::should_reuse_cached_route("fix that"));
+        assert!(LibreFangKernel::should_reuse_cached_route("继续"));
+        assert!(!LibreFangKernel::should_reuse_cached_route("thanks"));
+        assert!(!LibreFangKernel::should_reuse_cached_route(
+            "please write the API design for this service"
+        ));
+    }
+
+    #[test]
+    fn test_assistant_route_key_scopes_sender_and_thread() {
+        let agent_id = AgentId::new();
+        let sender = SenderContext {
+            channel: "telegram".to_string(),
+            user_id: "user-123".to_string(),
+            display_name: "Alice".to_string(),
+            is_group: true,
+            thread_id: Some("thread-9".to_string()),
+            account_id: None,
+        };
+
+        let with_sender = LibreFangKernel::assistant_route_key(agent_id, Some(&sender));
+        let without_sender = LibreFangKernel::assistant_route_key(agent_id, None);
+
+        assert!(with_sender.contains("telegram"));
+        assert!(with_sender.contains("user-123"));
+        assert!(with_sender.contains("thread-9"));
+        assert_ne!(with_sender, without_sender);
+    }
+
+    #[test]
+    fn test_boot_spawns_assistant_as_default_agent() {
         let tmp = tempfile::tempdir().unwrap();
-        let home_dir = tmp.path().join("librefang-kernel-default-router-test");
+        let home_dir = tmp.path().join("librefang-kernel-default-assistant-test");
         std::fs::create_dir_all(&home_dir).unwrap();
 
         let config = KernelConfig {
@@ -7761,8 +8078,8 @@ mod tests {
         let agents = kernel.registry.list();
 
         assert!(
-            agents.iter().any(|entry| entry.name == "router"),
-            "fresh kernel boot should auto-spawn a router agent"
+            agents.iter().any(|entry| entry.name == "assistant"),
+            "fresh kernel boot should auto-spawn an assistant agent"
         );
 
         kernel.shutdown();

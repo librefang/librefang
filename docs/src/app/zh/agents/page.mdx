@@ -1,0 +1,222 @@
+# Agent 模板
+
+LibreFang 预装了 30 个 Agent 模板，开箱即用。
+
+---
+
+## 30 个内置模板
+
+| Agent | 描述 | 能力 |
+|-------|------|------|
+| hello-world | 入门示例，可读取文件、搜索网页 | file_read, file_list, web_fetch, web_search |
+| coder | 代码开发和调试 | code_execute, file_read, file_write, git |
+| researcher | 深度研究和分析 | web_search, web_fetch, memory_recall |
+| writer | 内容创作和编辑 | file_write, memory_recall |
+| analyst | 数据分析和洞察 | data_analysis, file_read |
+| architect | 系统架构设计 | memory_recall, web_fetch |
+| ops | 运维自动化 | shell_execute, file_read |
+| security-auditor | 安全审计 | code_analysis, security_scan |
+| planner | 项目规划和任务管理 | memory_store, memory_recall |
+| debugger | 问题诊断和调试 | code_analysis, shell_execute |
+| translator | 多语言翻译 | memory_recall |
+| tutor | 学习和辅导 | memory_recall, web_fetch |
+| personal-finance | 个人财务管理 | data_analysis, file_read |
+| travel-planner | 旅行规划 | web_search, memory_recall |
+| social-media | 社交媒体管理 | web_fetch, memory_store |
+| meeting-assistant | 会议助手 | calendar, email |
+| email-assistant | 邮件助手 | email, file_read |
+| recruiter | 招聘和人才发现 | web_search, memory_recall |
+| data-scientist | 数据科学分析 | python, pandas, jupyter |
+| test-engineer | 测试工程 | code_execute, file_read |
+| doc-writer | 文档编写 | file_write, memory_recall |
+| customer-support | 客户支持 | memory_recall, email |
+| sales-assistant | 销售助手 | web_search, memory_store |
+| legal-assistant | 法律助手 | web_fetch, memory_recall |
+| health-tracker | 健康追踪 | data_analysis, memory_store |
+| home-automation | 家居自动化 | shell_execute, web_fetch |
+| assistant | 通用助手 | web_fetch, memory_recall |
+| orchestrator | 多 Agent 协调 | agent_spawn |
+| devops-lead | DevOps 领导 | shell_execute, kubernetes |
+
+---
+
+## 使用模板
+
+### 生成 Agent
+
+```bash
+librefang agent spawn agents/hello-world/agent.toml
+```
+
+### 查看模板
+
+```bash
+ls agents/
+```
+
+---
+
+## 模板结构
+
+```
+agents/
+└── hello-world/
+    ├── agent.toml      # Agent 清单
+    └── SKILL.md      # (可选) 领域知识
+```
+
+### agent.toml 示例
+
+```toml
+name = "hello-world"
+version = "0.1.0"
+description = "A friendly greeting agent"
+author = "librefang"
+module = "builtin:chat"
+
+[model]
+provider = "default"
+model = "default"
+max_tokens = 4096
+temperature = 0.6
+
+[system_prompt]
+prompt = "You are Hello World..."
+
+[capabilities]
+tools = ["file_read", "file_list", "web_fetch"]
+network = ["*"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+
+[resources]
+max_llm_tokens_per_hour = 100000
+```
+
+---
+
+## 创建自定义 Agent
+
+### 最小配置
+
+```toml
+name = "my-agent"
+version = "0.1.0"
+description = "My custom agent"
+module = "builtin:chat"
+
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+```
+
+### 完整配置
+
+```toml
+name = "my-agent"
+version = "0.1.0"
+description = "A helpful assistant"
+author = "you"
+module = "builtin:chat"
+
+[model]
+provider = "default"
+model = "default"
+max_tokens = 4096
+temperature = 0.7
+
+[system_prompt]
+prompt = "You are a helpful assistant..."
+
+[resources]
+max_llm_tokens_per_hour = 100000
+max_iterations = 100
+
+[capabilities]
+tools = ["file_read", "file_list", "web_fetch"]
+network = ["*"]
+memory_read = ["*"]
+memory_write = ["self.*"]
+agent_spawn = false
+
+[schedule]
+enabled = false
+cron = "0 9 * * *"
+
+[channels]
+telegram_enabled = true
+discord_enabled = false
+```
+
+---
+
+## Agent 字段参考
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `name` | String | Agent 名称 |
+| `version` | String | 版本号 |
+| `description` | String | 描述 |
+| `author` | String | 作者 |
+| `module` | String | 模块 (builtin:chat) |
+| `model.provider` | String | LLM 提供商 |
+| `model.model` | String | 模型名称 |
+| `model.max_tokens` | Integer | 最大 token |
+| `model.temperature` | Float | 采样温度 |
+| `system_prompt` | String | 系统提示 |
+| `capabilities.tools` | Array | 可用工具 |
+| `capabilities.network` | Array | 网络访问 |
+| `capabilities.memory_read` | Array | 记忆读取 |
+| `capabilities.memory_write` | Array | 记忆写入 |
+| `capabilities.agent_spawn` | Boolean | 是否可以生成子 Agent |
+
+---
+
+## 工具列表
+
+| 工具 | 说明 |
+|------|------|
+| file_read | 读取文件 |
+| file_write | 写入文件 |
+| file_list | 列出目录 |
+| shell_execute | 执行 Shell |
+| web_fetch | 获取网页 |
+| web_search | 搜索网页 |
+| memory_store | 存储记忆 |
+| memory_recall | 回忆记忆 |
+| code_execute | 执行代码 |
+| git | Git 操作 |
+| python | Python REPL |
+| jupyter | Jupyter 笔记本 |
+
+---
+
+## 模块类型
+
+| 模块 | 说明 |
+|------|------|
+| builtin:chat | 通用聊天 |
+| builtin:researcher | 研究 |
+| builtin:writer | 写作 |
+| builtin:coder | 编码 |
+
+---
+
+## CLI 命令
+
+```bash
+# 生成 Agent
+librefang agent spawn agents/hello-world/agent.toml
+
+# 列出所有 Agent
+librefang agent list
+
+# 与 Agent 聊天
+librefang agent chat <agent-id>
+
+# 终止 Agent
+librefang agent kill <agent-id>
+
+# 查看 Agent 状态
+librefang agent status <agent-id>
+```

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -24,7 +25,7 @@ class Point:
     stars: int
 
 
-def github_request(url: str) -> list[dict]:
+def github_request(url: str, retries: int = 3) -> list[dict]:
     headers = {
         "Accept": "application/vnd.github.star+json",
         "User-Agent": "librefang-star-history-generator",
@@ -34,9 +35,18 @@ def github_request(url: str) -> list[dict]:
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    request = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(request) as response:
-        return json.load(response)
+    for attempt in range(retries):
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(request) as response:
+                return json.load(response)
+        except urllib.error.HTTPError as e:
+            if e.code == 403 and attempt < retries - 1:
+                wait = 2 ** attempt * 5
+                print(f"Rate limited, retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+            raise
 
 
 def fetch_stargazers(repo: str) -> list[datetime]:

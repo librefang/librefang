@@ -1,0 +1,117 @@
+# Roadmap
+
+LibreFang v0.1.0 release roadmap, organized into 4 sprint phases.
+
+<Note>
+  Current progress: 18/18 features complete, 1751 tests passing. Only install script domain deployment remains.
+</Note>
+
+---
+
+## Overview
+
+| Phase | Goal | Progress |
+|-------|------|----------|
+| Sprint 1 | Core Stability | 4/4 Complete |
+| Sprint 2 | Competitive Parity | 4/5 Complete |
+| Sprint 3 | Differentiation | 5/5 Complete |
+| Sprint 4 | Polish & Launch | 5/5 Complete |
+
+---
+
+## Sprint 1 — Core Stability
+
+Addressing critical issues that affect basic usability.
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| Token Context Management | Smart token budget control, reduced from ~45K to ~15-20K with auto-compaction and context window protection | Complete |
+| Branding Assets | Full brand integration for desktop and web UI including icons, logo, and favicon | Complete |
+| App Signing | Tauri desktop Ed25519 signing for auto-update verification | Complete |
+| First-Run Experience | 8 wizard API endpoints fully implemented, 6-step onboarding flow ready out of the box | Complete |
+
+---
+
+## Sprint 2 — Competitive Parity
+
+Closing feature gaps with comparable solutions.
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| Browser Screenshots | Browser automation screenshots displayed inline in chat | Complete |
+| Chat Search | Ctrl+F shortcut, real-time filtering, and match highlighting | Complete |
+| Skill Marketplace | 4 tabs (Installed, Community, MCP Servers, Quick Start) with search and categories | Complete |
+| Install Script | One-line `curl` / `irm` installation, requires domain deployment | Pending |
+| Setup Wizard | 6-step onboarding (Welcome → Provider → Agent → Try It → Channel → Done) with API key auto-detection | Complete |
+
+---
+
+## Sprint 3 — Differentiation
+
+Core innovations that go beyond competing solutions.
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| Voice Interaction | Hold-to-record microphone, auto-transcription, TTS audio playback | Complete |
+| Canvas Rendering | Secure sandboxed iframe rendering for web and desktop | Complete |
+| Multi-Language SDKs | JavaScript (@librefang/sdk) and Python SDK with full API coverage | Complete |
+| Observability | Prometheus-format metrics export (`/api/metrics`) with Grafana integration | Complete |
+| Visual Workflows | Drag-and-drop DAG builder with 7 node types, bezier connections, and TOML export | Complete |
+
+---
+
+## Sprint 4 — Polish & Launch
+
+Performance tuning and release preparation.
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| Multi-Session | Multiple independent sessions per agent with UI dropdown switcher | Complete |
+| Config Hot-Reload | Auto-detect `config.toml` changes and apply without restart | Complete |
+| Documentation | Comprehensive CHANGELOG and README updates | Complete |
+| Load Testing | 7 benchmarks, API p99 latency < 5ms, throughput 2,792 req/s | Complete |
+| Release Ready | All code complete, production audit passed | Complete |
+
+---
+
+## Performance Benchmarks
+
+| Metric | Result |
+|--------|--------|
+| Health endpoint p99 | 0.8ms |
+| Agent list p99 | 0.5ms |
+| Metrics throughput | 2,792 req/s |
+| Concurrent reads | 1,728 req/s |
+| Agent spawns | 97/s |
+
+---
+
+## Feature Comparison
+
+LibreFang compared against similar open-source solutions.
+
+| Feature | Comparable Solutions | LibreFang | Advantage |
+|---------|---------------------|-----------|-----------|
+| Language / Performance | Node.js (~200MB) | Rust (~30MB single binary) | **LibreFang** |
+| Channel Integrations | ~15 | 40 | **LibreFang** |
+| Built-in Tools | ~19 | 41 | **LibreFang** |
+| Security Systems | Token + Sandbox | 16-layer defense-in-depth | **LibreFang** |
+| Agent Templates | Manual config | 30 pre-configured templates | **LibreFang** |
+| Autonomous Capabilities | None | 7 Hands packages | **LibreFang** |
+| Workflow Engine | Cron + Webhooks | Full DAG (parallel / loops) | **LibreFang** |
+| Knowledge Graph | Flat vector store | Entity-relation graph | **LibreFang** |
+| P2P Networking | None | OFP protocol | **LibreFang** |
+| WASM Sandbox | Docker only | Dual-metered WASM | **LibreFang** |
+| Desktop App | Electron (~200MB) | Tauri (~30MB) | **LibreFang** |
+| Migration Tools | None | `migrate --from openfang/openclaw` | **LibreFang** |
+| Skill Ecosystem | 54 bundled | 60 bundled | **LibreFang** |
+| LLM Providers | ~15 | 27 providers / 130+ models | **LibreFang** |
+| SDKs | TypeScript | JS + Python | Tie |
+| Native Mobile | iOS + Android + macOS | Web responsive | Comparable |
+| Voice Mode | Wake word + TTS | Mic + TTS playback | Comparable (slight) |
+| Visual Workflows | None | Drag-and-drop builder | **LibreFang** |
+
+<Note>
+  LibreFang wins 15 out of 18 categories. Remaining gaps: native mobile apps and voice wake word.
+</Note>
+

@@ -18,6 +18,12 @@ pub struct OpenAIDriver {
     base_url: String,
     client: reqwest::Client,
     extra_headers: Vec<(String, String)>,
+    /// If true, use `api-key` header instead of `Authorization: Bearer`.
+    /// Used by Azure OpenAI.
+    use_api_key_header: bool,
+    /// Optional query string appended to the request URL (e.g., "api-version=2024-02-01").
+    /// Used by Azure OpenAI.
+    url_query: Option<String>,
 }
 
 impl OpenAIDriver {
@@ -28,6 +34,33 @@ impl OpenAIDriver {
             base_url,
             client: crate::http_client::proxied_client(),
             extra_headers: Vec::new(),
+            use_api_key_header: false,
+            url_query: None,
+        }
+    }
+
+    /// Create a new Azure OpenAI driver.
+    ///
+    /// Azure OpenAI uses a different URL format and `api-key` header instead of Bearer auth.
+    /// URL: `{endpoint}/openai/deployments/{deployment}/chat/completions?api-version={version}`
+    pub fn new_azure(
+        api_key: String,
+        endpoint: String,
+        deployment: String,
+        api_version: String,
+    ) -> Self {
+        let base_url = format!(
+            "{}/openai/deployments/{}",
+            endpoint.trim_end_matches('/'),
+            deployment
+        );
+        Self {
+            api_key: Zeroizing::new(api_key),
+            base_url,
+            client: crate::http_client::proxied_client(),
+            extra_headers: Vec::new(),
+            use_api_key_header: true,
+            url_query: Some(format!("api-version={}", api_version)),
         }
     }
 
@@ -449,7 +482,10 @@ impl LlmDriver for OpenAIDriver {
 
         let max_retries = 3;
         for attempt in 0..=max_retries {
-            let url = format!("{}/chat/completions", self.base_url);
+            let url = match &self.url_query {
+                Some(q) => format!("{}/chat/completions?{}", self.base_url, q),
+                None => format!("{}/chat/completions", self.base_url),
+            };
             debug!(url = %url, attempt, "Sending OpenAI API request");
 
             let mut req_builder = self
@@ -459,8 +495,12 @@ impl LlmDriver for OpenAIDriver {
                 .json(&oai_request);
 
             if !self.api_key.as_str().is_empty() {
-                req_builder = req_builder
-                    .header("authorization", format!("Bearer {}", self.api_key.as_str()));
+                if self.use_api_key_header {
+                    req_builder = req_builder.header("api-key", self.api_key.as_str());
+                } else {
+                    req_builder = req_builder
+                        .header("authorization", format!("Bearer {}", self.api_key.as_str()));
+                }
             }
             for (k, v) in &self.extra_headers {
                 req_builder = req_builder.header(k, v);
@@ -946,7 +986,10 @@ impl LlmDriver for OpenAIDriver {
         // Retry loop for the initial HTTP request
         let max_retries = 3;
         for attempt in 0..=max_retries {
-            let url = format!("{}/chat/completions", self.base_url);
+            let url = match &self.url_query {
+                Some(q) => format!("{}/chat/completions?{}", self.base_url, q),
+                None => format!("{}/chat/completions", self.base_url),
+            };
             debug!(url = %url, attempt, "Sending OpenAI streaming request");
 
             let mut req_builder = self
@@ -956,8 +999,12 @@ impl LlmDriver for OpenAIDriver {
                 .json(&oai_request);
 
             if !self.api_key.as_str().is_empty() {
-                req_builder = req_builder
-                    .header("authorization", format!("Bearer {}", self.api_key.as_str()));
+                if self.use_api_key_header {
+                    req_builder = req_builder.header("api-key", self.api_key.as_str());
+                } else {
+                    req_builder = req_builder
+                        .header("authorization", format!("Bearer {}", self.api_key.as_str()));
+                }
             }
             for (k, v) in &self.extra_headers {
                 req_builder = req_builder.header(k, v);
@@ -1157,8 +1204,13 @@ impl LlmDriver for OpenAIDriver {
 
                         // Text content delta — route through think filter to
                         // strip <think>...</think> tags before they reach the client.
+                        // Skip content when tool_calls are present in the same delta —
+                        // some providers (e.g. kimi-k2 via nvidia-nim) echo tool call
+                        // text in the content field, which would leak raw tool syntax
+                        // to the user.
+                        let has_tool_calls = delta["tool_calls"].is_array();
                         if let Some(text) = delta["content"].as_str() {
-                            if !text.is_empty() {
+                            if !text.is_empty() && !has_tool_calls {
                                 text_content.push_str(text);
                                 for action in think_filter.process(text) {
                                     match action {

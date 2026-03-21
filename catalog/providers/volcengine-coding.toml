@@ -1,6 +1,0 @@
-[provider]
-id = "volcengine_coding"
-display_name = "Volcano Engine Coding Plan"
-api_key_env = "VOLCENGINE_API_KEY"
-base_url = "https://ark.cn-beijing.volces.com/api/coding/v3"
-key_required = true

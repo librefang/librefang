@@ -504,7 +504,8 @@ async fn handle_text_message(
                 state.kernel.clone() as Arc<dyn KernelHandle>;
             match state
                 .kernel
-                .send_message_streaming(agent_id, &content, Some(kernel_handle))
+                .send_message_streaming_with_routing(agent_id, &content, Some(kernel_handle))
+                .await
             {
                 Ok((mut rx, handle)) => {
                     // Forward stream events to WebSocket with debouncing
@@ -605,8 +606,17 @@ async fn handle_text_message(
                     // Wait for the agent loop to complete
                     match handle.await {
                         Ok(Ok(result)) => {
-                            // Cancel the stream forwarder (should be done by now)
-                            stream_task.abort();
+                            // Wait for the stream forwarder to drain remaining
+                            // events and flush its text buffer.  The agent loop
+                            // has finished so its `tx` is dropped, which makes
+                            // `rx.recv()` return `None` and the task exits
+                            // naturally.  We give it up to 5 s before aborting
+                            // as a safety net.
+                            let drain_result =
+                                tokio::time::timeout(Duration::from_secs(5), stream_task).await;
+                            if drain_result.is_err() {
+                                debug!("stream forwarder did not finish within 5 s — aborting");
+                            }
 
                             // Send typing lifecycle: stop
                             let _ = send_json(
@@ -689,7 +699,10 @@ async fn handle_text_message(
                             let _ = send_json(sender, &resp_json).await;
                         }
                         Ok(Err(e)) => {
-                            stream_task.abort();
+                            // Let the stream forwarder drain before
+                            // sending the error so partial content is
+                            // still delivered to the client.
+                            let _ = tokio::time::timeout(Duration::from_secs(2), stream_task).await;
                             warn!("Agent message failed: {e}");
                             let _ = send_json(
                                 sender,
@@ -709,7 +722,10 @@ async fn handle_text_message(
                             .await;
                         }
                         Err(e) => {
-                            stream_task.abort();
+                            // Let the stream forwarder drain before
+                            // sending the error so partial content is
+                            // still delivered to the client.
+                            let _ = tokio::time::timeout(Duration::from_secs(2), stream_task).await;
                             warn!("Agent task panicked: {e}");
                             let _ = send_json(
                                 sender,
@@ -792,6 +808,14 @@ async fn handle_command(
                 serde_json::json!({"type": "command_result", "command": cmd, "message": "Session reset. Chat history cleared."})
             }
             Err(e) => serde_json::json!({"type": "error", "content": format!("Reset failed: {e}")}),
+        },
+        "reboot" => match state.kernel.reboot_session(agent_id) {
+            Ok(()) => {
+                serde_json::json!({"type": "command_result", "command": "reboot", "message": "Session rebooted. Context cleared."})
+            }
+            Err(e) => {
+                serde_json::json!({"type": "error", "content": format!("Reboot failed: {e}")})
+            }
         },
         "compact" => match state.kernel.compact_agent_session(agent_id).await {
             Ok(msg) => {
