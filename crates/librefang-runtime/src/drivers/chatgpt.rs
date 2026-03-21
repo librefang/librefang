@@ -12,12 +12,14 @@
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tracing::debug;
+use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::chatgpt_oauth::CHATGPT_BASE_URL;
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmError, StreamEvent};
+use futures::StreamExt;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
+use librefang_types::tool::ToolCall;
 use serde::{Deserialize, Serialize};
 
 /// How long a ChatGPT session token is valid (conservative estimate).
@@ -62,7 +64,18 @@ struct ResponsesOutputItem {
     item_type: String,
     #[serde(default)]
     content: Option<Vec<ResponsesContentPart>>,
-    // tool_calls would go here if we support them later
+    // Fields for function_call output items
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    call_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+    // Reasoning summary items
+    #[serde(default)]
+    summary: Option<Vec<ResponsesReasoningSummary>>,
 }
 
 /// Content part within an output item.
@@ -70,6 +83,16 @@ struct ResponsesOutputItem {
 struct ResponsesContentPart {
     #[serde(rename = "type")]
     part_type: String,
+    #[serde(default)]
+    text: Option<String>,
+}
+
+/// Reasoning summary text entry.
+#[derive(Debug, Deserialize)]
+struct ResponsesReasoningSummary {
+    #[serde(rename = "type")]
+    #[serde(default)]
+    summary_type: Option<String>,
     #[serde(default)]
     text: Option<String>,
 }
@@ -356,154 +379,420 @@ impl ChatGptDriver {
         }
     }
 
-    /// Parse SSE stream from Responses API and extract final response.
-    async fn parse_sse_stream(resp: reqwest::Response) -> Result<ResponsesApiResponse, LlmError> {
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| LlmError::Http(format!("Failed to read SSE response: {e}")))?;
-
-        // Find the last `response.completed` event which has the full response
-        // Handle both "data:" and "data: " formats for SSE compatibility
-        let mut final_response: Option<ResponsesApiResponse> = None;
-        for line in body.lines() {
-            let data = match line.strip_prefix("data:") {
-                Some(d) => d.trim_start(),
-                None => continue,
-            };
-            // Parse each SSE data line looking for response.completed
-            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                if event.get("type").and_then(|t| t.as_str()) == Some("response.completed") {
-                    if let Some(resp_obj) = event.get("response") {
-                        if let Ok(parsed) =
-                            serde_json::from_value::<ResponsesApiResponse>(resp_obj.clone())
-                        {
-                            final_response = Some(parsed);
-                        }
-                    }
-                }
-            }
-        }
-
-        final_response.ok_or_else(|| {
-            LlmError::Parse("No response.completed event found in SSE stream".to_string())
-        })
-    }
-
-    /// Parse SSE stream and forward deltas to the streaming channel.
-    async fn parse_sse_stream_with_events(
+    /// Parse SSE byte-stream from the Responses API using true incremental
+    /// streaming.  When `tx` is `Some`, delta events are forwarded to the
+    /// channel as they arrive; when `None` (the `complete()` path) only the
+    /// final `CompletionResponse` is built.
+    async fn stream_sse(
         resp: reqwest::Response,
-        tx: &tokio::sync::mpsc::Sender<StreamEvent>,
-    ) -> Result<ResponsesApiResponse, LlmError> {
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| LlmError::Http(format!("Failed to read SSE response: {e}")))?;
+        tx: Option<&tokio::sync::mpsc::Sender<StreamEvent>>,
+    ) -> Result<CompletionResponse, LlmError> {
+        let mut byte_stream = resp.bytes_stream();
+        let mut line_buf = String::new();
 
-        let mut final_response: Option<ResponsesApiResponse> = None;
-        for line in body.lines() {
-            // Handle both "data:" and "data: " formats for SSE compatibility
-            let data = match line.strip_prefix("data:") {
-                Some(d) => d.trim_start(),
-                None => continue,
-            };
-            if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-                let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        // Accumulated state
+        let mut full_text = String::new();
+        let mut thinking_text = String::new();
+        let mut usage = TokenUsage::default();
+        let mut stop_reason = StopReason::EndTurn;
+        // tool_accum: (call_id, name, arguments) indexed by output_index
+        let mut tool_accum: Vec<(String, String, String)> = Vec::new();
+        let mut completed_response: Option<serde_json::Value> = None;
+
+        while let Some(chunk) = byte_stream.next().await {
+            let bytes = chunk.map_err(|e| LlmError::Http(format!("SSE stream error: {e}")))?;
+            line_buf.push_str(&String::from_utf8_lossy(&bytes));
+
+            while let Some(newline_pos) = line_buf.find('\n') {
+                let line = line_buf[..newline_pos].trim_end_matches('\r').to_string();
+                line_buf = line_buf[newline_pos + 1..].to_string();
+
+                let data = match line.strip_prefix("data:") {
+                    Some(d) => d.trim_start(),
+                    None => continue,
+                };
+
+                if data == "[DONE]" {
+                    continue;
+                }
+
+                let event: serde_json::Value = match serde_json::from_str(data) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                let event_type = event
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default();
+
                 match event_type {
+                    // ── Text deltas ──────────────────────────────────
                     "response.output_text.delta" => {
                         if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
-                            let _ = tx
-                                .send(StreamEvent::TextDelta {
-                                    text: delta.to_string(),
-                                })
-                                .await;
+                            full_text.push_str(delta);
+                            if let Some(tx) = tx {
+                                let _ = tx
+                                    .send(StreamEvent::TextDelta {
+                                        text: delta.to_string(),
+                                    })
+                                    .await;
+                            }
                         }
                     }
+
+                    // ── Reasoning / thinking deltas ──────────────────
+                    "response.reasoning.delta" => {
+                        if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
+                            thinking_text.push_str(delta);
+                            if let Some(tx) = tx {
+                                let _ = tx
+                                    .send(StreamEvent::ThinkingDelta {
+                                        text: delta.to_string(),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+
+                    // Reasoning summary text deltas (treated as thinking)
+                    "response.reasoning_summary_text.delta" => {
+                        if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
+                            thinking_text.push_str(delta);
+                            if let Some(tx) = tx {
+                                let _ = tx
+                                    .send(StreamEvent::ThinkingDelta {
+                                        text: delta.to_string(),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+
+                    // ── Tool / function call events ──────────────────
+                    "response.output_item.added" => {
+                        // A new output item appeared.  For function_call items
+                        // we capture metadata (call_id, name).
+                        if let Some(item) = event.get("item") {
+                            let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            if item_type == "function_call" {
+                                let call_id = item
+                                    .get("call_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let name = item
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string();
+                                let output_index = event
+                                    .get("output_index")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(tool_accum.len() as u64)
+                                    as usize;
+
+                                // Ensure tool_accum is large enough
+                                while tool_accum.len() <= output_index {
+                                    tool_accum.push((String::new(), String::new(), String::new()));
+                                }
+                                tool_accum[output_index] =
+                                    (call_id.clone(), name.clone(), String::new());
+
+                                if let Some(tx) = tx {
+                                    let _ = tx
+                                        .send(StreamEvent::ToolUseStart { id: call_id, name })
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+
+                    "response.function_call_arguments.delta" => {
+                        if let Some(delta) = event.get("delta").and_then(|d| d.as_str()) {
+                            let output_index = event
+                                .get("output_index")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0)
+                                as usize;
+                            if output_index < tool_accum.len() {
+                                tool_accum[output_index].2.push_str(delta);
+                            }
+                            if let Some(tx) = tx {
+                                let _ = tx
+                                    .send(StreamEvent::ToolInputDelta {
+                                        text: delta.to_string(),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+
+                    "response.function_call_arguments.done" => {
+                        let output_index = event
+                            .get("output_index")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as usize;
+                        if output_index < tool_accum.len() {
+                            let (ref id, ref name, ref args) = tool_accum[output_index];
+                            let input: serde_json::Value = serde_json::from_str(args)
+                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                            if let Some(tx) = tx {
+                                let _ = tx
+                                    .send(StreamEvent::ToolUseEnd {
+                                        id: id.clone(),
+                                        name: name.clone(),
+                                        input: input.clone(),
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+
+                    "response.output_item.done" => {
+                        // Function call items finalize here if .done wasn't received
+                        if let Some(item) = event.get("item") {
+                            let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            if item_type == "function_call" {
+                                let output_index = event
+                                    .get("output_index")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0)
+                                    as usize;
+                                // If arguments.done was never received, emit ToolUseEnd now
+                                if output_index < tool_accum.len() {
+                                    let (ref id, ref name, ref args) = tool_accum[output_index];
+                                    if !id.is_empty() {
+                                        let input: serde_json::Value = serde_json::from_str(args)
+                                            .unwrap_or(serde_json::Value::Object(
+                                                serde_json::Map::new(),
+                                            ));
+                                        if let Some(tx) = tx {
+                                            let _ = tx
+                                                .send(StreamEvent::ToolUseEnd {
+                                                    id: id.clone(),
+                                                    name: name.clone(),
+                                                    input,
+                                                })
+                                                .await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Lifecycle events ─────────────────────────────
                     "response.completed" => {
                         if let Some(resp_obj) = event.get("response") {
-                            if let Ok(parsed) =
-                                serde_json::from_value::<ResponsesApiResponse>(resp_obj.clone())
+                            // Extract usage from completed response
+                            if let Some(u) = resp_obj.get("usage") {
+                                usage = TokenUsage {
+                                    input_tokens: u
+                                        .get("input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0),
+                                    output_tokens: u
+                                        .get("output_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0),
+                                    ..Default::default()
+                                };
+                            }
+                            // Extract stop reason from status
+                            match resp_obj
+                                .get("status")
+                                .and_then(|s| s.as_str())
+                                .unwrap_or("completed")
                             {
-                                final_response = Some(parsed);
+                                "incomplete" => stop_reason = StopReason::MaxTokens,
+                                _ => stop_reason = StopReason::EndTurn,
                             }
+                            completed_response = Some(resp_obj.clone());
                         }
                     }
-                    _ => {}
+
+                    "error" => {
+                        let msg = event
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown error");
+                        return Err(LlmError::Api {
+                            status: 500,
+                            message: msg.to_string(),
+                        });
+                    }
+
+                    _ => {
+                        // Ignored: response.created, response.in_progress,
+                        // response.output_text.done, etc.
+                    }
                 }
             }
         }
 
-        final_response.ok_or_else(|| {
-            LlmError::Parse("No response.completed event found in SSE stream".to_string())
-        })
-    }
-
-    /// Parse a Responses API response into a CompletionResponse.
-    fn parse_responses_response(
-        resp: ResponsesApiResponse,
-    ) -> Result<CompletionResponse, LlmError> {
-        // Check for error
-        if let Some(err) = resp.error {
-            let msg = err
-                .message
-                .unwrap_or_else(|| err.code.unwrap_or_else(|| "unknown error".to_string()));
-            return Err(LlmError::Api {
-                status: 400,
-                message: msg,
-            });
-        }
-
-        // Check status
-        if resp.status.as_deref() == Some("failed") {
-            return Err(LlmError::Api {
-                status: 500,
-                message: "Responses API returned failed status".to_string(),
-            });
-        }
-
-        // Extract text from output items
+        // Build content blocks
         let mut content_blocks = Vec::new();
-        for item in &resp.output {
-            if item.item_type == "message" {
-                if let Some(ref parts) = item.content {
-                    for part in parts {
-                        if part.part_type == "output_text" || part.part_type == "text" {
-                            if let Some(ref text) = part.text {
-                                content_blocks.push(ContentBlock::Text {
-                                    text: text.clone(),
-                                    provider_metadata: None,
-                                });
-                            }
-                        }
-                    }
-                }
+
+        // Add thinking block if we captured reasoning
+        if !thinking_text.is_empty() {
+            content_blocks.push(ContentBlock::Thinking {
+                thinking: thinking_text,
+                provider_metadata: None,
+            });
+        }
+
+        // Add text block if we captured any text
+        if !full_text.is_empty() {
+            content_blocks.push(ContentBlock::Text {
+                text: full_text,
+                provider_metadata: None,
+            });
+        }
+
+        // Build tool_calls from accumulated data
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        for (call_id, name, args) in &tool_accum {
+            if !call_id.is_empty() {
+                let input: serde_json::Value = serde_json::from_str(args)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                tool_calls.push(ToolCall {
+                    id: call_id.clone(),
+                    name: name.clone(),
+                    input,
+                });
             }
         }
 
-        let usage = resp.usage.map_or(
-            TokenUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                ..Default::default()
-            },
-            |u| TokenUsage {
-                input_tokens: u.input_tokens,
-                output_tokens: u.output_tokens,
-                ..Default::default()
-            },
-        );
+        // If tool_calls are present, set stop_reason to ToolUse
+        if !tool_calls.is_empty() {
+            stop_reason = StopReason::ToolUse;
+        }
 
-        let stop_reason = match resp.status.as_deref() {
-            Some("incomplete") => StopReason::MaxTokens,
-            _ => StopReason::EndTurn,
-        };
+        // Backfill: if we got a response.completed payload but missed
+        // streaming deltas, fill in from the completed output array.
+        if content_blocks.is_empty() && tool_calls.is_empty() {
+            if let Some(ref resp_val) = completed_response {
+                Self::backfill_from_completed_output(
+                    resp_val,
+                    &mut content_blocks,
+                    &mut tool_calls,
+                    &mut stop_reason,
+                );
+            }
+        }
+
+        // If still nothing, that's an error
+        if content_blocks.is_empty() && tool_calls.is_empty() && completed_response.is_none() {
+            return Err(LlmError::Parse(
+                "No response.completed event found in SSE stream".to_string(),
+            ));
+        }
 
         Ok(CompletionResponse {
             content: content_blocks,
             stop_reason,
-            tool_calls: Vec::new(),
+            tool_calls,
             usage,
         })
+    }
+
+    /// Backfill content and tool calls from a `response.completed` output
+    /// array.  This is a fallback when streaming deltas were missed.
+    fn backfill_from_completed_output(
+        resp_val: &serde_json::Value,
+        content_blocks: &mut Vec<ContentBlock>,
+        tool_calls: &mut Vec<ToolCall>,
+        stop_reason: &mut StopReason,
+    ) {
+        let output = match resp_val.get("output").and_then(|o| o.as_array()) {
+            Some(arr) => arr,
+            None => return,
+        };
+
+        for item in output {
+            let item_type = item
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or_default();
+
+            match item_type {
+                "message" => {
+                    if let Some(parts) = item.get("content").and_then(|c| c.as_array()) {
+                        for part in parts {
+                            let part_type = part
+                                .get("type")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or_default();
+                            if part_type == "output_text" || part_type == "text" {
+                                if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+                                    if !text.is_empty() {
+                                        content_blocks.push(ContentBlock::Text {
+                                            text: text.to_string(),
+                                            provider_metadata: None,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Check for reasoning summaries
+                    if let Some(summaries) = item.get("summary").and_then(|s| s.as_array()) {
+                        for summary in summaries {
+                            if let Some(text) = summary.get("text").and_then(|t| t.as_str()) {
+                                if !text.is_empty() {
+                                    content_blocks.push(ContentBlock::Thinking {
+                                        thinking: text.to_string(),
+                                        provider_metadata: None,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                "function_call" => {
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let args = item
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
+                    let input: serde_json::Value = serde_json::from_str(args)
+                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    if !call_id.is_empty() {
+                        tool_calls.push(ToolCall {
+                            id: call_id,
+                            name,
+                            input,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !tool_calls.is_empty() {
+            *stop_reason = StopReason::ToolUse;
+        }
+    }
+
+    /// Ensure a JSON value is an object; if it's a string, attempt to parse it.
+    fn ensure_object(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(_) => v.clone(),
+            serde_json::Value::String(s) => {
+                serde_json::from_str(s).unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
+            }
+            _ => serde_json::Value::Object(serde_json::Map::new()),
+        }
     }
 }
 
@@ -557,9 +846,9 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
             });
         }
 
-        // ChatGPT Codex endpoint always returns SSE stream
-        let resp_body = Self::parse_sse_stream(http_resp).await?;
-        Self::parse_responses_response(resp_body)
+        // ChatGPT Codex endpoint always returns SSE stream — consume
+        // without forwarding events.
+        Self::stream_sse(http_resp, None).await
     }
 
     async fn stream(
@@ -584,8 +873,7 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
             });
         }
 
-        let resp_body = Self::parse_sse_stream_with_events(http_resp, &tx).await?;
-        let response = Self::parse_responses_response(resp_body)?;
+        let response = Self::stream_sse(http_resp, Some(&tx)).await?;
 
         let _ = tx
             .send(StreamEvent::ContentComplete {
@@ -753,8 +1041,8 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_responses_response_ok() {
-        let json = serde_json::json!({
+    fn test_backfill_text_from_completed_output() {
+        let resp_val = serde_json::json!({
             "output": [{
                 "type": "message",
                 "content": [{
@@ -768,42 +1056,155 @@ mod tests {
             },
             "status": "completed"
         });
-        let resp: ResponsesApiResponse = serde_json::from_value(json).unwrap();
-        let parsed = ChatGptDriver::parse_responses_response(resp).unwrap();
-        assert_eq!(parsed.text(), "Hello world!");
-        assert_eq!(parsed.usage.input_tokens, 10);
-        assert_eq!(parsed.usage.output_tokens, 5);
-        assert_eq!(parsed.stop_reason, StopReason::EndTurn);
+
+        let mut content_blocks = Vec::new();
+        let mut tool_calls = Vec::new();
+        let mut stop_reason = StopReason::EndTurn;
+
+        ChatGptDriver::backfill_from_completed_output(
+            &resp_val,
+            &mut content_blocks,
+            &mut tool_calls,
+            &mut stop_reason,
+        );
+
+        assert_eq!(content_blocks.len(), 1);
+        match &content_blocks[0] {
+            ContentBlock::Text { text, .. } => assert_eq!(text, "Hello world!"),
+            _ => panic!("Expected Text block"),
+        }
+        assert!(tool_calls.is_empty());
+        assert_eq!(stop_reason, StopReason::EndTurn);
     }
 
     #[test]
-    fn test_parse_responses_response_error() {
-        let json = serde_json::json!({
-            "output": [],
-            "error": {
-                "message": "Something went wrong",
-                "code": "server_error"
-            }
+    fn test_backfill_tool_calls_from_completed_output() {
+        let resp_val = serde_json::json!({
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_123",
+                "name": "web_search",
+                "arguments": "{\"query\": \"rust\"}"
+            }],
+            "status": "completed"
         });
-        let resp: ResponsesApiResponse = serde_json::from_value(json).unwrap();
-        let result = ChatGptDriver::parse_responses_response(resp);
-        assert!(result.is_err());
+
+        let mut content_blocks = Vec::new();
+        let mut tool_calls = Vec::new();
+        let mut stop_reason = StopReason::EndTurn;
+
+        ChatGptDriver::backfill_from_completed_output(
+            &resp_val,
+            &mut content_blocks,
+            &mut tool_calls,
+            &mut stop_reason,
+        );
+
+        assert!(content_blocks.is_empty());
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, "call_123");
+        assert_eq!(tool_calls[0].name, "web_search");
+        assert_eq!(tool_calls[0].input, serde_json::json!({"query": "rust"}));
+        assert_eq!(stop_reason, StopReason::ToolUse);
     }
 
     #[test]
-    fn test_parse_responses_response_incomplete() {
-        let json = serde_json::json!({
+    fn test_backfill_reasoning_summary() {
+        let resp_val = serde_json::json!({
             "output": [{
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": "partial"
+                    "text": "Answer"
+                }],
+                "summary": [{
+                    "type": "summary_text",
+                    "text": "I thought about this carefully."
                 }]
             }],
-            "status": "incomplete"
+            "status": "completed"
         });
-        let resp: ResponsesApiResponse = serde_json::from_value(json).unwrap();
-        let parsed = ChatGptDriver::parse_responses_response(resp).unwrap();
-        assert_eq!(parsed.stop_reason, StopReason::MaxTokens);
+
+        let mut content_blocks = Vec::new();
+        let mut tool_calls = Vec::new();
+        let mut stop_reason = StopReason::EndTurn;
+
+        ChatGptDriver::backfill_from_completed_output(
+            &resp_val,
+            &mut content_blocks,
+            &mut tool_calls,
+            &mut stop_reason,
+        );
+
+        assert_eq!(content_blocks.len(), 2);
+        match &content_blocks[0] {
+            ContentBlock::Text { text, .. } => assert_eq!(text, "Answer"),
+            _ => panic!("Expected Text block"),
+        }
+        match &content_blocks[1] {
+            ContentBlock::Thinking { thinking, .. } => {
+                assert_eq!(thinking, "I thought about this carefully.")
+            }
+            _ => panic!("Expected Thinking block"),
+        }
+    }
+
+    #[test]
+    fn test_ensure_object_with_object() {
+        let obj = serde_json::json!({"key": "value"});
+        let result = ChatGptDriver::ensure_object(&obj);
+        assert_eq!(result, obj);
+    }
+
+    #[test]
+    fn test_ensure_object_with_string() {
+        let s = serde_json::json!("{\"key\": \"value\"}");
+        let result = ChatGptDriver::ensure_object(&s);
+        assert_eq!(result, serde_json::json!({"key": "value"}));
+    }
+
+    #[test]
+    fn test_ensure_object_with_invalid_string() {
+        let s = serde_json::json!("not json");
+        let result = ChatGptDriver::ensure_object(&s);
+        assert_eq!(result, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_ensure_object_with_number() {
+        let n = serde_json::json!(42);
+        let result = ChatGptDriver::ensure_object(&n);
+        assert_eq!(result, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_responses_output_item_deserialize_function_call() {
+        let json = serde_json::json!({
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "call_abc",
+            "name": "get_weather",
+            "arguments": "{\"city\": \"London\"}"
+        });
+        let item: ResponsesOutputItem = serde_json::from_value(json).unwrap();
+        assert_eq!(item.item_type, "function_call");
+        assert_eq!(item.call_id.as_deref(), Some("call_abc"));
+        assert_eq!(item.name.as_deref(), Some("get_weather"));
+        assert_eq!(item.arguments.as_deref(), Some("{\"city\": \"London\"}"));
+    }
+
+    #[test]
+    fn test_responses_output_item_deserialize_message() {
+        let json = serde_json::json!({
+            "type": "message",
+            "content": [{
+                "type": "output_text",
+                "text": "Hello!"
+            }]
+        });
+        let item: ResponsesOutputItem = serde_json::from_value(json).unwrap();
+        assert_eq!(item.item_type, "message");
+        assert!(item.content.is_some());
+        assert_eq!(item.content.unwrap()[0].text.as_deref(), Some("Hello!"));
     }
 }
