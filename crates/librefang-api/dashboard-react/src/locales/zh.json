@@ -80,9 +80,10 @@
   },
   "hands": {
     "title": "Hands", "subtitle": "自主功能包。",
-    "available": "可用能力", "instances": "活跃实例", "telemetry": "遥测", "activate": "激活", "deactivate": "停用",
-    "orchestration": "能力编排", "ready_hands": "就绪 Hands", "ready_description": "已准备好部署到智能体。",
-    "active_instances_desc": "当前正在运行的 Hands 实例。", "activate_failed": "激活失败"
+    "available": "可用能力", "instances": "活跃实例", "activate": "激活", "deactivate": "停用",
+    "orchestration": "能力编排", "active_label": "活跃", "total_label": "总计",
+    "search_placeholder": "搜索 Hands...", "ready": "就绪", "missing_req": "缺少依赖",
+    "instance": "实例"
   },
   "analytics": {
     "title": "分析", "subtitle": "使用统计和性能遥测。",

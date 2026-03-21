@@ -80,9 +80,10 @@
   },
   "hands": {
     "title": "Hands", "subtitle": "Autonomous capability packages.",
-    "available": "Available Hands", "instances": "Active Instances", "telemetry": "Telemetry", "activate": "Activate", "deactivate": "Deactivate",
-    "orchestration": "Capability Orchestration", "ready_hands": "Ready Hands", "ready_description": "Ready to be deployed to an agent.",
-    "active_instances_desc": "Currently running Hands instances.", "activate_failed": "Activation Failed"
+    "available": "Available Hands", "instances": "Active Instances", "activate": "Activate", "deactivate": "Deactivate",
+    "orchestration": "Capability Orchestration", "active_label": "active", "total_label": "total",
+    "search_placeholder": "Search hands...", "ready": "Ready", "missing_req": "Missing Requirements",
+    "instance": "Instance"
   },
   "analytics": {
     "title": "Analytics", "subtitle": "Usage statistics and performance telemetry.",
