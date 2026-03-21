@@ -6,7 +6,8 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { Input } from "../components/ui/Input";
-import { Hand, RefreshCw, Search, Power, PowerOff, Loader2, Check } from "lucide-react";
+import { Hand, Search, Power, PowerOff, Loader2, Check } from "lucide-react";
+import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 
 const REFRESH_MS = 15000;
@@ -65,24 +66,20 @@ export function HandsPage() {
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
-      {/* Header */}
-      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
-            <Hand className="h-4 w-4" />
-            {t("hands.orchestration")}
+      <PageHeader
+        badge={t("hands.orchestration")}
+        title={t("hands.title")}
+        subtitle={t("hands.subtitle")}
+        isFetching={handsQuery.isFetching}
+        onRefresh={() => { handsQuery.refetch(); activeQuery.refetch(); }}
+        icon={<Hand className="h-4 w-4" />}
+        actions={
+          <div className="flex items-center gap-3">
+            <Badge variant="success">{activeCount} {t("hands.active_label")}</Badge>
+            <Badge variant="default">{hands.length} {t("hands.total_label")}</Badge>
           </div>
-          <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("hands.title")}</h1>
-          <p className="mt-1 text-text-dim font-medium text-sm">{t("hands.subtitle")}</p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Badge variant="success">{activeCount} {t("hands.active_label")}</Badge>
-          <Badge variant="default">{hands.length} {t("hands.total_label")}</Badge>
-          <Button variant="secondary" onClick={() => { handsQuery.refetch(); activeQuery.refetch(); }}>
-            <RefreshCw className={`h-3.5 w-3.5 ${handsQuery.isFetching ? "animate-spin" : ""}`} />
-          </Button>
-        </div>
-      </header>
+        }
+      />
 
       {/* Search */}
       {hands.length > 0 && (

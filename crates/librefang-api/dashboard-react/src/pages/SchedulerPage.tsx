@@ -4,8 +4,9 @@ import { useTranslation } from "react-i18next";
 import { createSchedule, deleteSchedule, listAgents, listSchedules, listTriggers, listCronJobs, runSchedule } from "../api";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
+import { PageHeader } from "../components/ui/PageHeader";
 import { useUIStore } from "../lib/store";
-import { Clock, Plus, Play, Trash2, RefreshCw, Calendar, Zap, X, Loader2, AlertCircle } from "lucide-react";
+import { Clock, Plus, Play, Trash2, Calendar, Zap, X, Loader2, AlertCircle } from "lucide-react";
 import { ListSkeleton } from "../components/ui/Skeleton";
 
 const REFRESH_MS = 30000;
@@ -71,25 +72,19 @@ export function SchedulerPage() {
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
-      {/* Header */}
-      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
-            <Calendar className="h-4 w-4" />
-            {t("nav.automation")}
-          </div>
-          <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("scheduler.title")}</h1>
-          <p className="mt-1 text-text-dim font-medium text-sm">{t("scheduler.subtitle")}</p>
-        </div>
-        <div className="flex gap-2">
+      <PageHeader
+        badge={t("nav.automation")}
+        title={t("scheduler.title")}
+        subtitle={t("scheduler.subtitle")}
+        isFetching={schedulesQuery.isFetching}
+        onRefresh={() => { schedulesQuery.refetch(); triggersQuery.refetch(); cronJobsQuery.refetch(); }}
+        icon={<Calendar className="h-4 w-4" />}
+        actions={
           <Button variant="primary" onClick={() => setShowCreate(true)}>
             <Plus className="w-4 h-4" /> {t("scheduler.create_job")}
           </Button>
-          <Button variant="secondary" onClick={() => { schedulesQuery.refetch(); triggersQuery.refetch(); cronJobsQuery.refetch(); }}>
-            <RefreshCw className={`h-3.5 w-3.5 ${schedulesQuery.isFetching ? "animate-spin" : ""}`} />
-          </Button>
-        </div>
-      </header>
+        }
+      />
 
       {/* Stats */}
       <div className="flex gap-3">
@@ -202,7 +197,7 @@ export function SchedulerPage() {
       {/* Create Modal */}
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreate(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw]" onClick={e => e.stopPropagation()}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-up" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("scheduler.create_job")}</h3>
               <button onClick={() => setShowCreate(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>

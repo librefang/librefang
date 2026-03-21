@@ -197,8 +197,8 @@ function DetailsModal({ channel, onClose, onConfigure, t }: {
   t: (key: string) => string
 }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={onClose}>
-      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-lg shadow-2xl max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-lg max-w-[90vw] shadow-2xl max-h-[90vh] overflow-y-auto animate-fade-in-up" onClick={e => e.stopPropagation()}>
         {/* Header */}
         <div className={`h-2 bg-gradient-to-r ${channel.configured ? "from-success via-success/60 to-success/30" : "from-brand via-brand/60 to-brand/30"} rounded-t-2xl`} />
         <div className="p-6 border-b border-border-subtle">

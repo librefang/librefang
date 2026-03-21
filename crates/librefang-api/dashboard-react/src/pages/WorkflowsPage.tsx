@@ -13,8 +13,10 @@ import { workflowTemplates, type WorkflowTemplate } from "../data/workflowTempla
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Input } from "../components/ui/Input";
+import { PageHeader } from "../components/ui/PageHeader";
+import { ListSkeleton } from "../components/ui/Skeleton";
 import {
-  Layers, RefreshCw, Trash2, FilePlus, Play, Search,
+  Layers, Trash2, FilePlus, Play, Search,
   Calendar, FileText, Activity, Bot, ArrowRight, Loader2, Clock, ChevronRight
 } from "lucide-react";
 
@@ -92,26 +94,20 @@ export function WorkflowsPage() {
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
-      {/* Header */}
-      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
-            <Layers className="h-4 w-4" />
-            {t("workflows.automation_hub")}
-          </div>
-          <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("workflows.title")}</h1>
-          <p className="mt-1 text-text-dim font-medium text-sm">{t("workflows.subtitle")}</p>
-        </div>
-        <div className="flex gap-2">
+      <PageHeader
+        badge={t("workflows.automation_hub")}
+        title={t("workflows.title")}
+        subtitle={t("workflows.subtitle")}
+        isFetching={workflowsQuery.isFetching}
+        onRefresh={() => void workflowsQuery.refetch()}
+        icon={<Layers className="h-4 w-4" />}
+        actions={
           <Button variant="primary" onClick={() => handleNewWorkflow()}>
             <FilePlus className="h-4 w-4" />
             {t("workflows.create_blank")}
           </Button>
-          <Button variant="secondary" onClick={() => void workflowsQuery.refetch()}>
-            <RefreshCw className={`h-3.5 w-3.5 ${workflowsQuery.isFetching ? "animate-spin" : ""}`} />
-          </Button>
-        </div>
-      </header>
+        }
+      />
 
       {/* 模板推荐区 — 始终显示 */}
       <div>
@@ -151,17 +147,7 @@ export function WorkflowsPage() {
 
       {/* 加载骨架 */}
       {workflowsQuery.isLoading && (
-        <div className="space-y-3">
-          {[1, 2, 3].map(i => (
-            <div key={i} className="flex items-center gap-4 p-4 rounded-2xl border border-border-subtle animate-pulse">
-              <div className="w-10 h-10 rounded-xl bg-main" />
-              <div className="flex-1 space-y-2">
-                <div className="h-4 w-40 rounded bg-main" />
-                <div className="h-3 w-60 rounded bg-main" />
-              </div>
-            </div>
-          ))}
-        </div>
+        <ListSkeleton rows={3} />
       )}
 
       {/* 主内容区 */}

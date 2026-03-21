@@ -5,6 +5,8 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
+import { PageHeader } from "../components/ui/PageHeader";
+import { ListSkeleton } from "../components/ui/Skeleton";
 import { Globe, Sun, Moon, Settings, PanelLeftClose, PanelLeft, Wrench, Search, RefreshCw } from "lucide-react";
 import { useUIStore } from "../lib/store";
 
@@ -54,14 +56,12 @@ export function SettingsPage() {
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
-      <header>
-        <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
-          <Settings className="h-4 w-4" />
-          {t("settings.system_config")}
-        </div>
-        <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("settings.title")}</h1>
-        <p className="mt-1 text-text-dim font-medium">{t("settings.subtitle")}</p>
-      </header>
+      <PageHeader
+        badge={t("settings.system_config")}
+        title={t("settings.title")}
+        subtitle={t("settings.subtitle")}
+        icon={<Settings className="h-4 w-4" />}
+      />
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* 外观设置 */}
@@ -128,9 +128,7 @@ export function SettingsPage() {
 
           <div className="space-y-1.5 max-h-80 overflow-y-auto">
             {toolsQuery.isLoading ? (
-              <div className="space-y-2">
-                {[1, 2, 3].map(i => <div key={i} className="h-10 rounded-lg bg-main animate-pulse" />)}
-              </div>
+              <ListSkeleton rows={3} />
             ) : filteredTools.length === 0 ? (
               <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
             ) : (

@@ -5,6 +5,7 @@ import { listModels } from "../api";
 import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { PageHeader } from "../components/ui/PageHeader";
+import { ListSkeleton } from "../components/ui/Skeleton";
 import {
   Cpu, Search, Check, X, Eye, Wrench, Zap, AlertCircle, Lock
 } from "lucide-react";
@@ -150,9 +151,7 @@ export function ModelsPage() {
 
       {/* Model List */}
       {modelsQuery.isLoading ? (
-        <div className="space-y-2">
-          {[1, 2, 3, 4, 5].map(i => <div key={i} className="h-12 rounded-xl bg-main animate-pulse" />)}
-        </div>
+        <ListSkeleton rows={5} />
       ) : filtered.length === 0 ? (
         <div className="text-center py-16">
           <Cpu className="w-10 h-10 text-text-dim/20 mx-auto mb-3" />

@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listChannels, loadDashboardSnapshot, getCommsTopology, listCommsEvents, type CommsEventItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
-import { CardSkeleton } from "../components/ui/Skeleton";
+import { CardSkeleton, ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
@@ -363,17 +363,7 @@ export function CommsPage() {
           </div>
 
           {eventsQuery.isLoading ? (
-            <div className="space-y-2">
-              {[1, 2, 3, 4, 5].map(i => (
-                <div key={i} className="flex items-center gap-3 p-3 rounded-lg bg-main/20 animate-pulse">
-                  <div className="w-8 h-8 rounded-lg bg-main" />
-                  <div className="flex-1 space-y-2">
-                    <div className="h-4 w-1/3 bg-main rounded" />
-                    <div className="h-3 w-2/3 bg-main rounded" />
-                  </div>
-                </div>
-              ))}
-            </div>
+            <ListSkeleton rows={5} />
           ) : filteredEvents.length === 0 ? (
             <EmptyState title={t("common.no_data")} icon={<Activity className="h-6 w-6" />} />
           ) : (

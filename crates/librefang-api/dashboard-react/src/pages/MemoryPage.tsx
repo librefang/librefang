@@ -31,8 +31,8 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={onClose}>
-      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-md p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-md max-w-[90vw] p-6 shadow-2xl animate-fade-in-up" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-black">{t("memory.add_memory")}</h3>
           <button onClick={onClose} className="p-1 hover:bg-main/30 rounded-lg">
@@ -105,8 +105,8 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={onClose}>
-      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-md p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-md max-w-[90vw] p-6 shadow-2xl animate-fade-in-up" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-black">{t("memory.edit_memory")}</h3>
           <button onClick={onClose} className="p-1 hover:bg-main/30 rounded-lg">

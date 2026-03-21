@@ -8,8 +8,10 @@ import {
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
+import { PageHeader } from "../components/ui/PageHeader";
+import { ListSkeleton } from "../components/ui/Skeleton";
 import {
-  Puzzle, RefreshCw, Plus, Download, Trash2, Package, FolderOpen,
+  Puzzle, Plus, Download, Trash2, Package, FolderOpen,
   GitBranch, X, Loader2, Check, AlertCircle, FileCode
 } from "lucide-react";
 
@@ -89,30 +91,26 @@ export function PluginsPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* Header */}
-      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
-            <Puzzle className="h-4 w-4" />
-            {t("plugins.section")}
+      <PageHeader
+        badge={t("plugins.section")}
+        title={t("plugins.title")}
+        subtitle={t("plugins.subtitle")}
+        isFetching={pluginsQuery.isFetching}
+        onRefresh={() => { pluginsQuery.refetch(); registriesQuery.refetch(); }}
+        icon={<Puzzle className="h-4 w-4" />}
+        actions={
+          <div className="flex gap-2">
+            <Button variant="secondary" onClick={() => setShowScaffold(true)}>
+              <FileCode className="h-4 w-4" />
+              {t("plugins.new_plugin")}
+            </Button>
+            <Button variant="primary" onClick={() => setShowInstall(true)}>
+              <Download className="h-4 w-4" />
+              {t("plugins.install")}
+            </Button>
           </div>
-          <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("plugins.title")}</h1>
-          <p className="mt-1 text-text-dim font-medium text-sm">{t("plugins.subtitle")}</p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="secondary" onClick={() => setShowScaffold(true)}>
-            <FileCode className="h-4 w-4" />
-            {t("plugins.new_plugin")}
-          </Button>
-          <Button variant="primary" onClick={() => setShowInstall(true)}>
-            <Download className="h-4 w-4" />
-            {t("plugins.install")}
-          </Button>
-          <Button variant="secondary" onClick={() => { pluginsQuery.refetch(); registriesQuery.refetch(); }}>
-            <RefreshCw className={`h-3.5 w-3.5 ${pluginsQuery.isFetching ? "animate-spin" : ""}`} />
-          </Button>
-        </div>
-      </header>
+        }
+      />
 
       {/* Tabs */}
       <div className="flex gap-4 border-b border-border-subtle">
@@ -133,14 +131,7 @@ export function PluginsPage() {
       {tab === "installed" && (
         <div>
           {pluginsQuery.isLoading ? (
-            <div className="space-y-3">
-              {[1, 2].map(i => (
-                <div key={i} className="p-4 rounded-2xl border border-border-subtle animate-pulse flex gap-4">
-                  <div className="w-10 h-10 rounded-xl bg-main" />
-                  <div className="flex-1 space-y-2"><div className="h-4 w-40 bg-main rounded" /><div className="h-3 w-64 bg-main rounded" /></div>
-                </div>
-              ))}
-            </div>
+            <ListSkeleton rows={3} />
           ) : plugins.length === 0 ? (
             <div className="text-center py-16">
               <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">
@@ -251,7 +242,7 @@ export function PluginsPage() {
       {/* Install Modal */}
       {showInstall && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowInstall(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw]" onClick={e => e.stopPropagation()}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-up" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("plugins.install_title")}</h3>
               <button onClick={() => setShowInstall(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
@@ -326,7 +317,7 @@ export function PluginsPage() {
       {/* Scaffold Modal */}
       {showScaffold && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowScaffold(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[400px] max-w-[90vw]" onClick={e => e.stopPropagation()}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[400px] max-w-[90vw] animate-fade-in-up" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("plugins.scaffold_title")}</h3>
               <button onClick={() => setShowScaffold(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>

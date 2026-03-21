@@ -4,8 +4,11 @@ import { useTranslation } from "react-i18next";
 import { deleteSession, listAgents, listSessions, switchAgentSession } from "../api";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
+import { Input } from "../components/ui/Input";
+import { PageHeader } from "../components/ui/PageHeader";
+import { ListSkeleton } from "../components/ui/Skeleton";
 import { useUIStore } from "../lib/store";
-import { Clock, RefreshCw, Search, MessageCircle, Trash2, Play, Users } from "lucide-react";
+import { Clock, Search, MessageCircle, Trash2, Play, Users } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -80,45 +83,34 @@ export function SessionsPage() {
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
-      {/* Header */}
-      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
-            <Clock className="h-4 w-4" />
-            {t("nav.sessions")}
+      <PageHeader
+        badge={t("nav.sessions")}
+        title={t("sessions.title")}
+        subtitle={t("sessions.subtitle")}
+        isFetching={sessionsQuery.isFetching}
+        onRefresh={() => void sessionsQuery.refetch()}
+        icon={<Clock className="h-4 w-4" />}
+        actions={
+          <div className="flex items-center gap-3">
+            <Badge variant="brand">{activeCount} {t("sessions.active_count")}</Badge>
+            <Badge variant="default">{sessions.length} {t("sessions.total")}</Badge>
           </div>
-          <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("sessions.title")}</h1>
-          <p className="mt-1 text-text-dim font-medium text-sm">{t("sessions.subtitle")}</p>
-        </div>
-        <div className="flex items-center gap-3">
-          <Badge variant="brand">{activeCount} {t("sessions.active_count")}</Badge>
-          <Badge variant="default">{sessions.length} {t("sessions.total")}</Badge>
-          <Button variant="secondary" onClick={() => sessionsQuery.refetch()}>
-            <RefreshCw className={`h-3.5 w-3.5 ${sessionsQuery.isFetching ? "animate-spin" : ""}`} />
-          </Button>
-        </div>
-      </header>
+        }
+      />
 
       {/* Search */}
       {sessions.length > 0 && (
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-dim/40" />
-          <input type="text" value={search} onChange={e => setSearch(e.target.value)}
-            placeholder={t("sessions.search_placeholder")}
-            className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-border-subtle bg-surface text-sm outline-none focus:border-brand" />
-        </div>
+        <Input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder={t("sessions.search_placeholder")}
+          leftIcon={<Search className="h-4 w-4" />}
+        />
       )}
 
       {/* Sessions */}
       {sessionsQuery.isLoading ? (
-        <div className="space-y-3">
-          {[1, 2, 3].map(i => (
-            <div key={i} className="flex items-center gap-4 p-4 rounded-2xl border border-border-subtle animate-pulse">
-              <div className="w-10 h-10 rounded-xl bg-main" />
-              <div className="flex-1 space-y-2"><div className="h-4 w-40 bg-main rounded" /><div className="h-3 w-60 bg-main rounded" /></div>
-            </div>
-          ))}
-        </div>
+        <ListSkeleton rows={3} />
       ) : sessions.length === 0 ? (
         <div className="flex flex-col items-center py-20">
           <div className="relative mb-6">
