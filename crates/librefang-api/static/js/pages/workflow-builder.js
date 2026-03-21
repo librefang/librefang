@@ -176,10 +176,10 @@ function workflowBuilder() {
         var node = this.nodes[ni];
         var g = document.createElementNS(SVG_NS, 'g');
         g.classList.add('wf-node');
+        g.setAttribute('data-node-id', node.id);
         g.setAttribute('transform', 'translate(' + node.x + ',' + node.y + ')');
         (function(n) {
           g.addEventListener('mousedown', function(e) { self.onNodeMouseDown(n, e); });
-          g.addEventListener('dblclick', function() { self.editNode(n); });
         })(node);
 
         // Node body rect
@@ -398,12 +398,11 @@ function workflowBuilder() {
 
     onNodeMouseDown: function(node, e) {
       e.stopPropagation();
-      // Detect double-click manually — the native dblclick event never fires
-      // because scheduleRender() destroys and recreates all SVG elements between
-      // the first and second click, so the browser loses the DOM target for dblclick.
+      // Manual double-click detection — native dblclick is unreliable because
+      // scheduleRender() may destroy and recreate <g> elements between the two
+      // clicks.  We track by node id (a string) so it survives DOM rebuilds.
       var now = Date.now();
-      if (this._lastClickNodeId === node.id && (now - this._lastClickTime) < 350) {
-        // Double-click detected — open editor instead of starting drag
+      if (this._lastClickNodeId === node.id && (now - this._lastClickTime) < 400) {
         this._lastClickNodeId = null;
         this._lastClickTime = 0;
         this.editNode(node);
@@ -432,6 +431,22 @@ function workflowBuilder() {
       this._didPan = false;
       this.canvasDragging = true;
       this.canvasDragStart = { x: e.clientX - this.canvasOffset.x * this.zoom, y: e.clientY - this.canvasOffset.y * this.zoom };
+    },
+
+    // Double-click handler on the persistent SVG element — reliably opens the
+    // node editor.  Native dblclick on individual <g> nodes is unreliable
+    // because scheduleRender() destroys and recreates SVG elements between
+    // clicks, causing the browser to lose the DOM target.  Binding the handler
+    // on the long-lived <svg> avoids this entirely.
+    onCanvasDblClick: function(e) {
+      var gEl = e.target.closest('.wf-node');
+      if (!gEl) return;
+      var nodeId = gEl.getAttribute('data-node-id');
+      if (!nodeId) return;
+      var node = this.getNode(nodeId);
+      if (node) {
+        this.editNode(node);
+      }
     },
 
     onCanvasMouseMove: function(e) {
