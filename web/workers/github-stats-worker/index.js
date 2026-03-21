@@ -1,4 +1,7 @@
 // GitHub Stats Worker
+// Optimized: stores history as single JSON blob to minimize KV operations
+// Before: ~128 KV ops per uncached request (120 reads + 8 writes)
+// After: ~6 KV ops per uncached request (2 reads + 4 writes)
 
 export default {
   async fetch(request, env) {
@@ -6,11 +9,11 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(recordDailyStars(env))
+    ctx.waitUntil(recordDailyStats(env))
   },
 }
 
-async function recordDailyStars(env) {
+async function recordDailyStats(env) {
   const headers = {
     'Accept': 'application/vnd.github.v3+json',
     'User-Agent': 'LibrefangStats/1.0',
@@ -30,7 +33,6 @@ async function recordDailyStars(env) {
       const data = await repoRes.json()
       const today = new Date().toISOString().split('T')[0]
 
-      // Get PR count from header
       const prLink = pullsRes.headers.get('link')
       let prCount = 0
       if (prLink) {
@@ -38,14 +40,36 @@ async function recordDailyStars(env) {
         if (match) prCount = parseInt(match[1], 10)
       }
 
-      // Record all metrics
-      await env.KV.put('stars_' + today, String(data.stargazers_count || 0))
-      await env.KV.put('forks_' + today, String(data.forks_count || 0))
-      await env.KV.put('issues_' + today, String(data.open_issues_count || 0))
-      await env.KV.put('prs_' + today, String(prCount))
-      await env.KV.put('downloads_' + today, '0') // Downloads recorded separately from releases
+      const todayEntry = {
+        date: today,
+        stars: data.stargazers_count || 0,
+        forks: data.forks_count || 0,
+        issues: data.open_issues_count || 0,
+        prs: prCount,
+      }
 
-      console.log('Recorded:', today, 'stars:', data.stargazers_count, 'forks:', data.forks_count, 'issues:', data.open_issues_count, 'PRs:', prCount)
+      // Read existing history blob, append today, trim to 90 days
+      let history = []
+      try {
+        const raw = await env.KV.get('stats_history')
+        if (raw) history = JSON.parse(raw)
+      } catch {}
+
+      // Replace or append today's entry
+      const idx = history.findIndex(h => h.date === today)
+      if (idx >= 0) {
+        history[idx] = todayEntry
+      } else {
+        history.push(todayEntry)
+      }
+
+      // Keep last 90 days max
+      if (history.length > 90) {
+        history = history.slice(-90)
+      }
+
+      await env.KV.put('stats_history', JSON.stringify(history))
+      console.log('Recorded:', today, 'stars:', todayEntry.stars, 'forks:', todayEntry.forks)
     }
   } catch (e) {
     console.error('Failed to record stats:', e.message)
@@ -66,7 +90,6 @@ function handleFetch(request, env) {
     return new Response(null, { headers: cors })
   }
 
-  // GET /api/github
   if (path === '/api/github' && request.method === 'GET') {
     return handleGitHubStats(env, cors)
   }
@@ -79,10 +102,8 @@ async function handleGitHubStats(env, cors) {
   const cacheTimeKey = 'github_stats_time'
   const cacheDuration = 1000 * 60 * 30 // 30 minutes
 
-  console.log('GITHUB_TOKEN exists:', !!env.GITHUB_TOKEN)
-
   try {
-    // Check cache
+    // Check cache (2 KV reads)
     let cached, cacheTime
     try {
       cached = await env.KV.get(cacheKey)
@@ -92,19 +113,12 @@ async function handleGitHubStats(env, cors) {
     }
 
     if (cached && cacheTime && (Date.now() - cacheTime < cacheDuration)) {
-      console.log('Returning cached response')
       return new Response(cached, {
-        headers: {
-          'Content-Type': 'application/json',
-          'Cache-Control': 'no-cache',
-          ...cors
-        }
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', ...cors }
       })
-    } else {
-      console.log('Cache miss or expired, fetching from GitHub')
     }
 
-    // Fetch from GitHub
+    // Fetch from GitHub (3 API calls)
     const headers = {
       'Accept': 'application/vnd.github.v3+json',
       'User-Agent': 'LibrefangStats/1.0',
@@ -123,7 +137,6 @@ async function handleGitHubStats(env, cors) {
     const repo = repoRes.ok ? await repoRes.json() : {}
     const releases = releasesRes.ok ? await releasesRes.json() : []
 
-    // Get PR count from header
     const prLink = pullsRes.headers.get('link')
     let prCount = 0
     if (prLink) {
@@ -135,33 +148,36 @@ async function handleGitHubStats(env, cors) {
       return sum + (rel.assets?.reduce((s, a) => s + (a.download_count || 0), 0) || 0)
     }, 0)
 
-    // Record today's all metrics
+    // Update today in history blob (1 KV read + 1 KV write)
     const today = new Date().toISOString().split('T')[0]
-    await env.KV.put('stars_' + today, String(repo.stargazers_count || 0))
-    await env.KV.put('forks_' + today, String(repo.forks_count || 0))
-    await env.KV.put('issues_' + today, String(repo.open_issues_count || 0))
-    await env.KV.put('prs_' + today, String(prCount))
-
-    // Get last 30 days history
-    const history = []
-    for (let i = 0; i < 30; i++) {
-      const d = new Date()
-      d.setDate(d.getDate() - i)
-      const dateStr = d.toISOString().split('T')[0]
-      const stars = await env.KV.get('stars_' + dateStr)
-      const forks = await env.KV.get('forks_' + dateStr)
-      const issues = await env.KV.get('issues_' + dateStr)
-      const prs = await env.KV.get('prs_' + dateStr)
-      if (stars) {
-        history.push({
-          date: dateStr,
-          stars: parseInt(stars, 10),
-          forks: forks ? parseInt(forks, 10) : 0,
-          issues: issues ? parseInt(issues, 10) : 0,
-          prs: prs ? parseInt(prs, 10) : 0
-        })
-      }
+    const todayEntry = {
+      date: today,
+      stars: repo.stargazers_count || 0,
+      forks: repo.forks_count || 0,
+      issues: repo.open_issues_count || 0,
+      prs: prCount,
     }
+
+    let history = []
+    try {
+      const raw = await env.KV.get('stats_history')
+      if (raw) history = JSON.parse(raw)
+    } catch {}
+
+    const idx = history.findIndex(h => h.date === today)
+    if (idx >= 0) {
+      history[idx] = todayEntry
+    } else {
+      history.push(todayEntry)
+    }
+    if (history.length > 90) {
+      history = history.slice(-90)
+    }
+
+    await env.KV.put('stats_history', JSON.stringify(history))
+
+    // Return last 30 days
+    const last30 = history.slice(-30)
 
     const result = {
       stars: repo.stargazers_count || 0,
@@ -171,22 +187,21 @@ async function handleGitHubStats(env, cors) {
       lastUpdate: repo.updated_at || '',
       createdAt: repo.created_at || '',
       downloads,
-      starHistory: history.reverse(),
+      starHistory: last30,
     }
 
     const json = JSON.stringify(result)
 
-    // Cache
+    // Cache result (2 KV writes)
     try {
       await env.KV.put(cacheKey, json)
       await env.KV.put(cacheTimeKey, String(Date.now()))
-      console.log('Cached response, KV write successful')
     } catch (e) {
-      console.log('KV put error:', e.message, e.stack)
+      console.log('KV put error:', e.message)
     }
 
     return new Response(json, {
-      headers: { 'Content-Type': 'application/json', ...cors }
+      headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', ...cors }
     })
   } catch (e) {
     return new Response(JSON.stringify({ error: e.message }), {
