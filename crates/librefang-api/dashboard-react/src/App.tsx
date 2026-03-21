@@ -1,4 +1,4 @@
-import { Link, Outlet } from "@tanstack/react-router";
+import { Link, Outlet, useLocation } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu } from "lucide-react";
@@ -9,6 +9,7 @@ export function App() {
   const { t } = useTranslation();
   const { theme, toggleTheme, language, setLanguage, isMobileMenuOpen, setMobileMenuOpen, isSidebarCollapsed, toggleSidebar, navLayout, collapsedNavGroups, toggleNavGroup } = useUIStore();
   const { isOpen: isPaletteOpen, setIsOpen: setPaletteOpen } = useCommandPalette();
+  const location = useLocation();
 
   useEffect(() => {
     const root = window.document.documentElement;
@@ -231,7 +232,7 @@ export function App() {
 
         {/* Main Content */}
         <main className="flex-1 overflow-auto bg-main">
-          <div className="mx-auto max-w-7xl p-4 lg:p-8 animate-fade-in-up">
+          <div key={location.pathname} className="mx-auto max-w-7xl p-3 sm:p-4 lg:p-8 animate-fade-in-up">
             <Outlet />
           </div>
         </main>

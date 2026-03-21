@@ -16,9 +16,31 @@ async function listTools(): Promise<any[]> {
   return data.tools ?? data ?? [];
 }
 
+// Tool name i18n mapping for Chinese
+const toolNameZh: Record<string, string> = {
+  file_read: "读取文件", file_write: "写入文件", file_list: "列出文件",
+  apply_patch: "应用补丁", web_fetch: "网页抓取", web_search: "网页搜索",
+  shell_exec: "执行命令", memory_store: "存储记忆", memory_recall: "回忆记忆",
+  schedule_create: "创建调度", schedule_list: "调度列表", schedule_delete: "删除调度",
+  knowledge_add_entity: "添加实体", knowledge_add_relation: "添加关系", knowledge_query: "知识查询",
+  event_publish: "发布事件", cron_create: "创建定时", cron_delete: "删除定时",
+  agent_send: "发送消息", agent_list: "智能体列表",
+};
+
+const toolDescZh: Record<string, string> = {
+  file_read: "读取指定路径的文件内容", file_write: "将内容写入指定文件", file_list: "列出目录下的文件",
+  apply_patch: "应用代码补丁到文件", web_fetch: "抓取网页内容", web_search: "搜索互联网信息",
+  shell_exec: "在系统终端执行命令", memory_store: "将信息存储到长期记忆", memory_recall: "从长期记忆中检索信息",
+  schedule_create: "创建新的调度任务", schedule_list: "列出所有调度任务", schedule_delete: "删除指定的调度任务",
+  knowledge_add_entity: "向知识图谱添加实体", knowledge_add_relation: "向知识图谱添加关系", knowledge_query: "查询知识图谱",
+  event_publish: "发布事件到事件总线", cron_create: "创建定时任务", cron_delete: "删除定时任务",
+  agent_send: "向智能体发送消息", agent_list: "列出所有智能体",
+};
+
 export function SettingsPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { theme, toggleTheme, language, setLanguage, navLayout, setNavLayout } = useUIStore();
+  const isZh = i18n.language === "zh";
   const [toolSearch, setToolSearch] = useState("");
 
   const toolsQuery = useQuery({ queryKey: ["tools"], queryFn: listTools });
@@ -118,8 +140,8 @@ export function SettingsPage() {
                     <Wrench className="w-3 h-3 text-brand" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <p className="text-xs font-bold truncate">{tool.name || tool.id}</p>
-                    {tool.description && <p className="text-[9px] text-text-dim truncate">{tool.description}</p>}
+                    <p className="text-xs font-bold truncate">{isZh ? (toolNameZh[tool.name] || tool.name) : (tool.name || tool.id)}</p>
+                    {tool.description && <p className="text-[9px] text-text-dim truncate">{isZh ? (toolDescZh[tool.name] || tool.description) : tool.description}</p>}
                   </div>
                   {tool.source && <span className="text-[8px] px-1.5 py-0.5 rounded bg-main text-text-dim/60 shrink-0">{tool.source}</span>}
                 </div>

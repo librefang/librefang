@@ -6,6 +6,7 @@ import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { Clock, Plus, Play, Trash2, RefreshCw, Calendar, Zap, X, Loader2, AlertCircle } from "lucide-react";
+import { ListSkeleton } from "../components/ui/Skeleton";
 
 const REFRESH_MS = 30000;
 
@@ -101,7 +102,7 @@ export function SchedulerPage() {
       <div>
         <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("scheduler.active_schedules")}</h2>
         {schedulesQuery.isLoading ? (
-          <div className="space-y-2">{[1, 2].map(i => <div key={i} className="h-20 rounded-2xl bg-main animate-pulse" />)}</div>
+          <ListSkeleton rows={2} />
         ) : schedules.length === 0 ? (
           <div className="text-center py-12 rounded-2xl border border-dashed border-border-subtle">
             <Calendar className="w-8 h-8 text-text-dim/30 mx-auto mb-2" />
@@ -201,7 +202,7 @@ export function SchedulerPage() {
       {/* Create Modal */}
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setShowCreate(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px]" onClick={e => e.stopPropagation()}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw]" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("scheduler.create_job")}</h3>
               <button onClick={() => setShowCreate(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>

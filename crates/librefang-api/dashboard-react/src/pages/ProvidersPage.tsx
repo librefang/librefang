@@ -792,7 +792,7 @@ export function ProvidersPage() {
       {/* API Key Config Modal */}
       {configProvider && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setConfigProvider(null)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px]" onClick={e => e.stopPropagation()}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw]" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <div className="flex items-center gap-2">
                 <Key className="w-4 h-4 text-brand" />

@@ -7,6 +7,7 @@ import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import { Input } from "../components/ui/Input";
 import { Hand, RefreshCw, Search, Power, PowerOff, Loader2, Check } from "lucide-react";
+import { ListSkeleton } from "../components/ui/Skeleton";
 
 const REFRESH_MS = 15000;
 
@@ -92,9 +93,7 @@ export function HandsPage() {
 
       {/* Hands List */}
       {handsQuery.isLoading ? (
-        <div className="grid gap-3 md:grid-cols-2">
-          {[1, 2, 3, 4].map(i => <div key={i} className="h-28 rounded-2xl bg-main animate-pulse" />)}
-        </div>
+        <ListSkeleton rows={4} />
       ) : hands.length === 0 ? (
         <div className="text-center py-16">
           <Hand className="w-10 h-10 text-text-dim/20 mx-auto mb-3" />

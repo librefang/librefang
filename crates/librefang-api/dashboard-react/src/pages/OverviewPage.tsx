@@ -5,6 +5,7 @@ import type { DashboardSnapshot, HealthCheck } from "../api";
 import { loadDashboardSnapshot } from "../api";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
+import { CardSkeleton } from "../components/ui/Skeleton";
 import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, User, Clock, Shield, Sparkles, Calendar, HardDrive, Activity } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -136,10 +137,7 @@ export function OverviewPage() {
           // Loading skeletons
           <>
             {[1, 2, 3, 4].map(i => (
-              <Card key={i} padding="md" className="animate-pulse">
-                <div className="h-4 w-24 bg-surface-hover rounded mb-3" />
-                <div className="h-8 w-16 bg-surface-hover rounded" />
-              </Card>
+              <CardSkeleton key={i} />
             ))}
           </>
         ) : (

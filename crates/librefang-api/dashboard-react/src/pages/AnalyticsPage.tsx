@@ -7,6 +7,7 @@ import { Button } from "../components/ui/Button";
 import { PageHeader } from "../components/ui/PageHeader";
 import { EmptyState } from "../components/ui/EmptyState";
 import { BarChart3, DollarSign, Shield, Save, Loader2, Cpu, Users, Zap, TrendingUp } from "lucide-react";
+import { CardSkeleton } from "../components/ui/Skeleton";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
 const REFRESH_MS = 30000;
@@ -44,13 +45,13 @@ export function AnalyticsPage() {
       />
 
       {isLoading ? (
-        <div className="grid gap-4 md:grid-cols-4">
-          {[1, 2, 3, 4].map(i => <div key={i} className="h-24 rounded-2xl bg-main animate-pulse" />)}
+        <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
+          {[1, 2, 3, 4].map(i => <CardSkeleton key={i} />)}
         </div>
       ) : (
         <>
           {/* KPI Cards */}
-          <div className="grid gap-4 md:grid-cols-4">
+          <div className="grid gap-4 grid-cols-2 md:grid-cols-4">
             {[
               { icon: Zap, label: t("analytics.total_calls"), value: usage?.call_count ?? 0, color: "text-brand", bg: "bg-brand/10" },
               { icon: Cpu, label: t("analytics.total_tokens_label"), value: `${(((usage?.total_input_tokens ?? 0) + (usage?.total_output_tokens ?? 0)) / 1000).toFixed(0)}K`, color: "text-purple-500", bg: "bg-purple-500/10" },
