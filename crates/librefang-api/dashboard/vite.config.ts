@@ -15,6 +15,16 @@ export default defineConfig({
   },
   build: {
     outDir: "../static/react",
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor: ["react", "react-dom"],
+          router: ["@tanstack/react-router", "@tanstack/react-query"],
+          charts: ["recharts"],
+          flow: ["@xyflow/react"],
+        }
+      }
+    }
   }
 });
