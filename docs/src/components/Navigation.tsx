@@ -6,7 +6,7 @@ import { ChevronRight } from "lucide-react";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useRef } from "react";
+import { useRef, useState } from "react";
 import { Button } from "@/components/Button";
 import { useIsInsideMobileNavigation } from "@/components/MobileNavigation";
 import { type Section, useSectionStore } from "@/components/SectionProvider";
@@ -184,6 +184,22 @@ function NavigationGroup({
 	const isActiveGroup =
 		group.links.findIndex((link) => link.href === pathname) !== -1;
 
+	const [collapsedSections, setCollapsedSections] = useState<Set<string>>(
+		new Set(),
+	);
+
+	const toggleSections = (href: string) => {
+		setCollapsedSections((prev) => {
+			const next = new Set(prev);
+			if (next.has(href)) {
+				next.delete(href);
+			} else {
+				next.add(href);
+			}
+			return next;
+		});
+	};
+
 	return (
 		<li className={clsx("relative mt-6", className)}>
 			<motion.h2
@@ -208,55 +224,71 @@ function NavigationGroup({
 					)}
 				</AnimatePresence>
 				<ul className="border-l border-transparent">
-					{group.links.map((link) => (
-						<motion.li key={link.href} layout="position" className="relative">
-							<NavLink
-								href={link.href}
-								active={link.href === pathname}
-								indicator={
-									lookupSections(allSections, link.href)?.length ? (
-										<ChevronRight
-											className={clsx(
-												"h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform duration-200 dark:text-zinc-500",
-												link.href === pathname &&
-													sections.length > 0 &&
-													"rotate-90",
-											)}
-										/>
-									) : null
-								}
-							>
-								{link.title}
-							</NavLink>
-							<AnimatePresence mode="popLayout" initial={false}>
-								{link.href === pathname && sections.length > 0 && (
-									<motion.ul
-										initial={{ opacity: 0 }}
-										animate={{
-											opacity: 1,
-											transition: { delay: 0.1 },
-										}}
-										exit={{
-											opacity: 0,
-											transition: { duration: 0.15 },
-										}}
-									>
-										{sections.map((section, sectionIndex) => (
-											<li key={section.id || `section-${sectionIndex}`}>
-												<NavLink
-													href={`${link.href}#${section.id}`}
-													tag={section.tag}
-													isAnchorLink
-												>
-													{section.title}
-												</NavLink>
-											</li>
-										))}
-									</motion.ul>
-								)}
-							</AnimatePresence>
-						</motion.li>
-					))}
+					{group.links.map((link) => {
+						const isActive = link.href === pathname;
+						const hasSections = isActive && sections.length > 0;
+						const isExpanded = hasSections && !collapsedSections.has(link.href);
+
+						return (
+							<motion.li key={link.href} layout="position" className="relative">
+								<NavLink
+									href={link.href}
+									active={isActive}
+									indicator={
+										lookupSections(allSections, link.href)?.length ? (
+											<button
+												type="button"
+												className="flex items-center justify-center p-0.5 -m-0.5"
+												onClick={(e) => {
+													if (isActive && hasSections) {
+														e.preventDefault();
+														e.stopPropagation();
+														toggleSections(link.href);
+													}
+												}}
+											>
+												<ChevronRight
+													className={clsx(
+														"h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform duration-200 dark:text-zinc-500",
+														isExpanded && "rotate-90",
+													)}
+												/>
+											</button>
+										) : null
+									}
+								>
+									{link.title}
+								</NavLink>
+								<AnimatePresence mode="popLayout" initial={false}>
+									{isExpanded && (
+										<motion.ul
+											initial={{ opacity: 0 }}
+											animate={{
+												opacity: 1,
+												transition: { delay: 0.1 },
+											}}
+											exit={{
+												opacity: 0,
+												transition: { duration: 0.15 },
+											}}
+										>
+											{sections.map((section, sectionIndex) => (
+												<li key={section.id || `section-${sectionIndex}`}>
+													<NavLink
+														href={`${link.href}#${section.id}`}
+														tag={section.tag}
+														isAnchorLink
+													>
+														{section.title}
+													</NavLink>
+												</li>
+											))}
+										</motion.ul>
+									)}
+								</AnimatePresence>
+							</motion.li>
+						);
+					})}
 				</ul>
 			</div>
 		</li>
