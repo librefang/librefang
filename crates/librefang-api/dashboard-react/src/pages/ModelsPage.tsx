@@ -21,41 +21,33 @@ export function ModelsPage() {
   const [availableOnly, setAvailableOnly] = useState(false);
   const [page, setPage] = useState(0);
 
-  const modelsQuery = useQuery({ queryKey: ["models"], queryFn: () => listModels(), refetchInterval: REFRESH_MS, structuralSharing: false });
+  const modelsQuery = useQuery({ queryKey: ["models"], queryFn: () => listModels(), refetchInterval: REFRESH_MS });
 
-  // Deduplicate models by id+provider (backend may return duplicates after catalog sync)
-  const allModels = useMemo(() => {
-    const models = modelsQuery.data?.models ?? [];
-    const seen = new Set<string>();
-    return models.filter(m => {
-      const key = `${m.provider}:${m.id}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-  }, [modelsQuery.data]);
+  // Compute everything from raw query data on every render — no stale memos
+  const rawModels = modelsQuery.data?.models ?? [];
   const totalAvailable = modelsQuery.data?.available ?? 0;
 
-  const providers = useMemo(() => {
-    const set = new Set(allModels.map(m => m.provider));
-    return ["all", ...Array.from(set).sort()];
-  }, [allModels]);
+  // Deduplicate
+  const allModels: ModelItem[] = [];
+  {
+    const seen = new Set<string>();
+    for (const m of rawModels) {
+      const key = `${m.provider}:${m.id}`;
+      if (!seen.has(key)) { seen.add(key); allModels.push(m); }
+    }
+  }
 
-  const tiers = useMemo(() => {
-    const set = new Set(allModels.map(m => m.tier).filter(Boolean));
-    return ["all", ...Array.from(set).sort()];
-  }, [allModels]);
+  const providers = ["all", ...Array.from(new Set(allModels.map(m => m.provider))).sort()];
+  const tiers = ["all", ...Array.from(new Set(allModels.map(m => m.tier).filter(Boolean))).sort()];
 
-  const filtered = useMemo(() => {
-    return allModels.filter(m => {
-      const q = search.toLowerCase();
-      if (search && !m.id.toLowerCase().includes(q) && !(m.display_name || "").toLowerCase().includes(q) && !m.provider.toLowerCase().includes(q)) return false;
-      if (tierFilter !== "all" && m.tier !== tierFilter) return false;
-      if (providerFilter !== "all" && m.provider !== providerFilter) return false;
-      if (availableOnly && !m.available) return false;
-      return true;
-    });
-  }, [allModels, search, tierFilter, providerFilter, availableOnly]);
+  const filtered = allModels.filter(m => {
+    const q = search.toLowerCase();
+    if (search && !m.id.toLowerCase().includes(q) && !(m.display_name || "").toLowerCase().includes(q) && !m.provider.toLowerCase().includes(q)) return false;
+    if (tierFilter !== "all" && m.tier !== tierFilter) return false;
+    if (providerFilter !== "all" && m.provider !== providerFilter) return false;
+    if (availableOnly && !m.available) return false;
+    return true;
+  });
 
   // Reset page when filters change
   useEffect(() => { setPage(0); }, [search, tierFilter, providerFilter, availableOnly]);
