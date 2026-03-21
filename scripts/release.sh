@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# release.sh — Create a new LibreFang release.
+# release.sh — Create a new LibreFang release using CalVer (YYYY.M.DDHH).
 #
 # Usage:
-#   ./scripts/release.sh            # interactive: choose patch/minor/major
-#   ./scripts/release.sh 0.5.0      # explicit version
+#   ./scripts/release.sh            # auto-generate version from current date/hour
+#   ./scripts/release.sh 2026.3.2114  # explicit version
 #
 # What it does:
 #   1. Validate environment (clean worktree, on main, up to date)
@@ -56,48 +56,31 @@ if [ -z "$CURRENT" ]; then
     exit 1
 fi
 
-MAJOR=$(echo "$CURRENT" | cut -d. -f1)
-MINOR=$(echo "$CURRENT" | cut -d. -f2)
-PATCH=$(echo "$CURRENT" | cut -d. -f3 | sed 's/-.*//')
-
 if [ $# -ge 1 ]; then
     VERSION="$1"
 else
-    V_CURRENT="${MAJOR}.${MINOR}.${PATCH}"
-    V_PATCH="${MAJOR}.${MINOR}.$((PATCH + 1))"
-    V_MINOR="${MAJOR}.$((MINOR + 1)).0"
-    V_MAJOR="$((MAJOR + 1)).0.0"
+    # CalVer: YYYY.M.DDHH
+    YEAR=$(date +%Y)
+    MONTH=$(date +%-m)
+    DAY=$(date +%d)
+    HOUR=$(date +%H)
+    VERSION="${YEAR}.${MONTH}.${DAY}${HOUR}"
 
     echo ""
     echo "Current version: $CURRENT (tag: ${PREV_TAG:-none})"
+    echo "New version:     $VERSION (CalVer YYYY.M.DDHH)"
     echo ""
-    echo "  1) patch   → $V_PATCH"
-    echo "  2) minor   → $V_MINOR"
-    echo "  3) major   → $V_MAJOR"
-    echo "  4) current → $V_CURRENT (re-release, overwrites existing tag)"
-    echo ""
-    read -rp "Choose [1/2/3/4]: " choice
-    case "$choice" in
-        1) VERSION="$V_PATCH" ;;
-        2) VERSION="$V_MINOR" ;;
-        3) VERSION="$V_MAJOR" ;;
-        4) VERSION="$V_CURRENT" ;;
-        *) echo "Invalid choice"; exit 1 ;;
-    esac
 fi
 
-# Validate semver
-if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
-    echo "Error: '$VERSION' is not a valid semver" >&2
+# Validate CalVer format: YYYY.M.DDHH or YYYY.M.DD (legacy single-release)
+if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[0-9]{1,2}\.[0-9]{2,4}$'; then
+    echo "Error: '$VERSION' is not a valid CalVer (expected: YYYY.M.DDHH)" >&2
     exit 1
 fi
 
-DATE=$(date +%Y%m%d)
-FULL_VERSION="${VERSION}-${DATE}"
-TAG="v${FULL_VERSION}"
+TAG="v${VERSION}"
 
-echo ""
-echo "  Version: $CURRENT → $FULL_VERSION"
+echo "  Version: $CURRENT → $VERSION"
 echo "  Tag:     $TAG"
 echo ""
 read -rp "Confirm? [Y/n]: " confirm
@@ -136,20 +119,30 @@ if git -C "$REPO_ROOT" rev-parse "$TAG" &>/dev/null; then
     PREV_TAG=$(git -C "$REPO_ROOT" tag --sort=-creatordate | grep -E '^v[0-9]' | grep -vE '(alpha|beta|rc)' | head -1 || true)
 fi
 
+# --- Extract base version for CHANGELOG matching ---
+# CalVer YYYY.M.DDHH → strip hour to get YYYY.M.DD for changelog section
+# e.g. 2026.3.2114 → 2026.3.21 (strip last 2 digits if 4-digit patch)
+PATCH_PART=$(echo "$VERSION" | cut -d. -f3)
+if [ ${#PATCH_PART} -eq 4 ]; then
+    CHANGELOG_VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH_PART:0:2}"
+else
+    CHANGELOG_VERSION="$VERSION"
+fi
+
 # --- Generate changelog ---
 
 CHANGELOG_SCRIPT="$REPO_ROOT/scripts/generate-changelog.sh"
 if [ -x "$CHANGELOG_SCRIPT" ]; then
     echo ""
     echo "Generating changelog..."
-    "$CHANGELOG_SCRIPT" "$VERSION" "${PREV_TAG:-}"
+    "$CHANGELOG_SCRIPT" "$CHANGELOG_VERSION" "${PREV_TAG:-}"
 fi
 
 # --- Bump all versions ---
 
 echo ""
 echo "Syncing versions..."
-"$SYNC_SCRIPT" "$FULL_VERSION"
+"$SYNC_SCRIPT" "$VERSION"
 
 # --- Update lockfile if cargo is available ---
 
@@ -160,24 +153,24 @@ fi
 
 # --- Generate Dev.to release article ---
 
-ARTICLE="$REPO_ROOT/articles/release-${VERSION}.md"
+ARTICLE="$REPO_ROOT/articles/release-${CHANGELOG_VERSION}.md"
 if [ ! -f "$ARTICLE" ]; then
-    CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' "$REPO_ROOT/CHANGELOG.md")
+    CHANGES=$(awk '/^## \['"$CHANGELOG_VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' "$REPO_ROOT/CHANGELOG.md")
     if [ -n "$CHANGES" ]; then
         echo "Generating Dev.to article..."
         cat > "$ARTICLE" <<ARTICLE_EOF
 ---
-title: "LibreFang $VERSION Released"
+title: "LibreFang $CHANGELOG_VERSION Released"
 published: true
-description: "LibreFang v${VERSION} release notes — open-source Agent OS built in Rust"
+description: "LibreFang v${CHANGELOG_VERSION} release notes — open-source Agent OS built in Rust"
 tags: rust, ai, opensource, release
 canonical_url: https://github.com/librefang/librefang/releases/tag/${TAG}
 cover_image: https://raw.githubusercontent.com/librefang/librefang/main/public/assets/logo.png
 ---
 
-# LibreFang $VERSION Released
+# LibreFang $CHANGELOG_VERSION Released
 
-We're excited to announce **LibreFang v${VERSION}**! Here's what's new:
+We're excited to announce **LibreFang v${CHANGELOG_VERSION}**! Here's what's new:
 
 ${CHANGES}
 
@@ -278,7 +271,7 @@ if command -v gh &>/dev/null; then
     echo "Creating Pull Request..."
 
     # Extract the current version's section from CHANGELOG.md as PR body
-    RELEASE_BODY=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' "$REPO_ROOT/CHANGELOG.md")
+    RELEASE_BODY=$(awk '/^## \['"$CHANGELOG_VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' "$REPO_ROOT/CHANGELOG.md")
     PR_BODY="## Release $TAG"
     if [ -n "$RELEASE_BODY" ]; then
         PR_BODY="$PR_BODY

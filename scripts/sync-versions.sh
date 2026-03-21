@@ -3,8 +3,8 @@
 # sync-versions.sh — Sync version strings across the LibreFang monorepo.
 #
 # Usage:
-#   ./scripts/sync-versions.sh          # show current version, sync non-Cargo files to it
-#   ./scripts/sync-versions.sh 0.5.0    # bump everything to 0.5.0 (including Cargo.toml)
+#   ./scripts/sync-versions.sh              # show current version, sync non-Cargo files to it
+#   ./scripts/sync-versions.sh 2026.3.2114  # bump everything to 2026.3.2114 (including Cargo.toml)
 #
 # What it updates:
 #   - Cargo.toml workspace version (only when explicit version given)
@@ -41,9 +41,9 @@ fi
 
 if [ $# -ge 1 ]; then
     VERSION="$1"
-    # Validate semver format
-    if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$'; then
-        echo "Error: '$VERSION' is not a valid semver (expected: X.Y.Z or X.Y.Z-suffix)" >&2
+    # Validate CalVer format: YYYY.M.DDHH or YYYY.M.DD
+    if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[0-9]{1,2}\.[0-9]{2,4}$'; then
+        echo "Error: '$VERSION' is not a valid CalVer (expected: YYYY.M.DDHH e.g. 2026.3.2114)" >&2
         exit 1
     fi
     if [ "$VERSION" = "$CURRENT" ]; then
@@ -96,7 +96,7 @@ if [ -f "$WA_PKG" ]; then
     echo "  Updated packages/whatsapp-gateway/package.json"
 fi
 
-# --- Tauri desktop app (full version with date suffix) ---
+# --- Tauri desktop app ---
 TAURI_CONF="$REPO_ROOT/crates/librefang-desktop/tauri.conf.json"
 if [ -f "$TAURI_CONF" ]; then
     sed -i.bak 's/"version": "[^"]*"/"version": "'"$VERSION"'"/' "$TAURI_CONF" && rm -f "$TAURI_CONF.bak"

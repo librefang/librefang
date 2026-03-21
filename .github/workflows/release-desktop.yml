@@ -40,7 +40,11 @@ jobs:
           # Fallback: create a minimal release so builds can proceed
           echo "::warning::Release not found after 60s, creating fallback release"
           VERSION="${TAG#v}"
-          VERSION="${VERSION%-*}"
+          # CalVer: strip hour for CHANGELOG matching (YYYY.M.DDHH → YYYY.M.DD)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          if [ ${#PATCH} -eq 4 ]; then
+            VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH:0:2}"
+          fi
           CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)
           if [ -z "$CHANGES" ]; then
             CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
@@ -142,13 +146,10 @@ jobs:
             echo "APPLE_SIGNING_IDENTITY=" >> $GITHUB_ENV
           fi
 
-      - name: Strip date suffix from Tauri version (MSI requires pre-release id ≤ 65535)
+      - name: Verify Tauri version (CalVer, all components ≤ 65535)
         shell: bash
         run: |
           cd crates/librefang-desktop
-          # 0.4.6-20260315 → 0.4.6 (MSI version components must be ≤ 65535)
-          sed -i.bak 's/"version": "\([0-9]*\.[0-9]*\.[0-9]*\)-[^"]*"/"version": "\1"/' tauri.conf.json
-          rm -f tauri.conf.json.bak
           echo "Tauri version: $(grep '"version"' tauri.conf.json)"
 
       - name: Delete existing assets for this target (allows re-release)

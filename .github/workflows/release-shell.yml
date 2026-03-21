@@ -40,7 +40,11 @@ jobs:
           # Fallback: create a minimal release so builds can proceed
           echo "::warning::Release not found after 60s, creating fallback release"
           VERSION="${TAG#v}"
-          VERSION="${VERSION%-*}"
+          # CalVer: strip hour for CHANGELOG matching (YYYY.M.DDHH → YYYY.M.DD)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          if [ ${#PATCH} -eq 4 ]; then
+            VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH:0:2}"
+          fi
           CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)
           if [ -z "$CHANGES" ]; then
             CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
@@ -331,8 +335,7 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          FULL="${GITHUB_REF#refs/tags/v}"
-          export VERSION="${FULL%-*}"
+          export VERSION="${GITHUB_REF#refs/tags/v}"
           bash scripts/publish-npm-binaries.sh
 
   # ── CLI Binary → PyPI ──────────────────────────────────────────────────
@@ -354,8 +357,7 @@ jobs:
           REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
         run: |
-          FULL="${GITHUB_REF#refs/tags/v}"
-          export VERSION="${FULL%-*}"
+          export VERSION="${GITHUB_REF#refs/tags/v}"
           bash scripts/publish-pypi-binaries.sh
 
   # ── Sync to Homebrew Tap ──────────────────────────────────────────────
@@ -414,8 +416,7 @@ jobs:
 
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
-          # Extract semver without date suffix (e.g. 0.5.0-20260316 → 0.5.0)
-          SEMVER="${VERSION%-*}"
+          SEMVER="${VERSION}"
 
           asset_url() {
             jq -r --arg name "$1" '.assets[] | select(.name == $name) | .browser_download_url' release.json

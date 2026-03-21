@@ -43,7 +43,11 @@ jobs:
           fi
 
           VERSION="${TAG#v}"
-          VERSION="${VERSION%-*}"
+          # CalVer: strip hour for CHANGELOG matching (YYYY.M.DDHH → YYYY.M.DD)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          if [ ${#PATCH} -eq 4 ]; then
+            VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH:0:2}"
+          fi
 
           echo "Checking release workflows for tag $TAG..."
 
