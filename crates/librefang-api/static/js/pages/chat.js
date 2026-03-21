@@ -48,6 +48,7 @@ function chatPage() {
       { cmd: '/help', descKey: 'agentChat.cmd.help', descFallback: 'Show available commands' },
       { cmd: '/agents', descKey: 'agentChat.cmd.agents', descFallback: 'Switch to Agents page' },
       { cmd: '/new', descKey: 'agentChat.cmd.new', descFallback: 'Reset session (clear history)' },
+      { cmd: '/reboot', descKey: 'agentChat.cmd.reboot', descFallback: 'Hard reset session (full context clear, no summary)' },
       { cmd: '/compact', descKey: 'agentChat.cmd.compact', descFallback: 'Trigger LLM session compaction' },
       { cmd: '/model', descKey: 'agentChat.cmd.model', descFallback: 'Show or switch model (/model [name])' },
       { cmd: '/stop', descKey: 'agentChat.cmd.stop', descFallback: 'Cancel current agent run' },
@@ -533,6 +534,14 @@ function chatPage() {
               self.messages = [];
               LibreFangToast.success(self.t('agentChat.toast.sessionReset', 'Session reset'));
             }).catch(function(e) { LibreFangToast.error(self.t('agentChat.toast.resetFailed', 'Reset failed: {message}', { message: e.message })); });
+          }
+          break;
+        case '/reboot':
+          if (self.currentAgent) {
+            LibreFangAPI.post('/api/agents/' + self.currentAgent.id + '/session/reboot', {}).then(function() {
+              self.messages = [];
+              LibreFangToast.success(self.t('agentChat.toast.sessionRebooted', 'Session rebooted. Context cleared.'));
+            }).catch(function(e) { LibreFangToast.error(self.t('agentChat.toast.rebootFailed', 'Reboot failed: {message}', { message: e.message })); });
           }
           break;
         case '/compact':

@@ -89,6 +89,10 @@ async fn start_test_server() -> TestServer {
             axum::routing::post(routes::reset_session),
         )
         .route(
+            "/api/agents/{id}/session/reboot",
+            axum::routing::post(routes::reboot_session),
+        )
+        .route(
             "/api/agents/{id}/sessions",
             axum::routing::get(routes::list_agent_sessions).post(routes::create_agent_session),
         )
