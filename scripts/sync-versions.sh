@@ -41,8 +41,8 @@ fi
 
 if [ $# -ge 1 ]; then
     VERSION="$1"
-    # Validate CalVer format: YYYY.M.DDHH or YYYY.M.DD
-    if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[0-9]{1,2}\.[0-9]{2,4}$'; then
+    # Validate CalVer format: YYYY.M.DDHH with optional -betaN or -rcN
+    if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[0-9]{1,2}\.[0-9]{2,4}(-(beta|rc)[0-9]+)?$'; then
         echo "Error: '$VERSION' is not a valid CalVer (expected: YYYY.M.DDHH e.g. 2026.3.2114)" >&2
         exit 1
     fi

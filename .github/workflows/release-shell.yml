@@ -40,7 +40,8 @@ jobs:
           # Fallback: create a minimal release so builds can proceed
           echo "::warning::Release not found after 60s, creating fallback release"
           VERSION="${TAG#v}"
-          # CalVer: strip hour for CHANGELOG matching (YYYY.M.DDHH → YYYY.M.DD)
+          # Strip pre-release suffix then strip hour for CHANGELOG
+          VERSION=$(echo "$VERSION" | sed 's/-.*//')
           PATCH=$(echo "$VERSION" | cut -d. -f3)
           if [ ${#PATCH} -eq 4 ]; then
             VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH:0:2}"
@@ -418,6 +419,12 @@ jobs:
           VERSION="${TAG#v}"
           SEMVER="${VERSION}"
 
+          # Skip Homebrew tap update for pre-release versions
+          if echo "$VERSION" | grep -qE '-(beta|rc)[0-9]'; then
+            echo "Pre-release version ($VERSION), skipping Homebrew formula update"
+            exit 0
+          fi
+
           asset_url() {
             jq -r --arg name "$1" '.assets[] | select(.name == $name) | .browser_download_url' release.json
           }
@@ -494,8 +501,8 @@ jobs:
           end
           EOF
 
-          # --- Versioned formula (e.g. librefang@0.5.0) ---
-          # Class name: LibrefangAT050 (@ → AT, dots removed)
+          # --- Versioned formula (e.g. librefang@2026.3.2114) ---
+          # Class name: LibrefangAT202632114 (@ → AT, dots removed)
           CLASS_SUFFIX=$(echo "$SEMVER" | tr -d '.')
           CLASS_NAME="LibrefangAT${CLASS_SUFFIX}"
 

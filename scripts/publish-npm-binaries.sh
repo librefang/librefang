@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish @librefang/cli platform packages + wrapper to npm.
-# Called from CI with: VERSION=0.6.7 REPO=librefang/librefang TAG=v0.6.7-20260320
+# Called from CI with: VERSION=2026.3.2114 REPO=librefang/librefang TAG=v2026.3.2114
 set -euo pipefail
 
 : "${VERSION:?}"

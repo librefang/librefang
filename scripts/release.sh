@@ -3,8 +3,9 @@
 # release.sh — Create a new LibreFang release using CalVer (YYYY.M.DDHH).
 #
 # Usage:
-#   ./scripts/release.sh            # auto-generate version from current date/hour
-#   ./scripts/release.sh 2026.3.2114  # explicit version
+#   ./scripts/release.sh                    # interactive: choose stable/beta/rc
+#   ./scripts/release.sh 2026.3.2114        # explicit stable version
+#   ./scripts/release.sh 2026.3.2114-beta.1 # explicit pre-release version
 #
 # What it does:
 #   1. Validate environment (clean worktree, on main, up to date)
@@ -64,24 +65,49 @@ else
     MONTH=$(date +%-m)
     DAY=$(date +%d)
     HOUR=$(date +%H)
-    VERSION="${YEAR}.${MONTH}.${DAY}${HOUR}"
+    BASE_VERSION="${YEAR}.${MONTH}.${DAY}${HOUR}"
+
+    # Count existing beta/rc tags for today to auto-increment
+    TODAY_BETA_COUNT=$(git -C "$REPO_ROOT" tag -l "v${BASE_VERSION}-beta*" 2>/dev/null | wc -l | tr -d ' ')
+    TODAY_RC_COUNT=$(git -C "$REPO_ROOT" tag -l "v${BASE_VERSION}-rc*" 2>/dev/null | wc -l | tr -d ' ')
+    NEXT_BETA=$((TODAY_BETA_COUNT + 1))
+    NEXT_RC=$((TODAY_RC_COUNT + 1))
 
     echo ""
     echo "Current version: $CURRENT (tag: ${PREV_TAG:-none})"
-    echo "New version:     $VERSION (CalVer YYYY.M.DDHH)"
     echo ""
+    echo "  1) stable  → $BASE_VERSION"
+    echo "  2) beta    → ${BASE_VERSION}-beta${NEXT_BETA}"
+    echo "  3) rc      → ${BASE_VERSION}-rc${NEXT_RC}"
+    echo ""
+    read -rp "Choose [1/2/3]: " choice
+    case "$choice" in
+        1) VERSION="$BASE_VERSION" ;;
+        2) VERSION="${BASE_VERSION}-beta${NEXT_BETA}" ;;
+        3) VERSION="${BASE_VERSION}-rc${NEXT_RC}" ;;
+        *) echo "Invalid choice"; exit 1 ;;
+    esac
 fi
 
-# Validate CalVer format: YYYY.M.DDHH or YYYY.M.DD (legacy single-release)
-if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[0-9]{1,2}\.[0-9]{2,4}$'; then
-    echo "Error: '$VERSION' is not a valid CalVer (expected: YYYY.M.DDHH)" >&2
+# Validate CalVer format: YYYY.M.DDHH with optional -betaN or -rcN
+if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[0-9]{1,2}\.[0-9]{2,4}(-(beta|rc)[0-9]+)?$'; then
+    echo "Error: '$VERSION' is not a valid CalVer (expected: YYYY.M.DDHH or YYYY.M.DDHH-rc1)" >&2
     exit 1
 fi
 
 TAG="v${VERSION}"
+# Check if this is a pre-release
+IS_PRERELEASE=false
+if echo "$VERSION" | grep -qE '-(beta|rc)[0-9]'; then
+    IS_PRERELEASE=true
+fi
 
+echo ""
 echo "  Version: $CURRENT → $VERSION"
 echo "  Tag:     $TAG"
+if [ "$IS_PRERELEASE" = true ]; then
+    echo "  Type:    pre-release"
+fi
 echo ""
 read -rp "Confirm? [Y/n]: " confirm
 if [[ "$confirm" =~ ^[Nn] ]]; then
@@ -120,13 +146,14 @@ if git -C "$REPO_ROOT" rev-parse "$TAG" &>/dev/null; then
 fi
 
 # --- Extract base version for CHANGELOG matching ---
-# CalVer YYYY.M.DDHH → strip hour to get YYYY.M.DD for changelog section
-# e.g. 2026.3.2114 → 2026.3.21 (strip last 2 digits if 4-digit patch)
-PATCH_PART=$(echo "$VERSION" | cut -d. -f3)
+# Strip pre-release suffix and hour for changelog section
+# e.g. 2026.3.2114-beta1 → 2026.3.21
+BASE_FOR_CHANGELOG=$(echo "$VERSION" | sed 's/-.*//')
+PATCH_PART=$(echo "$BASE_FOR_CHANGELOG" | cut -d. -f3)
 if [ ${#PATCH_PART} -eq 4 ]; then
-    CHANGELOG_VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH_PART:0:2}"
+    CHANGELOG_VERSION="$(echo "$BASE_FOR_CHANGELOG" | cut -d. -f1,2).${PATCH_PART:0:2}"
 else
-    CHANGELOG_VERSION="$VERSION"
+    CHANGELOG_VERSION="$BASE_FOR_CHANGELOG"
 fi
 
 # --- Generate changelog ---

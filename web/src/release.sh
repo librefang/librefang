@@ -56,48 +56,38 @@ if [ -z "$CURRENT" ]; then
     exit 1
 fi
 
-MAJOR=$(echo "$CURRENT" | cut -d. -f1)
-MINOR=$(echo "$CURRENT" | cut -d. -f2)
-PATCH=$(echo "$CURRENT" | cut -d. -f3 | sed 's/-.*//')
-
 if [ $# -ge 1 ]; then
     VERSION="$1"
 else
-    V_CURRENT="${MAJOR}.${MINOR}.${PATCH}"
-    V_PATCH="${MAJOR}.${MINOR}.$((PATCH + 1))"
-    V_MINOR="${MAJOR}.$((MINOR + 1)).0"
-    V_MAJOR="$((MAJOR + 1)).0.0"
+    # CalVer: YYYY.M.DDHH
+    YEAR=$(date +%Y)
+    MONTH=$(date +%-m)
+    DAY=$(date +%d)
+    HOUR=$(date +%H)
+    VERSION="${YEAR}.${MONTH}.${DAY}${HOUR}"
 
     echo ""
     echo "Current version: $CURRENT (tag: ${PREV_TAG:-none})"
     echo ""
-    echo "  1) patch   → $V_PATCH"
-    echo "  2) minor   → $V_MINOR"
-    echo "  3) major   → $V_MAJOR"
-    echo "  4) current → $V_CURRENT (re-release, overwrites existing tag)"
+    echo "  Version: $VERSION"
     echo ""
-    read -rp "Choose [1/2/3/4]: " choice
-    case "$choice" in
-        1) VERSION="$V_PATCH" ;;
-        2) VERSION="$V_MINOR" ;;
-        3) VERSION="$V_MAJOR" ;;
-        4) VERSION="$V_CURRENT" ;;
-        *) echo "Invalid choice"; exit 1 ;;
-    esac
+    read -rp "Confirm? [Y/n]: " choice
+    if [[ "$choice" =~ ^[Nn] ]]; then
+        echo "Aborted."
+        exit 0
+    fi
 fi
 
-# Validate semver
-if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
-    echo "Error: '$VERSION' is not a valid semver" >&2
+# Validate CalVer format: YYYY.M.DDHH with optional -betaN or -rcN
+if ! echo "$VERSION" | grep -qE '^[0-9]{4}\.[0-9]{1,2}\.[0-9]{2,4}(-(beta|rc)[0-9]+)?$'; then
+    echo "Error: '$VERSION' is not a valid CalVer (expected: YYYY.M.DDHH e.g. 2026.3.2114)" >&2
     exit 1
 fi
 
-DATE=$(date +%Y%m%d)
-FULL_VERSION="${VERSION}-${DATE}"
-TAG="v${FULL_VERSION}"
+TAG="v${VERSION}"
 
 echo ""
-echo "  Version: $CURRENT → $FULL_VERSION"
+echo "  Version: $CURRENT → $VERSION"
 echo "  Tag:     $TAG"
 echo ""
 read -rp "Confirm? [Y/n]: " confirm
@@ -149,7 +139,7 @@ fi
 
 echo ""
 echo "Syncing versions..."
-"$SYNC_SCRIPT" "$FULL_VERSION"
+"$SYNC_SCRIPT" "$VERSION"
 
 # --- Update lockfile if cargo is available ---
 

@@ -38,7 +38,8 @@ jobs:
           # Fallback: create a minimal release so builds can proceed
           echo "::warning::Release not found after 60s, creating fallback release"
           VERSION="${TAG#v}"
-          # CalVer: strip hour for CHANGELOG matching (YYYY.M.DDHH → YYYY.M.DD)
+          # Strip pre-release suffix then strip hour for CHANGELOG
+          VERSION=$(echo "$VERSION" | sed 's/-.*//')
           PATCH=$(echo "$VERSION" | cut -d. -f3)
           if [ ${#PATCH} -eq 4 ]; then
             VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH:0:2}"
@@ -117,8 +118,10 @@ jobs:
       - name: Sync version from tag
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
-          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
-          echo "Publishing librefang-sdk==$VERSION"
+          # PEP 440: convert -beta1 → b1, -rc1 → rc1
+          PYPI_VERSION=$(echo "$VERSION" | sed 's/-beta/b/; s/-rc/rc/')
+          sed -i "s/^version = .*/version = \"$PYPI_VERSION\"/" pyproject.toml
+          echo "Publishing librefang-sdk==$PYPI_VERSION"
           grep '^version' pyproject.toml
 
       - name: Build sdist and wheel
@@ -180,8 +183,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
-          GO_TAG="sdk/go/v${VERSION}"
           REPO="${{ github.repository }}"
+
+          # Map CalVer to Go-compatible v0.YYYYMMDD.HH (keeps major=0, no /v2026 import path)
+          # e.g. 2026.3.2114 → v0.20260321.14, 2026.3.2114-rc1 → v0.20260321.14-rc1
+          YEAR=$(echo "$VERSION" | cut -d. -f1)
+          MONTH=$(printf '%02d' "$(echo "$VERSION" | cut -d. -f2)")
+          DDHH=$(echo "$VERSION" | cut -d. -f3 | sed 's/-.*//')
+          PRERELEASE=$(echo "$VERSION" | grep -oE '\-.*' || true)
+          DD=${DDHH:0:2}
+          HH=${DDHH:2:2}
+          GO_VERSION="0.${YEAR}${MONTH}${DD}.${HH}${PRERELEASE}"
+          GO_TAG="sdk/go/v${GO_VERSION}"
 
           # Check if tag already exists
           if gh api "repos/$REPO/git/refs/tags/$GO_TAG" &>/dev/null; then
@@ -196,4 +209,4 @@ jobs:
           gh api "repos/$REPO/git/refs" \
             -f ref="refs/tags/$GO_TAG" \
             -f sha="$SHA"
-          echo "✓ Published Go module tag: $GO_TAG"
+          echo "✓ Published Go module tag: $GO_TAG (from $VERSION)"

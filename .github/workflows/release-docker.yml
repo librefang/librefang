@@ -38,7 +38,8 @@ jobs:
           # Fallback: create a minimal release so builds can proceed
           echo "::warning::Release not found after 60s, creating fallback release"
           VERSION="${TAG#v}"
-          # CalVer: strip hour for CHANGELOG matching (YYYY.M.DDHH → YYYY.M.DD)
+          # Strip pre-release suffix then strip hour for CHANGELOG
+          VERSION=$(echo "$VERSION" | sed 's/-.*//')
           PATCH=$(echo "$VERSION" | cut -d. -f3)
           if [ ${#PATCH} -eq 4 ]; then
             VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH:0:2}"
