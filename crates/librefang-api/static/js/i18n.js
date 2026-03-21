@@ -1,7 +1,7 @@
 (function(global) {
   'use strict';
 
-  var SUPPORTED_LANGUAGES = ['en', 'zh-CN'];
+  var SUPPORTED_LANGUAGES = ['en', 'zh-CN', 'ja'];
   var DEFAULT_LANGUAGE = 'en';
   var STORAGE_KEY = 'librefang-language';
 
@@ -55,6 +55,66 @@
     return replacePlaceholders(value, params);
   }
 
+  function tOr(key, fallback, params) {
+    var translated = t(key, params);
+    if (!translated || translated.charAt(0) === '[') {
+      return replacePlaceholders(fallback || key, params);
+    }
+    return translated;
+  }
+
+  function bindPageLanguage(page) {
+    if (!page) return function() {};
+    if (typeof page._unbindPageLanguage === 'function') return page._unbindPageLanguage;
+
+    var disposed = false;
+
+    function syncLanguage(event) {
+      if (event && event.detail && event.detail.language) {
+        page._currentLang = event.detail.language;
+        return;
+      }
+      page._currentLang = currentLanguage;
+    }
+
+    syncLanguage();
+    window.addEventListener('i18n-loaded', syncLanguage);
+    window.addEventListener('i18n-changed', syncLanguage);
+
+    function disposeLanguageBinding() {
+      if (disposed) return;
+      disposed = true;
+      window.removeEventListener('i18n-loaded', syncLanguage);
+      window.removeEventListener('i18n-changed', syncLanguage);
+      if (page._unbindPageLanguage === disposeLanguageBinding) {
+        delete page._unbindPageLanguage;
+      }
+    }
+
+    page._unbindPageLanguage = disposeLanguageBinding;
+
+    if (!page._pageLanguageDestroyWrapped) {
+      var originalDestroy = page.destroy;
+      page.destroy = function() {
+        if (typeof this._unbindPageLanguage === 'function') {
+          this._unbindPageLanguage();
+        }
+        if (typeof originalDestroy === 'function') {
+          return originalDestroy.apply(this, arguments);
+        }
+      };
+      page._pageLanguageDestroyWrapped = true;
+    }
+
+    return disposeLanguageBinding;
+  }
+
+  function tReactive(page, key, fallback, params) {
+    // Touch the current language so Alpine re-runs bindings after locale changes.
+    if (page) page._currentLang;
+    return tOr(key, fallback, params);
+  }
+
   function updateElement(element) {
     if (!element || element.nodeType !== 1) return;
 
@@ -88,6 +148,12 @@
     updateTree(document.body || document.documentElement || document);
   }
 
+  function updateDocumentLanguage(lang) {
+    if (document && document.documentElement) {
+      document.documentElement.lang = lang || DEFAULT_LANGUAGE;
+    }
+  }
+
   function ensureObserver() {
     if (observer || typeof MutationObserver === 'undefined') return;
     var target = document.body || document.documentElement;
@@ -106,6 +172,7 @@
 
   async function init(lang) {
     currentLanguage = lang || detectLanguage();
+    updateDocumentLanguage(currentLanguage);
     translations = await loadTranslations(currentLanguage);
     localStorage.setItem(STORAGE_KEY, currentLanguage);
     loaded = true;
@@ -118,6 +185,7 @@
   async function setLanguage(lang) {
     if (SUPPORTED_LANGUAGES.indexOf(lang) < 0) return false;
     currentLanguage = lang;
+    updateDocumentLanguage(currentLanguage);
     translations = await loadTranslations(lang);
     localStorage.setItem(STORAGE_KEY, currentLanguage);
     updateDOM();
@@ -128,6 +196,8 @@
   global.i18n = {
     init: init,
     t: t,
+    bindPageLanguage: bindPageLanguage,
+    tReactive: tReactive,
     setLanguage: setLanguage,
     getLanguage: function() { return currentLanguage; },
     getSupportedLanguages: function() { return SUPPORTED_LANGUAGES.slice(); },

@@ -19,6 +19,7 @@ const LOGO_PNG: &[u8] = include_bytes!("../static/logo.png");
 const FAVICON_ICO: &[u8] = include_bytes!("../static/favicon.ico");
 const LOCALE_EN: &str = include_str!("../static/locales/en.json");
 const LOCALE_ZH_CN: &str = include_str!("../static/locales/zh-CN.json");
+const LOCALE_JA: &str = include_str!("../static/locales/ja.json");
 
 /// GET /logo.png — Serve the LibreFang logo.
 pub async fn logo_png() -> impl IntoResponse {
@@ -59,6 +60,16 @@ pub async fn locale_zh_cn() -> impl IntoResponse {
             (header::CACHE_CONTROL, "public, max-age=3600"),
         ],
         LOCALE_ZH_CN,
+    )
+}
+
+pub async fn locale_ja() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        LOCALE_JA,
     )
 }
 
