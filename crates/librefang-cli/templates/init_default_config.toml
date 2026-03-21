@@ -24,3 +24,8 @@ max_retrieve = 10
 # duplicate_threshold = 0.5
 # confidence_decay_rate = 0.01
 # max_memories_per_agent = 1000
+
+# Regional endpoint selection for multi-region providers.
+# [provider_regions]
+# qwen = "intl"        # Use Qwen international endpoint
+# minimax = "china"    # Use MiniMax China endpoint (MINIMAX_CN_API_KEY)
