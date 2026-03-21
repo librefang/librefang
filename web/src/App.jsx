@@ -605,21 +605,31 @@ function GitHubStats({ t }) {
             </div>
           </div>
           <div className="h-48 flex items-end gap-1">
-            {currentHistory.length > 0 ? (
-              Array.from({ length: Math.min(24, currentHistory.length || 12) }, (_, i) => {
-                const idx = Math.floor((i / Math.min(24, currentHistory.length || 12)) * currentHistory.length)
+            {starHistoryData.length >= 3 ? (
+              Array.from({ length: Math.min(24, currentHistory.length) }, (_, i) => {
+                const idx = Math.floor((i / Math.min(24, currentHistory.length)) * currentHistory.length)
                 const value = currentHistory[idx] || 0
                 return (
                   <div key={i} className="flex-1 bg-primary/40 hover:bg-primary transition-colors rounded-t min-w-1" style={{ height: `${Math.max(4, (value / currentMax) * 100)}%` }} title={`${value} ${historyTab}`}></div>
                 )
               })
             ) : (
-              <div className="w-full h-32 flex items-center justify-center text-gray-500 text-sm">No data yet</div>
+              <div className="w-full h-full flex flex-col items-center justify-center text-gray-400 gap-2">
+                <span className="text-4xl font-bold text-primary">{currentValue ?? 0}</span>
+                <span className="text-sm">{historyTab === 'stars' ? (t.githubStats?.stars || 'Stars') : historyTab === 'forks' ? (t.githubStats?.forks || 'Forks') : historyTab === 'issues' ? (t.githubStats?.issues || 'Issues') : (t.githubStats?.prs || 'PRs')}</span>
+                <span className="text-xs text-gray-500">Chart builds as data is collected daily</span>
+              </div>
             )}
           </div>
           <div className="flex justify-between mt-3 text-xs text-gray-500">
-            <span>12 months ago</span>
-            <span className="text-primary font-semibold">Now ({currentValue ?? '-'})</span>
+            {starHistoryData.length >= 3 ? (
+              <>
+                <span>{starHistoryData[0]?.date || ''}</span>
+                <span className="text-primary font-semibold">Now ({currentValue ?? '-'})</span>
+              </>
+            ) : (
+              <span className="mx-auto text-gray-600">Tracking since {starHistoryData[0]?.date || 'today'}</span>
+            )}
           </div>
         </div>
 
