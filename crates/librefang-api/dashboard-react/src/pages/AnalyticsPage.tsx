@@ -4,7 +4,9 @@ import { useTranslation } from "react-i18next";
 import { getUsageSummary, listUsageByAgent, listUsageByModel, getUsageDaily, getBudgetStatus, updateBudget } from "../api";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
-import { BarChart3, DollarSign, Shield, Save, Loader2, RefreshCw, Cpu, Users, Zap, TrendingUp } from "lucide-react";
+import { PageHeader } from "../components/ui/PageHeader";
+import { EmptyState } from "../components/ui/EmptyState";
+import { BarChart3, DollarSign, Shield, Save, Loader2, Cpu, Users, Zap, TrendingUp } from "lucide-react";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
 const REFRESH_MS = 30000;
@@ -32,20 +34,14 @@ export function AnalyticsPage() {
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
       {/* Header */}
-      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
-            <BarChart3 className="h-4 w-4" />
-            {t("analytics.intelligence")}
-          </div>
-          <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("analytics.title")}</h1>
-          <p className="mt-1 text-text-dim font-medium text-sm">{t("analytics.subtitle")}</p>
-        </div>
-        <Button variant="secondary" onClick={() => { usageQuery.refetch(); usageByAgentQuery.refetch(); usageByModelQuery.refetch(); dailyQuery.refetch(); }}>
-          <RefreshCw className={`h-3.5 w-3.5 ${usageQuery.isFetching ? "animate-spin" : ""}`} />
-          {t("common.refresh")}
-        </Button>
-      </header>
+      <PageHeader
+        icon={<BarChart3 className="h-4 w-4" />}
+        badge={t("analytics.intelligence")}
+        title={t("analytics.title")}
+        subtitle={t("analytics.subtitle")}
+        isFetching={usageQuery.isFetching}
+        onRefresh={() => { usageQuery.refetch(); usageByAgentQuery.refetch(); usageByModelQuery.refetch(); dailyQuery.refetch(); }}
+      />
 
       {isLoading ? (
         <div className="grid gap-4 md:grid-cols-4">
@@ -78,7 +74,7 @@ export function AnalyticsPage() {
                 <Users className="w-4 h-4 text-brand" /> {t("analytics.usage_by_agent")}
               </h2>
               {usageByAgent.length === 0 ? (
-                <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
+                <EmptyState icon={<Users />} title={t("common.no_data")} description={t("analytics.no_agent_data")} />
               ) : (
                 <ResponsiveContainer width="100%" height={Math.max(usageByAgent.slice(0, 8).length * 36, 100)}>
                   <BarChart data={usageByAgent.slice(0, 8).map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.cost ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
@@ -97,7 +93,7 @@ export function AnalyticsPage() {
                 <Cpu className="w-4 h-4 text-purple-500" /> {t("analytics.usage_by_model")}
               </h2>
               {usageByModel.length === 0 ? (
-                <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
+                <EmptyState icon={<Cpu />} title={t("common.no_data")} description={t("analytics.no_model_data")} />
               ) : (
                 <ResponsiveContainer width="100%" height={Math.max(usageByModel.slice(0, 8).length * 36, 100)}>
                   <BarChart data={usageByModel.slice(0, 8).map(m => ({ name: m.model?.slice(0, 20), cost: m.total_cost_usd ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
@@ -118,7 +114,7 @@ export function AnalyticsPage() {
               <TrendingUp className="w-4 h-4 text-warning" /> {t("analytics.daily_trend")}
             </h2>
             {(!daily?.days || daily.days.length === 0) ? (
-              <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
+              <EmptyState icon={<TrendingUp />} title={t("common.no_data")} description={t("analytics.no_trend_data")} />
             ) : (
               <ResponsiveContainer width="100%" height={200}>
                 <AreaChart data={(daily.days || []).slice(-30).map(d => ({ ...d, date: (d.date || "").slice(5), cost: d.cost_usd || 0 }))}>

@@ -1,17 +1,21 @@
 export function Skeleton({ className = "" }: { className?: string }) {
   return (
     <div
-      className={`animate-pulse rounded-lg bg-slate-200 dark:bg-slate-800 ${className}`}
+      className={`animate-pulse rounded-lg bg-gradient-to-r from-main via-surface-hover to-main bg-[length:200%_100%] ${className}`}
+      style={{ animation: "shimmer 1.5s ease-in-out infinite" }}
     />
   );
 }
 
 export function CardSkeleton() {
   return (
-    <div className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm">
-      <Skeleton className="h-3 w-24 mb-4" />
-      <Skeleton className="h-8 w-16 mb-3" />
-      <Skeleton className="h-1.5 w-full" />
+    <div className="rounded-2xl border border-border-subtle bg-surface p-6 shadow-sm overflow-hidden">
+      <div className="flex items-center justify-between mb-4">
+        <Skeleton className="h-3 w-24" />
+        <Skeleton className="h-8 w-8 rounded-lg" />
+      </div>
+      <Skeleton className="h-8 w-20 mb-3" />
+      <Skeleton className="h-1.5 w-full rounded-full" />
     </div>
   );
 }
@@ -26,11 +30,11 @@ export function ListSkeleton({ rows = 3 }: { rows?: number }) {
         >
           <div className="flex items-center gap-4">
             <Skeleton className="h-10 w-10 rounded-xl shrink-0" />
-            <div className="flex-1 space-y-2">
+            <div className="flex-1 space-y-2.5">
               <Skeleton className="h-4 w-32" />
               <Skeleton className="h-3 w-48" />
             </div>
-            <Skeleton className="h-5 w-16 rounded-lg" />
+            <Skeleton className="h-6 w-16 rounded-lg" />
           </div>
         </div>
       ))}

@@ -12,6 +12,7 @@ import {
 import { workflowTemplates, type WorkflowTemplate } from "../data/workflowTemplates";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
+import { Input } from "../components/ui/Input";
 import {
   Layers, RefreshCw, Trash2, FilePlus, Play, Search,
   Calendar, FileText, Activity, Bot, ArrowRight, Loader2, Clock, ChevronRight
@@ -121,7 +122,7 @@ export function WorkflowsPage() {
             const nodeCount = tmpl.nodes.length;
             return (
               <button key={tmpl.id} onClick={() => handleNewWorkflow(tmpl)}
-                className="group text-left p-4 rounded-2xl border border-border-subtle bg-surface hover:border-brand/50 hover:shadow-md transition-all">
+                className="group text-left p-5 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 hover:shadow-lg hover:-translate-y-0.5 transition-all duration-300">
                 <div className="flex items-start gap-3">
                   <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0 group-hover:bg-brand/20 transition-colors">
                     {Icon ? <Icon className="w-5 h-5 text-brand" /> : <Layers className="w-5 h-5 text-brand" />}
@@ -143,12 +144,9 @@ export function WorkflowsPage() {
 
       {/* 搜索栏 */}
       {hasWorkflows && (
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-dim/40" />
-          <input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
-            placeholder={t("workflows.search_placeholder")}
-            className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-border-subtle bg-surface text-sm outline-none focus:border-brand focus:ring-1 focus:ring-brand/20" />
-        </div>
+        <Input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
+          placeholder={t("workflows.search_placeholder")}
+          leftIcon={<Search className="h-4 w-4" />} />
       )}
 
       {/* 加载骨架 */}

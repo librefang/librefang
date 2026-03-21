@@ -19,17 +19,17 @@ export function PageHeader({ icon, badge, title, subtitle, actions, isFetching, 
     <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
       <div>
         <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
-          {icon}
+          <div className="p-1 rounded-md bg-brand/10">{icon}</div>
           {badge}
         </div>
-        <h1 className="mt-2 text-3xl font-extrabold tracking-tight md:text-4xl">{title}</h1>
-        {subtitle && <p className="mt-1 text-text-dim font-medium max-w-2xl">{subtitle}</p>}
+        <h1 className="mt-3 text-3xl font-extrabold tracking-tight md:text-4xl bg-gradient-to-r from-text-main to-text-dim/70 bg-clip-text">{title}</h1>
+        {subtitle && <p className="mt-1.5 text-text-dim font-medium max-w-2xl text-sm">{subtitle}</p>}
       </div>
       <div className="flex items-center gap-3">
         {actions}
         {onRefresh && (
           <button
-            className="flex h-9 items-center gap-2 rounded-xl border border-border-subtle bg-surface px-4 text-sm font-bold text-text-dim hover:text-brand transition-all shadow-sm"
+            className="flex h-9 items-center gap-2 rounded-xl border border-border-subtle bg-surface px-4 text-sm font-bold text-text-dim hover:text-brand hover:border-brand/30 hover:shadow-sm transition-all duration-200"
             onClick={onRefresh}
           >
             <RefreshCw

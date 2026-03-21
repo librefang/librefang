@@ -3,9 +3,10 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listModels } from "../api";
 import { Badge } from "../components/ui/Badge";
-import { Button } from "../components/ui/Button";
+import { Input } from "../components/ui/Input";
+import { PageHeader } from "../components/ui/PageHeader";
 import {
-  Cpu, Search, RefreshCw, Check, X, Eye, Wrench, Zap, AlertCircle, Lock
+  Cpu, Search, Check, X, Eye, Wrench, Zap, AlertCircle, Lock
 } from "lucide-react";
 
 const REFRESH_MS = 60000;
@@ -83,25 +84,15 @@ export function ModelsPage() {
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
       {/* Header */}
-      <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-        <div>
-          <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
-            <Cpu className="h-4 w-4" />
-            {t("models.section")}
-          </div>
-          <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("models.title")}</h1>
-          <p className="mt-1 text-text-dim font-medium text-sm">{t("models.subtitle")}</p>
-        </div>
-        <div className="flex items-center gap-3">
-          {allModels.length > 0 && (
-            <Badge variant="brand">{totalAvailable} / {allModels.length} {t("models.available")}</Badge>
-          )}
-          <Button variant="secondary" onClick={() => modelsQuery.refetch()}>
-            <RefreshCw className={`h-3.5 w-3.5 ${modelsQuery.isFetching ? "animate-spin" : ""}`} />
-          </Button>
-        </div>
-      </header>
-
+      <PageHeader
+        badge={t("models.section")}
+        title={t("models.title")}
+        subtitle={t("models.subtitle")}
+        icon={<Cpu className="h-4 w-4" />}
+        isFetching={modelsQuery.isFetching}
+        onRefresh={() => modelsQuery.refetch()}
+        actions={allModels.length > 0 ? <Badge variant="brand">{totalAvailable} / {allModels.length} {t("models.available")}</Badge> : undefined}
+      />
       {/* Error state */}
       {modelsQuery.isError && (
         <div className="flex items-center gap-3 p-4 rounded-2xl bg-error/5 border border-error/20 text-error">
@@ -112,11 +103,10 @@ export function ModelsPage() {
 
       {/* Filters */}
       <div className="flex flex-wrap gap-3 items-center">
-        <div className="relative flex-1 min-w-[200px] max-w-sm">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-dim/40" />
-          <input type="text" value={search} onChange={e => setSearch(e.target.value)}
+        <div className="flex-1 min-w-[200px] max-w-sm">
+          <Input value={search} onChange={e => setSearch(e.target.value)}
             placeholder={t("models.search_placeholder")}
-            className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-border-subtle bg-surface text-sm outline-none focus:border-brand" />
+            leftIcon={<Search className="h-4 w-4" />} />
         </div>
 
         <select value={providerFilter} onChange={e => setProviderFilter(e.target.value)}
