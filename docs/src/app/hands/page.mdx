@@ -1,6 +1,6 @@
 # Autonomous Hands
 
-LibreFang's core innovation — 7 pre-built autonomous capability packages that run independently and execute on schedule without human intervention.
+LibreFang's core innovation — 14 pre-built autonomous capability packages that run independently and execute on schedule without human intervention.
 
 <Note>
 **Tip**: Hands can be configured with cron expressions for scheduled execution, and also support event-triggered mode.
@@ -18,7 +18,7 @@ Hands are LibreFang's unique feature — they are autonomous agents that can:
 
 ---
 
-## 7 Built-in Hands
+## 14 Built-in Hands
 
 | Hand | Function | Autonomy Level |
 |------|----------|----------------|
@@ -29,6 +29,13 @@ Hands are LibreFang's unique feature — they are autonomous agents that can:
 | **Researcher** | Deep autonomous research, CRAAP credibility assessment, APA citation | High |
 | **Twitter** | Autonomous X/Twitter account management, 7 content formats, approval queue | High |
 | **Browser** | Web automation, Playwright, mandatory purchase approval gate | Medium |
+| **Analytics** | Business analytics, KPI tracking, automated reporting, trend detection | High |
+| **ApiTester** | Automated API testing, contract validation, regression detection | High |
+| **DevOps** | CI/CD monitoring, deployment automation, infrastructure alerts | High |
+| **LinkedIn** | LinkedIn profile monitoring, outreach automation, lead enrichment | High |
+| **Reddit** | Reddit community monitoring, post scheduling, sentiment tracking | High |
+| **Strategist** | Strategic analysis, competitive intelligence, scenario planning | High |
+| **Trader** | Market data monitoring, signal generation, portfolio tracking | High |
 
 ---
 
@@ -325,6 +332,267 @@ librefang hand browser list
 
 ---
 
+## Analytics Hand
+
+Business analytics and KPI tracking Hand.
+
+### Features
+
+- Automated KPI dashboards
+- Trend detection and anomaly alerts
+- Scheduled report generation
+- Multi-source data aggregation
+- Cost and revenue analytics
+
+### Configuration
+
+```toml
+[analytics]
+data_sources = ["postgres", "bigquery"]
+report_schedule = "0 8 * * 1"
+kpi_metrics = ["mrr", "churn", "cac"]
+alert_threshold = 0.15
+```
+
+### CLI Commands
+
+```bash
+# Activate Analytics Hand
+librefang hand activate analytics
+
+# Generate report
+librefang hand analytics report --period weekly
+
+# View KPI dashboard
+librefang hand analytics dashboard
+```
+
+---
+
+## ApiTester Hand
+
+Automated API testing and contract validation Hand.
+
+### Features
+
+- OpenAPI/Swagger spec validation
+- Automated regression testing
+- Response contract checking
+- Latency and availability monitoring
+- Alert on breaking changes
+
+### Configuration
+
+```toml
+[apitester]
+spec_url = "https://api.example.com/openapi.json"
+base_url = "https://api.example.com"
+schedule = "0 */6 * * *"
+alert_channels = ["telegram", "email"]
+```
+
+### CLI Commands
+
+```bash
+# Activate ApiTester Hand
+librefang hand activate apitester
+
+# Run test suite
+librefang hand apitester run --spec openapi.json
+
+# View test history
+librefang hand apitester history
+```
+
+---
+
+## DevOps Hand
+
+CI/CD monitoring and deployment automation Hand.
+
+### Features
+
+- Pipeline status monitoring
+- Deployment automation triggers
+- Infrastructure health alerts
+- Log aggregation and anomaly detection
+- Rollback coordination
+
+### Configuration
+
+```toml
+[devops]
+ci_provider = "github_actions"
+monitor_repos = ["org/repo-a", "org/repo-b"]
+alert_on_failure = true
+alert_channels = ["slack", "telegram"]
+```
+
+### CLI Commands
+
+```bash
+# Activate DevOps Hand
+librefang hand activate devops
+
+# Check pipeline status
+librefang hand devops status --repo org/repo
+
+# Trigger deployment
+librefang hand devops deploy --env production
+```
+
+---
+
+## LinkedIn Hand
+
+LinkedIn profile monitoring and outreach automation Hand.
+
+### Features
+
+- Profile and company page monitoring
+- Connection request automation
+- Personalized outreach sequencing
+- Lead enrichment from LinkedIn data
+- Engagement tracking
+
+### Configuration
+
+```toml
+[linkedin]
+access_token_env = "LINKEDIN_ACCESS_TOKEN"
+outreach_daily_limit = 20
+personalize = true
+icp = "VP Engineering, >200 employees"
+```
+
+### CLI Commands
+
+```bash
+# Activate LinkedIn Hand
+librefang hand activate linkedin
+
+# Start outreach campaign
+librefang hand linkedin outreach --template "intro"
+
+# View connection stats
+librefang hand linkedin stats
+```
+
+---
+
+## Reddit Hand
+
+Reddit community monitoring and post scheduling Hand.
+
+### Features
+
+- Subreddit monitoring and keyword alerts
+- Scheduled post publishing
+- Sentiment and trend tracking
+- Comment moderation assistance
+- Community analytics
+
+### Configuration
+
+```toml
+[reddit]
+client_id_env = "REDDIT_CLIENT_ID"
+client_secret_env = "REDDIT_CLIENT_SECRET"
+subreddits = ["r/MachineLearning", "r/LocalLLaMA"]
+monitor_keywords = ["librefang", "agent OS"]
+post_schedule = "0 14 * * 2"
+```
+
+### CLI Commands
+
+```bash
+# Activate Reddit Hand
+librefang hand activate reddit
+
+# Monitor subreddit
+librefang hand reddit monitor --subreddit MachineLearning
+
+# Schedule post
+librefang hand reddit post --subreddit LocalLLaMA --title "..." --body "..."
+```
+
+---
+
+## Strategist Hand
+
+Strategic analysis and competitive intelligence Hand.
+
+### Features
+
+- Competitive landscape analysis
+- Market signal aggregation
+- Scenario planning and war-gaming
+- SWOT and Porter's Five Forces automation
+- Weekly strategy digest generation
+
+### Configuration
+
+```toml
+[strategist]
+competitors = ["competitor-a.com", "competitor-b.com"]
+market_sources = ["crunchbase", "pitchbook", "sec"]
+digest_schedule = "0 7 * * 1"
+scenario_depth = 3
+```
+
+### CLI Commands
+
+```bash
+# Activate Strategist Hand
+librefang hand activate strategist
+
+# Generate competitive analysis
+librefang hand strategist analyze --competitor competitor-a.com
+
+# Run scenario planning
+librefang hand strategist scenario --topic "AI regulation impact"
+```
+
+---
+
+## Trader Hand
+
+Market data monitoring and portfolio tracking Hand.
+
+### Features
+
+- Real-time price and volume monitoring
+- Technical indicator signal generation
+- Portfolio P&L tracking
+- Alert on threshold breaches
+- Trade journal automation
+
+### Configuration
+
+```toml
+[trader]
+data_provider = "alpaca"
+watchlist = ["AAPL", "MSFT", "BTC-USD"]
+alert_threshold_pct = 5.0
+journal = true
+paper_trading = true
+```
+
+### CLI Commands
+
+```bash
+# Activate Trader Hand
+librefang hand activate trader
+
+# View portfolio
+librefang hand trader portfolio
+
+# Set price alert
+librefang hand trader alert --symbol AAPL --price 200.00
+```
+
+---
+
 ## Hand Management
 
 ### CLI Commands
@@ -474,4 +742,76 @@ librefang hand error <hand-name> --last
 librefang hand reset <hand-name>
 ```
 
-export const sections = [];
+## REST API Endpoints
+
+### Hand Discovery and Installation
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/hands` | GET | List all registered hands with status |
+| `/api/hands/active` | GET | List currently active hands |
+| `/api/hands/{hand_id}` | GET | Get details for a specific hand |
+| `/api/hands/install` | POST | Install a hand from a URL or registry |
+| `/api/hands/{hand_id}/activate` | POST | Activate a hand (start scheduling) |
+| `/api/hands/{hand_id}/check-deps` | POST | Check dependency availability |
+| `/api/hands/{hand_id}/install-deps` | POST | Install missing dependencies |
+
+### Hand Configuration
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/hands/{hand_id}/settings` | GET | Get current hand configuration |
+| `/api/hands/{hand_id}/settings` | PUT | Update hand configuration |
+
+### Instance Lifecycle
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/hands/instances/{id}/pause` | POST | Pause a running hand instance |
+| `/api/hands/instances/{id}/resume` | POST | Resume a paused hand instance |
+| `/api/hands/instances/{id}` | DELETE | Deactivate and remove a hand instance |
+| `/api/hands/instances/{id}/stats` | GET | Get execution statistics for an instance |
+
+### Example: List All Hands
+
+```bash
+curl http://127.0.0.1:4545/api/hands
+```
+
+```json
+[
+  {
+    "id": "clip",
+    "name": "Clip",
+    "status": "Active",
+    "schedule": "0 9 * * *",
+    "last_run": "2025-03-21T09:00:00Z",
+    "next_run": "2025-03-22T09:00:00Z"
+  },
+  {
+    "id": "analytics",
+    "name": "Analytics",
+    "status": "Paused",
+    "schedule": "0 8 * * 1",
+    "last_run": "2025-03-18T08:00:00Z",
+    "next_run": null
+  }
+]
+```
+
+### Example: Activate a Hand
+
+```bash
+curl -X POST http://127.0.0.1:4545/api/hands/analytics/activate
+```
+
+### Example: Update Hand Settings
+
+```bash
+curl -X PUT http://127.0.0.1:4545/api/hands/analytics/settings \
+  -H "Content-Type: application/json" \
+  -d '{"report_schedule": "0 8 * * *", "alert_threshold": 0.10}'
+```
+
+---
+

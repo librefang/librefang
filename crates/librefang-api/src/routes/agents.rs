@@ -1737,6 +1737,47 @@ pub async fn reset_session(
     }
 }
 
+/// POST /api/agents/{id}/session/reboot — Hard-reboot an agent's session (full clear, no summary).
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/session/reboot",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    responses(
+        (status = 200, description = "Hard-reboot an agent's session without saving summary", body = serde_json::Value)
+    )
+)]
+pub async fn reboot_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    match state.kernel.reboot_session(agent_id) {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(
+                serde_json::json!({"status": "ok", "message": "Session rebooted. Context cleared."}),
+            ),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
+        ),
+    }
+}
+
 /// DELETE /api/agents/{id}/history — Clear ALL conversation history for an agent.
 #[utoipa::path(
     delete,

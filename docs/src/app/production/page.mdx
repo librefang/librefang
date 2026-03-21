@@ -1,6 +1,6 @@
 # Production Release Checklist
 
-Everything that must be done before tagging `v0.1.0` and shipping to users. Items are ordered by dependency — complete them top to bottom.
+Everything that must be done before tagging `v0.7.0` and shipping to users. Items are ordered by dependency — complete them top to bottom.
 
 ---
 
@@ -115,7 +115,7 @@ convert icon.svg -resize 256x256 -define icon:auto-resize=256,128,64,48,32,16 ic
 
 ## 5. Set Up the `librefang.ai` Install Domain
 
-**Status:** BLOCKING for install scripts — users should run `curl -fsSL https://librefang.ai/install.sh | sh`.
+**Status:** VERIFY — users should be able to run `curl -fsSL https://librefang.ai/install.sh | sh`.
 
 Options:
 - **GitHub Pages**: Point `librefang.ai` to a GitHub Pages site that redirects `/install.sh` to `scripts/install.sh` and `/install.ps1` to `scripts/install.ps1` from the repo's latest release.
@@ -126,7 +126,7 @@ The install scripts reference:
 - `https://librefang.ai/install.sh` → serves `scripts/install.sh`
 - `https://librefang.ai/install.ps1` → serves `scripts/install.ps1`
 
-Until the domain is set up, users can install via:
+Once the domain is set up, users can install via:
 ```bash
 curl -fsSL https://librefang.ai/install.sh | sh
 ```
@@ -181,14 +181,14 @@ docker build -f scripts/docker/install-smoke.Dockerfile .
 
 ---
 
-## 8. Write CHANGELOG.md for v0.1.0
+## 8. Write CHANGELOG.md for v0.7.0
 
 **Status:** VERIFY — confirm it covers all shipped features.
 
 The release workflow includes a link to `CHANGELOG.md` in every GitHub release body. Ensure it exists at the repo root and covers:
 
 - All 14 crates and what they do
-- Key features: 40 channels, 60 skills, 20 providers, 51 models
+- Key features: 44 channels, 60 tools, 28 providers, 130+ models
 - Security systems (9 SOTA + 7 critical fixes)
 - Desktop app with auto-updater
 - Migration path from OpenClaw
@@ -207,10 +207,10 @@ grep '^version' Cargo.toml
 
 # Commit any final changes
 git add -A
-git commit -m "chore: prepare v0.1.0 release"
+git commit -m "chore: prepare v0.7.0 release"
 
 # Tag and push
-git tag v0.1.0
+git tag v0.7.0
 git push origin main --tags
 ```
 
@@ -247,27 +247,27 @@ Visit: `https://github.com/librefang/librefang/releases/latest/download/latest.j
 ### Docker Image
 ```bash
 docker pull ghcr.io/librefang/librefang:latest
-docker pull ghcr.io/librefang/librefang:0.1.0
+docker pull ghcr.io/librefang/librefang:0.7.0
 
 # Verify both architectures
 docker run --rm ghcr.io/librefang/librefang:latest --version
 ```
 
-### Desktop App Auto-Update (test with v0.1.1)
-1. Install v0.1.0 from the release
-2. Tag v0.1.1 and push
+### Desktop App Auto-Update (test with v0.7.1)
+1. Install v0.7.0 from the release
+2. Tag v0.7.1 and push
 3. Wait for release workflow to complete
-4. Open the v0.1.0 app — after 10 seconds it should:
+4. Open the v0.7.0 app — after 10 seconds it should:
    - Show "LibreFang Updating..." notification
-   - Download and install v0.1.1
-   - Restart automatically to v0.1.1
+   - Download and install v0.7.1
+   - Restart automatically to v0.7.1
 5. Right-click tray → "Check for Updates" → should show "Up to Date"
 
 ### Install Scripts
 ```bash
 # Linux/macOS
 curl -fsSL https://librefang.ai/install.sh | sh
-librefang --version  # Should print v0.1.0
+librefang --version  # Should print v0.7.0
 
 # Windows PowerShell
 irm https://librefang.ai/install.ps1 | iex
@@ -298,4 +298,3 @@ Step 8 (CHANGELOG) ──────┘
 Steps 4-8 can be done in parallel. Steps 1-3 are sequential and must be done first.
 
 
-export const sections = [];

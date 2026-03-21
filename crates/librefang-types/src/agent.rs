@@ -508,6 +508,11 @@ pub struct AgentManifest {
     /// Whether this agent is enabled. Disabled agents are not spawned on startup.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Plugin allowlist — only these plugins are available (empty = all plugins).
+    /// When set, only plugins whose names appear in this list will be loaded
+    /// for this agent. When empty (default), all installed plugins are available.
+    #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
+    pub allowed_plugins: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -545,6 +550,7 @@ impl Default for AgentManifest {
             tool_blocklist: Vec::new(),
             tools_disabled: false,
             enabled: true,
+            allowed_plugins: Vec::new(),
         }
     }
 }
@@ -1318,6 +1324,57 @@ memory_write = ["self.*"]
         assert_eq!(
             manifest.capabilities.memory_write,
             vec!["self.*".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_manifest_allowed_plugins_default_empty() {
+        let manifest = AgentManifest::default();
+        assert!(manifest.allowed_plugins.is_empty());
+    }
+
+    #[test]
+    fn test_manifest_allowed_plugins_from_toml() {
+        let toml_str = r#"
+name = "restricted-agent"
+allowed_plugins = ["web-search", "code-exec"]
+
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.name, "restricted-agent");
+        assert_eq!(
+            manifest.allowed_plugins,
+            vec!["web-search".to_string(), "code-exec".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_manifest_allowed_plugins_omitted_in_toml() {
+        let toml_str = r#"
+name = "unrestricted-agent"
+
+[model]
+provider = "groq"
+model = "llama-3.3-70b-versatile"
+"#;
+        let manifest: AgentManifest = toml::from_str(toml_str).unwrap();
+        assert!(manifest.allowed_plugins.is_empty());
+    }
+
+    #[test]
+    fn test_manifest_allowed_plugins_roundtrip_json() {
+        let manifest = AgentManifest {
+            allowed_plugins: vec!["qdrant-recall".to_string(), "web-search".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        let back: AgentManifest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.allowed_plugins,
+            vec!["qdrant-recall".to_string(), "web-search".to_string()]
         );
     }
 }

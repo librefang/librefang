@@ -19,6 +19,7 @@ function chatPage() {
     dragOver: false,
     contextPressure: 'low', // green/yellow/orange/red indicator
     _typingTimeout: null,
+    _wsPingInterval: null,
     // Multi-session state
     sessions: [],
     sessionsOpen: false,
@@ -48,6 +49,7 @@ function chatPage() {
       { cmd: '/help', descKey: 'agentChat.cmd.help', descFallback: 'Show available commands' },
       { cmd: '/agents', descKey: 'agentChat.cmd.agents', descFallback: 'Switch to Agents page' },
       { cmd: '/new', descKey: 'agentChat.cmd.new', descFallback: 'Reset session (clear history)' },
+      { cmd: '/reboot', descKey: 'agentChat.cmd.reboot', descFallback: 'Hard reset session (full context clear, no summary)' },
       { cmd: '/compact', descKey: 'agentChat.cmd.compact', descFallback: 'Trigger LLM session compaction' },
       { cmd: '/model', descKey: 'agentChat.cmd.model', descFallback: 'Show or switch model (/model [name])' },
       { cmd: '/stop', descKey: 'agentChat.cmd.stop', descFallback: 'Cancel current agent run' },
@@ -535,6 +537,14 @@ function chatPage() {
             }).catch(function(e) { LibreFangToast.error(self.t('agentChat.toast.resetFailed', 'Reset failed: {message}', { message: e.message })); });
           }
           break;
+        case '/reboot':
+          if (self.currentAgent) {
+            LibreFangAPI.post('/api/agents/' + self.currentAgent.id + '/session/reboot', {}).then(function() {
+              self.messages = [];
+              LibreFangToast.success(self.t('agentChat.toast.sessionRebooted', 'Session rebooted. Context cleared.'));
+            }).catch(function(e) { LibreFangToast.error(self.t('agentChat.toast.rebootFailed', 'Reboot failed: {message}', { message: e.message })); });
+          }
+          break;
         case '/compact':
           if (self.currentAgent) {
             self.messages.push({ id: ++msgId, role: 'system', text: self.t('agentChat.sys.compacting', 'Compacting session...'), meta: '', tools: [] });
@@ -780,18 +790,29 @@ function chatPage() {
       this._wsAgent = agentId;
       var self = this;
 
+      // Clear any previous keepalive interval
+      if (self._wsPingInterval) { clearInterval(self._wsPingInterval); self._wsPingInterval = null; }
+
       LibreFangAPI.wsConnect(agentId, {
         onOpen: function() {
           Alpine.store('app').wsConnected = true;
+          // Start client-side keepalive ping every 30s to prevent
+          // proxies/NAT from closing idle connections during long
+          // multi-tool sequences.
+          self._wsPingInterval = setInterval(function() {
+            LibreFangAPI.wsSend({ type: 'ping' });
+          }, 30000);
         },
         onMessage: function(data) { self.handleWsMessage(data); },
         onClose: function() {
           Alpine.store('app').wsConnected = false;
           self._wsAgent = null;
+          if (self._wsPingInterval) { clearInterval(self._wsPingInterval); self._wsPingInterval = null; }
         },
         onError: function() {
           Alpine.store('app').wsConnected = false;
           self._wsAgent = null;
+          if (self._wsPingInterval) { clearInterval(self._wsPingInterval); self._wsPingInterval = null; }
         }
       });
     },
@@ -839,6 +860,8 @@ function chatPage() {
           break;
 
         case 'phase':
+          // Reset typing timeout — phase change proves the agent is alive
+          this._resetTypingTimeout();
           // Show tool/phase progress so the user sees the agent is working
           var phaseMsg = this.messages.length ? this.messages[this.messages.length - 1] : null;
           if (phaseMsg && (phaseMsg.thinking || phaseMsg.streaming)) {
@@ -876,6 +899,8 @@ function chatPage() {
           break;
 
         case 'text_delta':
+          // Reset typing timeout — streaming data proves the agent is alive
+          this._resetTypingTimeout();
           var last = this.messages.length ? this.messages[this.messages.length - 1] : null;
           if (last && last.streaming) {
             if (last.thinking) { last.text = ''; last.thinking = false; }
@@ -912,6 +937,8 @@ function chatPage() {
           break;
 
         case 'tool_start':
+          // Reset typing timeout — tool execution proves the agent is alive
+          this._resetTypingTimeout();
           var lastMsg = this.messages.length ? this.messages[this.messages.length - 1] : null;
           if (lastMsg && lastMsg.streaming) {
             if (!lastMsg.tools) lastMsg.tools = [];
@@ -934,6 +961,8 @@ function chatPage() {
           break;
 
         case 'tool_result':
+          // Reset typing timeout — tool result proves the agent is alive
+          this._resetTypingTimeout();
           // Tool execution completed — update tool card with result
           var lastMsg3 = this.messages.length ? this.messages[this.messages.length - 1] : null;
           if (lastMsg3 && lastMsg3.tools) {

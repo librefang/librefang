@@ -1,0 +1,259 @@
+# MCP 和 A2A 协议
+
+LibreFang 支持 MCP (Model Context Protocol) 和 A2A (Agent to Agent) 协议。
+
+<Note>
+**协议对比**:
+- **MCP**: 用于 LLM 与外部工具/服务连接 (1对多)
+- **A2A**: 用于 Agent 之间通信 (多对多)
+</Note>
+
+---
+
+## MCP (Model Context Protocol)
+
+MCP 是一个标准化协议，用于连接 LLM 与外部工具和服务。
+
+### 概述
+
+```
+┌─────────────┐      MCP       ┌─────────────┐
+│   LibreFang │ ◄─────────────► │  MCP Server │
+│   (Client)  │   JSON-RPC 2.0  │  (Server)   │
+└─────────────┘                  └─────────────┘
+```
+
+### MCP 服务器配置
+
+```toml
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+[[mcp_servers]]
+name = "github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_TOKEN = "your-token" }
+```
+
+### MCP 工具命名
+
+MCP 工具命名格式：
+```
+mcp_{server}_{tool}
+```
+
+例如：
+- `mcp_filesystem_read_file`
+- `mcp_github_create_issue`
+
+### 内置 MCP 服务器
+
+LibreFang 包含内置 MCP 服务器：
+
+| 服务器 | 工具 |
+|--------|------|
+| filesystem | read_file, write_file, list_directory |
+| github | create_issue, get_pr, search_repos |
+| postgres | query, execute, list_tables |
+
+### MCP 客户端
+
+作为 MCP 客户端连接到外部服务器：
+
+```toml
+[[mcp_servers]]
+name = "custom"
+command = "python"
+args = ["./mcp_server.py"]
+```
+
+### 开发 MCP 服务器
+
+```python
+from mcp.server import Server
+from mcp.types import Tool, TextContent
+
+app = Server("my-server")
+
+@app.list_tools()
+async def list_tools():
+    return [
+        Tool(
+            name="my_tool",
+            description="My custom tool",
+            inputSchema={"type": "object", "properties": {}}
+        )
+    ]
+
+@app.call_tool()
+async def call_tool(name: str, arguments: dict):
+    return [TextContent(type="text", text="result")]
+```
+
+---
+
+## A2A (Agent to Agent)
+
+A2A 协议支持 LibreFang agents 之间的通信。
+
+### 概述
+
+```
+┌─────────────┐      A2A       ┌─────────────┐
+│   Agent A   │ ◄─────────────► │   Agent B   │
+└─────────────┘   JSON over    └─────────────┘
+                  HTTP/WebSocket
+```
+
+### Agent Card
+
+每个 Agent 发布 Agent Card：
+
+```json
+{
+  "name": "researcher",
+  "description": "Deep research agent",
+  "url": "http://localhost:4545/api/a2a",
+  "version": "1.0.0",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": false
+  },
+  "skills": [
+    { "id": "research", "name": "Research" }
+  ]
+}
+```
+
+### 客户端端点（向外部 A2A Agent 发送任务）
+
+这些端点用于让 LibreFang 作为客户端，主动向外部 A2A agent 委派任务：
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/a2a/agents` | GET | 列出已发现的外部 A2A agents |
+| `/api/a2a/discover` | POST | 发现指定 URL 处的外部 A2A agent |
+| `/api/a2a/send` | POST | 向外部 A2A agent 发送任务 |
+| `/api/a2a/tasks/{id}/status` | GET | 查询已发送任务的状态 |
+
+### 服务端端点（接受外部任务）
+
+这些端点由 LibreFang 对外暴露，供其他 A2A agent 向本实例发送任务：
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/.well-known/agent.json` | GET | Agent Card（能力声明） |
+| `/api/a2a/tasks` | POST | 接受来自外部的任务 |
+| `/api/a2a/tasks/{id}` | GET | 获取任务状态 |
+| `/api/a2a/tasks/{id}/messages` | GET | 获取任务消息历史 |
+
+### 发现并发送任务到外部 Agent
+
+```bash
+# 发现外部 agent
+curl -X POST http://localhost:4545/api/a2a/discover \
+  -H "Content-Type: application/json" \
+  -d '{"url": "http://other-agent:4545"}'
+
+# 向外部 agent 发送任务
+curl -X POST http://localhost:4545/api/a2a/send \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_url": "http://other-agent:4545",
+    "message": "Research AI trends and summarize"
+  }'
+
+# 查询任务状态
+curl http://localhost:4545/api/a2a/tasks/task-123/status
+```
+
+### 接受来自外部的任务
+
+```bash
+# 外部 agent 向本实例发送任务
+curl -X POST http://localhost:4545/api/a2a/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "task-456",
+    "message": {
+      "role": "user",
+      "parts": [{ "type": "text", "text": "Research AI trends" }]
+    }
+  }'
+
+# 轮询结果
+curl http://localhost:4545/api/a2a/tasks/task-456
+
+# 或使用 SSE 流式接收
+curl -N http://localhost:4545/api/a2a/tasks/task-456/events
+```
+
+---
+
+## 对比
+
+| 特性 | MCP | A2A |
+|------|-----|------|
+| 用途 | LLM → 工具 | Agent ↔ Agent |
+| 协议 | JSON-RPC 2.0 | HTTP/WebSocket |
+| 方向 | 单向 | 双向 |
+| 示例 | 文件系统、GitHub | Agent 协作 |
+
+---
+
+## 使用场景
+
+### MCP 场景
+
+- 文件系统操作
+- 数据库查询
+- GitHub API 调用
+- 自定义工具集成
+
+### A2A 场景
+
+- 多 Agent 协作
+- 任务委派
+- 跨实例通信
+
+---
+
+## 配置示例
+
+### 完整 MCP 配置
+
+```toml
+# MCP 服务器
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+
+[[mcp_servers]]
+name = "github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+
+# A2A 配置
+[a2a]
+enabled = true
+listen_path = "/a2a"
+```
+
+---
+
+## CLI 命令
+
+```bash
+# 列出 MCP 服务器
+librefang mcp list
+
+# 测试 MCP 服务器
+librefang mcp test filesystem
+
+# 启动 MCP 模式
+librefang mcp
+```

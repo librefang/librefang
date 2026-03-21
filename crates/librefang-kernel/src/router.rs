@@ -792,9 +792,11 @@ fn auto_select_template_from_metadata(
     })
 }
 
-/// Cached manifest route candidates. Invalidated via `invalidate_manifest_cache()`,
-/// which should be called on config hot-reload or agent install/uninstall.
-static MANIFEST_CACHE: OnceLock<Mutex<Option<Vec<ManifestRouteCandidate>>>> = OnceLock::new();
+/// Cached manifest route candidates, keyed by the `agents_dir` path used to
+/// build them. Invalidated via `invalidate_manifest_cache()`, which should be
+/// called on config hot-reload or agent install/uninstall.
+type ManifestCacheEntry = (PathBuf, Vec<ManifestRouteCandidate>);
+static MANIFEST_CACHE: OnceLock<Mutex<Option<ManifestCacheEntry>>> = OnceLock::new();
 
 /// Invalidate the cached manifest route candidates so they are rebuilt on the
 /// next routing call. Call this after config hot-reload or agent changes.
@@ -833,12 +835,14 @@ pub fn all_template_descriptions(agents_dir: &Path) -> Vec<(String, String)> {
 fn manifest_route_candidates(agents_dir: &Path) -> Vec<ManifestRouteCandidate> {
     let cache = MANIFEST_CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(ref cached) = *guard {
-        return cached.clone();
+    if let Some((ref cached_path, ref cached)) = *guard {
+        if cached_path == agents_dir {
+            return cached.clone();
+        }
     }
 
     let candidates = build_manifest_route_candidates(agents_dir);
-    *guard = Some(candidates.clone());
+    *guard = Some((agents_dir.to_path_buf(), candidates.clone()));
     candidates
 }
 

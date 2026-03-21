@@ -26,6 +26,32 @@ const POLL_TOOLS: &[&str] = &[
     "shell_exec", // checking command output
 ];
 
+/// Known command prefixes that indicate polling intent.
+const POLL_COMMAND_PREFIXES: &[&str] = &[
+    "docker ps",
+    "docker inspect",
+    "kubectl get",
+    "kubectl describe",
+    "kubectl wait",
+    "systemctl status",
+    "systemctl is-active",
+    "service ",
+    "supervisorctl status",
+    "pgrep",
+    "pidof",
+    "lsof -i",
+    "ss -tlnp",
+    "netstat ",
+    "curl -s", // health checks
+    "wget -q", // health checks
+];
+
+/// Keywords in commands that strongly indicate polling intent.
+const POLL_KEYWORDS: &[&str] = &[
+    "status", "poll", "wait", "watch", "tail", "ps ", "jobs", "pgrep", "health", "ping", "alive",
+    "ready", "check",
+];
+
 /// Maximum recent call history size for ping-pong detection.
 const HISTORY_SIZE: usize = 30;
 
@@ -331,28 +357,37 @@ impl LoopGuard {
     ///
     /// Poll tools (like `shell_exec` for status checks) are expected to be
     /// called repeatedly and get relaxed loop detection thresholds.
+    ///
+    /// Detection uses three strategies (no arbitrary length limits):
+    /// 1. Explicit `"poll": true` parameter — callers can mark poll intent directly.
+    /// 2. Known command prefix matching — e.g. `docker ps`, `kubectl get`.
+    /// 3. Keyword matching — e.g. `status`, `poll`, `health`, `check`.
     fn is_poll_call(tool_name: &str, params: &serde_json::Value) -> bool {
-        // Known poll tools with short commands that look like status checks
+        // Explicit poll intent via params
+        if let Some(poll) = params.get("poll").and_then(|v| v.as_bool()) {
+            return poll;
+        }
+
+        // Known poll tools with poll-like commands (no length restriction)
         if POLL_TOOLS.contains(&tool_name) {
             if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
                 let cmd_lower = cmd.to_lowercase();
-                // Short commands that explicitly check status/wait/poll
-                if cmd.len() < 50
-                    && (cmd_lower.contains("status")
-                        || cmd_lower.contains("poll")
-                        || cmd_lower.contains("wait")
-                        || cmd_lower.contains("watch")
-                        || cmd_lower.contains("tail")
-                        || cmd_lower.contains("ps ")
-                        || cmd_lower.contains("jobs")
-                        || cmd_lower.contains("pgrep")
-                        || cmd_lower.contains("docker ps")
-                        || cmd_lower.contains("kubectl get"))
+
+                // Check known poll command prefixes
+                if POLL_COMMAND_PREFIXES
+                    .iter()
+                    .any(|prefix| cmd_lower.starts_with(prefix))
                 {
+                    return true;
+                }
+
+                // Check poll keywords anywhere in the command
+                if POLL_KEYWORDS.iter().any(|kw| cmd_lower.contains(kw)) {
                     return true;
                 }
             }
         }
+
         // Generic poll detection via params keywords
         let params_str = serde_json::to_string(params)
             .unwrap_or_default()
@@ -749,28 +784,28 @@ mod tests {
 
     #[test]
     fn test_is_poll_call_detection() {
-        // shell_exec with short status-check command
+        // shell_exec with status-check command
         assert!(LoopGuard::is_poll_call(
             "shell_exec",
             &serde_json::json!({"command": "docker ps --status"})
         ));
 
-        // shell_exec with short tail command
+        // shell_exec with tail command
         assert!(LoopGuard::is_poll_call(
             "shell_exec",
             &serde_json::json!({"command": "tail -f /var/log/app.log"})
         ));
 
-        // shell_exec with short command but NO poll keywords — NOT a poll
+        // shell_exec with command but NO poll keywords — NOT a poll
         assert!(!LoopGuard::is_poll_call(
             "shell_exec",
             &serde_json::json!({"command": "echo hi"})
         ));
 
-        // shell_exec with long command — NOT a poll
-        assert!(!LoopGuard::is_poll_call(
+        // Long poll command IS correctly detected (no length limit)
+        assert!(LoopGuard::is_poll_call(
             "shell_exec",
-            &serde_json::json!({"command": "this is a very long command that definitely exceeds fifty characters in length"})
+            &serde_json::json!({"command": "kubectl get pods -n production-namespace --field-selector=status.phase=Running"})
         ));
 
         // Non-poll tool with no poll keywords
@@ -795,6 +830,48 @@ mod tests {
         assert!(LoopGuard::is_poll_call(
             "queue",
             &serde_json::json!({"mode": "wait_for_completion"})
+        ));
+
+        // Explicit poll=true parameter marks any call as poll
+        assert!(LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "some-custom-command", "poll": true})
+        ));
+
+        // Explicit poll=false parameter overrides detection
+        assert!(!LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "docker ps", "poll": false})
+        ));
+
+        // Known prefix: systemctl status
+        assert!(LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "systemctl status nginx.service"})
+        ));
+
+        // Known prefix: curl -s (health check)
+        assert!(LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "curl -s http://localhost:8080/health"})
+        ));
+
+        // Known prefix: docker inspect
+        assert!(LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "docker inspect --format '{{.State.Status}}' my-container"})
+        ));
+
+        // Keyword: health
+        assert!(LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "my-app --health-endpoint /api/v1/healthz"})
+        ));
+
+        // Keyword: check
+        assert!(LoopGuard::is_poll_call(
+            "shell_exec",
+            &serde_json::json!({"command": "pg_isready --check --host=db.example.com --port=5432"})
         ));
     }
 

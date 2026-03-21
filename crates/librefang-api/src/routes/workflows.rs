@@ -13,6 +13,166 @@ use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_types::agent::AgentId;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::warn;
+
+// ---------------------------------------------------------------------------
+// Helpers – parse StepMode / ErrorMode from both flat-string and nested-object
+// formats so the frontend can send either:
+//   "sequential"                                     (flat string)
+//   {"conditional": {"condition": "..."}}            (serde-serialised enum)
+// ---------------------------------------------------------------------------
+
+/// Parse a `StepMode` from a JSON value.
+///
+/// Accepts:
+/// - A plain string: `"sequential"`, `"fan_out"`, `"collect"`, `"conditional"`, `"loop"`
+/// - A serde-serialised tagged object: `{"conditional": {"condition": "..."}}`
+fn parse_step_mode(val: &serde_json::Value, step: &serde_json::Value) -> StepMode {
+    // 1) Try flat string first
+    if let Some(s) = val.as_str() {
+        return match s {
+            "fan_out" => StepMode::FanOut,
+            "collect" => StepMode::Collect,
+            "conditional" => {
+                let condition = step["condition"]
+                    .as_str()
+                    .unwrap_or_else(|| {
+                        warn!("conditional step missing 'condition' field, defaulting to empty");
+                        ""
+                    })
+                    .to_string();
+                StepMode::Conditional { condition }
+            }
+            "loop" => {
+                let max_iterations = match step["max_iterations"].as_u64() {
+                    Some(v) => u32::try_from(v).unwrap_or_else(|_| {
+                        warn!(
+                            "loop step max_iterations value {v} exceeds u32 range, defaulting to 5"
+                        );
+                        5
+                    }),
+                    None => {
+                        warn!("loop step missing 'max_iterations' field, defaulting to 5");
+                        5
+                    }
+                };
+                let until = step["until"]
+                    .as_str()
+                    .unwrap_or_else(|| {
+                        warn!("loop step missing 'until' field, defaulting to empty");
+                        ""
+                    })
+                    .to_string();
+                StepMode::Loop {
+                    max_iterations,
+                    until,
+                }
+            }
+            _ => StepMode::Sequential,
+        };
+    }
+
+    // 2) Try nested object (serde-serialised enum representation)
+    if let Some(obj) = val.as_object() {
+        if let Some(inner) = obj.get("conditional") {
+            let condition = inner["condition"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    warn!("conditional step missing 'condition' field in nested object, defaulting to empty");
+                    ""
+                })
+                .to_string();
+            return StepMode::Conditional { condition };
+        }
+        if let Some(inner) = obj.get("loop") {
+            let max_iterations = match inner["max_iterations"].as_u64() {
+                Some(v) => u32::try_from(v).unwrap_or_else(|_| {
+                    warn!("loop step max_iterations value {v} exceeds u32 range, defaulting to 5");
+                    5
+                }),
+                None => {
+                    warn!(
+                        "loop step missing 'max_iterations' field in nested object, defaulting to 5"
+                    );
+                    5
+                }
+            };
+            let until = inner["until"]
+                .as_str()
+                .unwrap_or_else(|| {
+                    warn!("loop step missing 'until' field in nested object, defaulting to empty");
+                    ""
+                })
+                .to_string();
+            return StepMode::Loop {
+                max_iterations,
+                until,
+            };
+        }
+        if obj.contains_key("fan_out") {
+            return StepMode::FanOut;
+        }
+        if obj.contains_key("collect") {
+            return StepMode::Collect;
+        }
+        if obj.contains_key("sequential") {
+            return StepMode::Sequential;
+        }
+    }
+
+    // 3) Fallback: try serde deserialization directly
+    if let Ok(mode) = serde_json::from_value::<StepMode>(val.clone()) {
+        return mode;
+    }
+
+    StepMode::Sequential
+}
+
+/// Parse an `ErrorMode` from a JSON value.
+///
+/// Accepts:
+/// - A plain string: `"fail"`, `"skip"`, `"retry"`
+/// - A serde-serialised tagged object: `{"retry": {"max_retries": 3}}`
+fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorMode {
+    // 1) Try flat string first
+    if let Some(s) = val.as_str() {
+        return match s {
+            "skip" => ErrorMode::Skip,
+            "retry" => ErrorMode::Retry {
+                max_retries: step["max_retries"]
+                    .as_u64()
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(3),
+            },
+            _ => ErrorMode::Fail,
+        };
+    }
+
+    // 2) Try nested object
+    if let Some(obj) = val.as_object() {
+        if let Some(inner) = obj.get("retry") {
+            return ErrorMode::Retry {
+                max_retries: inner["max_retries"]
+                    .as_u64()
+                    .and_then(|v| u32::try_from(v).ok())
+                    .unwrap_or(3),
+            };
+        }
+        if obj.contains_key("skip") {
+            return ErrorMode::Skip;
+        }
+        if obj.contains_key("fail") {
+            return ErrorMode::Fail;
+        }
+    }
+
+    // 3) Fallback: try serde deserialization directly
+    if let Ok(mode) = serde_json::from_value::<ErrorMode>(val.clone()) {
+        return mode;
+    }
+
+    ErrorMode::Fail
+}
 
 // ---------------------------------------------------------------------------
 // Workflow routes
@@ -64,26 +224,8 @@ pub async fn create_workflow(
             );
         };
 
-        let mode = match s["mode"].as_str().unwrap_or("sequential") {
-            "fan_out" => StepMode::FanOut,
-            "collect" => StepMode::Collect,
-            "conditional" => StepMode::Conditional {
-                condition: s["condition"].as_str().unwrap_or("").to_string(),
-            },
-            "loop" => StepMode::Loop {
-                max_iterations: s["max_iterations"].as_u64().unwrap_or(5) as u32,
-                until: s["until"].as_str().unwrap_or("").to_string(),
-            },
-            _ => StepMode::Sequential,
-        };
-
-        let error_mode = match s["error_mode"].as_str().unwrap_or("fail") {
-            "skip" => ErrorMode::Skip,
-            "retry" => ErrorMode::Retry {
-                max_retries: s["max_retries"].as_u64().unwrap_or(3) as u32,
-            },
-            _ => ErrorMode::Fail,
-        };
+        let mode = parse_step_mode(&s["mode"], s);
+        let error_mode = parse_error_mode(&s["error_mode"], s);
 
         steps.push(WorkflowStep {
             name: step_name,
@@ -267,26 +409,8 @@ pub async fn update_workflow(
                 );
             };
 
-            let mode = match s["mode"].as_str().unwrap_or("sequential") {
-                "fan_out" => StepMode::FanOut,
-                "collect" => StepMode::Collect,
-                "conditional" => StepMode::Conditional {
-                    condition: s["condition"].as_str().unwrap_or("").to_string(),
-                },
-                "loop" => StepMode::Loop {
-                    max_iterations: s["max_iterations"].as_u64().unwrap_or(5) as u32,
-                    until: s["until"].as_str().unwrap_or("").to_string(),
-                },
-                _ => StepMode::Sequential,
-            };
-
-            let error_mode = match s["error_mode"].as_str().unwrap_or("fail") {
-                "skip" => ErrorMode::Skip,
-                "retry" => ErrorMode::Retry {
-                    max_retries: s["max_retries"].as_u64().unwrap_or(3) as u32,
-                },
-                _ => ErrorMode::Fail,
-            };
+            let mode = parse_step_mode(&s["mode"], s);
+            let error_mode = parse_error_mode(&s["error_mode"], s);
 
             parsed_steps.push(WorkflowStep {
                 name: step_name,
@@ -1245,5 +1369,328 @@ pub async fn cron_job_status(
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "Invalid job ID"})),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -----------------------------------------------------------------------
+    // parse_step_mode tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn step_mode_flat_sequential() {
+        let mode = parse_step_mode(&json!("sequential"), &json!({}));
+        assert!(matches!(mode, StepMode::Sequential));
+    }
+
+    #[test]
+    fn step_mode_flat_fan_out() {
+        let mode = parse_step_mode(&json!("fan_out"), &json!({}));
+        assert!(matches!(mode, StepMode::FanOut));
+    }
+
+    #[test]
+    fn step_mode_flat_collect() {
+        let mode = parse_step_mode(&json!("collect"), &json!({}));
+        assert!(matches!(mode, StepMode::Collect));
+    }
+
+    #[test]
+    fn step_mode_flat_conditional_with_condition() {
+        let step = json!({"condition": "status == ok"});
+        let mode = parse_step_mode(&json!("conditional"), &step);
+        match mode {
+            StepMode::Conditional { condition } => {
+                assert_eq!(condition, "status == ok");
+            }
+            other => panic!("expected Conditional, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_mode_flat_conditional_missing_condition() {
+        let mode = parse_step_mode(&json!("conditional"), &json!({}));
+        match mode {
+            StepMode::Conditional { condition } => {
+                assert_eq!(condition, "", "should default to empty string");
+            }
+            other => panic!("expected Conditional, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_mode_flat_loop_with_fields() {
+        let step = json!({"max_iterations": 10, "until": "done"});
+        let mode = parse_step_mode(&json!("loop"), &step);
+        match mode {
+            StepMode::Loop {
+                max_iterations,
+                until,
+            } => {
+                assert_eq!(max_iterations, 10);
+                assert_eq!(until, "done");
+            }
+            other => panic!("expected Loop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_mode_flat_loop_missing_fields() {
+        let mode = parse_step_mode(&json!("loop"), &json!({}));
+        match mode {
+            StepMode::Loop {
+                max_iterations,
+                until,
+            } => {
+                assert_eq!(max_iterations, 5, "should default to 5");
+                assert_eq!(until, "", "should default to empty string");
+            }
+            other => panic!("expected Loop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_mode_flat_loop_large_max_iterations_clamped() {
+        // u64 value exceeding u32::MAX should fall back to default (5)
+        let step = json!({"max_iterations": u64::MAX, "until": "x"});
+        let mode = parse_step_mode(&json!("loop"), &step);
+        match mode {
+            StepMode::Loop { max_iterations, .. } => {
+                assert_eq!(max_iterations, 5, "should fall back to 5 on u32 overflow");
+            }
+            other => panic!("expected Loop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_mode_flat_unknown_string_defaults_sequential() {
+        let mode = parse_step_mode(&json!("banana"), &json!({}));
+        assert!(matches!(mode, StepMode::Sequential));
+    }
+
+    #[test]
+    fn step_mode_nested_conditional() {
+        let val = json!({"conditional": {"condition": "x > 0"}});
+        let mode = parse_step_mode(&val, &json!({}));
+        match mode {
+            StepMode::Conditional { condition } => assert_eq!(condition, "x > 0"),
+            other => panic!("expected Conditional, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_mode_nested_conditional_missing_condition() {
+        let val = json!({"conditional": {}});
+        let mode = parse_step_mode(&val, &json!({}));
+        match mode {
+            StepMode::Conditional { condition } => {
+                assert_eq!(condition, "", "should default to empty string");
+            }
+            other => panic!("expected Conditional, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_mode_nested_loop() {
+        let val = json!({"loop": {"max_iterations": 3, "until": "finish"}});
+        let mode = parse_step_mode(&val, &json!({}));
+        match mode {
+            StepMode::Loop {
+                max_iterations,
+                until,
+            } => {
+                assert_eq!(max_iterations, 3);
+                assert_eq!(until, "finish");
+            }
+            other => panic!("expected Loop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_mode_nested_loop_missing_fields() {
+        let val = json!({"loop": {}});
+        let mode = parse_step_mode(&val, &json!({}));
+        match mode {
+            StepMode::Loop {
+                max_iterations,
+                until,
+            } => {
+                assert_eq!(max_iterations, 5);
+                assert_eq!(until, "");
+            }
+            other => panic!("expected Loop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_mode_nested_loop_large_max_iterations() {
+        let val = json!({"loop": {"max_iterations": u64::MAX}});
+        let mode = parse_step_mode(&val, &json!({}));
+        match mode {
+            StepMode::Loop { max_iterations, .. } => {
+                assert_eq!(max_iterations, 5);
+            }
+            other => panic!("expected Loop, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn step_mode_nested_fan_out() {
+        let val = json!({"fan_out": {}});
+        let mode = parse_step_mode(&val, &json!({}));
+        assert!(matches!(mode, StepMode::FanOut));
+    }
+
+    #[test]
+    fn step_mode_nested_collect() {
+        let val = json!({"collect": {}});
+        let mode = parse_step_mode(&val, &json!({}));
+        assert!(matches!(mode, StepMode::Collect));
+    }
+
+    #[test]
+    fn step_mode_nested_sequential() {
+        let val = json!({"sequential": {}});
+        let mode = parse_step_mode(&val, &json!({}));
+        assert!(matches!(mode, StepMode::Sequential));
+    }
+
+    #[test]
+    fn step_mode_null_defaults_sequential() {
+        let mode = parse_step_mode(&json!(null), &json!({}));
+        assert!(matches!(mode, StepMode::Sequential));
+    }
+
+    #[test]
+    fn step_mode_number_defaults_sequential() {
+        let mode = parse_step_mode(&json!(42), &json!({}));
+        assert!(matches!(mode, StepMode::Sequential));
+    }
+
+    #[test]
+    fn step_mode_empty_object_defaults_sequential() {
+        let mode = parse_step_mode(&json!({}), &json!({}));
+        assert!(matches!(mode, StepMode::Sequential));
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_error_mode tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn error_mode_flat_fail() {
+        let mode = parse_error_mode(&json!("fail"), &json!({}));
+        assert!(matches!(mode, ErrorMode::Fail));
+    }
+
+    #[test]
+    fn error_mode_flat_skip() {
+        let mode = parse_error_mode(&json!("skip"), &json!({}));
+        assert!(matches!(mode, ErrorMode::Skip));
+    }
+
+    #[test]
+    fn error_mode_flat_retry_with_value() {
+        let step = json!({"max_retries": 7});
+        let mode = parse_error_mode(&json!("retry"), &step);
+        match mode {
+            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 7),
+            other => panic!("expected Retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_mode_flat_retry_missing_max_retries() {
+        let mode = parse_error_mode(&json!("retry"), &json!({}));
+        match mode {
+            ErrorMode::Retry { max_retries } => {
+                assert_eq!(max_retries, 3, "should default to 3");
+            }
+            other => panic!("expected Retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_mode_flat_retry_large_value_clamped() {
+        let step = json!({"max_retries": u64::MAX});
+        let mode = parse_error_mode(&json!("retry"), &step);
+        match mode {
+            ErrorMode::Retry { max_retries } => {
+                assert_eq!(max_retries, 3, "should fall back to 3 on u32 overflow");
+            }
+            other => panic!("expected Retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_mode_flat_unknown_defaults_fail() {
+        let mode = parse_error_mode(&json!("explode"), &json!({}));
+        assert!(matches!(mode, ErrorMode::Fail));
+    }
+
+    #[test]
+    fn error_mode_nested_retry() {
+        let val = json!({"retry": {"max_retries": 2}});
+        let mode = parse_error_mode(&val, &json!({}));
+        match mode {
+            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 2),
+            other => panic!("expected Retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_mode_nested_retry_missing_max_retries() {
+        let val = json!({"retry": {}});
+        let mode = parse_error_mode(&val, &json!({}));
+        match mode {
+            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 3),
+            other => panic!("expected Retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_mode_nested_retry_large_value() {
+        let val = json!({"retry": {"max_retries": u64::MAX}});
+        let mode = parse_error_mode(&val, &json!({}));
+        match mode {
+            ErrorMode::Retry { max_retries } => assert_eq!(max_retries, 3),
+            other => panic!("expected Retry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_mode_nested_skip() {
+        let val = json!({"skip": {}});
+        let mode = parse_error_mode(&val, &json!({}));
+        assert!(matches!(mode, ErrorMode::Skip));
+    }
+
+    #[test]
+    fn error_mode_nested_fail() {
+        let val = json!({"fail": {}});
+        let mode = parse_error_mode(&val, &json!({}));
+        assert!(matches!(mode, ErrorMode::Fail));
+    }
+
+    #[test]
+    fn error_mode_null_defaults_fail() {
+        let mode = parse_error_mode(&json!(null), &json!({}));
+        assert!(matches!(mode, ErrorMode::Fail));
+    }
+
+    #[test]
+    fn error_mode_number_defaults_fail() {
+        let mode = parse_error_mode(&json!(99), &json!({}));
+        assert!(matches!(mode, ErrorMode::Fail));
+    }
+
+    #[test]
+    fn error_mode_empty_object_defaults_fail() {
+        let mode = parse_error_mode(&json!({}), &json!({}));
+        assert!(matches!(mode, ErrorMode::Fail));
     }
 }

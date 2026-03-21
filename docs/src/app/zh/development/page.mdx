@@ -30,6 +30,11 @@ cargo build -p librefang-cli
 
 # 构建桌面应用
 cargo build -p librefang-desktop
+
+# 构建 React Dashboard（Web UI 所需）
+cd crates/librefang-api/dashboard-react
+npm install
+npm run build
 ```
 
 ### 测试
@@ -92,40 +97,60 @@ librefang/
 // crates/librefang-channels/src/my_channel.rs
 
 use async_trait::async_trait;
-use crate::channel::{Channel, Message, ChannelConfig};
+use std::pin::Pin;
+use futures::Stream;
+use crate::types::{ChannelAdapter, ChannelContent, ChannelMessage, ChannelStatus, ChannelType, ChannelUser};
 
 pub struct MyChannel {
-    config: ChannelConfig,
+    // 特定通道的字段（如 API 客户端、配置等）
 }
 
 #[async_trait]
-impl Channel for MyChannel {
-    async fn send(&self, message: Message) -> Result<(), Error> {
-        // 实现发送逻辑
+impl ChannelAdapter for MyChannel {
+    fn name(&self) -> &str {
+        "my_channel"
+    }
+
+    fn channel_type(&self) -> ChannelType {
+        ChannelType::Custom("my_channel".to_string())
+    }
+
+    async fn start(
+        &self,
+    ) -> Result<
+        Pin<Box<dyn Stream<Item = ChannelMessage> + Send>>,
+        Box<dyn std::error::Error + Send + Sync>,
+    > {
+        // 返回传入消息的流
+        todo!()
+    }
+
+    async fn send(
+        &self,
+        _user: &ChannelUser,
+        _content: ChannelContent,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // 向用户发送响应
         Ok(())
     }
 
-    async fn receive(&self) -> Result<Message, Error> {
-        // 实现接收逻辑
-        Ok(Message::default())
+    async fn stop(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        Ok(())
     }
 }
 ```
 
 ### 2. 注册通道
 
+通道适配器通过 `librefang-api/src/server.rs` 中的 `BridgeManager` 注册，
+调用 `bridge_manager.add_adapter(Arc::new(MyChannel::new(config)))` 即可。
+每个适配器都通过 `crates/librefang-channels/Cargo.toml` 中的 Cargo feature flag
+（`channel-my-channel`）进行控制。
+
 ```rust
-// crates/librefang-channels/src/lib.rs
-
+// crates/librefang-channels/src/lib.rs — 添加 feature-gated 模块
+#[cfg(feature = "channel-my-channel")]
 pub mod my_channel;
-
-use crate::registry::ChannelRegistry;
-
-pub fn register_channels(registry: &mut ChannelRegistry) {
-    registry.register("my_channel", |config| {
-        Ok(Box::new(MyChannel::new(config)))
-    });
-}
 ```
 
 ### 3. 添加配置
@@ -394,7 +419,7 @@ cargo version bump patch
 vim CHANGELOG.md
 
 # 3. 创建 tag
-git tag v0.1.0
+git tag v0.7.0
 
 # 4. 构建发布
 cargo build --release

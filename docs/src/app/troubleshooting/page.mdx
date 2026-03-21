@@ -306,7 +306,7 @@ curl -X POST http://127.0.0.1:4545/api/agents/{id}/session/compact
 
 Or via chat command: `/compact`
 
-Auto-compaction is enabled by default when the session reaches the threshold (configurable in `[compaction]`).
+Auto-compaction is enabled by default when the session reaches the threshold (configurable at runtime; not exposed in `config.toml`).
 
 ### Agent not using tools
 
@@ -521,7 +521,9 @@ model = "llama3.2"
 | Binary size | ~30 MB | ~200 MB |
 | Startup | `&lt;200 ms` | `~3 s` |
 
-LibreFang can import OpenClaw configs: `librefang migrate --from openclaw`
+LibreFang can import OpenFang configs: `librefang migrate --from openfang`
+
+LibreFang can also import OpenClaw configs: `librefang migrate --from openclaw`
 
 ### How do I report a bug or request a feature?
 
@@ -560,4 +562,3 @@ The `librefang-kernel` crate assembles everything, but you can use individual cr
 
 
 
-export const sections = [];

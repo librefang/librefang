@@ -1028,6 +1028,62 @@ pub fn load_workflow_definitions(dir: &Path) -> Vec<Workflow> {
     workflows
 }
 
+// ---------------------------------------------------------------------------
+// WorkflowTemplateRegistry — in-memory store for workflow templates
+// ---------------------------------------------------------------------------
+
+use librefang_types::workflow_template::WorkflowTemplate;
+
+/// In-memory registry for storing and retrieving [`WorkflowTemplate`]s.
+///
+/// Thread-safe: the registry is designed to be wrapped in an `Arc` and shared
+/// across async tasks. Internal synchronisation uses a `RwLock`.
+pub struct WorkflowTemplateRegistry {
+    templates: RwLock<HashMap<String, WorkflowTemplate>>,
+}
+
+impl WorkflowTemplateRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self {
+            templates: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Register (insert or update) a template.
+    ///
+    /// If a template with the same `id` already exists it is replaced and the
+    /// old value is returned.
+    pub async fn register(&self, template: WorkflowTemplate) -> Option<WorkflowTemplate> {
+        let mut map = self.templates.write().await;
+        map.insert(template.id.clone(), template)
+    }
+
+    /// Retrieve a template by id, returning a cloned copy.
+    pub async fn get(&self, id: &str) -> Option<WorkflowTemplate> {
+        let map = self.templates.read().await;
+        map.get(id).cloned()
+    }
+
+    /// List all registered templates (order is arbitrary).
+    pub async fn list(&self) -> Vec<WorkflowTemplate> {
+        let map = self.templates.read().await;
+        map.values().cloned().collect()
+    }
+
+    /// Remove a template by id, returning it if it existed.
+    pub async fn remove(&self, id: &str) -> Option<WorkflowTemplate> {
+        let mut map = self.templates.write().await;
+        map.remove(id)
+    }
+}
+
+impl Default for WorkflowTemplateRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1782,5 +1838,91 @@ id = "{id}"
         // created_at should be roughly now (within last 5 seconds)
         let diff = Utc::now() - wf.created_at;
         assert!(diff.num_seconds() < 5);
+    }
+
+    // -- WorkflowTemplateRegistry tests --
+
+    use librefang_types::workflow_template::{
+        ParameterType, TemplateParameter, WorkflowTemplateStep,
+    };
+
+    fn test_template(id: &str) -> WorkflowTemplate {
+        WorkflowTemplate {
+            id: id.to_string(),
+            name: format!("Template {id}"),
+            description: "test".into(),
+            category: None,
+            parameters: vec![TemplateParameter {
+                name: "lang".into(),
+                description: None,
+                param_type: ParameterType::String,
+                default: None,
+                required: true,
+            }],
+            steps: vec![WorkflowTemplateStep {
+                name: "step1".into(),
+                prompt_template: "do {{lang}}".into(),
+                agent: None,
+                depends_on: vec![],
+            }],
+            tags: vec![],
+            created_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn registry_register_and_get() {
+        let reg = WorkflowTemplateRegistry::new();
+        let tpl = test_template("t1");
+
+        assert!(reg.get("t1").await.is_none());
+
+        let prev = reg.register(tpl.clone()).await;
+        assert!(prev.is_none());
+
+        let fetched = reg.get("t1").await.unwrap();
+        assert_eq!(fetched.id, "t1");
+        assert_eq!(fetched.name, "Template t1");
+    }
+
+    #[tokio::test]
+    async fn registry_register_overwrites() {
+        let reg = WorkflowTemplateRegistry::new();
+        reg.register(test_template("t1")).await;
+
+        let mut updated = test_template("t1");
+        updated.name = "Updated".into();
+        let old = reg.register(updated).await;
+        assert!(old.is_some());
+        assert_eq!(old.unwrap().name, "Template t1");
+
+        let fetched = reg.get("t1").await.unwrap();
+        assert_eq!(fetched.name, "Updated");
+    }
+
+    #[tokio::test]
+    async fn registry_list() {
+        let reg = WorkflowTemplateRegistry::new();
+        assert!(reg.list().await.is_empty());
+
+        reg.register(test_template("a")).await;
+        reg.register(test_template("b")).await;
+        reg.register(test_template("c")).await;
+
+        let all = reg.list().await;
+        assert_eq!(all.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn registry_remove() {
+        let reg = WorkflowTemplateRegistry::new();
+        reg.register(test_template("r1")).await;
+
+        let removed = reg.remove("r1").await;
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().id, "r1");
+
+        assert!(reg.get("r1").await.is_none());
+        assert!(reg.remove("r1").await.is_none());
     }
 }

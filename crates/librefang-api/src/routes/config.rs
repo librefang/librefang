@@ -486,6 +486,13 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
     );
+    set!(
+        "workspace_dir",
+        config
+            .workspace_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+    );
 
     // ── Default Model ──
     set!("default_model", {
@@ -798,6 +805,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
     set!("provider_urls", config.provider_urls);
     set!("provider_api_keys", provider_api_keys);
+    set!("provider_regions", config.provider_regions);
 
     set!("vertex_ai", {
         "project_id": config.vertex_ai.project_id,
@@ -1219,7 +1227,8 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
             "stable_prefix_mode": "boolean",
             "prompt_caching": "boolean",
             "max_cron_jobs": "number",
-            "workspaces_dir": "string"
+            "workspaces_dir": "string",
+            "workspace_dir": "string"
         }
     });
     sec!("default_model", {

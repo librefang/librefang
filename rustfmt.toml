@@ -1,0 +1,7 @@
+# LibreFang workspace rustfmt configuration
+# Enforced by CI — run `cargo fmt` before pushing.
+
+edition = "2021"
+max_width = 100
+use_field_init_shorthand = true
+use_try_shorthand = true

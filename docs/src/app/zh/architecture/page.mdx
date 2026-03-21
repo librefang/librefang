@@ -36,8 +36,8 @@ librefang-api            REST/WS/SSE API 服务器 (Axum 0.8), 76 个端点
     |
 librefang-kernel         内核: 组装所有子系统、工作流引擎、RBAC、计量
     |
-    +-- librefang-runtime    Agent 循环、3 个 LLM 驱动、23 个工具、WASM 沙箱、MCP、A2A
-    +-- librefang-channels   40 个通道适配器、桥接器、格式化器、速率限制器
+    +-- librefang-runtime    Agent 循环、3 个 LLM 驱动、60 个工具、WASM 沙箱、MCP、A2A
+    +-- librefang-channels   42 个通道适配器、桥接器、格式化器、速率限制器
     +-- librefang-wire       OFP 点对点网络，HMAC-SHA256 认证
     +-- librefang-migrate    迁移引擎 (OpenClaw YAML→TOML)
     +-- librefang-skills     60 个内置技能、FangHub 市场、ClawHub 客户端
@@ -53,10 +53,10 @@ librefang-types          共享类型: Agent、Capability、Event、Memory、Mes
 |-------|------|
 | **librefang-types** | 核心类型定义。定义 `AgentManifest`、`AgentId`、`Capability`、`ToolDefinition`、`KernelConfig`、污点追踪、Ed25519 清单签名、模型目录类型、MCP/A2A 配置类型。 |
 | **librefang-memory** | SQLite 内存子系统（schema v5）。提供结构化 KV 存储、向量嵌入语义搜索、知识图谱、会话管理、任务板、使用事件持久化。5 个 schema 版本。 |
-| **librefang-runtime** | Agent 执行引擎。包含 agent 循环、3 个原生 LLM 驱动（Anthropic、Gemini、OpenAI 兼容）、23 个内置工具、WASM 沙箱（Masmtime 双燃料+epoch 计量）、MCP 客户端/服务器、A2A 协议、Web 搜索引擎、SSRF 保护、循环守卫、会话修复、LLM 会话压缩器、Merkle 哈希链审计追踪。 |
+| **librefang-runtime** | Agent 执行引擎。包含 agent 循环、3 个原生 LLM 驱动（Anthropic、Gemini、OpenAI 兼容）、60 个内置工具、WASM 沙箱（Wasmtime 双燃料+epoch 计量）、MCP 客户端/服务器、A2A 协议、Web 搜索引擎、SSRF 保护、循环守卫、会话修复、LLM 会话压缩器、Merkle 哈希链审计追踪。 |
 | **librefang-kernel** | 中央协调器。`LibreFangKernel` 组装所有子系统：`AgentRegistry`、`AgentScheduler`、`CapabilityManager`、`EventBus`、`Supervisor`、`WorkflowEngine`、`TriggerEngine`、`BackgroundExecutor`、`WasmSandbox`、`ModelCatalog`、`MeteringEngine`、`ModelRouter`、`AuthManager`、`HeartbeatMonitor`。 |
 | **librefang-api** | 基于 Axum 0.8 的 HTTP API 服务器，76 个端点。包含 REST、WebSocket、SSE 端点。OpenAI 兼容端点 (`/v1/chat/completions`)。中间件：Bearer 认证、请求 ID 注入、结构化日志、GCRA 速率限制、安全头。 |
-| **librefang-channels** | 通道桥接层，40 个适配器。包括 Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email 等。功能：消息路由、生命周期协调、速率限制、格式化器、通道覆盖。 |
+| **librefang-channels** | 通道桥接层，42 个适配器。包括 Telegram、Discord、Slack、WhatsApp、Signal、Matrix、Email 等。功能：消息路由、生命周期协调、速率限制、格式化器、通道覆盖。 |
 | **librefang-wire** | LibreFang 协议 (OFP) 点对点通信。TCP 上的 JSON 帧消息，HMAC-SHA256 双向认证。 |
 | **librefang-cli** | 基于 Clap 的 CLI。支持所有命令：`init`、`start`、`status`、`doctor`、`agent spawn/list/chat/kill`、`workflow`、`trigger`、`skill`、`channel`、`config`、`chat`、`mcp`。 |
 | **librefang-desktop** | Tauri 2.0 原生桌面应用。在进程内启动内核，后台线程运行 axum 服务器，系统托盘、桌面通知、单实例强制。 |
@@ -90,7 +90,7 @@ librefang-types          共享类型: Agent、Capability、Event、Memory、Mes
    - 验证驱动配置
 
 5. 初始化模型目录
-   - 构建包含 51 个内置模型、20+ 别名、20 个提供商的 ModelCatalog
+   - 构建包含 130+ 个内置模型、20+ 别名、28 个提供商的 ModelCatalog
    - 运行 detect_auth() 检查环境变量存在（从不读取密钥）
 
 6. 初始化计量引擎
@@ -180,7 +180,7 @@ LibreFang 使用多层稳定性保护：
 |------|--------|
 | Anthropic | Claude 系列 |
 | Gemini | Google Gemini 系列 |
-| OpenAI 兼容 | 20+ 提供商 (Groq、DeepSeek、OpenRouter 等) |
+| OpenAI 兼容 | 28 个提供商 (Groq、DeepSeek、OpenRouter 等) |
 
 ---
 
@@ -217,7 +217,7 @@ LibreFang 使用多层稳定性保护：
 
 ## 通道系统
 
-40 个通道适配器：
+42 个通道适配器：
 
 **核心**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
 

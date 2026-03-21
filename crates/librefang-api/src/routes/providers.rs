@@ -337,6 +337,29 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             "base_url": p.base_url,
         });
 
+        // Attach region map so the dashboard can show available regions
+        if !p.regions.is_empty() {
+            let regions: serde_json::Map<String, serde_json::Value> = p
+                .regions
+                .iter()
+                .map(|(name, rc)| {
+                    (
+                        name.clone(),
+                        serde_json::json!({
+                            "base_url": rc.base_url,
+                            "api_key_env": rc.api_key_env,
+                        }),
+                    )
+                })
+                .collect();
+            entry["regions"] = serde_json::Value::Object(regions);
+
+            // Mark which region is active (if configured via [provider_regions])
+            if let Some(active) = state.kernel.config.provider_regions.get(&p.id) {
+                entry["active_region"] = serde_json::json!(active);
+            }
+        }
+
         // For local providers, attach the probe result
         if let Some(probe) = probe_map.remove(&i) {
             attach_probe_result(&mut entry, &probe, &p.id, &state.kernel.model_catalog);
