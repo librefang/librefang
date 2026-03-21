@@ -1185,7 +1185,12 @@ pub async fn run_agent_loop(
                     });
 
                     // Stop executing remaining tool calls on failure (#948)
-                    if result.is_error {
+                    // but not for approval denials — those should continue the loop
+                    let is_approval_denial = result.is_error
+                        && result
+                            .content
+                            .contains("requires human approval and was denied");
+                    if result.is_error && !is_approval_denial {
                         warn!(
                             tool = %tool_call.name,
                             "Tool execution failed — skipping remaining tool calls"
@@ -1233,12 +1238,14 @@ pub async fn run_agent_loop(
                     });
                 }
 
-                // Check if ALL tool results are errors — stop the loop (#948)
+                // Check if ALL tool results are non-denial errors — stop the loop (#948)
                 let total_tool_results = tool_result_blocks
                     .iter()
                     .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
                     .count();
-                let all_failed = total_tool_results > 0 && error_count == total_tool_results;
+                let all_failed = total_tool_results > 0
+                    && non_denial_errors > 0
+                    && non_denial_errors == total_tool_results - denial_count;
 
                 // Add tool results as a user message (Anthropic API requirement)
                 let tool_results_msg = Message {
@@ -2470,7 +2477,12 @@ pub async fn run_agent_loop_streaming(
                     });
 
                     // Stop executing remaining tool calls on failure (#948)
-                    if result.is_error {
+                    // but not for approval denials — those should continue the loop
+                    let is_approval_denial = result.is_error
+                        && result
+                            .content
+                            .contains("requires human approval and was denied");
+                    if result.is_error && !is_approval_denial {
                         warn!(
                             tool = %tool_call.name,
                             "Tool execution failed — skipping remaining tool calls (streaming)"
@@ -2518,12 +2530,14 @@ pub async fn run_agent_loop_streaming(
                     });
                 }
 
-                // Check if ALL tool results are errors — stop the loop (#948)
+                // Check if ALL tool results are non-denial errors — stop the loop (#948)
                 let total_tool_results = tool_result_blocks
                     .iter()
                     .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
                     .count();
-                let all_failed = total_tool_results > 0 && error_count == total_tool_results;
+                let all_failed = total_tool_results > 0
+                    && non_denial_errors > 0
+                    && non_denial_errors == total_tool_results - denial_count;
 
                 let tool_results_msg = Message {
                     role: Role::User,
@@ -2572,7 +2586,9 @@ pub async fn run_agent_loop_streaming(
                     }
                     // Stream the error to the client
                     let _ = stream_tx
-                        .send(StreamEvent::Text(error_response.clone()))
+                        .send(StreamEvent::TextDelta {
+                            text: error_response.clone(),
+                        })
                         .await;
                     // Fire AgentLoopEnd hook
                     if let Some(hook_reg) = hooks {
