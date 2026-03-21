@@ -347,10 +347,24 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 backdrop-blur-sm" onClick={onClose}>
-      <div className="bg-surface border border-border-subtle rounded-2xl w-full max-w-md p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
-        <h3 className="text-lg font-black mb-2">{t("channels.configure")}: {channel.display_name || channel.name}</h3>
-        <p className="text-xs text-text-dim mb-6">{channel.description}</p>
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 backdrop-blur-sm" onClick={onClose}>
+      <div className="bg-surface border border-border-subtle rounded-2xl w-full max-w-md max-w-[90vw] shadow-2xl animate-fade-in-up" onClick={e => e.stopPropagation()}>
+        <div className="px-6 py-5 border-b border-border-subtle">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center">
+                <Settings className="w-5 h-5 text-brand" />
+              </div>
+              <div>
+                <h3 className="text-base font-black">{channel.display_name || channel.name}</h3>
+                <p className="text-[10px] text-text-dim mt-0.5">{t("channels.configure")}</p>
+              </div>
+            </div>
+            <button onClick={onClose} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
+          </div>
+        </div>
+        <div className="p-6">
+        <p className="text-xs text-text-dim mb-5">{channel.description}</p>
 
         {/* 已添加的配置 */}
         {Object.keys(configs).length > 0 && (
@@ -400,6 +414,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
           <Button variant="primary" className="flex-1" onClick={() => configMutation.mutate()} disabled={configMutation.isPending}>
             {configMutation.isPending ? t("common.saving") : t("common.save")}
           </Button>
+        </div>
         </div>
       </div>
     </div>
