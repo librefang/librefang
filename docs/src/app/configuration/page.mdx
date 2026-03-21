@@ -16,6 +16,8 @@ Complete reference for `config.toml`, covering every configurable field in the L
   - [\[memory\]](#memory)
   - [\[network\]](#network)
   - [\[web\]](#web)
+  - [\[media\]](#media)
+  - [\[links\]](#links)
   - [\[channels\]](#channels)
   - [\[\[mcp\_servers\]\]](#mcp_servers)
   - [\[a2a\]](#a2a)
@@ -148,6 +150,12 @@ max_cron_jobs = 500                   # Global max cron jobs
 cors_origin = []                      # CORS allowed origins
 include = []                          # Config file includes
 
+[provider_urls]
+# ollama = "http://192.168.1.100:11434/v1"
+
+[provider_api_keys]
+# nvidia = "NVIDIA_API_KEY"
+
 # --- Default LLM Provider ---
 [default_model]
 provider = "anthropic"
@@ -209,6 +217,22 @@ max_chars = 50000
 max_response_bytes = 10485760         # 10 MB
 timeout_secs = 30
 readability = true
+
+# --- Media Understanding ---
+[media]
+image_description = true
+audio_transcription = true
+video_description = false
+max_concurrency = 2
+# image_provider = "openai"
+# audio_provider = "openai"
+
+# --- Link Understanding ---
+[links]
+enabled = false
+max_links = 3
+max_content_bytes = 102400
+timeout_secs = 10
 
 # --- MCP Servers ---
 [[mcp_servers]]
@@ -279,12 +303,22 @@ poll_interval_secs = 1
 [channels.discord]
 bot_token_env = "DISCORD_BOT_TOKEN"
 allowed_guilds = []
-intents = 33280
+intents = 37376
 
 [channels.slack]
 app_token_env = "SLACK_APP_TOKEN"
 bot_token_env = "SLACK_BOT_TOKEN"
 allowed_channels = []
+
+# [channels.qq]
+# app_id = "your-app-id"
+# app_secret_env = "QQ_BOT_APP_SECRET"
+
+# [channels.wecom]
+# corp_id = "your-corp-id"
+# agent_id = "your-agent-id"
+# secret_env = "WECOM_SECRET"
+# webhook_port = 8454
 
 # --- Browser Automation ---
 [browser]
@@ -343,6 +377,9 @@ timeout_secs = 60
 read_only_root = true
 mode = "off"                          # off | non_main | all
 scope = "session"                     # session | agent | shared
+cap_add = []                          # e.g., ["NET_ADMIN"]
+tmpfs = ["/tmp:size=64m"]
+pids_limit = 100
 
 # --- Vault ---
 [vault]
@@ -431,6 +468,8 @@ These fields sit at the root of `config.toml` (not inside any `[section]`).
 | `max_cron_jobs` | usize | `500` | Global maximum number of cron jobs across all agents. |
 | `workspaces_dir` | path or null | `null` | Root directory for agent workspaces. Defaults to `~/.librefang/workspaces`. |
 | `include` | list of strings | `[]` | Config file includes (relative paths). See [Config Include Mechanism](#config-include-mechanism). |
+| `provider_urls` | map of string→string | `{}` | Provider base URL overrides. Maps provider ID to custom base URL (e.g., `ollama = "http://192.168.1.100:11434/v1"`). Useful for self-hosted or proxied endpoints. |
+| `provider_api_keys` | map of string→string | `{}` | Provider API key env var overrides. Maps provider ID to the name of an environment variable holding the key (e.g., `nvidia = "NVIDIA_API_KEY"`). When not set for a provider, the convention `{PROVIDER_UPPER}_API_KEY` is used. |
 
 **`mode` values:**
 
@@ -612,11 +651,63 @@ readability = true
 
 ---
 
+### `[media]`
+
+Configures media understanding (image description, audio transcription, video description) for messages that include attachments.
+
+```toml
+[media]
+image_description = true
+audio_transcription = true
+video_description = false
+max_concurrency = 2
+# image_provider = "openai"   # auto-detect if omitted
+# audio_provider = "openai"   # auto-detect if omitted
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `image_description` | bool | `true` | Enable automatic image description for incoming image attachments. |
+| `audio_transcription` | bool | `true` | Enable automatic audio transcription for incoming audio attachments. |
+| `video_description` | bool | `false` | Enable video description. Disabled by default (expensive and slow). |
+| `max_concurrency` | usize | `2` | Maximum number of concurrent media processing tasks. |
+| `image_provider` | string or null | `null` | Preferred provider for image description. Auto-detected from available providers if `null`. |
+| `audio_provider` | string or null | `null` | Preferred provider for audio transcription. Auto-detected from available providers if `null`. |
+
+---
+
+### `[links]`
+
+Configures automatic link understanding — fetching and summarizing URLs found in incoming messages.
+
+```toml
+[links]
+enabled = false
+max_links = 3
+max_content_bytes = 102400
+timeout_secs = 10
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable automatic link understanding. When `true`, URLs in messages are fetched and their content is summarized before the agent processes the message. |
+| `max_links` | usize | `3` | Maximum number of links to process per message. Additional links are ignored. |
+| `max_content_bytes` | usize | `102400` (100 KB) | Maximum content size to fetch per link in bytes. Content exceeding this is truncated. |
+| `timeout_secs` | u64 | `10` | Per-link fetch timeout in seconds. |
+
+---
+
 ### `[channels]`
 
 All 42 channel adapters are configured under `[channels.<name>]`. Each channel is `Option<T>` -- omitting the section disables the adapter entirely. Including the section header (even empty) enables it with default values.
 
-Every channel config includes a `default_agent` field (optional agent name to route messages to) and an `overrides` sub-table (see [Channel Overrides](#channel-overrides)).
+**Universal channel fields:** Every channel adapter supports the following common fields in addition to its own specific fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `default_agent` | string or null | `null` | Agent name to route messages to by default. |
+| `account_id` | string or null | `null` | Unique identifier for this bot instance. Used for multi-bot routing via `[[bindings]]` match rules. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
 
 #### `[channels.telegram]`
 
@@ -626,6 +717,8 @@ bot_token_env = "TELEGRAM_BOT_TOKEN"
 allowed_users = []
 # default_agent = "assistant"
 poll_interval_secs = 1
+# api_url = "https://api.telegram.org"  # override for local Bot API server
+# account_id = "my-telegram-bot"
 ```
 
 | Field | Type | Default | Description |
@@ -634,6 +727,9 @@ poll_interval_secs = 1
 | `allowed_users` | list of i64 | `[]` | Telegram user IDs allowed to interact. Empty = allow all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 | `poll_interval_secs` | u64 | `1` | Long-polling interval in seconds. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `api_url` | string or null | `null` | Override the Telegram Bot API base URL. Useful for local Bot API server instances. Defaults to `https://api.telegram.org`. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
 
 #### `[channels.discord]`
 
@@ -642,7 +738,9 @@ poll_interval_secs = 1
 bot_token_env = "DISCORD_BOT_TOKEN"
 allowed_guilds = []
 # default_agent = "assistant"
-intents = 33280
+intents = 37376
+ignore_bots = true
+# account_id = "my-discord-bot"
 ```
 
 | Field | Type | Default | Description |
@@ -650,7 +748,11 @@ intents = 33280
 | `bot_token_env` | string | `"DISCORD_BOT_TOKEN"` | Env var holding the Discord bot token. |
 | `allowed_guilds` | list of u64 | `[]` | Guild (server) IDs allowed. Empty = allow all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
-| `intents` | u64 | `33280` | Gateway intents bitmask. Default = `GUILD_MESSAGES \| MESSAGE_CONTENT`. |
+| `allowed_users` | list of strings | `[]` | Discord user IDs allowed to interact. Empty = allow all. |
+| `intents` | u64 | `37376` | Gateway intents bitmask. Default = `GUILD_MESSAGES \| DIRECT_MESSAGES \| MESSAGE_CONTENT` (37376). |
+| `ignore_bots` | bool | `true` | When `true`, messages from other bots are ignored. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
 
 #### `[channels.slack]`
 
@@ -659,6 +761,7 @@ intents = 33280
 app_token_env = "SLACK_APP_TOKEN"
 bot_token_env = "SLACK_BOT_TOKEN"
 allowed_channels = []
+# account_id = "my-slack-bot"
 ```
 
 | Field | Type | Default | Description |
@@ -667,6 +770,8 @@ allowed_channels = []
 | `bot_token_env` | string | `"SLACK_BOT_TOKEN"` | Env var holding the Slack bot token (`xoxb-`) for REST API. |
 | `allowed_channels` | list of strings | `[]` | Channel IDs allowed. Empty = allow all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
 
 #### `[channels.whatsapp]`
 
@@ -677,6 +782,9 @@ verify_token_env = "WHATSAPP_VERIFY_TOKEN"
 phone_number_id = ""
 webhook_port = 8443
 allowed_users = []
+# gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"  # for QR/Web mode
+# account_id = "my-whatsapp-bot"
+# owner_numbers = []   # optional admin phone numbers
 ```
 
 | Field | Type | Default | Description |
@@ -685,8 +793,12 @@ allowed_users = []
 | `verify_token_env` | string | `"WHATSAPP_VERIFY_TOKEN"` | Env var holding the webhook verification token. |
 | `phone_number_id` | string | `""` | WhatsApp Business phone number ID. |
 | `webhook_port` | u16 | `8443` | Port to listen for incoming webhook callbacks. |
+| `gateway_url_env` | string | `"WHATSAPP_WEB_GATEWAY_URL"` | Env var holding the WhatsApp Web gateway URL. When set, outgoing messages are routed through the QR/Web gateway instead of the Cloud API. |
 | `allowed_users` | list of strings | `[]` | Phone numbers allowed. Empty = allow all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `owner_numbers` | list of strings | `[]` | Phone numbers with administrative privileges for this bot instance. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
 
 #### `[channels.signal]`
 
@@ -1286,6 +1398,56 @@ organization_id = ""
 | `organization_id` | string | `""` | LinkedIn organization ID for messaging. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 
+#### `[channels.qq]`
+
+QQ Bot channel adapter using the official QQ Bot Open Platform API.
+
+```toml
+[channels.qq]
+app_id = "your-app-id"
+app_secret_env = "QQ_BOT_APP_SECRET"
+allowed_users = []
+# default_agent = "assistant"
+# account_id = "my-qq-bot"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `app_id` | string | `""` | QQ Bot application ID registered on the QQ Open Platform. |
+| `app_secret_env` | string | `"QQ_BOT_APP_SECRET"` | Env var holding the QQ Bot application secret. The actual secret is never stored in config. |
+| `allowed_users` | list of strings | `[]` | QQ user IDs allowed to interact. Empty = allow all. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+
+#### `[channels.wecom]`
+
+WeCom (formerly WeChat Work / Enterprise WeChat) channel adapter.
+
+```toml
+[channels.wecom]
+corp_id = "your-corp-id"
+agent_id = "your-agent-id"
+secret_env = "WECOM_SECRET"
+webhook_port = 8454
+# token_env = "WECOM_TOKEN"
+# encoding_aes_key_env = "WECOM_AES_KEY"
+# default_agent = "assistant"
+# account_id = "my-wecom-bot"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `corp_id` | string | `""` | WeCom corporation ID. |
+| `agent_id` | string | `""` | WeCom application agent ID. |
+| `secret_env` | string | `"WECOM_SECRET"` | Env var holding the WeCom application secret. |
+| `webhook_port` | u16 | `8454` | Port for the incoming webhook. |
+| `token_env` | string or null | `null` | Env var holding the callback verification token. Required for verifying incoming messages. |
+| `encoding_aes_key_env` | string or null | `null` | Env var holding the encoding AES key for message encryption/decryption. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+
 ---
 
 ### `[[mcp_servers]]`
@@ -1772,6 +1934,9 @@ blocked_mounts = []
 | `idle_timeout_secs` | u64 | `86400` | Destroy containers after this many seconds of inactivity (24 hours default). |
 | `max_age_secs` | u64 | `604800` | Maximum container age before forced destruction (7 days default). |
 | `blocked_mounts` | list of strings | `[]` | Host paths blocked from bind mounting into containers. |
+| `cap_add` | list of strings | `[]` | Linux capabilities to add to the container (e.g., `["NET_ADMIN"]`). Use with caution. |
+| `tmpfs` | list of strings | `["/tmp:size=64m"]` | tmpfs mounts inside the container. Each entry is `"path:options"` (e.g., `"/tmp:size=128m"`). |
+| `pids_limit` | u32 | `100` | Maximum number of processes inside the container. Prevents fork bombs. |
 
 **`mode` values:**
 
