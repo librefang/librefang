@@ -1253,8 +1253,8 @@ librefang migrate --from <FRAMEWORK> [--source-dir <PATH>] [--dry-run]
 
 | Option | Description |
 |---|---|
-| `--from <FRAMEWORK>` | Source framework. One of: `openclaw`, `langchain`, `autogpt`. |
-| `--source-dir <PATH>` | Path to the source workspace. Auto-detected if not set (e.g. `~/.openclaw`, `~/.langchain`, `~/Auto-GPT`). |
+| `--from <FRAMEWORK>` | Source framework. One of: `openfang`, `openclaw`, `langchain`, `autogpt`. |
+| `--source-dir <PATH>` | Path to the source workspace. Auto-detected if not set (e.g. `~/.openfang`, `~/.openclaw`, `~/.langchain`, `~/Auto-GPT`). |
 | `--dry-run` | Show what would be imported without making changes. |
 
 **Behavior:**
@@ -1266,6 +1266,9 @@ librefang migrate --from <FRAMEWORK> [--source-dir <PATH>] [--dry-run]
 **Example:**
 
 ```bash
+# Migrate from OpenFang (auto-detect ~/.openfang)
+librefang migrate --from openfang
+
 # Dry run migration from OpenClaw
 librefang migrate --from openclaw --dry-run
 
@@ -1524,6 +1527,9 @@ librefang config edit
 ### Migration from other frameworks
 
 ```bash
+# Migrate from OpenFang (auto-detects ~/.openfang)
+librefang migrate --from openfang
+
 # Preview migration
 librefang migrate --from openclaw --dry-run
 

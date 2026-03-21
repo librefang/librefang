@@ -8,9 +8,45 @@ Migrating to LibreFang from other systems.
 
 LibreFang provides the following migration support:
 
+- **OpenFang** - Automated migration via `librefang-migrate` crate (`librefang migrate --from openfang`)
 - **OpenClaw** - Automated migration via `librefang-migrate` crate (`librefang migrate --from openclaw`)
 - **LangChain** - Manual migration guide (no automated tooling)
 - **AutoGPT** - Manual migration guide (no automated tooling)
+
+---
+
+## Migrating from OpenFang
+
+OpenFang and LibreFang share the same directory structure and config format (LibreFang is a community fork of OpenFang). Migration is a straightforward recursive copy of `~/.openfang` → `~/.librefang` with content rewriting in `.toml` and `.env` files.
+
+### Automatic Migration
+
+```bash
+# Migrate everything
+librefang migrate --from openfang
+
+# Migrate from specific path
+librefang migrate --from openfang --path ~/.openfang
+
+# Preview mode (no execution)
+librefang migrate --from openfang --dry-run
+```
+
+### Migration Content
+
+| Content | Supported | Description |
+|---------|-----------|-------------|
+| Agent Manifests | ✅ | Direct copy (TOML format shared) |
+| Skill Configurations | ✅ | Direct copy |
+| Channel Configurations | ✅ | Direct copy |
+| Memory Data | ✅ | Direct copy |
+| Sessions | ✅ | Direct copy |
+| Config Files | ✅ | Content rewriting (`openfang` → `librefang`) |
+| Environment Files | ✅ | Variable rewriting (`OPENFANG_` → `LIBREFANG_`) |
+
+<Note>
+  Existing files in `~/.librefang` are never overwritten. The migration only copies files that do not already exist at the destination.
+</Note>
 
 ---
 
