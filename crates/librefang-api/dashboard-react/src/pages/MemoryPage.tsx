@@ -143,34 +143,20 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-      <Card padding="md" hover>
-        <div className="flex items-center gap-2 mb-2">
-          <Database className="w-4 h-4 text-brand" />
-          <span className="text-[10px] font-black uppercase text-text-dim">{t("memory.total_memories")}</span>
-        </div>
-        <p className="text-2xl font-black">{stats.total ?? 0}</p>
-      </Card>
-      <Card padding="md" hover>
-        <div className="flex items-center gap-2 mb-2">
-          <Sparkles className="w-4 h-4 text-success" />
-          <span className="text-[10px] font-black uppercase text-text-dim">{t("memory.episodic")}</span>
-        </div>
-        <p className="text-2xl font-black">{(stats as any).episodic_count ?? 0}</p>
-      </Card>
-      <Card padding="md" hover>
-        <div className="flex items-center gap-2 mb-2">
-          <Zap className="w-4 h-4 text-warning" />
-          <span className="text-[10px] font-black uppercase text-text-dim">{t("memory.semantic")}</span>
-        </div>
-        <p className="text-2xl font-black">{(stats as any).semantic_count ?? 0}</p>
-      </Card>
-      <Card padding="md" hover>
-        <div className="flex items-center gap-2 mb-2">
-          <Clock className="w-4 h-4 text-accent" />
-          <span className="text-[10px] font-black uppercase text-text-dim">{t("memory.working")}</span>
-        </div>
-        <p className="text-2xl font-black">{(stats as any).working_count ?? 0}</p>
-      </Card>
+      {[
+        { icon: Database, label: t("memory.total_memories"), value: stats.total ?? 0, color: "text-brand", bg: "bg-brand/10" },
+        { icon: Sparkles, label: t("memory.episodic"), value: (stats as any).episodic_count ?? 0, color: "text-success", bg: "bg-success/10" },
+        { icon: Zap, label: t("memory.semantic"), value: (stats as any).semantic_count ?? 0, color: "text-warning", bg: "bg-warning/10" },
+        { icon: Clock, label: t("memory.working"), value: (stats as any).working_count ?? 0, color: "text-accent", bg: "bg-accent/10" },
+      ].map((kpi, i) => (
+        <Card key={i} hover padding="md">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{kpi.label}</span>
+            <div className={`w-8 h-8 rounded-lg ${kpi.bg} flex items-center justify-center`}><kpi.icon className={`w-4 h-4 ${kpi.color}`} /></div>
+          </div>
+          <p className={`text-3xl font-black tracking-tight mt-2 ${kpi.color}`}>{kpi.value}</p>
+        </Card>
+      ))}
     </div>
   );
 }

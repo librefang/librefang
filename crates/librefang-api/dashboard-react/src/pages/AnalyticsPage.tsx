@@ -52,18 +52,18 @@ export function AnalyticsPage() {
           {/* KPI Cards */}
           <div className="grid gap-4 md:grid-cols-4">
             {[
-              { icon: Zap, label: t("analytics.total_calls"), value: usage?.call_count ?? 0, color: "text-brand" },
-              { icon: Cpu, label: t("analytics.total_tokens_label"), value: `${(((usage?.total_input_tokens ?? 0) + (usage?.total_output_tokens ?? 0)) / 1000).toFixed(0)}K`, color: "text-purple-500" },
-              { icon: DollarSign, label: t("analytics.total_cost"), value: `$${(usage?.total_cost_usd ?? 0).toFixed(4)}`, color: "text-success" },
-              { icon: TrendingUp, label: t("analytics.today_cost"), value: `$${(daily?.today_cost_usd ?? 0).toFixed(4)}`, color: "text-warning" },
+              { icon: Zap, label: t("analytics.total_calls"), value: usage?.call_count ?? 0, color: "text-brand", bg: "bg-brand/10" },
+              { icon: Cpu, label: t("analytics.total_tokens_label"), value: `${(((usage?.total_input_tokens ?? 0) + (usage?.total_output_tokens ?? 0)) / 1000).toFixed(0)}K`, color: "text-purple-500", bg: "bg-purple-500/10" },
+              { icon: DollarSign, label: t("analytics.total_cost"), value: `$${(usage?.total_cost_usd ?? 0).toFixed(4)}`, color: "text-success", bg: "bg-success/10" },
+              { icon: TrendingUp, label: t("analytics.today_cost"), value: `$${(daily?.today_cost_usd ?? 0).toFixed(4)}`, color: "text-warning", bg: "bg-warning/10" },
             ].map((kpi, i) => (
-              <div key={i} className="p-4 rounded-2xl border border-border-subtle bg-surface">
-                <div className="flex items-center gap-2 mb-2">
-                  <kpi.icon className={`w-4 h-4 ${kpi.color}`} />
-                  <span className="text-[10px] font-bold text-text-dim uppercase">{kpi.label}</span>
+              <Card key={i} hover padding="md">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{kpi.label}</span>
+                  <div className={`w-8 h-8 rounded-lg ${kpi.bg} flex items-center justify-center`}><kpi.icon className={`w-4 h-4 ${kpi.color}`} /></div>
                 </div>
-                <p className="text-2xl font-black">{kpi.value}</p>
-              </div>
+                <p className={`text-3xl font-black tracking-tight mt-2 ${kpi.color}`}>{kpi.value}</p>
+              </Card>
             ))}
           </div>
 
