@@ -187,6 +187,7 @@ function WorkflowList({
   onSelect: (w: WorkflowItem) => void; onDelete: (id: string) => void;
   onRun: (id: string) => void; isRunning: string | null; t: (key: string) => string;
 }) {
+  const [confirmId, setConfirmId] = useState<string | null>(null);
   return (
     <Card padding="md" className="w-72 border-r border-border-subtle bg-main/30 overflow-y-auto rounded-none">
       <div className="flex items-center justify-between mb-4">
@@ -202,20 +203,34 @@ function WorkflowList({
               className={`p-3 rounded-xl border cursor-pointer transition-all ${
                 selectedId === w.id ? "border-brand bg-brand/5" : "border-border-subtle hover:border-brand/50 bg-surface"
               }`}>
-              <div className="flex items-center justify-between">
-                <span className="text-sm font-bold truncate">{w.name}</span>
-                <div className="flex gap-1">
-                  <button onClick={(e) => { e.stopPropagation(); onRun(w.id); }} disabled={isRunning === w.id}
-                    className="p-1.5 rounded-lg hover:bg-success/10 text-success disabled:opacity-50">
-                    {isRunning === w.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                  </button>
-                  <button onClick={(e) => { e.stopPropagation(); onDelete(w.id); }}
-                    className="p-1.5 rounded-lg hover:bg-error/10 text-error">
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
+              {confirmId === w.id ? (
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-text-dim truncate">{t("workflows.delete_confirm")}</span>
+                  <div className="flex gap-1 shrink-0">
+                    <button onClick={(e) => { e.stopPropagation(); onDelete(w.id); setConfirmId(null); }}
+                      className="px-2 py-1 rounded-lg bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
+                    <button onClick={(e) => { e.stopPropagation(); setConfirmId(null); }}
+                      className="px-2 py-1 rounded-lg bg-surface text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
+                  </div>
                 </div>
-              </div>
-              <p className="text-[10px] text-text-dim mt-1 truncate">{w.description || "-"}</p>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-bold truncate">{w.name}</span>
+                    <div className="flex gap-1">
+                      <button onClick={(e) => { e.stopPropagation(); onRun(w.id); }} disabled={isRunning === w.id}
+                        className="p-1.5 rounded-lg hover:bg-success/10 text-success disabled:opacity-50">
+                        {isRunning === w.id ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                      </button>
+                      <button onClick={(e) => { e.stopPropagation(); setConfirmId(w.id); }}
+                        className="p-1.5 rounded-lg hover:bg-error/10 text-error">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                  <p className="text-[10px] text-text-dim mt-1 truncate">{w.description || "-"}</p>
+                </>
+              )}
             </div>
           ))
         )}
@@ -1226,8 +1241,7 @@ function CanvasPageInner() {
   }, [selectedWorkflow, nodes, edges, workflowName, workflowDescription, buildSteps, runInput, t, showError]);
 
   // 删除工作流
-  const handleDelete = useCallback(async (id: string) => {
-    if (!window.confirm(t("workflows.delete_confirm"))) return;
+  const handleDeleteConfirmed = useCallback(async (id: string) => {
     try {
       await deleteWorkflow(id);
       setWorkflows(prev => prev.filter(w => w.id !== id));
@@ -1237,7 +1251,7 @@ function CanvasPageInner() {
         setWorkflowName(""); setWorkflowDescription("");
       }
     } catch (e) { console.error(e); }
-  }, [selectedWorkflow, t, setNodes, setEdges]);
+  }, [selectedWorkflow, setNodes, setEdges]);
 
   // 选择已保存的工作流
   const handleSelectWorkflow = useCallback((w: WorkflowItem) => {
@@ -1392,7 +1406,7 @@ function CanvasPageInner() {
       <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface">
         {showWorkflowPanel && (
           <WorkflowList workflows={workflows} selectedId={selectedWorkflow?.id || null}
-            onSelect={handleSelectWorkflow} onDelete={handleDelete} onRun={handleRunClick}
+            onSelect={handleSelectWorkflow} onDelete={handleDeleteConfirmed} onRun={handleRunClick}
             isRunning={runningWorkflowId} t={t} />
         )}
 

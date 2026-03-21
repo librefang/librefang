@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
-import { Search, Home, Layers, MessageCircle, Users, Server, Network, Calendar, Shield, BarChart3, FileText, Settings, Bot } from "lucide-react";
+import { Search, Home, Layers, MessageCircle, Server, Network, Calendar, Shield, BarChart3, FileText, Settings, Bot } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
 interface CommandItem {
@@ -25,8 +25,8 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   const commands: CommandItem[] = [
     { id: "overview", label: "Overview", labelZh: "概览", category: "Core", icon: Home, action: () => navigate({ to: "/overview" }) },
     { id: "workflows", label: "Workflows", labelZh: "工作流", category: "Core", icon: Layers, action: () => navigate({ to: "/workflows" }) },
-    { id: "canvas", label: "Canvas", labelZh: "画布", category: "Core", icon: Layers, action: () => navigate({ to: "/canvas" }) },
-    { id: "chat", label: "Chat", labelZh: "对话", category: "Core", icon: MessageCircle, action: () => navigate({ to: "/chat" }) },
+    { id: "canvas", label: "Canvas", labelZh: "画布", category: "Core", icon: Layers, action: () => navigate({ to: "/canvas", search: { t: Date.now() } }) },
+    { id: "chat", label: "Chat", labelZh: "对话", category: "Core", icon: MessageCircle, action: () => navigate({ to: "/chat", search: { agentId: undefined } }) },
     { id: "agents", label: "Agents", labelZh: "智能体", category: "Resources", icon: Bot, action: () => navigate({ to: "/agents" }) },
     { id: "providers", label: "Providers", labelZh: "供应商", category: "Resources", icon: Server, action: () => navigate({ to: "/providers" }) },
     { id: "channels", label: "Channels", labelZh: "通道", category: "Resources", icon: Network, action: () => navigate({ to: "/channels" }) },

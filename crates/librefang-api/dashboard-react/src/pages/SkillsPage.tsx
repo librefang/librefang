@@ -201,11 +201,11 @@ function DetailsModal({ skill, onClose, onInstall, pendingId, t }: {
               <>
                 <span className="flex items-center gap-1">
                   <Star className="w-4 h-4 text-warning" />
-                  {skill.stars} stars
+                  {skill.stars} {t("skills.stars_count")}
                 </span>
                 <span className="flex items-center gap-1">
                   <Download className="w-4 h-4" />
-                  {skill.downloads} downloads
+                  {skill.downloads} {t("skills.downloads_count")}
                 </span>
               </>
             ) : skill.updated_at ? (
@@ -361,7 +361,7 @@ export function SkillsPage() {
     },
     onError: (error: any) => {
       const msg = error.message || t("common.error");
-      addToast(msg.includes("abort") ? "Installation timed out" : msg, "error");
+      addToast(msg.includes("abort") ? t("skills.install_timeout") : msg, "error");
       setInstallingId(null);
     }
   });

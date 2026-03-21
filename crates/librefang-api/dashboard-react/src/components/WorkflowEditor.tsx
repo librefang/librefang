@@ -1,4 +1,4 @@
-import { useCallback, useState, useEffect, useMemo } from "react";
+import { useCallback, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   ReactFlow,
@@ -54,6 +54,7 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
   const { theme } = useUIStore();
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
 
   const onConnect = useCallback((params: Connection) => setEdges((eds) => addEdge(params, eds)), [setEdges]);
 
@@ -79,10 +80,22 @@ export function WorkflowEditor({ initialNodes = [], initialEdges = [], onSave, o
             <p className="text-[10px] font-bold text-text-dim uppercase tracking-widest">{t("canvas.subtitle")}</p>
           </div>
         </div>
-        <div className="flex gap-3">
-          <button onClick={() => window.confirm(t("canvas.clear_confirm")) && setNodes([])} className="px-4 py-2 rounded-xl border border-border-subtle text-sm font-bold text-text-dim hover:text-brand transition-all">
-            {t("common.clear")}
-          </button>
+        <div className="flex gap-3 items-center">
+          {showClearConfirm ? (
+            <>
+              <span className="text-xs text-text-dim">{t("canvas.clear_confirm")}</span>
+              <button onClick={() => { setNodes([]); setShowClearConfirm(false); }} className="px-3 py-1.5 rounded-xl bg-error text-white text-sm font-bold">
+                {t("common.confirm")}
+              </button>
+              <button onClick={() => setShowClearConfirm(false)} className="px-3 py-1.5 rounded-xl border border-border-subtle text-sm font-bold text-text-dim">
+                {t("common.cancel")}
+              </button>
+            </>
+          ) : (
+            <button onClick={() => setShowClearConfirm(true)} className="px-4 py-2 rounded-xl border border-border-subtle text-sm font-bold text-text-dim hover:text-brand transition-all">
+              {t("common.clear")}
+            </button>
+          )}
           <button onClick={() => onSave?.(nodes, edges)} className="px-8 py-2 rounded-xl bg-brand text-white text-sm font-black shadow-lg shadow-brand/20 hover:opacity-90 transition-all">
             {t("common.save")}
           </button>

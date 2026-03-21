@@ -327,13 +327,13 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
             <div className="space-y-2">
               {provider.base_url && (
                 <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
-                  <span className="text-xs font-bold text-text-dim">Base URL</span>
+                  <span className="text-xs font-bold text-text-dim">{t("providers.base_url")}</span>
                   <span className="text-xs font-mono text-text-main truncate max-w-[200px]">{provider.base_url}</span>
                 </div>
               )}
               {provider.api_key_env && (
                 <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
-                  <span className="text-xs font-bold text-text-dim">API Key</span>
+                  <span className="text-xs font-bold text-text-dim">{t("providers.api_key")}</span>
                   <span className="text-xs font-mono text-text-main">{provider.api_key_env}</span>
                 </div>
               )}

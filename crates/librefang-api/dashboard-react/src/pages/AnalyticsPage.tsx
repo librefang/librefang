@@ -4,9 +4,8 @@ import { useTranslation } from "react-i18next";
 import { getUsageSummary, listUsageByAgent, listUsageByModel, getUsageDaily, getBudgetStatus, updateBudget } from "../api";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
-import { Badge } from "../components/ui/Badge";
 import { BarChart3, DollarSign, Shield, Save, Loader2, RefreshCw, Cpu, Users, Zap, TrendingUp } from "lucide-react";
-import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from "recharts";
+import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 
 const REFRESH_MS = 30000;
 
@@ -82,11 +81,11 @@ export function AnalyticsPage() {
                 <p className="text-xs text-text-dim italic text-center py-4">{t("common.no_data")}</p>
               ) : (
                 <ResponsiveContainer width="100%" height={Math.max(usageByAgent.slice(0, 8).length * 36, 100)}>
-                  <BarChart data={usageByAgent.slice(0, 8).map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.total_cost ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
+                  <BarChart data={usageByAgent.slice(0, 8).map(u => ({ name: u.name || u.agent_id?.slice(0, 8), cost: u.cost ?? 0 }))} layout="vertical" margin={{ left: 0, right: 20 }}>
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={100} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: number) => [`$${v.toFixed(4)}`, "Cost"]} />
+                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [`$${v.toFixed(4)}`, "Cost"]} />
                     <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#3b82f6" />
                   </BarChart>
                 </ResponsiveContainer>
@@ -105,7 +104,7 @@ export function AnalyticsPage() {
                     <CartesianGrid strokeDasharray="3 3" opacity={0.2} horizontal={false} />
                     <XAxis type="number" tick={{ fontSize: 10 }} tickFormatter={v => `$${v}`} axisLine={false} tickLine={false} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 10 }} width={120} axisLine={false} tickLine={false} />
-                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: number) => [`$${v.toFixed(4)}`, "Cost"]} />
+                    <Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: any) => [`$${v.toFixed(4)}`, "Cost"]} />
                     <Bar dataKey="cost" radius={[0, 6, 6, 0]} fill="#a855f7" />
                   </BarChart>
                 </ResponsiveContainer>
@@ -134,7 +133,7 @@ export function AnalyticsPage() {
                   <YAxis tick={{ fontSize: 10 }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} width={50} />
                   <Tooltip
                     contentStyle={{ borderRadius: 12, border: "1px solid #e5e7eb", fontSize: 12, boxShadow: "0 4px 12px rgba(0,0,0,0.1)" }}
-                    formatter={(v: number) => [`$${v.toFixed(2)}`, t("analytics.total_cost")]}
+                    formatter={(v: any) => [`$${v.toFixed(2)}`, t("analytics.total_cost")]}
                     labelFormatter={l => `${t("analytics.daily_trend")}: ${l}`}
                   />
                   <Area type="monotone" dataKey="cost" stroke="#3b82f6" strokeWidth={2.5} fill="url(#costGrad)" dot={{ r: 3, fill: "#3b82f6", strokeWidth: 2, stroke: "white" }} activeDot={{ r: 5 }} />

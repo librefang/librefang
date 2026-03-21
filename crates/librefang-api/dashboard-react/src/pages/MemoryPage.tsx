@@ -60,9 +60,9 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
                 onChange={(e) => setLevel(e.target.value)}
                 className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm focus:border-brand focus:ring-1 focus:ring-brand/20 outline-none"
               >
-                <option value="episodic">Episodic</option>
-                <option value="semantic">Semantic</option>
-                <option value="working">Working</option>
+                <option value="episodic">{t("memory.episodic")}</option>
+                <option value="semantic">{t("memory.semantic")}</option>
+                <option value="working">{t("memory.working")}</option>
               </select>
             </div>
             <div>

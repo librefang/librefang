@@ -12,8 +12,8 @@ import { Input } from "../components/ui/Input";
 import { Pagination } from "../components/ui/Pagination";
 import {
   Network, Search, CheckCircle2, XCircle, ChevronRight, X, Grid3X3, List,
-  Settings, Key, Clock, Zap, AlertCircle, CheckSquare, Square, ExternalLink,
-  MessageCircle, Mail, Phone, Hash, Link2, Webhook, Radio, Send, Bell, Wifi, Globe
+  Settings, Key, Clock, AlertCircle, CheckSquare, Square,
+  MessageCircle, Mail, Phone, Link2, Radio, Send, Bell, Wifi, Globe
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -410,7 +410,6 @@ type TabType = "configured" | "unconfigured";
 
 export function ChannelsPage() {
   const { t } = useTranslation();
-  const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<TabType>("configured");
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");

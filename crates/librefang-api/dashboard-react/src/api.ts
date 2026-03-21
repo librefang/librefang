@@ -368,6 +368,7 @@ export interface UsageByAgentItem {
   name?: string;
   total_tokens?: number;
   tool_calls?: number;
+  cost?: number;
 }
 
 export interface UsageDailyItem {

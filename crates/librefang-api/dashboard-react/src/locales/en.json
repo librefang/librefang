@@ -30,7 +30,9 @@
     "quick_actions": "Quick Actions", "new_workflow": "New Workflow", "deploy_agent": "Deploy Agent", "open_chat": "Open Chat",
     "recent_agents": "Recent Agents", "view_all": "View All", "system_status": "System Status", "uptime": "Uptime", "memory_usage": "Memory",
     "version": "Version", "telemetry": "Service Telemetry", "pro_tip": "Pro Tip", "pro_tip_text": "Use the Canvas to orchestrate agents across multiple channels.",
-    "no_active_agents": "No active agents configured", "no_telemetry": "No telemetry data available"
+    "no_active_agents": "No active agents configured", "no_telemetry": "No telemetry data available",
+    "active_sessions": "Active Sessions", "agent_count": "Agent Count",
+    "health_checks": "Health Checks", "pro_tip_shortcut": "Use ⌘K to quick search · Press ← to collapse sidebar"
   },
   "agents": {
     "title": "Agents", "subtitle": "Active autonomous units managed by the LibreFang kernel.",
@@ -40,7 +42,8 @@
     "template_name": "Template Name", "template_placeholder": "e.g. default, researcher, coder",
     "template_hint": "Templates are loaded from ~/.librefang/agents/{name}/agent.toml",
     "manifest_toml": "Agent Manifest (TOML)",
-    "suspend": "Suspend", "resume": "Resume", "core_agents": "Core Agents", "hands": "Hands"
+    "suspend": "Suspend", "resume": "Resume", "core_agents": "Core Agents", "hands": "Hands",
+    "hand_badge": "HAND", "tools_cap": "Tools", "network": "Network"
   },
   "providers": {
     "title": "Providers", "subtitle": "Manage LLM API connections and health.",
@@ -55,7 +58,8 @@
     "results": "results", "config": "Configure", "config_hint": "Configuration coming soon",
     "configure_provider": "Configure Provider", "key_saved": "API Key saved", "key_removed": "API Key removed",
     "key_placeholder": "Enter API key...", "key_placeholder_existing": "Enter new key to replace...",
-    "optional": "optional", "remove_key": "Remove Key"
+    "optional": "optional", "remove_key": "Remove Key",
+    "base_url": "Base URL", "api_key": "API Key"
   },
   "channels": {
     "title": "Channels", "subtitle": "Messaging adapters and integration gateways.",
@@ -76,7 +80,8 @@
     "installed_count": "{{count}} Installed",
     "sort_trending": "Trending", "sort_downloads": "Downloads", "sort_stars": "Stars", "sort_updated": "Updated", "sort_rating": "Rating",
     "no_results": "No skills found", "rate_limited": "Rate Limited", "rate_limited_desc": "ClawHub API rate limit exceeded. Please try again later.", "load_error": "Failed to load",
-    "search_placeholder": "Search skills (e.g. python, web, ai...)"
+    "search_placeholder": "Search skills (e.g. python, web, ai...)",
+    "stars_count": "stars", "downloads_count": "downloads", "install_timeout": "Installation timed out"
   },
   "hands": {
     "title": "Hands", "subtitle": "Autonomous capability packages.",
@@ -224,11 +229,15 @@
   "chat": {
     "title": "Chat", "neural_terminal": "Neural Terminal", "select_agent": "Select Agent", "select_agent_desc": "Choose an agent from the list to establish a communication link.",
     "transmit_command": "Transmit neural pulse...", "send": "Send", "secure_link": "Secure Link", "standby": "Standby",
-    "end_history": "End of history", "welcome_system": "Neural bridge established.", "input_placeholder_with_agent": "Transmit command to {{name}}..."
+    "end_history": "End of history", "welcome_system": "Neural bridge established.", "input_placeholder_with_agent": "Transmit command to {{name}}...",
+    "generating": "Generating...", "clear_chat": "Clear Chat", "send_hint": "Enter to send, Cmd+Enter for newline",
+    "you": "You", "bot": "Bot"
   },
   "goals": {
     "title": "Goals", "subtitle": "Strategic planning and task tracking.", "total": "Total", "pending": "Pending", "in_progress": "In Progress", "completed": "Completed",
-    "create_goal": "Create Goal", "goal_title_placeholder": "Goal Title", "goal_desc_placeholder": "Description", "goal_tree": "Goal Tree"
+    "create_goal": "Create Goal", "goal_title_placeholder": "Goal Title", "goal_desc_placeholder": "Description", "goal_tree": "Goal Tree",
+    "title_label": "Title", "desc_label": "Description", "add_examples": "Add Examples", "add_example_goals": "Add Example Goals",
+    "toggle_reset": "Complete / Reset", "delete_confirm": "Are you sure you want to delete this goal?"
   },
   "sessions": {
     "title": "Sessions", "subtitle": "Active agent conversations and historical execution contexts.",
@@ -250,7 +259,8 @@
     "free": "Free", "no_results": "No models match your filters.", "no_models": "No models loaded. Is the daemon running?", "load_error": "Failed to load models. Check if the daemon is running.",
     "no_key": "No Key",
     "tier_all": "All", "tier_frontier": "Frontier", "tier_smart": "Smart", "tier_balanced": "Balanced", "tier_fast": "Fast", "tier_local": "Local", "tier_basic": "Basic", "tier_standard": "Standard", "tier_advanced": "Advanced", "tier_enterprise": "Enterprise",
-    "col_model": "Model", "col_provider": "Provider", "col_tier": "Tier", "col_context": "Context", "col_input": "Input $/M"
+    "col_model": "Model", "col_provider": "Provider", "col_tier": "Tier", "col_context": "Context", "col_input": "Input $/M",
+    "col_tools": "Tools", "col_vision": "Vision", "col_streaming": "Streaming"
   },
   "plugins": {
     "section": "Extensions", "title": "Plugins", "subtitle": "Extend agent capabilities with custom plugins.",
@@ -262,6 +272,7 @@
     "source_registry": "Registry", "source_local": "Local", "source_git": "Git",
     "registry_optional": "Registry (optional)", "registry_placeholder": "owner/repo",
     "path": "Path", "url": "URL", "branch": "Branch",
-    "scaffold_title": "Create New Plugin", "scaffold_desc": "What does this plugin do?", "create": "Create"
+    "scaffold_title": "Create New Plugin", "scaffold_desc": "What does this plugin do?", "create": "Create",
+    "deps": "Deps"
   }
 }

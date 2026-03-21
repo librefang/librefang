@@ -1,12 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState, useCallback, useMemo } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useTranslation } from "react-i18next";
 import { useSearch } from "@tanstack/react-router";
 import { listAgents, sendAgentMessage, loadAgentSession } from "../api";
-import { Button } from "../components/ui/Button";
-import { Card } from "../components/ui/Card";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight } from "lucide-react";
 
 interface ChatMessage {
@@ -102,8 +100,6 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
   }, [agentId]);
 
   // Slash 命令提示
-  const [showSlash, setShowSlash] = useState(false);
-  const [slashFilter, setSlashFilter] = useState("");
 
   // 发送消息并实现流式输出
   const sendMessage = useCallback(async (content: string) => {
@@ -198,6 +194,7 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
 
 // 消息气泡组件
 function MessageBubble({ message }: { message: ChatMessage }) {
+  const { t } = useTranslation();
   const isUser = message.role === "user";
 
   if (message.role === "system") {
@@ -223,7 +220,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
             {isUser ? <User className="h-3.5 w-3.5" /> : <Bot className="h-3.5 w-3.5 text-brand" />}
           </div>
           <span className={`text-[11px] font-bold uppercase tracking-wider ${isUser ? "text-brand" : "text-text-dim"}`}>
-            {isUser ? "You" : "Bot"}
+            {isUser ? t("chat.you") : t("chat.bot")}
           </span>
         </div>
 
@@ -281,6 +278,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 
 // 输入框 - 带快捷键提示
 function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string }) {
+  const { t } = useTranslation();
   const [message, setMessage] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -342,7 +340,7 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
         >
           <Send className="h-4 w-4" />
           <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-            Enter 发送 · ⌘+↵ 换行
+            {t("chat.send_hint")}
           </span>
         </button>
       </div>
@@ -365,14 +363,14 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear }: { agentN
         <span className="text-xs font-medium text-text-dim">{agentName}</span>
         {isLoading && (
           <span className="ml-2 px-2 py-0.5 rounded-full bg-brand/10 text-brand text-[10px] font-medium animate-pulse">
-            生成中...
+            {t("chat.generating")}
           </span>
         )}
       </div>
       {messageCount > 0 && (
         <button onClick={onClear} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium text-text-dim/60 hover:text-error hover:bg-error/5 transition-colors">
           <X className="h-3 w-3" />
-          清空对话
+          {t("chat.clear_chat")}
         </button>
       )}
     </div>

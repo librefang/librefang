@@ -176,7 +176,7 @@ export function PluginsPage() {
                       onClick={() => depsMutation.mutate(p.name)}
                       disabled={depsMutation.isPending}>
                       {depsMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-                      Deps
+                      {t("plugins.deps")}
                     </Button>
                     {confirmDelete === p.name ? (
                       <div className="flex items-center gap-1">

@@ -267,7 +267,7 @@ export function OverviewPage() {
                 </div>
                 <div>
                   <p className="text-2xl font-black">{sessionsCount}</p>
-                  <p className="text-[10px] text-text-dim uppercase">活跃会话</p>
+                  <p className="text-[10px] text-text-dim uppercase">{t("overview.active_sessions")}</p>
                 </div>
               </div>
               <div className="h-10 w-px bg-border-subtle" />
@@ -291,25 +291,25 @@ export function OverviewPage() {
             <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim mb-4">{t("overview.system_status")}</h3>
             <div className="space-y-4">
               <div className="flex justify-between items-center py-2 border-b border-border-subtle/30">
-                <span className="text-xs font-medium text-text-dim uppercase">运行时间</span>
+                <span className="text-xs font-medium text-text-dim uppercase">{t("overview.uptime")}</span>
                 <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-200">
                   {formatUptime(snapshot?.status?.uptime_seconds)}
                 </span>
               </div>
               <div className="flex justify-between items-center py-2 border-b border-border-subtle/30">
-                <span className="text-xs font-medium text-text-dim uppercase">内存使用</span>
+                <span className="text-xs font-medium text-text-dim uppercase">{t("overview.memory_usage")}</span>
                 <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-200">
                   {snapshot?.status?.memory_used_mb ? `${snapshot.status.memory_used_mb} MB` : "-"}
                 </span>
               </div>
               <div className="flex justify-between items-center py-2 border-b border-border-subtle/30">
-                <span className="text-xs font-medium text-text-dim uppercase">版本</span>
+                <span className="text-xs font-medium text-text-dim uppercase">{t("overview.version")}</span>
                 <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-200">
                   {snapshot?.status?.version || "-"}
                 </span>
               </div>
               <div className="flex justify-between items-center py-2">
-                <span className="text-xs font-medium text-text-dim uppercase">Agent 数量</span>
+                <span className="text-xs font-medium text-text-dim uppercase">{t("overview.agent_count")}</span>
                 <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-200">
                   {agentsTotal}
                 </span>
@@ -319,7 +319,7 @@ export function OverviewPage() {
 
           {/* Health Checks */}
           <Card padding="lg">
-            <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim mb-4">健康检查</h3>
+            <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim mb-4">{t("overview.health_checks")}</h3>
             {snapshot?.health?.checks && snapshot.health.checks.length > 0 ? (
               <div className="space-y-3">
                 {snapshot.health.checks.map((check: HealthCheck, i: number) => (
@@ -344,10 +344,9 @@ export function OverviewPage() {
                 <Sparkles className="h-5 w-5 text-brand" />
               </div>
               <div>
-                <h4 className="text-xs font-bold uppercase tracking-wider text-brand mb-1">使用提示</h4>
+                <h4 className="text-xs font-bold uppercase tracking-wider text-brand mb-1">{t("overview.pro_tip")}</h4>
                 <p className="text-xs leading-relaxed text-text-dim">
-                  使用 <kbd className="px-1 py-0.5 bg-surface rounded text-[10px] font-mono">⌘K</kbd> 快速搜索
-                  · 按 <kbd className="px-1 py-0.5 bg-surface rounded text-[10px] font-mono">←</kbd> 折叠侧边栏
+                  {t("overview.pro_tip_shortcut")}
                 </p>
               </div>
             </div>

@@ -179,9 +179,9 @@ export function ModelsPage() {
             <span>{t("models.col_tier")}</span>
             <span>{t("models.col_context")}</span>
             <span>{t("models.col_input")}</span>
-            <span className="text-center" title="Tools"><Wrench className="w-3.5 h-3.5 inline" /></span>
-            <span className="text-center" title="Vision"><Eye className="w-3.5 h-3.5 inline" /></span>
-            <span className="text-center" title="Streaming"><Zap className="w-3.5 h-3.5 inline" /></span>
+            <span className="text-center" title={t("models.col_tools")}><Wrench className="w-3.5 h-3.5 inline" /></span>
+            <span className="text-center" title={t("models.col_vision")}><Eye className="w-3.5 h-3.5 inline" /></span>
+            <span className="text-center" title={t("models.col_streaming")}><Zap className="w-3.5 h-3.5 inline" /></span>
           </div>
 
           {paged.map((m, i) => (

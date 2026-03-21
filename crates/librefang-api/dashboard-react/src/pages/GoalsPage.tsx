@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { createGoal, listAgents, listGoals, updateGoal, deleteGoal, type GoalItem } from "../api";
+import { createGoal, listGoals, updateGoal, deleteGoal, type GoalItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -9,14 +9,14 @@ import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
-import { Shield, Trash2, Edit2, Plus, Target, Zap, BookOpen } from "lucide-react";
+import { Shield, Trash2, Edit2, Plus, Target, Zap } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
 const EXAMPLE_GOALS = [
-  { title: "部署生产环境", description: "配置并部署应用到生产服务器", status: "pending" as const },
-  { title: "优化数据库查询", description: "分析并优化慢查询，提升性能", status: "pending" as const },
-  { title: "编写API文档", description: "为所有API端点生成文档", status: "pending" as const },
+  { title: "Deploy Production", description: "Configure and deploy app to production server", status: "pending" as const },
+  { title: "Optimize DB Queries", description: "Analyze and optimize slow queries for performance", status: "pending" as const },
+  { title: "Write API Docs", description: "Generate documentation for all API endpoints", status: "pending" as const },
 ];
 
 export function GoalsPage() {
@@ -27,9 +27,9 @@ export function GoalsPage() {
   const [createDraft, setCreateDraft] = useState({ title: "", description: "", status: "pending" as string, progress: 0, parent_id: "", agent_id: "" });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState({ title: "", description: "", status: "pending" as string, progress: 0 });
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const goalsQuery = useQuery({ queryKey: ["goals", "list"], queryFn: listGoals, refetchInterval: REFRESH_MS });
-  const agentsQuery = useQuery({ queryKey: ["agents", "list", "goals"], queryFn: listAgents });
 
   const createMutation = useMutation({ mutationFn: createGoal });
   const updateMutation = useMutation({ mutationFn: ({ id, data }: { id: string; data: any }) => updateGoal(id, data) });
@@ -84,10 +84,10 @@ export function GoalsPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm(t("common.confirm"))) return;
     try {
       await deleteMutation.mutateAsync(id);
       addToast(t("common.success"), "success");
+      setConfirmDeleteId(null);
       await queryClient.invalidateQueries({ queryKey: ["goals"] });
     } catch (err: any) {
       addToast(err.message || t("common.error"), "error");
@@ -132,6 +132,12 @@ export function GoalsPage() {
 
   const inputClass = "rounded-xl border border-border-subtle bg-main px-4 py-2 text-sm focus:border-brand outline-none transition-all";
 
+  const statusLabel = (status: string) => {
+    if (status === "in_progress") return t("goals.in_progress");
+    if (status === "completed") return t("goals.completed");
+    return t("goals.pending");
+  };
+
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
       <PageHeader
@@ -153,7 +159,7 @@ export function GoalsPage() {
           />
           <Button variant="secondary" onClick={handleAddExamples}>
             <Plus className="h-4 w-4" />
-            添加示例目标
+            {t("goals.add_example_goals")}
           </Button>
         </div>
       ) : (
@@ -184,7 +190,7 @@ export function GoalsPage() {
                 <h2 className="text-lg font-black tracking-tight">{t("goals.goal_tree")}</h2>
                 <Button variant="ghost" size="sm" onClick={handleAddExamples}>
                   <Zap className="h-3.5 w-3.5" />
-                  添加示例
+                  {t("goals.add_examples")}
                 </Button>
               </div>
               <div className="space-y-2">
@@ -192,39 +198,47 @@ export function GoalsPage() {
                   <div key={r.goal.id} className="p-4 rounded-xl bg-main/40 border border-border-subtle hover:border-brand/30 transition-all" style={{ marginLeft: `${r.depth * 20}px` }}>
                     {editingId === r.goal.id ? (
                       <div className="flex flex-col gap-2">
-                        <input value={editDraft.title} onChange={e => setEditDraft({...editDraft, title: e.target.value})} className={inputClass} placeholder="标题" />
-                        <textarea value={editDraft.description} onChange={e => setEditDraft({...editDraft, description: e.target.value})} className={`${inputClass} resize-none`} rows={2} placeholder="描述" />
+                        <input value={editDraft.title} onChange={e => setEditDraft({...editDraft, title: e.target.value})} className={inputClass} placeholder={t("goals.title_label")} />
+                        <textarea value={editDraft.description} onChange={e => setEditDraft({...editDraft, description: e.target.value})} className={`${inputClass} resize-none`} rows={2} placeholder={t("goals.desc_label")} />
                         <div className="flex gap-2">
                           <select value={editDraft.status} onChange={e => setEditDraft({...editDraft, status: e.target.value})} className={inputClass}>
-                            <option value="pending">待处理</option>
-                            <option value="in_progress">进行中</option>
-                            <option value="completed">已完成</option>
+                            <option value="pending">{t("goals.pending")}</option>
+                            <option value="in_progress">{t("goals.in_progress")}</option>
+                            <option value="completed">{t("goals.completed")}</option>
                           </select>
                           <input type="number" value={editDraft.progress} onChange={e => setEditDraft({...editDraft, progress: Number(e.target.value)})} className={inputClass} min={0} max={100} style={{ width: "80px" }} />
-                          <Button variant="primary" size="sm" onClick={handleSaveEdit}>保存</Button>
-                          <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>取消</Button>
+                          <Button variant="primary" size="sm" onClick={handleSaveEdit}>{t("common.save")}</Button>
+                          <Button variant="ghost" size="sm" onClick={() => setEditingId(null)}>{t("common.cancel")}</Button>
+                        </div>
+                      </div>
+                    ) : confirmDeleteId === r.goal.id ? (
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm text-text-dim">{t("goals.delete_confirm")}</span>
+                        <div className="flex items-center gap-2">
+                          <Button variant="primary" size="sm" onClick={() => handleDelete(r.goal.id)} className="!bg-error hover:!bg-error/80">{t("common.confirm")}</Button>
+                          <Button variant="ghost" size="sm" onClick={() => setConfirmDeleteId(null)}>{t("common.cancel")}</Button>
                         </div>
                       </div>
                     ) : (
                       <div className="flex items-center justify-between gap-3">
                         <div className="flex items-center gap-3 flex-1 min-w-0">
-                          {r.hasChildren && <button onClick={() => setExpandedById({...expandedById, [r.goal.id]: !expandedById[r.goal.id]})} className="text-text-dim font-bold hover:text-brand transition-colors w-5">{expandedById[r.goal.id] ? "−" : "+"}</button>}
+                          {r.hasChildren && <button onClick={() => setExpandedById({...expandedById, [r.goal.id]: !expandedById[r.goal.id]})} className="text-text-dim font-bold hover:text-brand transition-colors w-5">{expandedById[r.goal.id] ? "\u2212" : "+"}</button>}
                           <span className="text-sm font-black truncate">{r.goal.title}</span>
                           <Badge variant={r.goal.status === "completed" ? "success" : r.goal.status === "in_progress" ? "warning" : "default"}>
-                            {r.goal.status === "in_progress" ? "进行中" : r.goal.status === "completed" ? "已完成" : "待处理"}
+                            {statusLabel(r.goal.status || "pending")}
                           </Badge>
                           {r.goal.progress !== undefined && r.goal.progress > 0 && (
                             <span className="text-xs text-text-dim">{r.goal.progress}%</span>
                           )}
                         </div>
                         <div className="flex items-center gap-1">
-                          <button onClick={() => handleStatusChange(r.goal.id, r.goal.status === "completed" ? "pending" : "completed")} className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-all" title="完成/重置">
+                          <button onClick={() => handleStatusChange(r.goal.id, r.goal.status === "completed" ? "pending" : "completed")} className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-all" title={t("goals.toggle_reset")}>
                             <Target className="h-3.5 w-3.5" />
                           </button>
-                          <button onClick={() => handleStartEdit(r.goal)} className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-all" title="编辑">
+                          <button onClick={() => handleStartEdit(r.goal)} className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-all" title={t("common.edit")}>
                             <Edit2 className="h-3.5 w-3.5" />
                           </button>
-                          <button onClick={() => handleDelete(r.goal.id)} className="p-1.5 rounded-lg hover:bg-error/10 text-text-dim hover:text-error transition-all" title="删除">
+                          <button onClick={() => setConfirmDeleteId(r.goal.id)} className="p-1.5 rounded-lg hover:bg-error/10 text-text-dim hover:text-error transition-all" title={t("common.delete")}>
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
                         </div>

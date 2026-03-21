@@ -30,7 +30,9 @@
     "quick_actions": "快速操作", "new_workflow": "新建工作流", "deploy_agent": "部署智能体", "open_chat": "打开对话",
     "recent_agents": "最近智能体", "view_all": "查看全部", "system_status": "系统状态", "uptime": "运行时间", "memory_usage": "内存",
     "version": "版本", "telemetry": "服务遥测", "pro_tip": "小贴士", "pro_tip_text": "使用画布跨多个通道编排智能体。",
-    "no_active_agents": "暂未配置活跃智能体", "no_telemetry": "暂无遥测数据可用"
+    "no_active_agents": "暂未配置活跃智能体", "no_telemetry": "暂无遥测数据可用",
+    "active_sessions": "活跃会话", "agent_count": "Agent 数量",
+    "health_checks": "健康检查", "pro_tip_shortcut": "使用 ⌘K 快速搜索 · 按 ← 折叠侧边栏"
   },
   "agents": {
     "title": "智能体", "subtitle": "由 LibreFang 内核管理的活跃自主单元。",
@@ -40,7 +42,8 @@
     "template_name": "模板名称", "template_placeholder": "例如：default, researcher, coder",
     "template_hint": "模板从 ~/.librefang/agents/{name}/agent.toml 加载",
     "manifest_toml": "智能体清单 (TOML)",
-    "suspend": "暂停", "resume": "恢复", "core_agents": "核心智能体", "hands": "Hands"
+    "suspend": "暂停", "resume": "恢复", "core_agents": "核心智能体", "hands": "Hands",
+    "hand_badge": "HAND", "tools_cap": "工具", "network": "网络"
   },
   "providers": {
     "title": "供应商", "subtitle": "管理 LLM API 连接并监控健康状况。",
@@ -55,7 +58,8 @@
     "results": "结果", "config": "配置", "config_hint": "配置功能即将推出",
     "configure_provider": "配置供应商", "key_saved": "API Key 已保存", "key_removed": "API Key 已移除",
     "key_placeholder": "输入 API Key...", "key_placeholder_existing": "输入新 Key 替换旧的...",
-    "optional": "可选", "remove_key": "移除 Key"
+    "optional": "可选", "remove_key": "移除 Key",
+    "base_url": "Base URL", "api_key": "API Key"
   },
   "channels": {
     "title": "通道", "subtitle": "消息适配器和集成网关。",
@@ -76,7 +80,8 @@
     "installed_count": "已安装 {{count}} 个",
     "sort_trending": "热门", "sort_downloads": "下载量", "sort_stars": "星标", "sort_updated": "更新", "sort_rating": "评分",
     "no_results": "没有找到技能", "rate_limited": "请求受限", "rate_limited_desc": "ClawHub API 请求次数超限，请稍后重试。", "load_error": "加载失败",
-    "search_placeholder": "搜索技能（如 python、web、ai...）"
+    "search_placeholder": "搜索技能（如 python、web、ai...）",
+    "stars_count": "星标", "downloads_count": "下载", "install_timeout": "安装超时"
   },
   "hands": {
     "title": "Hands", "subtitle": "自主功能包。",
@@ -224,11 +229,15 @@
   "chat": {
     "title": "对话", "neural_terminal": "神经终端", "select_agent": "选择智能体", "select_agent_desc": "从列表中选择一个智能体以建立通信链路。",
     "transmit_command": "传输神经脉冲...", "send": "发送", "secure_link": "加密链路", "standby": "待机中",
-    "end_history": "历史记录末尾", "welcome_system": "神经桥接已建立。", "input_placeholder_with_agent": "向 {{name}} 传输指令..."
+    "end_history": "历史记录末尾", "welcome_system": "神经桥接已建立。", "input_placeholder_with_agent": "向 {{name}} 传输指令...",
+    "generating": "生成中...", "clear_chat": "清空对话", "send_hint": "Enter 发送 · ⌘+↵ 换行",
+    "you": "你", "bot": "Bot"
   },
   "goals": {
     "title": "目标", "subtitle": "战略规划和任务跟踪。", "total": "总目标", "pending": "待处理", "in_progress": "进行中", "completed": "已完成",
-    "create_goal": "创建目标", "goal_title_placeholder": "目标标题", "goal_desc_placeholder": "描述", "goal_tree": "目标树"
+    "create_goal": "创建目标", "goal_title_placeholder": "目标标题", "goal_desc_placeholder": "描述", "goal_tree": "目标树",
+    "title_label": "标题", "desc_label": "描述", "add_examples": "添加示例", "add_example_goals": "添加示例目标",
+    "toggle_reset": "完成/重置", "delete_confirm": "确定要删除此目标吗？"
   },
   "sessions": {
     "title": "会话", "subtitle": "活跃的智能体对话和历史执行上下文。",
@@ -250,7 +259,8 @@
     "free": "免费", "no_results": "没有匹配的模型。", "no_models": "未加载任何模型。守护进程是否在运行？", "load_error": "加载模型失败。请检查守护进程是否在运行。",
     "no_key": "未配置",
     "tier_all": "全部", "tier_frontier": "前沿", "tier_smart": "智能", "tier_balanced": "均衡", "tier_fast": "快速", "tier_local": "本地", "tier_basic": "基础", "tier_standard": "标准", "tier_advanced": "高级", "tier_enterprise": "企业",
-    "col_model": "模型", "col_provider": "供应商", "col_tier": "等级", "col_context": "上下文", "col_input": "输入 $/M"
+    "col_model": "模型", "col_provider": "供应商", "col_tier": "等级", "col_context": "上下文", "col_input": "输入 $/M",
+    "col_tools": "工具", "col_vision": "视觉", "col_streaming": "流式"
   },
   "plugins": {
     "section": "扩展", "title": "插件", "subtitle": "通过自定义插件扩展智能体能力。",
@@ -262,6 +272,7 @@
     "source_registry": "插件源", "source_local": "本地", "source_git": "Git",
     "registry_optional": "注册表（可选）", "registry_placeholder": "owner/repo",
     "path": "路径", "url": "URL", "branch": "分支",
-    "scaffold_title": "创建新插件", "scaffold_desc": "这个插件做什么？", "create": "创建"
+    "scaffold_title": "创建新插件", "scaffold_desc": "这个插件做什么？", "create": "创建",
+    "deps": "依赖"
   }
 }

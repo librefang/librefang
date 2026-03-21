@@ -11,7 +11,7 @@ import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
-import { Search, Users, Settings, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -29,7 +29,7 @@ export function AgentsPage() {
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [detailAgent, setDetailAgent] = useState<any>(null);
-  const [detailLoading, setDetailLoading] = useState(false);
+  const [, setDetailLoading] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [createMode, setCreateMode] = useState<"template" | "toml">("template");
   const [templateName, setTemplateName] = useState("");
@@ -82,7 +82,7 @@ export function AgentsPage() {
               <h2 className="text-lg font-black tracking-tight truncate">{agent.name}</h2>
               <div className="flex items-center gap-2">
                 <p className="text-[10px] font-mono text-text-dim/60 truncate">{agent.id.slice(0, 8)}</p>
-                {isHand && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400 font-bold">HAND</span>}
+                {isHand && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400 font-bold">{t("agents.hand_badge")}</span>}
               </div>
             </div>
           </div>
@@ -223,8 +223,8 @@ export function AgentsPage() {
                 <div>
                   <h4 className="text-[10px] font-bold text-text-dim uppercase mb-2 flex items-center gap-1"><Wrench className="w-3 h-3" /> {t("agents.capabilities")}</h4>
                   <div className="flex flex-wrap gap-1.5">
-                    {detailAgent.capabilities.tools && <Badge variant="brand">Tools</Badge>}
-                    {detailAgent.capabilities.network && <Badge variant="brand">Network</Badge>}
+                    {detailAgent.capabilities.tools && <Badge variant="brand">{t("agents.tools_cap")}</Badge>}
+                    {detailAgent.capabilities.network && <Badge variant="brand">{t("agents.network")}</Badge>}
                   </div>
                 </div>
               )}
