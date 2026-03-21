@@ -9,7 +9,7 @@ const comparisonData = [
   { metric: 'Binary Size', openclaw: '100MB+', zeroclaw: '200MB+', librefang: '32MB' },
   { metric: 'Security Layers', openclaw: '3', zeroclaw: '2', librefang: '16' },
   { metric: 'Channel Adapters', openclaw: '15', zeroclaw: '8', librefang: '40' },
-  { metric: 'Built-in Hands', openclaw: '0', zeroclaw: '0', librefang: '7' },
+  { metric: 'Built-in Hands', openclaw: '0', zeroclaw: '0', librefang: '14' },
 ]
 
 function MaterialIcon({ name, className = '' }) {
@@ -454,6 +454,16 @@ function Install({ t }) {
             </div>
           ))}
         </div>
+        <div className="flex flex-wrap justify-center gap-6 pt-4">
+          <a href="https://deploy.librefang.ai/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 px-6 py-3 bg-primary/10 border border-primary/30 rounded-xl text-primary font-bold hover:bg-primary/20 transition-colors">
+            <MaterialIcon name="open_in_new" className="w-5 h-5" />
+            {t.install?.cloudDeploy || 'One-Click Cloud Deploy'}
+          </a>
+          <a href="https://github.com/librefang/librefang-registry" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 px-6 py-3 bg-white/5 border border-gray-700/50 rounded-xl text-gray-300 font-bold hover:border-gray-600/50 hover:text-white transition-colors">
+            <MaterialIcon name="code" className="w-5 h-5" />
+            {t.install?.handRegistry || 'Hand Registry'}
+          </a>
+        </div>
       </div>
     </section>
   )
@@ -510,16 +520,13 @@ function GitHubStats({ t }) {
   const { data: githubData, isLoading: githubLoading, isError: githubError } = useQuery({
     queryKey: ['githubStats'],
     queryFn: async () => {
-      try {
-        const res = await fetch('https://stats.librefang.ai/api/github')
-        if (!res.ok) throw new Error('Failed to fetch')
-        return res.json()
-      } catch {
-        return { stars: 0, forks: 0, issues: 0, prs: 0, lastUpdate: '', downloads: 0, starHistory: [] }
-      }
+      const res = await fetch('https://stats.librefang.ai/api/github')
+      if (!res.ok) throw new Error(`GitHub stats API returned ${res.status}`)
+      return res.json()
     },
-    staleTime: 1000 * 60 * 30,
-    retry: 1,
+    placeholderData: { stars: 0, forks: 0, issues: 0, prs: 0, downloads: 0, lastUpdate: '', starHistory: [] },
+    staleTime: 1000 * 60 * 10,
+    retry: 3,
   })
 
   const { data: docsData, isLoading: docsLoading } = useQuery({
@@ -608,21 +615,31 @@ function GitHubStats({ t }) {
             </div>
           </div>
           <div className="h-48 flex items-end gap-1">
-            {currentHistory.length > 0 ? (
-              Array.from({ length: Math.min(24, currentHistory.length || 12) }, (_, i) => {
-                const idx = Math.floor((i / Math.min(24, currentHistory.length || 12)) * currentHistory.length)
+            {starHistoryData.length >= 3 ? (
+              Array.from({ length: Math.min(24, currentHistory.length) }, (_, i) => {
+                const idx = Math.floor((i / Math.min(24, currentHistory.length)) * currentHistory.length)
                 const value = currentHistory[idx] || 0
                 return (
                   <div key={i} className="flex-1 bg-primary/40 hover:bg-primary transition-colors rounded-t min-w-1" style={{ height: `${Math.max(4, (value / currentMax) * 100)}%` }} title={`${value} ${historyTab}`}></div>
                 )
               })
             ) : (
-              <div className="w-full h-32 flex items-center justify-center text-gray-500 text-sm">No data yet</div>
+              <div className="w-full h-full flex flex-col items-center justify-center text-gray-400 gap-2">
+                <span className="text-4xl font-bold text-primary">{currentValue ?? 0}</span>
+                <span className="text-sm">{historyTab === 'stars' ? (t.githubStats?.stars || 'Stars') : historyTab === 'forks' ? (t.githubStats?.forks || 'Forks') : historyTab === 'issues' ? (t.githubStats?.issues || 'Issues') : (t.githubStats?.prs || 'PRs')}</span>
+                <span className="text-xs text-gray-500">Chart builds as data is collected daily</span>
+              </div>
             )}
           </div>
           <div className="flex justify-between mt-3 text-xs text-gray-500">
-            <span>12 months ago</span>
-            <span className="text-primary font-semibold">Now ({currentValue ?? '-'})</span>
+            {starHistoryData.length >= 3 ? (
+              <>
+                <span>{starHistoryData[0]?.date || ''}</span>
+                <span className="text-primary font-semibold">Now ({currentValue ?? '-'})</span>
+              </>
+            ) : (
+              <span className="mx-auto text-gray-600">Tracking since {starHistoryData[0]?.date || 'today'}</span>
+            )}
           </div>
         </div>
 

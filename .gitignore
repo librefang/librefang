@@ -1,12 +1,14 @@
 # Build
 /target
 /target-isolated
+/target-*
 **/*.rs.bk
 *.pdb
 
 # Cloudflare Wrangler
 .wrangler/
 .serena
+.vite
 
 # Environment & secrets
 .env

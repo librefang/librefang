@@ -121,9 +121,18 @@ function rehypeSlugify() {
 		const usedIds = new Set();
 
 		visit(tree, "element", (node) => {
-			if (node.tagName === "h2" && !node.properties.id) {
+			if ((node.tagName === "h2" || node.tagName === "h3") && !node.properties.id) {
 				const text = toString(node);
-				let id = slugify(text);
+				let id;
+
+				// Config-style headings like [exec_policy] or [[mcp_servers]]:
+				// strip brackets and preserve underscores/dots as-is.
+				const bracketMatch = text.match(/^\[+([^\]]+)\]+$/);
+				if (bracketMatch) {
+					id = bracketMatch[1].trim().toLowerCase();
+				} else {
+					id = slugify(text);
+				}
 
 				// @sindresorhus/slugify strips CJK characters, producing empty IDs.
 				// Fall back to a Unicode-aware slug that preserves CJK, Kana, Hangul, etc.

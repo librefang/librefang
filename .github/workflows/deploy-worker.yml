@@ -1,4 +1,4 @@
-name: Deploy Worker
+name: Deploy Workers
 
 on:
   workflow_dispatch:
@@ -6,10 +6,11 @@ on:
     branches: [main]
     paths:
       - "deploy/worker/**"
+      - "web/workers/github-stats-worker/**"
 
 jobs:
-  deploy:
-    name: Deploy to Cloudflare
+  deploy-worker:
+    name: Deploy Main Worker
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -22,3 +23,18 @@ jobs:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: deploy/worker
+
+  deploy-github-stats:
+    name: Deploy GitHub Stats Worker
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Deploy GitHub Stats Worker
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: web/workers/github-stats-worker

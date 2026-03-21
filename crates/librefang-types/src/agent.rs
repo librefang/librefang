@@ -505,6 +505,9 @@ pub struct AgentManifest {
     /// Explicitly disable all tools, overriding profile / capability / filter expansion.
     #[serde(default)]
     pub tools_disabled: bool,
+    /// Whether this agent is enabled. Disabled agents are not spawned on startup.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// Plugin allowlist — only these plugins are available (empty = all plugins).
     /// When set, only plugins whose names appear in this list will be loaded
     /// for this agent. When empty (default), all installed plugins are available.
@@ -546,6 +549,7 @@ impl Default for AgentManifest {
             tool_allowlist: Vec::new(),
             tool_blocklist: Vec::new(),
             tools_disabled: false,
+            enabled: true,
             allowed_plugins: Vec::new(),
         }
     }

@@ -63,7 +63,9 @@ librefang start
 <summary><strong>Homebrew</strong></summary>
 
 ```bash
-brew tap librefang/tap && brew install librefang
+brew tap librefang/tap
+brew install librefang        # CLI
+brew install --cask librefang  # Desktop App
 ```
 
 </details>

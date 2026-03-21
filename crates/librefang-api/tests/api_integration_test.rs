@@ -384,6 +384,36 @@ async fn test_build_router_path_version_beats_unknown_accept_header() {
 }
 
 #[tokio::test]
+async fn test_build_router_serves_dashboard_locales() {
+    let harness = start_full_router("").await;
+
+    for (path, expected_chat) in [
+        ("/locales/en.json", "Chat"),
+        ("/locales/zh-CN.json", "对话"),
+        ("/locales/ja.json", "チャット"),
+    ] {
+        let response = harness
+            .app
+            .clone()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/json; charset=utf-8"
+        );
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["nav"]["chat"], expected_chat);
+    }
+}
+
+#[tokio::test]
 async fn test_build_router_providers_marks_lemonade_as_local() {
     let harness = start_full_router("").await;
 

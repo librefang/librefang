@@ -181,7 +181,14 @@ fn estimate_message_tokens(msg: &Message) -> usize {
                         + estimate_str_tokens(id)
                         + estimate_str_tokens(&serde_json::to_string(input).unwrap_or_default())
                 }
-                ContentBlock::Image { .. } | ContentBlock::Unknown => 0,
+                // Base64 images consume significant tokens.  A rough
+                // estimate: each base64 char ≈ 0.25 tokens (same as ASCII),
+                // plus a small fixed overhead for the image framing.
+                ContentBlock::Image { data, .. } => {
+                    let data_tokens = data.len() / 4;
+                    data_tokens + 85 // 85 token fixed overhead per image
+                }
+                ContentBlock::Unknown => 0,
             })
             .sum(),
     }

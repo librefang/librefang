@@ -79,6 +79,9 @@ pub struct Workflow {
     /// Created at.
     #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
+    /// Optional canvas layout data (nodes, edges, positions) for the visual editor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<serde_json::Value>,
 }
 
 /// A single step in a workflow.
@@ -942,6 +945,7 @@ impl From<WorkflowFile> for Workflow {
             description: f.description,
             steps: f.steps,
             created_at: f.created_at.unwrap_or_else(Utc::now),
+            layout: None,
         }
     }
 }
@@ -1114,6 +1118,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            layout: None,
         }
     }
 
@@ -1228,6 +1233,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
@@ -1280,6 +1286,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -1319,6 +1326,7 @@ mod tests {
                 output_var: None,
             }],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "draft".to_string()).await.unwrap();
@@ -1365,6 +1373,7 @@ mod tests {
                 output_var: None,
             }],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -1412,6 +1421,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -1458,6 +1468,7 @@ mod tests {
                 output_var: None,
             }],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
@@ -1526,6 +1537,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "start".to_string()).await.unwrap();
@@ -1595,6 +1607,7 @@ mod tests {
                 },
             ],
             created_at: Utc::now(),
+            layout: None,
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
