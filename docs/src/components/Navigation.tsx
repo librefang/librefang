@@ -2,13 +2,14 @@
 
 import { CloseButton } from "@headlessui/react";
 import clsx from "clsx";
+import { ChevronRight } from "lucide-react";
 import { AnimatePresence, motion, useIsPresent } from "motion/react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useRef } from "react";
 import { Button } from "@/components/Button";
 import { useIsInsideMobileNavigation } from "@/components/MobileNavigation";
-import { useSectionStore } from "@/components/SectionProvider";
+import { type Section, useSectionStore } from "@/components/SectionProvider";
 import { Tag } from "@/components/Tag";
 import { remToPx } from "@/lib/remToPx";
 import { withPrefix } from "@/lib/utils";
@@ -24,6 +25,15 @@ interface NavGroup {
 function useInitialValue<T>(value: T, condition = true) {
 	const initialValue = useRef(value).current;
 	return condition ? initialValue : value;
+}
+
+function lookupSections(
+	allSections: Record<string, Array<Section>> | undefined,
+	href: string,
+): Array<Section> | undefined {
+	if (!allSections) return undefined;
+	const normalized = href.replace(/^\/?/, "/");
+	return allSections[normalized] ?? allSections[`${normalized}/`];
 }
 
 function TopLevelNavItem({
@@ -52,12 +62,14 @@ function NavLink({
 	tag,
 	active = false,
 	isAnchorLink = false,
+	indicator,
 }: {
 	href: string;
 	children: React.ReactNode;
 	tag?: string;
 	active?: boolean;
 	isAnchorLink?: boolean;
+	indicator?: React.ReactNode;
 }) {
 	return (
 		<CloseButton
@@ -73,6 +85,7 @@ function NavLink({
 			)}
 		>
 			<span className="truncate">{children}</span>
+			{indicator}
 			{tag && (
 				<Tag variant="small" color="zinc">
 					{tag}
@@ -153,9 +166,11 @@ function ActivePageMarker({
 function NavigationGroup({
 	group,
 	className,
+	allSections,
 }: {
 	group: NavGroup;
 	className?: string;
+	allSections?: Record<string, Array<Section>>;
 }) {
 	// If this is the mobile navigation then we always render the initial
 	// state, so that the state does not change during the close animation.
@@ -195,7 +210,22 @@ function NavigationGroup({
 				<ul className="border-l border-transparent">
 					{group.links.map((link) => (
 						<motion.li key={link.href} layout="position" className="relative">
-							<NavLink href={link.href} active={link.href === pathname}>
+							<NavLink
+								href={link.href}
+								active={link.href === pathname}
+								indicator={
+									lookupSections(allSections, link.href)?.length ? (
+										<ChevronRight
+											className={clsx(
+												"h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform duration-200 dark:text-zinc-500",
+												link.href === pathname &&
+													sections.length > 0 &&
+													"rotate-90",
+											)}
+										/>
+									) : null
+								}
+							>
 								{link.title}
 							</NavLink>
 							<AnimatePresence mode="popLayout" initial={false}>
@@ -351,7 +381,12 @@ export const enNavigation: Array<NavGroup> = [
 
 export { zhNavigation };
 
-export function Navigation(props: React.ComponentPropsWithoutRef<"nav">) {
+export function Navigation({
+	allSections,
+	...props
+}: React.ComponentPropsWithoutRef<"nav"> & {
+	allSections?: Record<string, Array<Section>>;
+}) {
 	const pathname = usePathname();
 	const isZh = pathname?.startsWith("/zh");
 	const navigation = isZh ? zhNavigation : enNavigation;
@@ -370,6 +405,7 @@ export function Navigation(props: React.ComponentPropsWithoutRef<"nav">) {
 						key={group.title}
 						group={group}
 						className={groupIndex === 0 ? "md:mt-0" : ""}
+						allSections={allSections}
 					/>
 				))}
 			</ul>
