@@ -230,6 +230,16 @@ $(cat "$ARTICLE")" 2>/dev/null) || true
     fi
 fi
 
+# --- Build React dashboard ---
+
+DASHBOARD_DIR="$REPO_ROOT/crates/librefang-api/dashboard-react"
+if [ -f "$DASHBOARD_DIR/package.json" ]; then
+    echo ""
+    echo "Building React dashboard..."
+    (cd "$DASHBOARD_DIR" && pnpm install --frozen-lockfile && pnpm run build)
+    echo "  ✓ Dashboard built"
+fi
+
 # --- Commit and tag ---
 
 git -C "$REPO_ROOT" add \
@@ -238,7 +248,8 @@ git -C "$REPO_ROOT" add \
     sdk/javascript/package.json \
     sdk/python/setup.py \
     packages/whatsapp-gateway/package.json \
-    crates/librefang-desktop/tauri.conf.json
+    crates/librefang-desktop/tauri.conf.json \
+    crates/librefang-api/static/react/
 [ -f "$ARTICLE" ] && git -C "$REPO_ROOT" add "$ARTICLE"
 
 if git -C "$REPO_ROOT" diff --cached --quiet; then
