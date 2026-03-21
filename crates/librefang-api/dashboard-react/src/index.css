@@ -134,7 +134,6 @@ body {
 
 .animate-fade-in-up {
   animation: fade-in-up 0.6s var(--apple-spring);
-  will-change: transform, opacity, filter;
 }
 
 .animate-fade-in-scale {

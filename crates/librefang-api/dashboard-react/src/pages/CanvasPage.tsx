@@ -1306,7 +1306,7 @@ function CanvasPageInner() {
   const [zoomLevel, setZoomLevel] = useState(100);
 
   return (
-    <div className={`flex flex-col transition-all duration-300 ${isFullscreen ? "fixed inset-0 z-50 bg-main" : "h-[calc(100vh-140px)]"}`}>
+    <div className={`flex flex-col transition-all duration-300 ${isFullscreen ? "fixed inset-0 z-[100] bg-main" : "h-[calc(100vh-140px)]"}`}>
       <header className="flex justify-between items-end pb-4">
         <div className="flex items-center gap-4">
           {isFullscreen && (
