@@ -31,6 +31,9 @@ LibreFang 从 TOML 配置文件中读取配置：
   - [[channels.telegram]](#channelstelegram)
   - [[channels.discord]](#channelsdiscord)
   - [[channels.slack]](#channelsslack)
+  - [[channels.whatsapp]](#channelswhatsapp)
+  - [[channels.qq]](#channelsqq)
+  - [[channels.wecom]](#channelswecom)
   - [通道行为覆盖](#通道行为覆盖-channelovervides)
 - [[[mcp_servers]]](#mcp_servers)
 - [[a2a]](#a2a)
@@ -67,6 +70,8 @@ LibreFang 从 TOML 配置文件中读取配置：
 - [[audit]](#audit)
 - [[health_check]](#health_check)
 - [[plugins]](#plugins)
+- [[media]](#media)
+- [[links]](#links)
 - [环境变量](#环境变量)
 - [验证](#验证)
 
@@ -98,6 +103,12 @@ usage_footer     = "full"             # off | tokens | cost | full
 workspaces_dir   = "~/.librefang/workspaces"
 max_cron_jobs    = 500
 include          = ["secrets.toml"]
+
+[provider_urls]
+openai = "https://my-openai-proxy.example.com/v1"
+
+[provider_api_keys]
+openai = "MY_CUSTOM_OPENAI_KEY"
 
 # ── 默认模型 ──────────────────────────────────────────────────────────────
 [default_model]
@@ -133,6 +144,33 @@ allowed_guilds = ["987654321"]
 [channels.slack]
 bot_token_env = "SLACK_BOT_TOKEN"
 app_token_env = "SLACK_APP_TOKEN"
+
+[channels.whatsapp]
+gateway_url_env = "WHATSAPP_WEB_GATEWAY_URL"
+allowed_users   = ["+8613800000000"]
+owner_numbers   = ["+8613900000000"]
+
+[channels.qq]
+app_id         = "123456789"
+app_secret_env = "QQ_BOT_APP_SECRET"
+
+[channels.wecom]
+corp_id      = "ww1234567890abcdef"
+agent_id     = "1000002"
+secret_env   = "WECOM_SECRET"
+webhook_port = 8454
+
+# ── 媒体理解 ──────────────────────────────────────────────────────────────
+[media]
+image_description   = true
+audio_transcription = true
+video_description   = false
+max_concurrency     = 2
+
+# ── 链接理解 ──────────────────────────────────────────────────────────────
+[links]
+enabled  = false
+max_links = 3
 
 # ── MCP 服务器 ────────────────────────────────────────────────────────────
 [[mcp_servers]]
@@ -297,6 +335,8 @@ health_check_interval_secs = 60
 | `workspaces_dir` | Path | `~/.librefang/workspaces` | Agent 工作区根目录 |
 | `max_cron_jobs` | Integer | `500` | 所有 Agent 的最大 Cron 任务总数 |
 | `include` | Array\<String\> | `[]` | 在主配置前合并的子配置文件路径（相对路径，禁止 `..`） |
+| `provider_urls` | Map | `{}` | Provider 基础 URL 覆盖（`provider_id` → 自定义 URL），如 `openai = "https://my-proxy.com/v1"` |
+| `provider_api_keys` | Map | `{}` | Provider API Key 环境变量覆盖（`provider_id` → 环境变量名），如 `openai = "MY_OPENAI_KEY"` |
 | `network_enabled` | bool | `false` | 是否启用 OFP 网络层 |
 | `log_level` | String | `"info"` | 日志级别：`trace` / `debug` / `info` / `warn` / `error` |
 
@@ -386,6 +426,67 @@ OFP P2P 网络层配置（仅在 `network_enabled = true` 时生效）。
 | `account_id` | String? | `null` | Bot 实例唯一标识 |
 | `default_agent` | String? | `null` | 默认路由到的 Agent 名称 |
 | `overrides` | ChannelOverrides | — | 通道行为覆盖 |
+
+#### [channels.whatsapp]
+
+通过 WhatsApp Web 网关接入（需要自托管网关服务）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `gateway_url_env` | String | `"WHATSAPP_WEB_GATEWAY_URL"` | 持有网关 URL 的环境变量名 |
+| `allowed_users` | Array\<String\> | `[]` | 允许交互的 WhatsApp 号码（E.164 格式，空 = 允许所有） |
+| `account_id` | String? | `null` | Bot 实例唯一标识（用于多 Bot 路由） |
+| `default_agent` | String? | `null` | 默认路由到的 Agent 名称 |
+| `owner_numbers` | Array\<String\> | `[]` | 机器人所有者号码（E.164 格式，授予管理员权限） |
+| `overrides` | ChannelOverrides | — | 通道行为覆盖 |
+
+#### [channels.qq]
+
+QQ 频道机器人（官方 QQ Bot API）。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `app_id` | String | 必填 | QQ Bot 应用 ID |
+| `app_secret_env` | String | `"QQ_BOT_APP_SECRET"` | 持有应用密钥的环境变量名 |
+| `allowed_users` | Array\<String\> | `[]` | 允许交互的 QQ 用户 ID（空 = 允许所有） |
+| `account_id` | String? | `null` | Bot 实例唯一标识（用于多 Bot 路由） |
+| `default_agent` | String? | `null` | 默认路由到的 Agent 名称 |
+| `overrides` | ChannelOverrides | — | 通道行为覆盖 |
+
+```toml
+[channels.qq]
+app_id         = "123456789"
+app_secret_env = "QQ_BOT_APP_SECRET"
+allowed_users  = ["10001", "10002"]
+```
+
+#### [channels.wecom]
+
+企业微信（WeCom / 微信工作）机器人。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `corp_id` | String | 必填 | 企业 ID（CorpID） |
+| `agent_id` | String | 必填 | 应用 AgentID |
+| `secret_env` | String | `"WECOM_SECRET"` | 持有应用密钥的环境变量名 |
+| `webhook_port` | Integer | `8454` | 接收企业微信回调的端口 |
+| `token_env` | String? | `null` | 持有回调验证 Token 的环境变量名 |
+| `encoding_aes_key_env` | String? | `null` | 持有消息加解密 AES Key 的环境变量名 |
+| `account_id` | String? | `null` | Bot 实例唯一标识（用于多 Bot 路由） |
+| `default_agent` | String? | `null` | 默认路由到的 Agent 名称 |
+| `overrides` | ChannelOverrides | — | 通道行为覆盖 |
+
+```toml
+[channels.wecom]
+corp_id              = "ww1234567890abcdef"
+agent_id             = "1000002"
+secret_env           = "WECOM_SECRET"
+webhook_port         = 8454
+token_env            = "WECOM_TOKEN"
+encoding_aes_key_env = "WECOM_AES_KEY"
+```
+
+> **通用说明：** 所有通道均支持 `account_id`（多 Bot 路由标识）、`default_agent`（默认 Agent 名称）和 `overrides`（行为覆盖）字段。
 
 #### 通道行为覆盖（ChannelOverrides）
 
@@ -1028,6 +1129,52 @@ tools = ["web_search", "web_fetch"]
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `plugin_registries` | Array\<String\> | `[]` | 额外的 GitHub `owner/repo` 插件注册表，与 `context_engine.plugin_registries` 合并 |
+
+---
+
+### [media]
+
+多媒体理解配置——控制图片描述、音频转录和视频理解功能。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `image_description` | bool | `true` | 是否启用图片自动描述 |
+| `audio_transcription` | bool | `true` | 是否启用音频自动转录 |
+| `video_description` | bool | `false` | 是否启用视频自动描述（开销较大，默认关闭） |
+| `max_concurrency` | Integer | `2` | 最大并发媒体处理任务数 |
+| `image_provider` | String? | `null` | 图片描述首选提供商（`null` = 自动检测） |
+| `audio_provider` | String? | `null` | 音频转录首选提供商（`null` = 自动检测） |
+
+```toml
+[media]
+image_description   = true
+audio_transcription = true
+video_description   = false
+max_concurrency     = 2
+image_provider      = "openai"   # 可选：显式指定提供商
+audio_provider      = "openai"   # 可选：显式指定提供商
+```
+
+---
+
+### [links]
+
+链接内容理解配置——控制消息中 URL 链接的自动抓取与分析。
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 是否启用自动链接理解 |
+| `max_links` | Integer | `3` | 每条消息最多处理的链接数 |
+| `max_content_bytes` | Integer | `102400` | 每个链接最大抓取内容大小（字节，默认 100 KB） |
+| `timeout_secs` | Integer | `10` | 每个链接抓取超时（秒） |
+
+```toml
+[links]
+enabled           = true
+max_links         = 3
+max_content_bytes = 102400
+timeout_secs      = 10
+```
 
 ---
 
