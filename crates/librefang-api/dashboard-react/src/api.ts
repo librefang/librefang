@@ -635,12 +635,7 @@ export async function listModels(params?: { provider?: string; tier?: string; av
   if (params?.tier) query.set("tier", params.tier);
   if (params?.available !== undefined) query.set("available", String(params.available));
   const qs = query.toString();
-  const data = await get<{ models: ModelItem[]; total: number; available: number }>(`/api/models${qs ? `?${qs}` : ""}`);
-  // Deep freeze: return new array with new objects to prevent cache mutation
-  return {
-    ...data,
-    models: (data.models ?? []).map(m => ({ ...m })),
-  };
+  return get<{ models: ModelItem[]; total: number; available: number }>(`/api/models${qs ? `?${qs}` : ""}`);
 }
 
 export async function setProviderKey(providerId: string, key: string): Promise<ApiActionResponse> {
