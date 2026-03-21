@@ -20,7 +20,9 @@ use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmError, StreamE
 use futures::StreamExt;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
-use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use serde::Deserialize;
+use serde::Serialize;
 
 /// How long a ChatGPT session token is valid (conservative estimate).
 /// ChatGPT session tokens typically last ~2 weeks, but we refresh at 7 days.
@@ -58,6 +60,7 @@ struct ResponsesApiRequest {
 }
 
 /// A single output item in the Responses API response.
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct ResponsesOutputItem {
     #[serde(rename = "type")]
@@ -79,6 +82,7 @@ struct ResponsesOutputItem {
 }
 
 /// Content part within an output item.
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct ResponsesContentPart {
     #[serde(rename = "type")]
@@ -88,6 +92,7 @@ struct ResponsesContentPart {
 }
 
 /// Reasoning summary text entry.
+#[cfg(test)]
 #[derive(Debug, Deserialize)]
 struct ResponsesReasoningSummary {
     #[serde(rename = "type")]
@@ -95,15 +100,6 @@ struct ResponsesReasoningSummary {
     summary_type: Option<String>,
     #[serde(default)]
     text: Option<String>,
-}
-
-/// Token usage from the Responses API.
-#[derive(Debug, Deserialize)]
-struct ResponsesUsage {
-    #[serde(default)]
-    input_tokens: u64,
-    #[serde(default)]
-    output_tokens: u64,
 }
 
 // ── Token cache ───────────────────────────────────────────────────────
