@@ -174,14 +174,8 @@ similarity_threshold = 0.75
 ### API 端点
 
 ```bash
-# 语义搜索 API
-curl -X POST http://127.0.0.1:4545/api/memory/search \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "find information about AI",
-    "limit": 10,
-    "threshold": 0.8
-  }'
+# 语义搜索 API（GET 请求，使用查询参数）
+curl "http://127.0.0.1:4545/api/memory/search?q=find+information+about+AI&limit=10&threshold=0.8"
 ```
 
 ---
@@ -233,14 +227,7 @@ librefang kg subgraph --entity "person:bob" --depth 2
 
 ### 自动压缩
 
-当会话消息数量达到阈值时自动压缩：
-
-```toml
-[compaction]
-threshold = 80
-keep_recent = 20
-max_summary_tokens = 1024
-```
+当会话消息数量达到阈值时自动压缩。压缩参数由 runtime 内部管理，不在 `config.toml` 中暴露。默认阈值为 80 条消息，保留最近 20 条原文，其余进行摘要压缩。
 
 ### 手动压缩
 
@@ -296,21 +283,21 @@ librefang cost export --format csv
 
 ## API 端点
 
-### 内存操作
+### KV 内存操作
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/api/memory` | GET | 搜索记忆 |
-| `/api/memory` | POST | 存储记忆 |
-| `/api/memory/{id}` | GET | 获取记忆 |
-| `/api/memory/{id}` | DELETE | 删除记忆 |
+| `/api/memory/search` | GET | 搜索记忆（查询参数：`q`、`limit`、`threshold`） |
+| `/api/memory` | POST | 存储记忆条目 |
+| `/api/memory/{id}` | GET | 获取指定记忆条目 |
+| `/api/memory/{id}` | DELETE | 删除记忆条目 |
 
 ### 会话操作
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/api/memory/sessions` | GET | 列出会话 |
-| `/api/memory/sessions/{id}` | GET | 获取会话 |
+| `/api/memory/sessions/{id}` | GET | 获取会话详情 |
 | `/api/memory/sessions/{id}/compact` | POST | 压缩会话 |
 
 ### 知识图谱
@@ -320,6 +307,19 @@ librefang cost export --format csv
 | `/api/memory/kg/entities` | GET | 列出实体 |
 | `/api/memory/kg/relations` | GET | 列出关系 |
 | `/api/memory/kg/query` | POST | 查询图谱 |
+
+### 主动记忆（Proactive Memory）
+
+主动记忆允许 agent 自主地浮现、整合和召回长期知识，无需显式工具调用。
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/memory/proactive` | GET | 列出所有主动记忆条目 |
+| `/api/memory/proactive` | POST | 创建主动记忆条目 |
+| `/api/memory/proactive/{id}` | GET | 获取主动记忆条目 |
+| `/api/memory/proactive/{id}` | DELETE | 删除主动记忆条目 |
+| `/api/memory/proactive/search` | GET | 对主动记忆做语义搜索 |
+| `/api/memory/proactive/consolidate` | POST | 触发近期记忆的整合 |
 
 ---
 

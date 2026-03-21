@@ -116,7 +116,7 @@ A2A 协议支持 LibreFang agents 之间的通信。
 {
   "name": "researcher",
   "description": "Deep research agent",
-  "url": "http://localhost:4545/a2a",
+  "url": "http://localhost:4545/api/a2a",
   "version": "1.0.0",
   "capabilities": {
     "streaming": true,
@@ -128,37 +128,67 @@ A2A 协议支持 LibreFang agents 之间的通信。
 }
 ```
 
-### A2A 端点
+### 客户端端点（向外部 A2A Agent 发送任务）
+
+这些端点用于让 LibreFang 作为客户端，主动向外部 A2A agent 委派任务：
 
 | 端点 | 方法 | 说明 |
 |------|------|------|
-| `/.well-known/agent.json` | GET | Agent Card |
-| `/a2a/tasks` | POST | 创建任务 |
-| `/a2a/tasks/{id}` | GET | 获取任务状态 |
-| `/a2a/tasks/{id}/messages` | GET | 获取消息历史 |
+| `/api/a2a/agents` | GET | 列出已发现的外部 A2A agents |
+| `/api/a2a/discover` | POST | 发现指定 URL 处的外部 A2A agent |
+| `/api/a2a/send` | POST | 向外部 A2A agent 发送任务 |
+| `/api/a2a/tasks/{id}/status` | GET | 查询已发送任务的状态 |
 
-### 发送任务
+### 服务端端点（接受外部任务）
+
+这些端点由 LibreFang 对外暴露，供其他 A2A agent 向本实例发送任务：
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/.well-known/agent.json` | GET | Agent Card（能力声明） |
+| `/api/a2a/tasks` | POST | 接受来自外部的任务 |
+| `/api/a2a/tasks/{id}` | GET | 获取任务状态 |
+| `/api/a2a/tasks/{id}/messages` | GET | 获取任务消息历史 |
+
+### 发现并发送任务到外部 Agent
 
 ```bash
-curl -X POST http://localhost:4545/a2a/tasks \
+# 发现外部 agent
+curl -X POST http://localhost:4545/api/a2a/discover \
+  -H "Content-Type: application/json" \
+  -d '{"url": "http://other-agent:4545"}'
+
+# 向外部 agent 发送任务
+curl -X POST http://localhost:4545/api/a2a/send \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "task-123",
+    "agent_url": "http://other-agent:4545",
+    "message": "Research AI trends and summarize"
+  }'
+
+# 查询任务状态
+curl http://localhost:4545/api/a2a/tasks/task-123/status
+```
+
+### 接受来自外部的任务
+
+```bash
+# 外部 agent 向本实例发送任务
+curl -X POST http://localhost:4545/api/a2a/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "task-456",
     "message": {
       "role": "user",
       "parts": [{ "type": "text", "text": "Research AI trends" }]
     }
   }'
-```
 
-### 接收任务
+# 轮询结果
+curl http://localhost:4545/api/a2a/tasks/task-456
 
-```bash
-# 轮询
-curl http://localhost:4545/a2a/tasks/task-123
-
-# 或使用 SSE
-curl -N http://localhost:4545/a2a/tasks/task-123/events
+# 或使用 SSE 流式接收
+curl -N http://localhost:4545/api/a2a/tasks/task-456/events
 ```
 
 ---
@@ -210,7 +240,7 @@ args = ["-y", "@modelcontextprotocol/server-github"]
 # A2A 配置
 [a2a]
 enabled = true
-agent_card_path = "/a2a/agent.json"
+listen_path = "/a2a"
 ```
 
 ---

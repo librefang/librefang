@@ -53,16 +53,12 @@ listen_addr = "127.0.0.1:4545"
 [memory]
 decay_rate = 0.05
 
-# 会话压缩
-[compaction]
-threshold = 80
-keep_recent = 20
-max_summary_tokens = 1024
-
 # 使用统计
 [usage_footer]
 display = "Full"
 ```
+
+> **注意**：会话压缩（compaction）参数由 runtime 内部管理，不在 `config.toml` 中配置。自动压缩默认启用。
 
 ---
 

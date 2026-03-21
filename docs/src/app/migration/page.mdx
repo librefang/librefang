@@ -6,11 +6,11 @@ Migrating to LibreFang from other systems.
 
 ## Overview
 
-LibreFang provides comprehensive migration support:
+LibreFang provides the following migration support:
 
-- **OpenClaw** - Direct migration
-- **LangChain** - Compatibility layer
-- **AutoGPT** - Configuration conversion
+- **OpenClaw** - Automated migration via `librefang-migrate` crate (`librefang migrate --from openclaw`)
+- **LangChain** - Manual migration guide (no automated tooling)
+- **AutoGPT** - Manual migration guide (no automated tooling)
 
 ---
 
@@ -56,6 +56,9 @@ librefang migrate --from openclaw --import
 ---
 
 ## Migrating from LangChain
+
+> **Note**: LangChain migration is a **manual process**. There is no automated tool support.
+> The guide below shows how to manually convert LangChain configurations to LibreFang format.
 
 ### Agent Configuration Conversion
 
@@ -114,6 +117,9 @@ result = agent.run("What is the capital of France?")
 ---
 
 ## Migrating from AutoGPT
+
+> **Note**: AutoGPT migration is a **manual process**. There is no automated tool support.
+> The guide below shows how to manually convert AutoGPT configurations to LibreFang format.
 
 ### Configuration Conversion
 

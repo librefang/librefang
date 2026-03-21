@@ -1,12 +1,12 @@
 # Channel Adapters
 
-LibreFang connects to messaging platforms through **40 channel adapters**, allowing users to interact with their agents across every major communication platform. Adapters span consumer messaging, enterprise collaboration, social media, community platforms, privacy-focused protocols, and generic webhooks.
+LibreFang connects to messaging platforms through **42 channel adapters**, allowing users to interact with their agents across every major communication platform. Adapters span consumer messaging, enterprise collaboration, social media, community platforms, privacy-focused protocols, and generic webhooks.
 
 All adapters share a common foundation: graceful shutdown via `watch::channel`, exponential backoff on connection failures, `Zeroizing<String>` for secrets, automatic message splitting for platform limits, per-channel model/prompt overrides, DM/group policy enforcement, per-user rate limiting, and output formatting (Markdown, TelegramHTML, SlackMrkdwn, PlainText).
 
 ## Table of Contents
 
-- [All 40 Channels](#all-40-channels)
+- [All 42 Channels](#all-42-channels)
 - [Channel Configuration](#channel-configuration)
 - [Channel Overrides](#channel-overrides)
 - [Formatter, Rate Limiter, and Policies](#formatter-rate-limiter-and-policies)
@@ -23,7 +23,7 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 
 ---
 
-## All 40 Channels
+## All 42 Channels
 
 ### Core (7)
 
@@ -88,7 +88,7 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 | Nostr | NIP-01 relay WebSocket | `NOSTR_PRIVATE_KEY`, `NOSTR_RELAY` | `Custom("nostr")` |
 | Mumble | TCP text protocol | `MUMBLE_SERVER`, `MUMBLE_USERNAME`, `MUMBLE_PASSWORD` | `Custom("mumble")` |
 
-### Workplace (4)
+### Workplace (6)
 
 | Channel | Protocol | Env Vars | ChannelType Variant |
 |---------|----------|----------|---------------------|
@@ -96,6 +96,8 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 | Flock | Webhook | `FLOCK_TOKEN` | `Custom("flock")` |
 | Twist | API v3 polling | `TWIST_TOKEN` | `Custom("twist")` |
 | DingTalk | Robot API webhook | `DINGTALK_TOKEN`, `DINGTALK_SECRET` | `Custom("dingtalk")` |
+| QQ | Bot API long-polling | `QQ_BOT_TOKEN`, `QQ_BOT_APPID` | `Custom("qq")` |
+| WeCom / WeChat Work | Enterprise API webhook | `WECOM_CORP_ID`, `WECOM_AGENT_ID`, `WECOM_SECRET` | `Custom("wecom")` |
 
 ### Notification (2)
 
@@ -162,7 +164,7 @@ default_agent = "social-media"
 | Matrix | `MATRIX_TOKEN` |
 | Email | `EMAIL_PASSWORD` |
 
-Env vars for all other channels are listed in the [All 40 Channels](#all-40-channels) tables above.
+Env vars for all other channels are listed in the [All 42 Channels](#all-42-channels) tables above.
 
 ---
 

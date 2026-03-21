@@ -127,6 +127,25 @@ quick_chat = "Ctrl+Shift+C"
 
 ---
 
+## React Dashboard
+
+嵌入式 Web UI 包含两套并存的前端实现：
+
+- **旧版 Alpine.js dashboard** — 位于 `crates/librefang-api/static/`，以单一 HTML 文件形式提供，无需构建步骤。
+- **React dashboard** — 位于 `crates/librefang-api/dashboard-react/`，基于 Vite + React + TanStack Router + TanStack Query 构建的现代 SPA。编译产物提交至 `crates/librefang-api/static/react/`，通过 `/react/` 路由访问。
+
+修改前端代码后，可通过以下命令重新构建 React dashboard：
+
+```bash
+cd crates/librefang-api/dashboard-react
+npm install
+npm run build
+```
+
+输出写入 `../static/react/`，axum 服务器下次启动时自动加载。
+
+---
+
 ## 开发
 
 ### 前端开发

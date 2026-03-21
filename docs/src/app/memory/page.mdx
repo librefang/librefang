@@ -174,14 +174,8 @@ similarity_threshold = 0.75
 ### API Endpoint
 
 ```bash
-# Semantic search API
-curl -X POST http://127.0.0.1:4545/api/memory/search \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "find information about AI",
-    "limit": 10,
-    "threshold": 0.8
-  }'
+# Semantic search API (GET with query params)
+curl "http://127.0.0.1:4545/api/memory/search?q=find+information+about+AI&limit=10&threshold=0.8"
 ```
 
 ---
@@ -233,14 +227,7 @@ librefang kg subgraph --entity "person:bob" --depth 2
 
 ### Auto Compaction
 
-Automatic compaction when session message count reaches threshold:
-
-```toml
-[compaction]
-threshold = 80
-keep_recent = 20
-max_summary_tokens = 1024
-```
+Automatic compaction when session message count reaches threshold. Compaction settings are managed internally by the runtime and are not exposed in `config.toml`. The default threshold is 80 messages, keeping the 20 most recent verbatim and summarizing the rest.
 
 ### Manual Compaction
 
@@ -296,21 +283,21 @@ librefang cost export --format csv
 
 ## API Endpoints
 
-### Memory Operations
+### KV Memory Operations
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/memory` | GET | Search memory |
-| `/api/memory` | POST | Store memory |
-| `/api/memory/{id}` | GET | Get memory |
-| `/api/memory/{id}` | DELETE | Delete memory |
+| `/api/memory/search` | GET | Search memory (query params: `q`, `limit`, `threshold`) |
+| `/api/memory` | POST | Store a memory entry |
+| `/api/memory/{id}` | GET | Get a specific memory entry |
+| `/api/memory/{id}` | DELETE | Delete a memory entry |
 
 ### Session Operations
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/memory/sessions` | GET | List sessions |
-| `/api/memory/sessions/{id}` | GET | Get session |
+| `/api/memory/sessions/{id}` | GET | Get session details |
 | `/api/memory/sessions/{id}/compact` | POST | Compact session |
 
 ### Knowledge Graph
@@ -320,6 +307,19 @@ librefang cost export --format csv
 | `/api/memory/kg/entities` | GET | List entities |
 | `/api/memory/kg/relations` | GET | List relations |
 | `/api/memory/kg/query` | POST | Query graph |
+
+### Proactive Memory
+
+Proactive memory allows agents to autonomously surface, consolidate, and recall long-term knowledge without explicit tool calls.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/memory/proactive` | GET | List all proactive memory entries |
+| `/api/memory/proactive` | POST | Create a proactive memory entry |
+| `/api/memory/proactive/{id}` | GET | Get a proactive memory entry |
+| `/api/memory/proactive/{id}` | DELETE | Delete a proactive memory entry |
+| `/api/memory/proactive/search` | GET | Semantic search over proactive memories |
+| `/api/memory/proactive/consolidate` | POST | Trigger consolidation of recent memories |
 
 ---
 
