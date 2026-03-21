@@ -44,7 +44,7 @@ dash:
     cd crates/librefang-api/dashboard-react && pnpm dev
 
 # Start API daemon in dev mode (requires GROQ_API_KEY or OPENAI_API_KEY env var)
-api:
+api: dashboard-build
     cargo run -p librefang-cli -- start --foreground
 
 # Remove build artifacts
