@@ -34,14 +34,12 @@ pub const VENICE_BASE_URL: &str = "https://api.venice.ai/api/v1";
 // ── GitHub Copilot ──────────────────────────────────────────────
 pub const GITHUB_COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
 
-// ── Qwen regional endpoints ──────────────────────────────────────
+// ── Chinese providers ─────────────────────────────────────────────
 pub const QWEN_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
 /// Qwen International endpoint (Singapore).
 pub const QWEN_INTL_BASE_URL: &str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
 /// Qwen US endpoint (Virginia).
 pub const QWEN_US_BASE_URL: &str = "https://dashscope-us.aliyuncs.com/compatible-mode/v1";
-
-// ── Chinese providers ─────────────────────────────────────────────
 /// MiniMax China mainland (minimaxi.com)
 pub const MINIMAX_CN_BASE_URL: &str = "https://api.minimaxi.com/v1";
 /// MiniMax International (minimax.io)
