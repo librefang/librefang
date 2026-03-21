@@ -4413,7 +4413,30 @@ system_prompt = "You are a helpful assistant."
                         .model_catalog
                         .write()
                         .unwrap_or_else(|e| e.into_inner());
-                    catalog.apply_url_overrides(&new_config.provider_urls);
+                    // Apply region selections first (lower priority)
+                    if !new_config.provider_regions.is_empty() {
+                        let region_urls = catalog.resolve_region_urls(&new_config.provider_regions);
+                        if !region_urls.is_empty() {
+                            catalog.apply_url_overrides(&region_urls);
+                            info!(
+                                "Hot-reload: applied {} provider region URL override(s)",
+                                region_urls.len()
+                            );
+                        }
+                        let region_api_keys =
+                            catalog.resolve_region_api_keys(&new_config.provider_regions);
+                        if !region_api_keys.is_empty() {
+                            info!(
+                                "Hot-reload: {} region api_key override(s) detected \
+                                 (takes effect on next driver init)",
+                                region_api_keys.len()
+                            );
+                        }
+                    }
+                    // Apply explicit provider_urls (higher priority, overwrites region URLs)
+                    if !new_config.provider_urls.is_empty() {
+                        catalog.apply_url_overrides(&new_config.provider_urls);
+                    }
                 }
                 HotAction::UpdateDefaultModel => {
                     info!(

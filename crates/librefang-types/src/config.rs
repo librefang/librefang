@@ -4927,6 +4927,19 @@ mod tests {
     }
 
     #[test]
+    fn test_provider_regions_toml_roundtrip() {
+        let toml_str = r#"
+            [provider_regions]
+            qwen = "intl"
+            minimax = "china"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.provider_regions.len(), 2);
+        assert_eq!(config.provider_regions.get("qwen").unwrap(), "intl");
+        assert_eq!(config.provider_regions.get("minimax").unwrap(), "china");
+    }
+
+    #[test]
     fn test_one_or_many_single_toml_table() {
         // Single [channels.telegram] table should parse as OneOrMany with one element
         let toml_str = r#"
