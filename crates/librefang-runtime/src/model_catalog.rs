@@ -677,10 +677,6 @@ pub fn read_codex_credential() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_catalog() -> ModelCatalog {
-        ModelCatalog::new()
-    }
     use librefang_types::model_catalog::{LMSTUDIO_BASE_URL, OLLAMA_BASE_URL};
 
     /// Build a catalog for tests.
