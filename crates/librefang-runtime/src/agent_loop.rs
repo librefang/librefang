@@ -2796,13 +2796,12 @@ fn looks_like_hallucinated_action(text: &str) -> bool {
 fn user_message_has_action_intent(user_message: &str) -> bool {
     let lower = user_message.to_lowercase();
     let action_keywords = [
-        "send", "execute", "create", "delete", "remove", "update", "write", "post", "publish",
-        "deploy", "run", "install", "upload", "download", "forward", "submit", "trigger", "launch",
-        "notify", "schedule", "move", "copy", "rename", "save", "fetch", "search",
+        "send", "execute", "create", "delete", "remove", "write", "publish", "deploy", "install",
+        "upload", "download", "forward", "submit", "trigger", "launch", "notify", "schedule",
+        "rename", "fetch",
     ];
-    // Require the keyword to appear as a word boundary — avoid false positives
-    // from substrings (e.g. "create" inside "recreate" is fine, but "run" inside
-    // "running" should still match since intent is clear).
+    // Require the keyword to appear as an exact word — uses split_whitespace()
+    // so "running" does NOT match "run", and "recreate" does NOT match "create".
     action_keywords.iter().any(|kw| {
         lower.split_whitespace().any(|word| {
             // Strip common punctuation so "send," or "send!" still match
@@ -5232,7 +5231,7 @@ mod tests {
     #[test]
     fn test_action_intent_combined() {
         assert!(user_message_has_action_intent(
-            "search for news about AI and send to Telegram"
+            "fetch the news about AI and send to Telegram"
         ));
     }
 
@@ -5240,7 +5239,7 @@ mod tests {
     fn test_action_intent_with_punctuation() {
         assert!(user_message_has_action_intent("send, please"));
         assert!(user_message_has_action_intent("can you deploy!"));
-        assert!(user_message_has_action_intent("run?"));
+        assert!(user_message_has_action_intent("execute?"));
     }
 
     #[test]
@@ -5263,15 +5262,15 @@ mod tests {
     fn test_action_intent_case_insensitive() {
         assert!(user_message_has_action_intent("SEND this now"));
         assert!(user_message_has_action_intent("Deploy the app"));
-        assert!(user_message_has_action_intent("RUN the tests"));
+        assert!(user_message_has_action_intent("EXECUTE the tests"));
     }
 
     #[test]
     fn test_action_intent_all_keywords() {
         let keywords = [
-            "send", "execute", "create", "delete", "remove", "update", "write", "post", "publish",
-            "deploy", "run", "install", "upload", "download", "forward", "submit", "trigger",
-            "launch", "notify", "schedule", "move", "copy", "rename", "save", "fetch", "search",
+            "send", "execute", "create", "delete", "remove", "write", "publish", "deploy",
+            "install", "upload", "download", "forward", "submit", "trigger", "launch", "notify",
+            "schedule", "rename", "fetch",
         ];
         for kw in &keywords {
             let msg = format!("please {} the thing", kw);
