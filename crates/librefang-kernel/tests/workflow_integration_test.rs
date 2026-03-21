@@ -140,6 +140,7 @@ memory_write = ["self.*"]
             },
         ],
         created_at: chrono::Utc::now(),
+        layout: None,
     };
 
     let wf_id = kernel.register_workflow(workflow).await;
@@ -214,6 +215,7 @@ memory_write = ["self.*"]
             output_var: None,
         }],
         created_at: chrono::Utc::now(),
+        layout: None,
     };
 
     let wf_id = kernel.register_workflow(workflow).await;
@@ -355,6 +357,7 @@ async fn test_workflow_e2e_with_groq() {
             },
         ],
         created_at: chrono::Utc::now(),
+        layout: None,
     };
 
     let wf_id = kernel.register_workflow(workflow).await;

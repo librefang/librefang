@@ -15,7 +15,9 @@ Or with other package managers:
 pip install librefang
 
 # Homebrew (macOS)
-brew install librefang/tap/librefang
+brew tap librefang/tap
+brew install librefang        # CLI
+brew install --cask librefang  # Desktop App
 
 # Cargo
 cargo install librefang

@@ -54,7 +54,12 @@ jobs:
             echo ""
             echo "## Installation"
             echo ""
-            echo "**Desktop App** — Download the installer for your platform below."
+            echo '**Homebrew (macOS):**'
+            echo '```bash'
+            echo 'brew tap librefang/tap'
+            echo 'brew install librefang        # CLI'
+            echo 'brew install --cask librefang  # Desktop App'
+            echo '```'
             echo ""
             echo '**CLI (Linux/macOS):**'
             echo '```bash'
@@ -94,6 +99,12 @@ jobs:
             echo "- [Documentation](https://librefang.ai)"
             echo "- [Discord](https://discord.gg/DzTYqAZZmc)"
             echo "- [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)"
+            echo ""
+            PREV=$(git tag --sort=-creatordate | grep -E '^v[0-9]' | grep -v "$TAG" | head -1)
+            if [ -n "$PREV" ]; then
+              echo "---"
+              echo "**Full diff:** https://github.com/librefang/librefang/compare/${PREV}...${TAG}"
+            fi
           } > /tmp/release-body.md
 
           # Detect pre-release tags (-betaN, -rcN)
@@ -105,12 +116,12 @@ jobs:
           if gh release view "$TAG" &>/dev/null; then
             echo "Release $TAG already exists, updating..."
             gh release edit "$TAG" \
-              --title "LibreFang $TAG" \
+              --title "$TAG" \
               --notes-file /tmp/release-body.md \
               $PRERELEASE_FLAG
           else
             gh release create "$TAG" \
-              --title "LibreFang $TAG" \
+              --title "$TAG" \
               --notes-file /tmp/release-body.md \
               $PRERELEASE_FLAG
           fi

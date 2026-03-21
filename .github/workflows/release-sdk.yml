@@ -72,7 +72,7 @@ jobs:
 
       - uses: actions/setup-node@v6
         with:
-          node-version: "20"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
 
       - name: Sync version from tag
@@ -106,6 +106,44 @@ jobs:
         run: |
           npm config set registry https://npm.pkg.github.com
           npm publish --access public 2>/dev/null || echo "✓ Already published to GitHub Packages, skipping"
+
+  # ── CLI npm wrapper → npm ─────────────────────────────────────────────────
+  sdk_cli_npm:
+    name: SDK / CLI npm (@librefang/cli)
+    needs: [wait_for_release]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/cli-npm
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Sync version from tag
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          echo "Publishing @librefang/cli@$VERSION"
+
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; then
+            echo "✓ ${PKG_NAME}@${PKG_VERSION} already published, skipping"
+          else
+            NPM_TAG=""
+            if echo "$PKG_VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
+              NPM_TAG="--tag next"
+            fi
+            npm publish --access public $NPM_TAG
+          fi
 
   # ── Python SDK → PyPI ─────────────────────────────────────────────────────
   sdk_python:

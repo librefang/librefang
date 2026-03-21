@@ -1,6 +1,6 @@
 //! Catalog sync — fetch model catalog updates from the remote repository.
 //!
-//! Downloads TOML files from `github.com/librefang/model-catalog` and caches
+//! Downloads TOML files from `github.com/librefang/librefang-registry` and caches
 //! them under `~/.librefang/cache/catalog/`. The cached catalog is loaded at
 //! startup between the builtin fallback and the user's local overrides.
 
@@ -23,7 +23,7 @@ struct ProviderCatalogFile {
 }
 
 /// Default remote repository for the model catalog.
-const CATALOG_REPO: &str = "librefang/model-catalog";
+const CATALOG_REPO: &str = "librefang/librefang-registry";
 
 /// Sync the model catalog from the remote repository.
 ///
