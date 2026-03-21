@@ -1,9 +1,7 @@
 import { useState, useEffect } from 'react'
-import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { translations, languages } from './i18n'
 import { ExternalLink, Globe, ChevronDown, Menu, X, ClipboardCheck, Settings, BadgeCheck, Code, Bug, MessageCircle, Copy, Check, Video, UserSearch, Radar, TrendingUp, Activity, Filter, Network, RefreshCw, Shield, Library, Monitor, SearchCheck, Rss, Star, GitFork, CircleDot, GitPullRequest } from 'lucide-react'
-
-const queryClient = new QueryClient()
 
 const comparisonData = [
   { metric: 'Cold Start', openclaw: '2.5s+', zeroclaw: '4s+', librefang: '180ms' },
@@ -400,9 +398,9 @@ function Install({ t }) {
             </div>
             <ul className="space-y-3 text-gray-400">
               <li className="flex items-center gap-3"><span className="text-primary">•</span> {t.install.platforms}</li>
-              <li className="flex items-center gap-3"><span className="text-primary">•</span> 64MB RAM minimum (256MB recommended)</li>
-              <li className="flex items-center gap-3"><span className="text-primary">•</span> x86_64 or ARM64 architecture</li>
-              <li className="flex items-center gap-3"><span className="text-primary">•</span> LLM API Key (12 providers supported)</li>
+              <li className="flex items-center gap-3"><span className="text-primary">•</span> {t.install.ramMinimum}</li>
+              <li className="flex items-center gap-3"><span className="text-primary">•</span> {t.install.cpuArch}</li>
+              <li className="flex items-center gap-3"><span className="text-primary">•</span> {t.install.llmApiKey}</li>
             </ul>
           </article>
           <article className="bg-white/5 rounded-[2rem] border border-gray-700/50 p-8 space-y-6 hover:border-gray-600/50 transition-colors">
@@ -413,9 +411,9 @@ function Install({ t }) {
               <h3 className="text-2xl font-extrabold text-white">{t.install.whatYouGet}</h3>
             </div>
             <ul className="space-y-3 text-gray-400">
-              <li className="flex items-center gap-3"><span className="text-primary">•</span> 7 built-in autonomous Hands</li>
-              <li className="flex items-center gap-3"><span className="text-primary">•</span> 10 workflow orchestration templates</li>
-              <li className="flex items-center gap-3"><span className="text-primary">•</span> 40 channel adapters (incl. Feishu & DingTalk)</li>
+              <li className="flex items-center gap-3"><span className="text-primary">•</span> {t.install.builtInHands}</li>
+              <li className="flex items-center gap-3"><span className="text-primary">•</span> {t.install.workflowTemplates}</li>
+              <li className="flex items-center gap-3"><span className="text-primary">•</span> {t.install.channelAdapters}</li>
               <li className="flex items-center gap-3"><span className="text-primary">•</span> {t.install.desktopApp}</li>
             </ul>
           </article>
@@ -804,10 +802,4 @@ function App() {
   )
 }
 
-export default function WrappedApp() {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <App />
-    </QueryClientProvider>
-  )
-}
+export default App
