@@ -51,6 +51,7 @@ mod tests {
     #[test]
     fn bundled_integrations_returns_vec() {
         // Just verify it doesn't panic — actual content depends on disk state
-        let _ = bundled_integrations();
+        let home = std::path::PathBuf::from("/tmp/test_home");
+        let _ = bundled_integrations(&home);
     }
 }

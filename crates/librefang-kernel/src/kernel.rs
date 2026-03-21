@@ -7888,6 +7888,7 @@ mod tests {
             display_name: "Alice".to_string(),
             is_group: true,
             thread_id: Some("thread-9".to_string()),
+            account_id: None,
         };
 
         let with_sender = LibreFangKernel::assistant_route_key(agent_id, Some(&sender));
