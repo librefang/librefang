@@ -352,7 +352,7 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
 function ConnectionBar({ agentName, isLoading, messageCount, onClear }: { agentName: string; isLoading: boolean; messageCount: number; onClear: () => void }) {
   const { t } = useTranslation();
   return (
-    <div className="px-4 py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface/80 to-transparent flex items-center justify-between backdrop-blur-sm">
+    <div className="px-4 py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface/80 to-transparent flex items-center justify-between backdrop-blur-xl backdrop-saturate-150">
       <div className="flex items-center gap-3">
         <div className="relative">
           <Wifi className="h-3.5 w-3.5 text-success" />
