@@ -106,29 +106,6 @@ struct ResponsesUsage {
     output_tokens: u64,
 }
 
-/// Top-level response from the Responses API.
-#[derive(Debug, Deserialize)]
-struct ResponsesApiResponse {
-    #[serde(default)]
-    output: Vec<ResponsesOutputItem>,
-    #[serde(default)]
-    usage: Option<ResponsesUsage>,
-    #[serde(default)]
-    error: Option<ResponsesError>,
-    // status can be "completed", "failed", "incomplete"
-    #[serde(default)]
-    status: Option<String>,
-}
-
-/// Error object from the Responses API.
-#[derive(Debug, Deserialize)]
-struct ResponsesError {
-    #[serde(default)]
-    message: Option<String>,
-    #[serde(default)]
-    code: Option<String>,
-}
-
 // ── Token cache ───────────────────────────────────────────────────────
 
 /// Cached ChatGPT session token with estimated expiry.
@@ -395,8 +372,8 @@ impl ChatGptDriver {
         let mut thinking_text = String::new();
         let mut usage = TokenUsage::default();
         let mut stop_reason = StopReason::EndTurn;
-        // tool_accum: (call_id, name, arguments) indexed by output_index
-        let mut tool_accum: Vec<(String, String, String)> = Vec::new();
+        // tool_accum: (call_id, name, arguments, arguments_done_emitted) indexed by output_index
+        let mut tool_accum: Vec<(String, String, String, bool)> = Vec::new();
         let mut completed_response: Option<serde_json::Value> = None;
 
         while let Some(chunk) = byte_stream.next().await {
@@ -418,7 +395,10 @@ impl ChatGptDriver {
 
                 let event: serde_json::Value = match serde_json::from_str(data) {
                     Ok(v) => v,
-                    Err(_) => continue,
+                    Err(e) => {
+                        warn!("ChatGPT SSE: failed to parse JSON event: {e}");
+                        continue;
+                    }
                 };
 
                 let event_type = event
@@ -494,10 +474,15 @@ impl ChatGptDriver {
 
                                 // Ensure tool_accum is large enough
                                 while tool_accum.len() <= output_index {
-                                    tool_accum.push((String::new(), String::new(), String::new()));
+                                    tool_accum.push((
+                                        String::new(),
+                                        String::new(),
+                                        String::new(),
+                                        false,
+                                    ));
                                 }
                                 tool_accum[output_index] =
-                                    (call_id.clone(), name.clone(), String::new());
+                                    (call_id.clone(), name.clone(), String::new(), false);
 
                                 if let Some(tx) = tx {
                                     let _ = tx
@@ -534,9 +519,15 @@ impl ChatGptDriver {
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0) as usize;
                         if output_index < tool_accum.len() {
-                            let (ref id, ref name, ref args) = tool_accum[output_index];
-                            let input: serde_json::Value = serde_json::from_str(args)
-                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                            tool_accum[output_index].3 = true;
+                            let (ref id, ref name, ref args, _) = tool_accum[output_index];
+                            let input: serde_json::Value = match serde_json::from_str(args) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    warn!("ChatGPT SSE: failed to parse tool call arguments: {e}");
+                                    serde_json::Value::Object(serde_json::Map::new())
+                                }
+                            };
                             if let Some(tx) = tx {
                                 let _ = tx
                                     .send(StreamEvent::ToolUseEnd {
@@ -550,7 +541,7 @@ impl ChatGptDriver {
                     }
 
                     "response.output_item.done" => {
-                        // Function call items finalize here if .done wasn't received
+                        // Function call items finalize here if arguments.done wasn't received
                         if let Some(item) = event.get("item") {
                             let item_type = item.get("type").and_then(|t| t.as_str()).unwrap_or("");
                             if item_type == "function_call" {
@@ -559,14 +550,19 @@ impl ChatGptDriver {
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(0)
                                     as usize;
-                                // If arguments.done was never received, emit ToolUseEnd now
-                                if output_index < tool_accum.len() {
-                                    let (ref id, ref name, ref args) = tool_accum[output_index];
+                                // Only emit ToolUseEnd if arguments.done didn't already emit it
+                                if output_index < tool_accum.len() && !tool_accum[output_index].3 {
+                                    let (ref id, ref name, ref args, _) = tool_accum[output_index];
                                     if !id.is_empty() {
-                                        let input: serde_json::Value = serde_json::from_str(args)
-                                            .unwrap_or(serde_json::Value::Object(
-                                                serde_json::Map::new(),
-                                            ));
+                                        let input: serde_json::Value = match serde_json::from_str(
+                                            args,
+                                        ) {
+                                            Ok(v) => v,
+                                            Err(e) => {
+                                                warn!("ChatGPT SSE: failed to parse tool call arguments in output_item.done: {e}");
+                                                serde_json::Value::Object(serde_json::Map::new())
+                                            }
+                                        };
                                         if let Some(tx) = tx {
                                             let _ = tx
                                                 .send(StreamEvent::ToolUseEnd {
@@ -614,7 +610,8 @@ impl ChatGptDriver {
 
                     "error" => {
                         let msg = event
-                            .get("message")
+                            .get("error")
+                            .and_then(|e| e.get("message"))
                             .and_then(|m| m.as_str())
                             .unwrap_or("unknown error");
                         return Err(LlmError::Api {
@@ -652,10 +649,15 @@ impl ChatGptDriver {
 
         // Build tool_calls from accumulated data
         let mut tool_calls: Vec<ToolCall> = Vec::new();
-        for (call_id, name, args) in &tool_accum {
+        for (call_id, name, args, _) in &tool_accum {
             if !call_id.is_empty() {
-                let input: serde_json::Value = serde_json::from_str(args)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                let input: serde_json::Value = match serde_json::from_str(args) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!("ChatGPT: failed to parse accumulated tool call arguments: {e}");
+                        serde_json::Value::Object(serde_json::Map::new())
+                    }
+                };
                 tool_calls.push(ToolCall {
                     id: call_id.clone(),
                     name: name.clone(),
@@ -765,8 +767,13 @@ impl ChatGptDriver {
                         .get("arguments")
                         .and_then(|v| v.as_str())
                         .unwrap_or("{}");
-                    let input: serde_json::Value = serde_json::from_str(args)
-                        .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                    let input: serde_json::Value = match serde_json::from_str(args) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            warn!("ChatGPT: failed to parse tool arguments in completed response: {e}");
+                            serde_json::Value::Object(serde_json::Map::new())
+                        }
+                    };
                     if !call_id.is_empty() {
                         tool_calls.push(ToolCall {
                             id: call_id,
@@ -781,17 +788,6 @@ impl ChatGptDriver {
 
         if !tool_calls.is_empty() {
             *stop_reason = StopReason::ToolUse;
-        }
-    }
-
-    /// Ensure a JSON value is an object; if it's a string, attempt to parse it.
-    fn ensure_object(v: &serde_json::Value) -> serde_json::Value {
-        match v {
-            serde_json::Value::Object(_) => v.clone(),
-            serde_json::Value::String(s) => {
-                serde_json::from_str(s).unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
-            }
-            _ => serde_json::Value::Object(serde_json::Map::new()),
         }
     }
 }
@@ -1147,34 +1143,6 @@ mod tests {
             }
             _ => panic!("Expected Thinking block"),
         }
-    }
-
-    #[test]
-    fn test_ensure_object_with_object() {
-        let obj = serde_json::json!({"key": "value"});
-        let result = ChatGptDriver::ensure_object(&obj);
-        assert_eq!(result, obj);
-    }
-
-    #[test]
-    fn test_ensure_object_with_string() {
-        let s = serde_json::json!("{\"key\": \"value\"}");
-        let result = ChatGptDriver::ensure_object(&s);
-        assert_eq!(result, serde_json::json!({"key": "value"}));
-    }
-
-    #[test]
-    fn test_ensure_object_with_invalid_string() {
-        let s = serde_json::json!("not json");
-        let result = ChatGptDriver::ensure_object(&s);
-        assert_eq!(result, serde_json::json!({}));
-    }
-
-    #[test]
-    fn test_ensure_object_with_number() {
-        let n = serde_json::json!(42);
-        let result = ChatGptDriver::ensure_object(&n);
-        assert_eq!(result, serde_json::json!({}));
     }
 
     #[test]
