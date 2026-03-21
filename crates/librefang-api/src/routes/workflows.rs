@@ -15,6 +15,107 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
+// Helpers – parse StepMode / ErrorMode from both flat-string and nested-object
+// formats so the frontend can send either:
+//   "sequential"                                     (flat string)
+//   {"conditional": {"condition": "..."}}            (serde-serialised enum)
+// ---------------------------------------------------------------------------
+
+/// Parse a `StepMode` from a JSON value.
+///
+/// Accepts:
+/// - A plain string: `"sequential"`, `"fan_out"`, `"collect"`, `"conditional"`, `"loop"`
+/// - A serde-serialised tagged object: `{"conditional": {"condition": "..."}}`
+fn parse_step_mode(val: &serde_json::Value, step: &serde_json::Value) -> StepMode {
+    // 1) Try flat string first
+    if let Some(s) = val.as_str() {
+        return match s {
+            "fan_out" => StepMode::FanOut,
+            "collect" => StepMode::Collect,
+            "conditional" => StepMode::Conditional {
+                condition: step["condition"].as_str().unwrap_or("").to_string(),
+            },
+            "loop" => StepMode::Loop {
+                max_iterations: step["max_iterations"].as_u64().unwrap_or(5) as u32,
+                until: step["until"].as_str().unwrap_or("").to_string(),
+            },
+            _ => StepMode::Sequential,
+        };
+    }
+
+    // 2) Try nested object (serde-serialised enum representation)
+    if let Some(obj) = val.as_object() {
+        if let Some(inner) = obj.get("conditional") {
+            return StepMode::Conditional {
+                condition: inner["condition"].as_str().unwrap_or("").to_string(),
+            };
+        }
+        if let Some(inner) = obj.get("loop") {
+            return StepMode::Loop {
+                max_iterations: inner["max_iterations"].as_u64().unwrap_or(5) as u32,
+                until: inner["until"].as_str().unwrap_or("").to_string(),
+            };
+        }
+        if obj.contains_key("fan_out") {
+            return StepMode::FanOut;
+        }
+        if obj.contains_key("collect") {
+            return StepMode::Collect;
+        }
+        if obj.contains_key("sequential") {
+            return StepMode::Sequential;
+        }
+    }
+
+    // 3) Fallback: try serde deserialization directly
+    if let Ok(mode) = serde_json::from_value::<StepMode>(val.clone()) {
+        return mode;
+    }
+
+    StepMode::Sequential
+}
+
+/// Parse an `ErrorMode` from a JSON value.
+///
+/// Accepts:
+/// - A plain string: `"fail"`, `"skip"`, `"retry"`
+/// - A serde-serialised tagged object: `{"retry": {"max_retries": 3}}`
+fn parse_error_mode(val: &serde_json::Value, step: &serde_json::Value) -> ErrorMode {
+    // 1) Try flat string first
+    if let Some(s) = val.as_str() {
+        return match s {
+            "skip" => ErrorMode::Skip,
+            "retry" => ErrorMode::Retry {
+                max_retries: step["max_retries"].as_u64().unwrap_or(3) as u32,
+            },
+            _ => ErrorMode::Fail,
+        };
+    }
+
+    // 2) Try nested object
+    if let Some(obj) = val.as_object() {
+        if let Some(inner) = obj.get("retry") {
+            return ErrorMode::Retry {
+                max_retries: inner["max_retries"].as_u64().unwrap_or(3) as u32,
+            };
+        }
+        if obj.contains_key("skip") {
+            return ErrorMode::Skip;
+        }
+        if obj.contains_key("fail") {
+            return ErrorMode::Fail;
+        }
+    }
+
+    // 3) Fallback: try serde deserialization directly
+    if let Ok(mode) = serde_json::from_value::<ErrorMode>(val.clone()) {
+        return mode;
+    }
+
+    ErrorMode::Fail
+}
+
+// ---------------------------------------------------------------------------
 // Workflow routes
 // ---------------------------------------------------------------------------
 
@@ -64,26 +165,8 @@ pub async fn create_workflow(
             );
         };
 
-        let mode = match s["mode"].as_str().unwrap_or("sequential") {
-            "fan_out" => StepMode::FanOut,
-            "collect" => StepMode::Collect,
-            "conditional" => StepMode::Conditional {
-                condition: s["condition"].as_str().unwrap_or("").to_string(),
-            },
-            "loop" => StepMode::Loop {
-                max_iterations: s["max_iterations"].as_u64().unwrap_or(5) as u32,
-                until: s["until"].as_str().unwrap_or("").to_string(),
-            },
-            _ => StepMode::Sequential,
-        };
-
-        let error_mode = match s["error_mode"].as_str().unwrap_or("fail") {
-            "skip" => ErrorMode::Skip,
-            "retry" => ErrorMode::Retry {
-                max_retries: s["max_retries"].as_u64().unwrap_or(3) as u32,
-            },
-            _ => ErrorMode::Fail,
-        };
+        let mode = parse_step_mode(&s["mode"], s);
+        let error_mode = parse_error_mode(&s["error_mode"], s);
 
         steps.push(WorkflowStep {
             name: step_name,
@@ -263,26 +346,8 @@ pub async fn update_workflow(
                 );
             };
 
-            let mode = match s["mode"].as_str().unwrap_or("sequential") {
-                "fan_out" => StepMode::FanOut,
-                "collect" => StepMode::Collect,
-                "conditional" => StepMode::Conditional {
-                    condition: s["condition"].as_str().unwrap_or("").to_string(),
-                },
-                "loop" => StepMode::Loop {
-                    max_iterations: s["max_iterations"].as_u64().unwrap_or(5) as u32,
-                    until: s["until"].as_str().unwrap_or("").to_string(),
-                },
-                _ => StepMode::Sequential,
-            };
-
-            let error_mode = match s["error_mode"].as_str().unwrap_or("fail") {
-                "skip" => ErrorMode::Skip,
-                "retry" => ErrorMode::Retry {
-                    max_retries: s["max_retries"].as_u64().unwrap_or(3) as u32,
-                },
-                _ => ErrorMode::Fail,
-            };
+            let mode = parse_step_mode(&s["mode"], s);
+            let error_mode = parse_error_mode(&s["error_mode"], s);
 
             parsed_steps.push(WorkflowStep {
                 name: step_name,
