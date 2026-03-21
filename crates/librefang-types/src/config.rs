@@ -1073,13 +1073,15 @@ pub struct SidecarChannelConfig {
 
 /// Session retention policy configuration.
 ///
-/// Controls automatic cleanup of idle or excess sessions.
+/// Controls automatic cleanup of idle or excess sessions and optional
+/// startup prompt injection.
 /// Configure in `config.toml`:
 /// ```toml
 /// [session]
 /// retention_days = 30
 /// max_sessions_per_agent = 100
 /// cleanup_interval_hours = 24
+/// reset_prompt = "You are a helpful coding assistant. Always respond in English."
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1090,6 +1092,11 @@ pub struct SessionConfig {
     pub max_sessions_per_agent: u32,
     /// How often the cleanup job runs (in hours).
     pub cleanup_interval_hours: u32,
+    /// Optional message injected as the first system message when a new session
+    /// starts or when the session is reset. Useful for setting up persistent
+    /// context or instructions across all agents.
+    #[serde(default)]
+    pub reset_prompt: Option<String>,
 }
 
 impl Default for SessionConfig {
@@ -1098,6 +1105,7 @@ impl Default for SessionConfig {
             retention_days: 0,
             max_sessions_per_agent: 0,
             cleanup_interval_hours: 24,
+            reset_prompt: None,
         }
     }
 }
@@ -1306,6 +1314,10 @@ pub struct KernelConfig {
     /// Root directory for agent workspaces. Default: `~/.librefang/workspaces`
     #[serde(default)]
     pub workspaces_dir: Option<PathBuf>,
+    /// Global shared workspace directory for cross-session file persistence.
+    /// Default: `~/.librefang/workspace`
+    #[serde(default)]
+    pub workspace_dir: Option<PathBuf>,
     /// Media understanding configuration.
     #[serde(default)]
     pub media: crate::media::MediaConfig,
@@ -1366,6 +1378,11 @@ pub struct KernelConfig {
     /// e.g. `ollama = "http://192.168.1.100:11434/v1"`
     #[serde(default)]
     pub provider_urls: HashMap<String, String>,
+    /// Provider region selection (provider ID → region name).
+    /// Selects a regional endpoint from the provider's `[provider.regions]` map.
+    /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
+    #[serde(default)]
+    pub provider_regions: HashMap<String, String>,
     /// Provider API key env var overrides (provider ID → env var name).
     /// For custom/unknown providers, maps the provider name to the environment
     /// variable holding the API key. e.g. `nvidia = "NVIDIA_API_KEY"`.
@@ -2039,6 +2056,7 @@ impl Default for KernelConfig {
             extensions: ExtensionsConfig::default(),
             vault: VaultConfig::default(),
             workspaces_dir: None,
+            workspace_dir: None,
             media: crate::media::MediaConfig::default(),
             links: crate::media::LinkConfig::default(),
             reload: ReloadConfig::default(),
@@ -2058,6 +2076,7 @@ impl Default for KernelConfig {
             thinking: None,
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
+            provider_regions: HashMap::new(),
             provider_api_keys: HashMap::new(),
             vertex_ai: VertexAiConfig::default(),
             oauth: OAuthConfig::default(),
@@ -2084,6 +2103,13 @@ impl KernelConfig {
         self.workspaces_dir
             .clone()
             .unwrap_or_else(|| self.home_dir.join("workspaces"))
+    }
+
+    /// Resolved global shared workspace directory for cross-session persistence.
+    pub fn effective_workspace_dir(&self) -> PathBuf {
+        self.workspace_dir
+            .clone()
+            .unwrap_or_else(|| self.home_dir.join("workspace"))
     }
 
     /// Resolve the API key env var name for a provider.
@@ -2148,6 +2174,7 @@ impl std::fmt::Debug for KernelConfig {
             .field("extensions", &self.extensions)
             .field("vault", &format!("enabled={}", self.vault.enabled))
             .field("workspaces_dir", &self.workspaces_dir)
+            .field("workspace_dir", &self.workspace_dir)
             .field(
                 "media",
                 &format!(
@@ -2257,9 +2284,16 @@ pub struct MemoryConfig {
     /// Environment variable name for the embedding API key.
     #[serde(default)]
     pub embedding_api_key_env: Option<String>,
+    /// Override embedding dimensions instead of auto-inferring from model name.
+    #[serde(default)]
+    pub embedding_dimensions: Option<usize>,
     /// How often to run memory consolidation (hours). 0 = disabled.
     #[serde(default = "default_consolidation_interval")]
     pub consolidation_interval_hours: u64,
+    /// When true, use SQLite FTS5 full-text search instead of embedding-based
+    /// vector similarity. Eliminates the need for an external embedding provider.
+    #[serde(default)]
+    pub fts_only: Option<bool>,
 }
 
 fn default_consolidation_interval() -> u64 {
@@ -2275,7 +2309,9 @@ impl Default for MemoryConfig {
             decay_rate: 0.1,
             embedding_provider: None,
             embedding_api_key_env: None,
+            embedding_dimensions: None,
             consolidation_interval_hours: default_consolidation_interval(),
+            fts_only: None,
         }
     }
 }
@@ -2488,6 +2524,11 @@ pub struct DiscordConfig {
     /// Set to false to allow bot-to-bot interactions in multi-agent setups.
     #[serde(default = "default_true")]
     pub ignore_bots: bool,
+    /// Custom text patterns that trigger the bot (case-insensitive contains match).
+    /// When any pattern matches the message content, the bot treats it as if it was mentioned.
+    /// Example: `["hey bot", "!ask"]`
+    #[serde(default)]
+    pub mention_patterns: Vec<String>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2503,6 +2544,7 @@ impl Default for DiscordConfig {
             default_agent: None,
             intents: 37376,
             ignore_bots: true,
+            mention_patterns: vec![],
             overrides: ChannelOverrides::default(),
         }
     }
@@ -2524,9 +2566,18 @@ pub struct SlackConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Whether to disable link unfurling (preview expansion) in sent messages.
+    /// When set to `false`, Slack will not expand link previews.
+    /// When `None` (default), Slack uses its own default behavior.
+    #[serde(default)]
+    pub unfurl_links: Option<bool>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// When true, bot replies are posted as top-level channel messages instead
+    /// of threaded replies. Defaults to `None` (i.e. use normal threading).
+    #[serde(default)]
+    pub force_flat_replies: Option<bool>,
 }
 
 impl Default for SlackConfig {
@@ -2537,7 +2588,9 @@ impl Default for SlackConfig {
             allowed_channels: vec![],
             account_id: None,
             default_agent: None,
+            unfurl_links: None,
             overrides: ChannelOverrides::default(),
+            force_flat_replies: None,
         }
     }
 }
@@ -4491,6 +4544,34 @@ mod tests {
         assert_eq!(sl.app_token_env, "SLACK_APP_TOKEN");
         assert_eq!(sl.bot_token_env, "SLACK_BOT_TOKEN");
         assert!(sl.allowed_channels.is_empty());
+        assert!(sl.unfurl_links.is_none());
+    }
+
+    #[test]
+    fn test_slack_config_unfurl_links_deserialization() {
+        let toml_str = r#"
+            app_token_env = "SLACK_APP_TOKEN"
+            bot_token_env = "SLACK_BOT_TOKEN"
+            unfurl_links = false
+        "#;
+        let sl: SlackConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(sl.unfurl_links, Some(false));
+
+        let toml_str2 = r#"
+            app_token_env = "SLACK_APP_TOKEN"
+            bot_token_env = "SLACK_BOT_TOKEN"
+            unfurl_links = true
+        "#;
+        let sl2: SlackConfig = toml::from_str(toml_str2).unwrap();
+        assert_eq!(sl2.unfurl_links, Some(true));
+
+        // Default (field omitted) should be None
+        let toml_str3 = r#"
+            app_token_env = "SLACK_APP_TOKEN"
+            bot_token_env = "SLACK_BOT_TOKEN"
+        "#;
+        let sl3: SlackConfig = toml::from_str(toml_str3).unwrap();
+        assert!(sl3.unfurl_links.is_none());
     }
 
     #[test]
@@ -4918,6 +4999,19 @@ mod tests {
             config.provider_api_keys.get("azure").unwrap(),
             "AZURE_OPENAI_KEY"
         );
+    }
+
+    #[test]
+    fn test_provider_regions_toml_roundtrip() {
+        let toml_str = r#"
+            [provider_regions]
+            qwen = "intl"
+            minimax = "china"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.provider_regions.len(), 2);
+        assert_eq!(config.provider_regions.get("qwen").unwrap(), "intl");
+        assert_eq!(config.provider_regions.get("minimax").unwrap(), "china");
     }
 
     #[test]

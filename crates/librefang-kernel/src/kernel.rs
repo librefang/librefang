@@ -701,6 +701,16 @@ impl LibreFangKernel {
         std::fs::create_dir_all(&config.data_dir)
             .map_err(|e| KernelError::BootFailed(format!("Failed to create data dir: {e}")))?;
 
+        // Ensure global shared workspace directory exists
+        let workspace_dir = config.effective_workspace_dir();
+        std::fs::create_dir_all(&workspace_dir).map_err(|e| {
+            KernelError::BootFailed(format!(
+                "Failed to create workspace dir {}: {e}",
+                workspace_dir.display()
+            ))
+        })?;
+        info!("Global workspace dir: {}", workspace_dir.display());
+
         // Initialize memory substrate
         let db_path = config
             .memory
@@ -924,6 +934,21 @@ impl LibreFangKernel {
         let mut model_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
         model_catalog.detect_auth();
+        // Apply region selections first (lower priority than explicit provider_urls)
+        if !config.provider_regions.is_empty() {
+            let region_urls = model_catalog.resolve_region_urls(&config.provider_regions);
+            if !region_urls.is_empty() {
+                model_catalog.apply_url_overrides(&region_urls);
+                info!("applied {} provider region override(s)", region_urls.len());
+            }
+            // Also apply region-specific api_key_env overrides (e.g. minimax china
+            // uses MINIMAX_CN_API_KEY instead of MINIMAX_API_KEY). Only inserts if
+            // the user hasn't already set an explicit provider_api_keys entry.
+            let region_api_keys = model_catalog.resolve_region_api_keys(&config.provider_regions);
+            for (provider, env_var) in region_api_keys {
+                config.provider_api_keys.entry(provider).or_insert(env_var);
+            }
+        }
         if !config.provider_urls.is_empty() {
             model_catalog.apply_url_overrides(&config.provider_urls);
             info!(
@@ -1057,7 +1082,10 @@ impl LibreFangKernel {
         // Auto-detect embedding driver for vector similarity search
         let embedding_driver: Option<
             Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>,
-        > = {
+        > = if config.memory.fts_only == Some(true) {
+            info!("FTS-only memory mode active — skipping embedding driver, using SQLite FTS5 text search");
+            None
+        } else {
             use librefang_runtime::embedding::create_embedding_driver;
             let configured_model = &config.memory.embedding_model;
             if let Some(ref provider) = config.memory.embedding_provider {
@@ -1075,7 +1103,13 @@ impl LibreFangKernel {
                     .provider_urls
                     .get(provider.as_str())
                     .map(|s| s.as_str());
-                match create_embedding_driver(provider, model, api_key_env, custom_url) {
+                match create_embedding_driver(
+                    provider,
+                    model,
+                    api_key_env,
+                    custom_url,
+                    config.memory.embedding_dimensions,
+                ) {
                     Ok(d) => {
                         info!(provider = %provider, model = %model, "Embedding driver configured from memory config");
                         Some(Arc::from(d))
@@ -1092,7 +1126,13 @@ impl LibreFangKernel {
                     configured_model.as_str()
                 };
                 let openai_url = config.provider_urls.get("openai").map(|s| s.as_str());
-                match create_embedding_driver("openai", model, "OPENAI_API_KEY", openai_url) {
+                match create_embedding_driver(
+                    "openai",
+                    model,
+                    "OPENAI_API_KEY",
+                    openai_url,
+                    config.memory.embedding_dimensions,
+                ) {
                     Ok(d) => {
                         info!(model = %model, "Embedding driver auto-detected: OpenAI");
                         Some(Arc::from(d))
@@ -1110,7 +1150,13 @@ impl LibreFangKernel {
                     configured_model.as_str()
                 };
                 let ollama_url = config.provider_urls.get("ollama").map(|s| s.as_str());
-                match create_embedding_driver("ollama", model, "", ollama_url) {
+                match create_embedding_driver(
+                    "ollama",
+                    model,
+                    "",
+                    ollama_url,
+                    config.memory.embedding_dimensions,
+                ) {
                     Ok(d) => {
                         info!(model = %model, "Embedding driver auto-detected: Ollama (local)");
                         Some(Arc::from(d))
@@ -1598,10 +1644,12 @@ system_prompt = "You are a helpful assistant."
 
         info!(agent = %name, id = %agent_id, parent = ?parent, "Spawning agent");
 
-        // Create session
-        self.memory
+        // Create session and inject reset prompt if configured
+        let mut session = self
+            .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
+        self.inject_reset_prompt(&mut session);
 
         // Inherit kernel exec_policy as fallback if agent manifest doesn't have one
         let mut manifest = manifest;
@@ -3389,6 +3437,37 @@ system_prompt = "You are a helpful assistant."
         // Delete the old session
         let _ = self.memory.delete_session(entry.session_id);
 
+        // Create a fresh session and inject reset prompt if configured
+        let mut new_session = self
+            .memory
+            .create_session(agent_id)
+            .map_err(KernelError::LibreFang)?;
+        self.inject_reset_prompt(&mut new_session);
+
+        // Update registry with new session ID
+        self.registry
+            .update_session_id(agent_id, new_session.id)
+            .map_err(KernelError::LibreFang)?;
+
+        // Reset quota tracking so /new clears "token quota exceeded"
+        self.scheduler.reset_usage(agent_id);
+
+        info!(agent_id = %agent_id, "Session reset (summary saved to memory)");
+        Ok(())
+    }
+
+    /// Hard-reboot an agent's session — clears conversation history WITHOUT saving
+    /// a summary to memory.  Keeps agent config, system prompt, and tools intact.
+    /// More aggressive than `reset_session` (which auto-saves a summary) but less
+    /// destructive than `clear_agent_history` (which wipes ALL sessions).
+    pub fn reboot_session(&self, agent_id: AgentId) -> KernelResult<()> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        // Delete the old session WITHOUT saving a summary
+        let _ = self.memory.delete_session(entry.session_id);
+
         // Create a fresh session
         let new_session = self
             .memory
@@ -3400,10 +3479,10 @@ system_prompt = "You are a helpful assistant."
             .update_session_id(agent_id, new_session.id)
             .map_err(KernelError::LibreFang)?;
 
-        // Reset quota tracking so /new clears "token quota exceeded"
+        // Reset quota tracking
         self.scheduler.reset_usage(agent_id);
 
-        info!(agent_id = %agent_id, "Session reset (summary saved to memory)");
+        info!(agent_id = %agent_id, "Session rebooted (no summary saved)");
         Ok(())
     }
 
@@ -3421,11 +3500,12 @@ system_prompt = "You are a helpful assistant."
         // Delete canonical (cross-channel) session
         let _ = self.memory.delete_canonical_session(agent_id);
 
-        // Create a fresh session
-        let new_session = self
+        // Create a fresh session and inject reset prompt if configured
+        let mut new_session = self
             .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
+        self.inject_reset_prompt(&mut new_session);
 
         // Update registry with new session ID
         self.registry
@@ -3474,10 +3554,11 @@ system_prompt = "You are a helpful assistant."
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        let session = self
+        let mut session = self
             .memory
             .create_session_with_label(agent_id, label)
             .map_err(KernelError::LibreFang)?;
+        self.inject_reset_prompt(&mut session);
 
         // Switch to the new session
         self.registry
@@ -3524,6 +3605,23 @@ system_prompt = "You are a helpful assistant."
 
         info!(agent_id = %agent_id, session_id = %session_id.0, "Switched session");
         Ok(())
+    }
+
+    /// Inject the configured `session.reset_prompt` into a newly created session
+    /// as the first system message (if configured).
+    fn inject_reset_prompt(&self, session: &mut librefang_memory::session::Session) {
+        if let Some(ref prompt) = self.config.session.reset_prompt {
+            if !prompt.is_empty() {
+                session
+                    .messages
+                    .push(librefang_types::message::Message::system(prompt.clone()));
+                let _ = self.memory.save_session(session);
+                debug!(
+                    session_id = %session.id.0,
+                    "Injected session reset prompt"
+                );
+            }
+        }
     }
 
     /// Save a summary of the current session to agent memory before reset.
@@ -4398,7 +4496,30 @@ system_prompt = "You are a helpful assistant."
                         .model_catalog
                         .write()
                         .unwrap_or_else(|e| e.into_inner());
-                    catalog.apply_url_overrides(&new_config.provider_urls);
+                    // Apply region selections first (lower priority)
+                    if !new_config.provider_regions.is_empty() {
+                        let region_urls = catalog.resolve_region_urls(&new_config.provider_regions);
+                        if !region_urls.is_empty() {
+                            catalog.apply_url_overrides(&region_urls);
+                            info!(
+                                "Hot-reload: applied {} provider region URL override(s)",
+                                region_urls.len()
+                            );
+                        }
+                        let region_api_keys =
+                            catalog.resolve_region_api_keys(&new_config.provider_regions);
+                        if !region_api_keys.is_empty() {
+                            info!(
+                                "Hot-reload: {} region api_key override(s) detected \
+                                 (takes effect on next driver init)",
+                                region_api_keys.len()
+                            );
+                        }
+                    }
+                    // Apply explicit provider_urls (higher priority, overwrites region URLs)
+                    if !new_config.provider_urls.is_empty() {
+                        catalog.apply_url_overrides(&new_config.provider_urls);
+                    }
                 }
                 HotAction::UpdateDefaultModel => {
                     info!(

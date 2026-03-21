@@ -24,8 +24,12 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           VERSION="${TAG#v}"
-          # Strip date suffix (e.g. 0.4.2-20260314 → 0.4.2) to match CHANGELOG headers
-          VERSION="${VERSION%-*}"
+          # Strip pre-release suffix (-betaN / -rcN) then strip hour for CHANGELOG
+          VERSION=$(echo "$VERSION" | sed 's/-.*//')
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+          if [ ${#PATCH} -eq 4 ]; then
+            VERSION="$(echo "$VERSION" | cut -d. -f1,2).${PATCH:0:2}"
+          fi
 
           # Extract this version's changelog section
           CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md)
@@ -92,13 +96,21 @@ jobs:
             echo "- [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)"
           } > /tmp/release-body.md
 
+          # Detect pre-release tags (-betaN, -rcN)
+          PRERELEASE_FLAG=""
+          if echo "$TAG" | grep -qE '-(beta|rc)[0-9]'; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
           if gh release view "$TAG" &>/dev/null; then
             echo "Release $TAG already exists, updating..."
             gh release edit "$TAG" \
               --title "LibreFang $TAG" \
-              --notes-file /tmp/release-body.md
+              --notes-file /tmp/release-body.md \
+              $PRERELEASE_FLAG
           else
             gh release create "$TAG" \
               --title "LibreFang $TAG" \
-              --notes-file /tmp/release-body.md
+              --notes-file /tmp/release-body.md \
+              $PRERELEASE_FLAG
           fi

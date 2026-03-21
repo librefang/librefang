@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -46,10 +44,10 @@
 @layer components {
   .glass-effect {
     @apply fixed top-0 left-0 right-0 z-40 px-4 md:px-12 py-4;
-    background: rgba(8, 12, 16, 0.85);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    background: rgba(8, 12, 16, 0.88);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   }
 
   .rounded-section {
@@ -63,22 +61,26 @@
 
 /* Custom scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #080c10;
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
   background: #374151;
-  border-radius: 4px;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4b5563;
 }
 
 /* Focus visible styles for accessibility */
 :focus-visible {
-  outline: 2px solid #00d4aa;
+  outline: 2px solid #10b981;
   outline-offset: 2px;
 }
 
@@ -91,11 +93,13 @@
   position: absolute;
   top: -40px;
   left: 0;
-  background: #00d4aa;
+  background: #10b981;
   color: #080c10;
   padding: 8px 16px;
   z-index: 100;
   transition: top 0.3s;
+  font-weight: 700;
+  border-radius: 0 0 8px 0;
 }
 
 .skip-link:focus {

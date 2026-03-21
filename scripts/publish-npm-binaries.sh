@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Publish @librefang/cli platform packages + wrapper to npm.
-# Called from CI with: VERSION=0.6.7 REPO=librefang/librefang TAG=v0.6.7-20260320
+# Called from CI with: VERSION=2026.3.2114 REPO=librefang/librefang TAG=v2026.3.2114
 set -euo pipefail
 
 : "${VERSION:?}"
@@ -106,7 +106,12 @@ for target in "${!TARGETS[@]}"; do
 }
 EOF
 
-  npm publish "$pkg_dir" --access public
+  # Use --tag next for pre-release to avoid overwriting latest
+  NPM_TAG=""
+  if echo "$VERSION" | grep -qE '-(beta|rc)[0-9]'; then
+    NPM_TAG="--tag next"
+  fi
+  npm publish "$pkg_dir" --access public $NPM_TAG
   echo "  Published ${pkg_name}@${VERSION}"
 done
 
@@ -131,5 +136,10 @@ for (const dep in pkg.optionalDependencies) {
 require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
 "
 
-npm publish --access public
+# Use --tag next for pre-release to avoid overwriting latest
+NPM_TAG=""
+if echo "$VERSION" | grep -qE '-(beta|rc)[0-9]'; then
+  NPM_TAG="--tag next"
+fi
+npm publish --access public $NPM_TAG
 echo "  Published @librefang/cli@${VERSION}"

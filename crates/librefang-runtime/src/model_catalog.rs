@@ -7,6 +7,7 @@ use librefang_types::model_catalog::{
     AliasesCatalogFile, AuthStatus, ModelCatalogEntry, ModelCatalogFile, ModelTier, ProviderInfo,
 };
 use std::collections::HashMap;
+use tracing::warn;
 
 /// The model catalog — registry of all known models and providers.
 pub struct ModelCatalog {
@@ -271,6 +272,7 @@ impl ModelCatalog {
                 auth_status: AuthStatus::Missing,
                 model_count: 0,
                 signup_url: None,
+                regions: std::collections::HashMap::new(),
             });
             // Re-detect auth for the newly added provider
             self.detect_auth();
@@ -295,6 +297,79 @@ impl ModelCatalog {
                 }
             }
         }
+    }
+
+    /// Resolve provider region selections into URL overrides.
+    ///
+    /// For each entry in `region_selections` (provider ID → region name), looks up
+    /// the region URL from the provider's `regions` map. Returns a map of provider
+    /// IDs to resolved URLs that can be applied via [`apply_url_overrides`].
+    ///
+    /// Entries where the provider or region is not found are skipped with a warning.
+    pub fn resolve_region_urls(
+        &self,
+        region_selections: &HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        let mut resolved = HashMap::new();
+        for (provider_id, region_name) in region_selections {
+            if let Some(provider) = self.get_provider(provider_id) {
+                if let Some(region_cfg) = provider.regions.get(region_name) {
+                    resolved.insert(provider_id.clone(), region_cfg.base_url.clone());
+                } else {
+                    warn!(
+                        "provider_regions: unknown region '{}' for provider '{}' \
+                         (available: {:?})",
+                        region_name,
+                        provider_id,
+                        provider.regions.keys().collect::<Vec<_>>()
+                    );
+                }
+            } else {
+                warn!(
+                    "provider_regions: unknown provider '{}' — not found in catalog",
+                    provider_id
+                );
+            }
+        }
+        resolved
+    }
+
+    /// Resolve provider region selections into API key env var overrides.
+    ///
+    /// For each entry in `region_selections` (provider ID → region name), looks up
+    /// the region's `api_key_env` from the provider's `regions` map. Only returns
+    /// entries where the region defines a custom `api_key_env`.
+    ///
+    /// The returned map can be merged into `config.provider_api_keys` so that
+    /// [`KernelConfig::resolve_api_key_env`] picks up region-specific env vars.
+    pub fn resolve_region_api_keys(
+        &self,
+        region_selections: &HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        let mut resolved = HashMap::new();
+        for (provider_id, region_name) in region_selections {
+            if let Some(provider) = self.get_provider(provider_id) {
+                if let Some(region_cfg) = provider.regions.get(region_name) {
+                    if let Some(api_key_env) = &region_cfg.api_key_env {
+                        resolved.insert(provider_id.clone(), api_key_env.clone());
+                    }
+                } else {
+                    warn!(
+                        "provider_regions: unknown region '{}' for provider '{}' \
+                         (available: {:?})",
+                        region_name,
+                        provider_id,
+                        provider.regions.keys().collect::<Vec<_>>()
+                    );
+                }
+            } else {
+                warn!(
+                    "provider_regions: unknown provider '{}' — not found in catalog",
+                    provider_id
+                );
+            }
+        }
+        resolved
     }
 
     /// List models filtered by tier.
@@ -1171,6 +1246,126 @@ mod tests {
             catalog.get_provider("lmstudio").unwrap().base_url,
             LMSTUDIO_BASE_URL
         );
+    }
+
+    /// Build a synthetic catalog with regions defined inline for deterministic testing.
+    fn region_test_catalog() -> ModelCatalog {
+        let provider_a = r#"
+[provider]
+id = "test-provider"
+display_name = "Test Provider"
+base_url = "https://api.test.com/v1"
+api_key_env = "TEST_API_KEY"
+
+[provider.regions.us]
+base_url = "https://us.api.test.com/v1"
+
+[provider.regions.cn]
+base_url = "https://cn.api.test.com/v1"
+api_key_env = "TEST_CN_API_KEY"
+
+[[models]]
+id = "test-model"
+display_name = "Test Model"
+tier = "smart"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 1.0
+output_cost_per_m = 3.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+"#;
+        let provider_b = r#"
+[provider]
+id = "test-provider-nokey"
+display_name = "Test Provider No Key"
+base_url = "https://api.nokey.com/v1"
+api_key_env = "NOKEY_API_KEY"
+
+[provider.regions.eu]
+base_url = "https://eu.api.nokey.com/v1"
+
+[[models]]
+id = "nokey-model"
+display_name = "NoKey Model"
+tier = "fast"
+context_window = 8192
+max_output_tokens = 2048
+input_cost_per_m = 0.5
+output_cost_per_m = 1.5
+supports_tools = false
+supports_vision = false
+supports_streaming = false
+"#;
+        let sources = vec![provider_a.to_string(), provider_b.to_string()];
+        ModelCatalog::from_sources(&sources, None)
+    }
+
+    #[test]
+    fn test_resolve_region_urls() {
+        let catalog = region_test_catalog();
+
+        // Known provider + known region -> URL resolved
+        let mut sel = HashMap::new();
+        sel.insert("test-provider".to_string(), "us".to_string());
+        let urls = catalog.resolve_region_urls(&sel);
+        assert_eq!(
+            urls.get("test-provider").unwrap(),
+            "https://us.api.test.com/v1"
+        );
+
+        // Known provider + another known region
+        sel.clear();
+        sel.insert("test-provider".to_string(), "cn".to_string());
+        let urls = catalog.resolve_region_urls(&sel);
+        assert_eq!(
+            urls.get("test-provider").unwrap(),
+            "https://cn.api.test.com/v1"
+        );
+
+        // Known provider + unknown region -> empty
+        sel.clear();
+        sel.insert("test-provider".to_string(), "jp".to_string());
+        let urls = catalog.resolve_region_urls(&sel);
+        assert!(urls.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_region_api_keys() {
+        let catalog = region_test_catalog();
+
+        // Region with api_key_env -> returned
+        let mut sel = HashMap::new();
+        sel.insert("test-provider".to_string(), "cn".to_string());
+        let keys = catalog.resolve_region_api_keys(&sel);
+        assert_eq!(
+            keys.get("test-provider").map(|s| s.as_str()),
+            Some("TEST_CN_API_KEY")
+        );
+
+        // Region without api_key_env -> excluded
+        sel.clear();
+        sel.insert("test-provider".to_string(), "us".to_string());
+        let keys = catalog.resolve_region_api_keys(&sel);
+        assert!(!keys.contains_key("test-provider"));
+
+        // Provider whose region has no api_key_env -> excluded
+        sel.clear();
+        sel.insert("test-provider-nokey".to_string(), "eu".to_string());
+        let keys = catalog.resolve_region_api_keys(&sel);
+        assert!(!keys.contains_key("test-provider-nokey"));
+    }
+
+    #[test]
+    fn test_resolve_region_unknown_provider() {
+        let catalog = region_test_catalog();
+        let mut sel = HashMap::new();
+        sel.insert("nonexistent".to_string(), "us".to_string());
+        let urls = catalog.resolve_region_urls(&sel);
+        assert!(urls.is_empty());
+        let keys = catalog.resolve_region_api_keys(&sel);
+        assert!(keys.is_empty());
     }
 
     #[test]
