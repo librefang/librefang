@@ -510,16 +510,13 @@ function GitHubStats({ t }) {
   const { data: githubData, isLoading: githubLoading, isError: githubError } = useQuery({
     queryKey: ['githubStats'],
     queryFn: async () => {
-      try {
-        const res = await fetch('https://stats.librefang.ai/api/github')
-        if (!res.ok) throw new Error('Failed to fetch')
-        return res.json()
-      } catch {
-        return { stars: 0, forks: 0, issues: 0, prs: 0, lastUpdate: '', downloads: 0, starHistory: [] }
-      }
+      const res = await fetch('https://stats.librefang.ai/api/github')
+      if (!res.ok) throw new Error(`GitHub stats API returned ${res.status}`)
+      return res.json()
     },
-    staleTime: 1000 * 60 * 30,
-    retry: 1,
+    placeholderData: { stars: 0, forks: 0, issues: 0, prs: 0, downloads: 0, lastUpdate: '', starHistory: [] },
+    staleTime: 1000 * 60 * 10,
+    retry: 3,
   })
 
   const { data: docsData, isLoading: docsLoading } = useQuery({
