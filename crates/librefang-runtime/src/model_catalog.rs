@@ -677,6 +677,10 @@ pub fn read_codex_credential() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_catalog() -> ModelCatalog {
+        ModelCatalog::new()
+    }
     use librefang_types::model_catalog::{LMSTUDIO_BASE_URL, OLLAMA_BASE_URL};
 
     /// Build a catalog for tests.
@@ -947,7 +951,7 @@ mod tests {
 
     #[test]
     fn test_custom_model_keeps_assigned_provider() {
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
         let added = catalog.add_custom_model(ModelCatalogEntry {
             id: "custom-qwen-model".to_string(),
             display_name: "Custom Qwen Model".to_string(),
@@ -973,7 +977,7 @@ mod tests {
 
     #[test]
     fn test_custom_models_with_same_id_keep_distinct_providers() {
-        let mut catalog = ModelCatalog::new();
+        let mut catalog = test_catalog();
 
         assert!(catalog.add_custom_model(ModelCatalogEntry {
             id: "shared-custom-id".to_string(),
