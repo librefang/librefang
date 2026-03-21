@@ -321,6 +321,12 @@ if command -v gh &>/dev/null; then
 
 $RELEASE_BODY"
     fi
+    if [ -n "$PREV_TAG" ]; then
+        PR_BODY="$PR_BODY
+
+---
+**Full diff:** https://github.com/librefang/librefang/compare/${PREV_TAG}...${TAG}"
+    fi
 
     PR_URL=$(gh pr create \
         --repo librefang/librefang \
