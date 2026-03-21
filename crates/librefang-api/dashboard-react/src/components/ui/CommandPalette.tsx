@@ -110,6 +110,11 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
           />
           <kbd className="hidden sm:inline-flex h-5 items-center gap-1 rounded border border-border-subtle bg-main px-1.5 text-[10px] font-medium text-text-dim">ESC</kbd>
         </div>
+        <div className="px-4 py-2 border-b border-border-subtle/50 flex items-center gap-4 text-[10px] text-text-dim/50">
+          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">↑↓</kbd> {isZh ? "导航" : "Navigate"}</span>
+          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">↵</kbd> {isZh ? "打开" : "Open"}</span>
+          <span className="flex items-center gap-1"><kbd className="px-1 py-0.5 rounded bg-main text-[9px] font-mono">esc</kbd> {isZh ? "关闭" : "Close"}</span>
+        </div>
         <div className="max-h-[50vh] overflow-y-auto p-2 scrollbar-thin">
           {filteredCommands.length === 0 ? (
             <p className="py-8 text-center text-sm text-text-dim">{t("common.no_data")}</p>
