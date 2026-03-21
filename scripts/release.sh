@@ -240,11 +240,17 @@ git -C "$REPO_ROOT" add \
     packages/whatsapp-gateway/package.json \
     crates/librefang-desktop/tauri.conf.json
 [ -f "$ARTICLE" ] && git -C "$REPO_ROOT" add "$ARTICLE"
-git -C "$REPO_ROOT" commit -m "chore: bump version to $TAG"
+
+if git -C "$REPO_ROOT" diff --cached --quiet; then
+    echo ""
+    echo "No file changes (re-release). Tagging current HEAD."
+else
+    git -C "$REPO_ROOT" commit -m "chore: bump version to $TAG"
+fi
 git -C "$REPO_ROOT" tag "$TAG"
 
 echo ""
-echo "Created commit and tag $TAG"
+echo "Created tag $TAG"
 
 # --- Create branch and push ---
 
