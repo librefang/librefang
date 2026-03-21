@@ -282,6 +282,16 @@ RUST_LOG=debug librefang skill list
 
 ## Migration
 
+### Q: How to migrate from OpenFang?
+
+```bash
+# Automatic migration (copies ~/.openfang → ~/.librefang)
+librefang migrate --from openfang
+
+# Preview mode
+librefang migrate --from openfang --dry-run
+```
+
 ### Q: How to migrate from OpenClaw?
 
 ```bash
@@ -294,6 +304,7 @@ librefang migrate --from openclaw --dry-run
 
 ### Q: Which migration sources are supported?
 
+- OpenFang (automated migration via `librefang migrate --from openfang`)
 - OpenClaw (automated migration via `librefang migrate --from openclaw`)
 - LangChain (manual migration guide — no automated tooling)
 - AutoGPT (manual migration guide — no automated tooling)
