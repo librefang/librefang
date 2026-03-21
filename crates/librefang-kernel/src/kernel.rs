@@ -2432,7 +2432,7 @@ system_prompt = "You are a helpful assistant."
                 Some(&kernel_clone.process_manager),
                 None, // content_blocks (streaming path uses text only for now)
                 kernel_clone.proactive_memory.get().cloned(),
-                kernel_clone.context_engine.as_deref(),
+                kernel_clone.context_engine_for_agent(&manifest),
             )
             .await;
 
@@ -3313,7 +3313,7 @@ system_prompt = "You are a helpful assistant."
             Some(&self.process_manager),
             content_blocks,
             proactive_memory,
-            self.context_engine.as_deref(),
+            self.context_engine_for_agent(&manifest),
         )
         .await
         .map_err(KernelError::LibreFang)?;
@@ -3891,9 +3891,9 @@ system_prompt = "You are a helpful assistant."
             })
             .unwrap_or(200_000);
 
-        // Delegate to the context engine when available, otherwise fall back
-        // to the built-in compactor directly.
-        let result = if let Some(engine) = self.context_engine.as_deref() {
+        // Delegate to the context engine when available (and allowed for this agent),
+        // otherwise fall back to the built-in compactor directly.
+        let result = if let Some(engine) = self.context_engine_for_agent(&entry.manifest) {
             engine
                 .compact(
                     agent_id,
@@ -6215,6 +6215,38 @@ system_prompt = "You are a helpful assistant."
         let user = fresh.load_all().unwrap_or(0);
         info!(bundled, user, "Skill registry hot-reloaded");
         *registry = fresh;
+    }
+
+    /// Check whether the context engine plugin (if any) is allowed for an agent.
+    ///
+    /// Returns the context engine reference if:
+    /// - The agent has no `allowed_plugins` restriction (empty = all plugins), OR
+    /// - The configured context engine plugin name appears in the agent's allowlist.
+    ///
+    /// Returns `None` if the agent's `allowed_plugins` is non-empty and the
+    /// context engine plugin is not in the list.
+    fn context_engine_for_agent(
+        &self,
+        manifest: &librefang_types::agent::AgentManifest,
+    ) -> Option<&dyn librefang_runtime::context_engine::ContextEngine> {
+        let engine = self.context_engine.as_deref()?;
+        if manifest.allowed_plugins.is_empty() {
+            return Some(engine);
+        }
+        // Check if the configured context engine plugin is in the agent's allowlist
+        if let Some(ref plugin_name) = self.config.context_engine.plugin {
+            if manifest.allowed_plugins.iter().any(|p| p == plugin_name) {
+                return Some(engine);
+            }
+            tracing::debug!(
+                agent = %manifest.name,
+                plugin = plugin_name.as_str(),
+                "Context engine plugin not in agent's allowed_plugins — skipping"
+            );
+            return None;
+        }
+        // No plugin configured (manual hooks or default engine) — always allow
+        Some(engine)
     }
 
     /// Build a compact skill summary for the system prompt so the agent knows
