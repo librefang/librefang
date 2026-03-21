@@ -1189,8 +1189,52 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    fn ensure_registry() {
+        use std::sync::Once;
+        static SYNC_ONCE: Once = Once::new();
+        SYNC_ONCE.call_once(|| {
+            // Use bundled HAND.toml files from the source tree so tests
+            // work on CI without network/git.  disk_hands() expects
+            // home_dir/hands/*/HAND.toml, so we copy the bundled files
+            // into a temp directory with that layout.
+            let bundled = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("librefang-hands")
+                .join("bundled");
+
+            let test_home = std::env::temp_dir().join("librefang-kernel-router-tests");
+            let hands_dir = test_home.join("hands");
+            let _ = std::fs::create_dir_all(&hands_dir);
+
+            if let Ok(entries) = std::fs::read_dir(&bundled) {
+                for entry in entries.flatten() {
+                    let src = entry.path();
+                    if !src.is_dir() {
+                        continue;
+                    }
+                    let name = src.file_name().unwrap();
+                    let dest = hands_dir.join(name);
+                    let _ = std::fs::create_dir_all(&dest);
+                    let src_toml = src.join("HAND.toml");
+                    if src_toml.exists() {
+                        let _ = std::fs::copy(&src_toml, dest.join("HAND.toml"));
+                    }
+                    let src_skill = src.join("SKILL.md");
+                    if src_skill.exists() {
+                        let _ = std::fs::copy(&src_skill, dest.join("SKILL.md"));
+                    }
+                }
+            }
+
+            set_hand_route_home_dir(&test_home);
+            invalidate_hand_route_cache();
+        });
+    }
+
     /// Helper: call auto_select_hand without semantic scores.
     fn hand(msg: &str) -> HandSelection {
+        ensure_registry();
         auto_select_hand(msg, None)
     }
 
@@ -1508,6 +1552,7 @@ weak_aliases = ["changelog"]
 
     #[test]
     fn test_semantic_scores_boost_hand_selection() {
+        ensure_registry();
         // Without semantic: generic message should not match any hand
         let without = hand("please help me with this task");
         assert_eq!(without.hand_id, None);
@@ -1522,6 +1567,7 @@ weak_aliases = ["changelog"]
 
     #[test]
     fn test_semantic_fallback_routes_chinese_to_collector() {
+        ensure_registry();
         // Chinese input: no English keyword match → score 0 without semantic
         let without = hand("帮我监控这个网站的变更");
         assert_eq!(
@@ -1541,6 +1587,7 @@ weak_aliases = ["changelog"]
 
     #[test]
     fn test_semantic_fallback_routes_japanese_to_trader() {
+        ensure_registry();
         // Japanese: "株式取引のポートフォリオを確認して" (check stock trading portfolio)
         let without = hand("株式取引のポートフォリオを確認して");
         assert_eq!(without.hand_id, None);
@@ -1554,6 +1601,7 @@ weak_aliases = ["changelog"]
 
     #[test]
     fn test_semantic_fallback_routes_korean_to_researcher() {
+        ensure_registry();
         // Korean: "이 주제에 대해 심층 연구를 해주세요" (do deep research on this topic)
         let mut scores = HashMap::new();
         scores.insert("researcher".to_string(), 0.88);
@@ -1563,6 +1611,7 @@ weak_aliases = ["changelog"]
 
     #[test]
     fn test_semantic_low_similarity_does_not_match() {
+        ensure_registry();
         // All scores below threshold: similarity too low to trigger routing
         let mut scores = HashMap::new();
         scores.insert("collector".to_string(), 0.2);
@@ -1575,6 +1624,7 @@ weak_aliases = ["changelog"]
 
     #[test]
     fn test_semantic_plus_keyword_combined_scoring() {
+        ensure_registry();
         // English keyword gives partial score, semantic boosts it over threshold
         // "deploy" is a weak alias for devops (score 1, below threshold alone)
         let keyword_only = hand("help me deploy the service");
@@ -1594,6 +1644,7 @@ weak_aliases = ["changelog"]
 
     #[test]
     fn test_no_embedding_graceful_degradation() {
+        ensure_registry();
         // When semantic_scores is None, only keyword matching is used.
         // Non-English input simply gets no match (graceful, not error).
         let sel = auto_select_hand("请帮我做数据分析", None);
@@ -1603,6 +1654,7 @@ weak_aliases = ["changelog"]
 
     #[test]
     fn test_semantic_does_not_override_strong_keyword() {
+        ensure_registry();
         // If keyword matching strongly matches hand A, but semantic scores
         // favor hand B, keyword should still win (keyword score is higher).
         let mut scores = HashMap::new();
