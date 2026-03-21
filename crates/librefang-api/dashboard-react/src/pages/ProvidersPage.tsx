@@ -101,8 +101,8 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
           <div className="flex items-center gap-2">
             <h3 className="font-black truncate">{p.display_name || p.id}</h3>
             {isConfigured ? (
-              <Badge variant={p.reachable ? "success" : "error"} className="shrink-0">
-                {p.reachable ? t("providers.online") : t("providers.offline")}
+              <Badge variant={p.reachable === true ? "success" : p.reachable === false ? "error" : "default"} className="shrink-0">
+                {p.reachable === true ? t("providers.online") : p.reachable === false ? t("providers.offline") : t("providers.not_checked")}
               </Badge>
             ) : (
               <Badge variant="warning" className="shrink-0">{t("common.setup")}</Badge>
@@ -174,8 +174,8 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
             </div>
           </div>
           {isConfigured ? (
-            <Badge variant={p.reachable ? "success" : "error"}>
-              {p.reachable ? t("providers.online") : t("providers.offline")}
+            <Badge variant={p.reachable === true ? "success" : p.reachable === false ? "error" : "default"}>
+              {p.reachable === true ? t("providers.online") : p.reachable === false ? t("providers.offline") : t("providers.not_checked")}
             </Badge>
           ) : (
             <Badge variant="warning">{t("common.setup")}</Badge>
@@ -218,16 +218,18 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
           )}
           <div className="flex items-center gap-2 text-xs">
             {isConfigured ? (
-              p.reachable ? (
+              p.reachable === true ? (
                 <>
                   <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
                   <span className="text-success font-bold text-[10px]">{t("providers.reachable")}</span>
                 </>
-              ) : (
+              ) : p.reachable === false ? (
                 <>
                   <XCircle className="w-3 h-3 text-error shrink-0" />
                   <span className="text-error font-bold text-[10px]">{t("providers.unreachable")}</span>
                 </>
+              ) : (
+                <span className="text-text-dim font-bold text-[10px]">{t("providers.not_checked")}</span>
               )
             ) : (
               <>
@@ -345,11 +347,11 @@ function DetailsModal({ provider, onClose, onTest, pendingId, t }: {
               </div>
               <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
                 <span className="text-xs font-bold text-text-dim">{t("providers.health")}</span>
-                {provider.reachable !== undefined && (
-                  <Badge variant={provider.reachable ? "success" : "error"}>
-                    {provider.reachable ? t("providers.reachable") : t("providers.unreachable")}
+                {provider.reachable !== undefined ? (
+                  <Badge variant={provider.reachable === true ? "success" : "error"}>
+                    {provider.reachable === true ? t("providers.reachable") : t("providers.unreachable")}
                   </Badge>
-                )}
+                ) : <Badge variant="default">{t("providers.not_checked")}</Badge>}
               </div>
               {provider.key_required !== undefined && (
                 <div className="flex justify-between items-center p-3 rounded-lg bg-main/20">
