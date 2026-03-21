@@ -744,6 +744,7 @@ impl LibreFangKernel {
             api_key: default_api_key.clone(),
             base_url: default_base_url.clone(),
             vertex_ai: config.vertex_ai.clone(),
+            azure_openai: config.azure_openai.clone(),
             skip_permissions: true,
         };
         // Primary driver failure is non-fatal: the dashboard should remain accessible
@@ -776,6 +777,7 @@ impl LibreFangKernel {
                     api_key: Some(spec.api_key),
                     base_url: default_base_url.clone(),
                     vertex_ai: config.vertex_ai.clone(),
+                    azure_openai: config.azure_openai.clone(),
                     skip_permissions: true,
                 };
                 match drivers::create_driver(&profile_config) {
@@ -824,6 +826,7 @@ impl LibreFangKernel {
                             api_key: std::env::var(env_var).ok(),
                             base_url: config.provider_urls.get(provider).cloned(),
                             vertex_ai: config.vertex_ai.clone(),
+                            azure_openai: config.azure_openai.clone(),
                             skip_permissions: true,
                         };
                         match drivers::create_driver(&auto_config) {
@@ -871,6 +874,7 @@ impl LibreFangKernel {
                     .clone()
                     .or_else(|| config.provider_urls.get(&fb.provider).cloned()),
                 vertex_ai: config.vertex_ai.clone(),
+                azure_openai: config.azure_openai.clone(),
                 skip_permissions: true,
             };
             match drivers::create_driver(&fb_config) {
@@ -5652,6 +5656,7 @@ system_prompt = "You are a helpful assistant."
                 api_key,
                 base_url,
                 vertex_ai: self.config.vertex_ai.clone(),
+                azure_openai: self.config.azure_openai.clone(),
                 skip_permissions: true,
             };
 
@@ -5729,6 +5734,7 @@ system_prompt = "You are a helpful assistant."
                         .clone()
                         .or_else(|| self.lookup_provider_url(&fb_provider)),
                     vertex_ai: self.config.vertex_ai.clone(),
+                    azure_openai: self.config.azure_openai.clone(),
                     skip_permissions: true,
                 };
                 match drivers::create_driver(&config) {
