@@ -1,20 +1,20 @@
-# MCP 和 A2A 协议
+# MCP and A2A Protocols
 
-LibreFang 支持 MCP (Model Context Protocol) 和 A2A (Agent to Agent) 协议。
+LibreFang supports MCP (Model Context Protocol) and A2A (Agent to Agent) protocols.
 
 <Note>
-**协议对比**:
-- **MCP**: 用于 LLM 与外部工具/服务连接 (1对多)
-- **A2A**: 用于 Agent 之间通信 (多对多)
+**Protocol Comparison**:
+- **MCP**: Connects LLMs to external tools/services (1-to-many)
+- **A2A**: Enables communication between Agents (many-to-many)
 </Note>
 
 ---
 
 ## MCP (Model Context Protocol)
 
-MCP 是一个标准化协议，用于连接 LLM 与外部工具和服务。
+MCP is a standardized protocol for connecting LLMs to external tools and services.
 
-### 概述
+### Overview
 
 ```
 ┌─────────────┐      MCP       ┌─────────────┐
@@ -23,7 +23,7 @@ MCP 是一个标准化协议，用于连接 LLM 与外部工具和服务。
 └─────────────┘                  └─────────────┘
 ```
 
-### MCP 服务器配置
+### MCP Server Configuration
 
 ```toml
 [[mcp_servers]]
@@ -38,30 +38,30 @@ args = ["-y", "@modelcontextprotocol/server-github"]
 env = { GITHUB_TOKEN = "your-token" }
 ```
 
-### MCP 工具命名
+### MCP Tool Naming
 
-MCP 工具命名格式：
+MCP tool naming format:
 ```
 mcp_{server}_{tool}
 ```
 
-例如：
+For example:
 - `mcp_filesystem_read_file`
 - `mcp_github_create_issue`
 
-### 内置 MCP 服务器
+### Built-in MCP Servers
 
-LibreFang 包含内置 MCP 服务器：
+LibreFang includes built-in MCP servers:
 
-| 服务器 | 工具 |
-|--------|------|
+| Server | Tools |
+|--------|-------|
 | filesystem | read_file, write_file, list_directory |
 | github | create_issue, get_pr, search_repos |
 | postgres | query, execute, list_tables |
 
-### MCP 客户端
+### MCP Client
 
-作为 MCP 客户端连接到外部服务器：
+Connect to external servers as an MCP client:
 
 ```toml
 [[mcp_servers]]
@@ -70,7 +70,7 @@ command = "python"
 args = ["./mcp_server.py"]
 ```
 
-### 开发 MCP 服务器
+### Developing MCP Servers
 
 ```python
 from mcp.server import Server
@@ -97,9 +97,9 @@ async def call_tool(name: str, arguments: dict):
 
 ## A2A (Agent to Agent)
 
-A2A 协议支持 LibreFang agents 之间的通信。
+The A2A protocol enables communication between LibreFang agents.
 
-### 概述
+### Overview
 
 ```
 ┌─────────────┐      A2A       ┌─────────────┐
@@ -110,13 +110,13 @@ A2A 协议支持 LibreFang agents 之间的通信。
 
 ### Agent Card
 
-每个 Agent 发布 Agent Card：
+Each Agent publishes an Agent Card:
 
 ```json
 {
   "name": "researcher",
   "description": "Deep research agent",
-  "url": "http://localhost:4545/a2a",
+  "url": "http://localhost:4545/api/a2a",
   "version": "1.0.0",
   "capabilities": {
     "streaming": true,
@@ -128,75 +128,105 @@ A2A 协议支持 LibreFang agents 之间的通信。
 }
 ```
 
-### A2A 端点
+### Client Endpoints (Send Tasks to External A2A Agents)
 
-| 端点 | 方法 | 说明 |
-|------|------|------|
-| `/.well-known/agent.json` | GET | Agent Card |
-| `/a2a/tasks` | POST | 创建任务 |
-| `/a2a/tasks/{id}` | GET | 获取任务状态 |
-| `/a2a/tasks/{id}/messages` | GET | 获取消息历史 |
+These endpoints allow LibreFang to act as a client, delegating tasks to external A2A agents:
 
-### 发送任务
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/a2a/agents` | GET | List discovered external A2A agents |
+| `/api/a2a/discover` | POST | Discover an external A2A agent at a URL |
+| `/api/a2a/send` | POST | Send a task to an external A2A agent |
+| `/api/a2a/tasks/{id}/status` | GET | Check the status of a sent task |
+
+### Server Endpoints (Accept External Tasks)
+
+These endpoints are exposed by LibreFang, allowing other A2A agents to send tasks to this instance:
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/.well-known/agent.json` | GET | Agent Card (capability declaration) |
+| `/api/a2a/tasks` | POST | Accept tasks from external agents |
+| `/api/a2a/tasks/{id}` | GET | Get task status |
+| `/api/a2a/tasks/{id}/messages` | GET | Get task message history |
+
+### Discover and Send Tasks to External Agents
 
 ```bash
-curl -X POST http://localhost:4545/a2a/tasks \
+# Discover an external agent
+curl -X POST http://localhost:4545/api/a2a/discover \
+  -H "Content-Type: application/json" \
+  -d '{"url": "http://other-agent:4545"}'
+
+# Send a task to an external agent
+curl -X POST http://localhost:4545/api/a2a/send \
   -H "Content-Type: application/json" \
   -d '{
-    "id": "task-123",
+    "agent_url": "http://other-agent:4545",
+    "message": "Research AI trends and summarize"
+  }'
+
+# Check task status
+curl http://localhost:4545/api/a2a/tasks/task-123/status
+```
+
+### Accept Tasks from External Agents
+
+```bash
+# External agent sends a task to this instance
+curl -X POST http://localhost:4545/api/a2a/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "task-456",
     "message": {
       "role": "user",
       "parts": [{ "type": "text", "text": "Research AI trends" }]
     }
   }'
-```
 
-### 接收任务
+# Poll for results
+curl http://localhost:4545/api/a2a/tasks/task-456
 
-```bash
-# 轮询
-curl http://localhost:4545/a2a/tasks/task-123
-
-# 或使用 SSE
-curl -N http://localhost:4545/a2a/tasks/task-123/events
+# Or use SSE for streaming
+curl -N http://localhost:4545/api/a2a/tasks/task-456/events
 ```
 
 ---
 
-## 对比
+## Comparison
 
-| 特性 | MCP | A2A |
-|------|-----|------|
-| 用途 | LLM → 工具 | Agent ↔ Agent |
-| 协议 | JSON-RPC 2.0 | HTTP/WebSocket |
-| 方向 | 单向 | 双向 |
-| 示例 | 文件系统、GitHub | Agent 协作 |
-
----
-
-## 使用场景
-
-### MCP 场景
-
-- 文件系统操作
-- 数据库查询
-- GitHub API 调用
-- 自定义工具集成
-
-### A2A 场景
-
-- 多 Agent 协作
-- 任务委派
-- 跨实例通信
+| Feature | MCP | A2A |
+|---------|-----|-----|
+| Purpose | LLM to Tools | Agent to Agent |
+| Protocol | JSON-RPC 2.0 | HTTP/WebSocket |
+| Direction | Unidirectional | Bidirectional |
+| Examples | Filesystem, GitHub | Agent collaboration |
 
 ---
 
-## 配置示例
+## Use Cases
 
-### 完整 MCP 配置
+### MCP Use Cases
+
+- Filesystem operations
+- Database queries
+- GitHub API calls
+- Custom tool integration
+
+### A2A Use Cases
+
+- Multi-agent collaboration
+- Task delegation
+- Cross-instance communication
+
+---
+
+## Configuration Example
+
+### Complete MCP Configuration
 
 ```toml
-# MCP 服务器
+# MCP Servers
 [[mcp_servers]]
 name = "filesystem"
 command = "npx"
@@ -207,23 +237,23 @@ name = "github"
 command = "npx"
 args = ["-y", "@modelcontextprotocol/server-github"]
 
-# A2A 配置
+# A2A Configuration
 [a2a]
 enabled = true
-agent_card_path = "/a2a/agent.json"
+listen_path = "/a2a"
 ```
 
 ---
 
-## CLI 命令
+## CLI Commands
 
 ```bash
-# 列出 MCP 服务器
+# List MCP servers
 librefang mcp list
 
-# 测试 MCP 服务器
+# Test an MCP server
 librefang mcp test filesystem
 
-# 启动 MCP 模式
+# Start MCP mode
 librefang mcp
 ```

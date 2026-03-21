@@ -126,7 +126,7 @@ librefang start [--config <PATH>]
 **Output:**
 
 ```
-  LibreFang Agent OS v0.1.0
+  LibreFang Agent OS v0.7.0
 
   Starting daemon...
 
@@ -420,6 +420,239 @@ librefang agent kill <AGENT_ID>
 
 ```bash
 librefang agent kill a1b2c3d4-e5f6-7890-abcd-ef1234567890
+```
+
+---
+
+## Hand Management
+
+Hands are autonomous execution modules that give agents the ability to take actions in the real world — browsing the web, managing files, interacting with APIs, and more. All hand commands require a running daemon.
+
+### librefang hand list
+
+List all available hands (bundled and installed).
+
+```
+librefang hand list
+```
+
+**Output columns:** ID, NAME, VERSION, STATUS, DESCRIPTION.
+
+Discovers hands from bundled modules and the `~/.librefang/hands/` directory.
+
+---
+
+### librefang hand active
+
+Show currently active hand instances and their runtime state.
+
+```
+librefang hand active
+```
+
+**Output columns:** INSTANCE ID, HAND ID, AGENT, STATE, STARTED.
+
+---
+
+### librefang hand activate \<name\>
+
+Activate a hand, making it available for agent use.
+
+```
+librefang hand activate <NAME>
+```
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<NAME>` | Hand ID (e.g. `clip`, `lead`, `researcher`). |
+
+**Example:**
+
+```bash
+librefang hand activate clip
+librefang hand activate researcher
+```
+
+---
+
+### librefang hand deactivate \<name\>
+
+Deactivate a running hand, stopping its execution.
+
+```
+librefang hand deactivate <NAME>
+```
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<NAME>` | Hand ID to deactivate. |
+
+**Example:**
+
+```bash
+librefang hand deactivate clip
+```
+
+---
+
+### librefang hand status [name]
+
+Show active status for a specific hand or all active hands.
+
+```
+librefang hand status [<NAME>]
+```
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<NAME>` | Optional hand ID. If omitted, shows all active hands. |
+
+**Example:**
+
+```bash
+# Show all active hands
+librefang hand status
+
+# Show status for a specific hand
+librefang hand status clip
+```
+
+---
+
+### librefang hand install \<path\>
+
+Install a hand from a local directory containing a `HAND.toml` manifest.
+
+```
+librefang hand install <PATH>
+```
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<PATH>` | Path to the hand directory (must contain `HAND.toml`). |
+
+**Example:**
+
+```bash
+librefang hand install ./my-hand
+```
+
+---
+
+### librefang hand info \<name\>
+
+Show detailed information about a hand including its capabilities, dependencies, and configuration.
+
+```
+librefang hand info <NAME>
+```
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<NAME>` | Hand ID. |
+
+**Example:**
+
+```bash
+librefang hand info clip
+```
+
+---
+
+### librefang hand check-deps \<name\>
+
+Check whether all required dependencies for a hand are installed.
+
+```
+librefang hand check-deps <NAME>
+```
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<NAME>` | Hand ID. |
+
+**Example:**
+
+```bash
+librefang hand check-deps clip
+```
+
+---
+
+### librefang hand install-deps \<name\>
+
+Install any missing dependencies required by a hand.
+
+```
+librefang hand install-deps <NAME>
+```
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<NAME>` | Hand ID. |
+
+**Example:**
+
+```bash
+librefang hand install-deps clip
+```
+
+---
+
+### librefang hand pause \<name\>
+
+Pause a running hand without fully deactivating it. The hand can be resumed later.
+
+```
+librefang hand pause <NAME>
+```
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<NAME>` | Hand ID or instance ID. |
+
+**Example:**
+
+```bash
+librefang hand pause clip
+```
+
+---
+
+### librefang hand resume \<name\>
+
+Resume a previously paused hand.
+
+```
+librefang hand resume <NAME>
+```
+
+**Arguments:**
+
+| Argument | Description |
+|---|---|
+| `<NAME>` | Hand ID or instance ID. |
+
+**Example:**
+
+```bash
+librefang hand resume clip
 ```
 
 ---
@@ -1020,8 +1253,8 @@ librefang migrate --from <FRAMEWORK> [--source-dir <PATH>] [--dry-run]
 
 | Option | Description |
 |---|---|
-| `--from <FRAMEWORK>` | Source framework. One of: `openclaw`, `langchain`, `autogpt`. |
-| `--source-dir <PATH>` | Path to the source workspace. Auto-detected if not set (e.g. `~/.openclaw`, `~/.langchain`, `~/Auto-GPT`). |
+| `--from <FRAMEWORK>` | Source framework. One of: `openfang`, `openclaw`, `langchain`, `autogpt`. |
+| `--source-dir <PATH>` | Path to the source workspace. Auto-detected if not set (e.g. `~/.openfang`, `~/.openclaw`, `~/.langchain`, `~/Auto-GPT`). |
 | `--dry-run` | Show what would be imported without making changes. |
 
 **Behavior:**
@@ -1033,6 +1266,9 @@ librefang migrate --from <FRAMEWORK> [--source-dir <PATH>] [--dry-run]
 **Example:**
 
 ```bash
+# Migrate from OpenFang (auto-detect ~/.openfang)
+librefang migrate --from openfang
+
 # Dry run migration from OpenClaw
 librefang migrate --from openclaw --dry-run
 
@@ -1291,6 +1527,9 @@ librefang config edit
 ### Migration from other frameworks
 
 ```bash
+# Migrate from OpenFang (auto-detects ~/.openfang)
+librefang migrate --from openfang
+
 # Preview migration
 librefang migrate --from openclaw --dry-run
 
@@ -1357,4 +1596,3 @@ Additional search/fetch provider keys: `BRAVE_API_KEY`, `TAVILY_API_KEY`.
 
 
 
-export const sections = [];

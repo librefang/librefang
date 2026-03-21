@@ -1,6 +1,8 @@
 # LLM Providers Guide
 
-LibreFang ships with a comprehensive model catalog covering **3 native LLM drivers**, **20 providers**, **51 builtin models**, and **23 aliases**. Every provider uses one of three battle-tested drivers: the native **Anthropic** driver, the native **Gemini** driver, or the universal **OpenAI-compatible** driver. This guide is the single source of truth for configuring, selecting, and managing LLM providers in LibreFang.
+LibreFang ships with a comprehensive model catalog covering **3 native LLM drivers**, **34 providers**, **51 builtin models**, and **23 aliases**. Every provider uses one of three battle-tested drivers: the native **Anthropic** driver, the native **Gemini** driver, or the universal **OpenAI-compatible** driver. This guide is the single source of truth for configuring, selecting, and managing LLM providers in LibreFang.
+
+The model catalog also supports **dynamic loading** — you can add custom provider definitions by placing TOML files in `~/.librefang/providers/`. Any file matching `~/.librefang/providers/*.toml` is merged into the catalog at boot, allowing you to add private endpoints, on-premises deployments, or new providers without modifying the core configuration.
 
 ---
 
@@ -549,6 +551,444 @@ For Gemini specifically, either `GEMINI_API_KEY` or `GOOGLE_API_KEY` will work.
 
 ---
 
+### 21. Claude Code
+
+| | |
+|---|---|
+| **Display Name** | Claude Code |
+| **Driver** | Native Anthropic (Messages API) |
+| **Env Var** | `ANTHROPIC_API_KEY` |
+| **Base URL** | `https://api.anthropic.com` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `x-api-key` header |
+| **Models** | Claude models with extended tool use |
+
+**Notes:** Claude Code is an Anthropic model variant optimized for agentic coding tasks. It uses the same API key and base URL as Anthropic but targets models tuned for long-horizon tool-use workflows.
+
+---
+
+### 22. NVIDIA NIM
+
+| | |
+|---|---|
+| **Display Name** | NVIDIA NIM |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `NVIDIA_API_KEY` |
+| **Base URL** | `https://integrate.api.nvidia.com/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | Llama, Mistral, and NVIDIA-optimized models |
+
+**Setup:**
+1. Sign up at [build.nvidia.com](https://build.nvidia.com)
+2. Create an API key
+3. `export NVIDIA_API_KEY="nvapi-..."`
+
+---
+
+### 23. Voyage AI
+
+| | |
+|---|---|
+| **Display Name** | Voyage AI |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `VOYAGE_API_KEY` |
+| **Base URL** | `https://api.voyageai.com/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | Embedding and reranking models |
+
+**Notes:** Voyage AI specializes in embedding and reranking models used for semantic search and RAG pipelines.
+
+**Setup:**
+1. Sign up at [voyageai.com](https://www.voyageai.com)
+2. Create an API key
+3. `export VOYAGE_API_KEY="pa-..."`
+
+---
+
+### 24. Anyscale
+
+| | |
+|---|---|
+| **Display Name** | Anyscale |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `ANYSCALE_API_KEY` |
+| **Base URL** | `https://api.endpoints.anyscale.com/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | Open-source models (Llama, Mistral, etc.) |
+
+**Setup:**
+1. Sign up at [anyscale.com](https://www.anyscale.com)
+2. Create an API key
+3. `export ANYSCALE_API_KEY="esecret_..."`
+
+---
+
+### 25. DeepInfra
+
+| | |
+|---|---|
+| **Display Name** | DeepInfra |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `DEEPINFRA_API_KEY` |
+| **Base URL** | `https://api.deepinfra.com/v1/openai` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits) |
+| **Auth** | `Authorization: Bearer` header |
+| **Models** | Open-source models at low cost |
+
+**Setup:**
+1. Sign up at [deepinfra.com](https://deepinfra.com)
+2. Create an API key
+3. `export DEEPINFRA_API_KEY="..."`
+
+---
+
+### 26. Azure OpenAI
+
+| | |
+|---|---|
+| **Display Name** | Azure OpenAI |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` |
+| **Base URL** | `https://<your-resource>.openai.azure.com/openai/deployments/<deployment>` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `api-key` header |
+| **Models** | GPT-4o, GPT-4, and other Azure-hosted models |
+
+**Setup:**
+1. Create an Azure OpenAI resource in the [Azure Portal](https://portal.azure.com)
+2. Deploy a model in Azure OpenAI Studio
+3. Set environment variables:
+   ```bash
+   export AZURE_OPENAI_API_KEY="..."
+   export AZURE_OPENAI_ENDPOINT="https://<your-resource>.openai.azure.com"
+   ```
+
+---
+
+### 27. Amazon Bedrock
+
+| | |
+|---|---|
+| **Display Name** | Amazon Bedrock |
+| **Driver** | OpenAI-compatible (via Bedrock Converse API) |
+| **Env Var** | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` |
+| **Base URL** | AWS regional endpoint |
+| **Key Required** | Yes (AWS credentials) |
+| **Free Tier** | No |
+| **Auth** | AWS Signature v4 |
+| **Models** | Claude, Llama, Titan, Mistral via Bedrock |
+
+**Setup:**
+1. Enable model access in the [AWS Bedrock console](https://console.aws.amazon.com/bedrock)
+2. Configure AWS credentials:
+   ```bash
+   export AWS_ACCESS_KEY_ID="AKIA..."
+   export AWS_SECRET_ACCESS_KEY="..."
+   export AWS_REGION="us-east-1"
+   ```
+
+---
+
+### 28. GitHub Copilot
+
+| | |
+|---|---|
+| **Display Name** | GitHub Copilot |
+| **Driver** | OpenAI-compatible (via Copilot token exchange) |
+| **Env Var** | `GITHUB_TOKEN` |
+| **Base URL** | `https://api.githubcopilot.com` |
+| **Key Required** | Yes (GitHub PAT or OAuth token) |
+| **Free Tier** | Included with GitHub Copilot subscription |
+| **Auth** | OAuth PKCE flow; exchanges GitHub PAT for short-lived Copilot API token |
+| **Models** | GitHub Copilot-hosted models (GPT-4o, Claude, etc.) |
+
+**Setup:**
+1. Subscribe to [GitHub Copilot](https://github.com/features/copilot)
+2. Create a Personal Access Token with `copilot` scope
+3. `export GITHUB_TOKEN="ghp_..."`
+
+**Notes:** The Copilot driver handles OAuth PKCE token exchange automatically — it obtains a short-lived Copilot API token from `https://api.github.com/copilot_internal/v2/token` and caches it with auto-refresh. The Copilot API uses OpenAI-compatible chat completions format. Tokens are refreshed 5 minutes before expiry.
+
+---
+
+### 29. Aider
+
+| | |
+|---|---|
+| **Display Name** | Aider |
+| **Type** | **CLI Provider** |
+| **Driver** | Subprocess (CLI) |
+| **Env Var** | None (uses its own provider env vars) |
+| **Binary** | `aider` (must be on PATH) |
+| **Key Required** | No (uses Aider's own auth) |
+| **Free Tier** | Depends on Aider's configured backend |
+
+**Setup:**
+1. Install Aider: `pip install aider-install && aider-install`
+2. Configure Aider's LLM provider via its own env vars (e.g. `OPENAI_API_KEY`)
+3. No additional LibreFang configuration needed
+
+**Notes:** CLI Provider — LibreFang spawns the `aider` binary as a subprocess in non-interactive mode (`--message`). Aider handles its own LLM provider authentication via standard environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.). Aider's `--yes-always`, `--no-auto-commits`, and `--no-git` flags are applied automatically. Use `AIDER_CLI_PATH` to override the binary path.
+
+---
+
+### 30. Claude Code CLI
+
+| | |
+|---|---|
+| **Display Name** | Claude Code CLI |
+| **Type** | **CLI Provider** |
+| **Driver** | Subprocess (CLI) |
+| **Env Var** | None (uses its own OAuth session) |
+| **Binary** | `claude` (must be on PATH) |
+| **Key Required** | No (uses Claude Code's own session auth) |
+| **Free Tier** | Depends on Claude Code subscription |
+
+**Setup:**
+1. Install Claude Code: `npm install -g @anthropic-ai/claude-code`
+2. Authenticate: `claude auth login`
+3. No additional LibreFang configuration needed
+
+**Notes:** CLI Provider — LibreFang spawns the `claude` binary as a subprocess in print mode (`-p`). The driver strips other providers' API keys from the subprocess environment to prevent leakage. Active subprocess PIDs are tracked and message timeouts (default 5 minutes) prevent hung processes from blocking agents. Vision input is supported via base64-encoded images.
+
+---
+
+### 31. Codex CLI
+
+| | |
+|---|---|
+| **Display Name** | Codex CLI |
+| **Type** | **CLI Provider** |
+| **Driver** | Subprocess (CLI) |
+| **Env Var** | `OPENAI_API_KEY` (used by the Codex CLI itself) |
+| **Binary** | `codex` (must be on PATH) |
+| **Key Required** | Yes (OpenAI API key for Codex CLI) |
+| **Free Tier** | No |
+
+**Setup:**
+1. Install Codex CLI: `npm install -g @openai/codex`
+2. `export OPENAI_API_KEY="sk-..."`
+3. No additional LibreFang configuration needed
+
+**Notes:** CLI Provider — LibreFang spawns the `codex` binary as a subprocess in quiet mode (`-q`). The driver strips other providers' API keys from the subprocess environment (preserving only `OPENAI_API_KEY` and `CODEX_*` variables). This allows users with Codex CLI installed to use it as an LLM provider without additional configuration.
+
+---
+
+### 32. Gemini CLI
+
+| | |
+|---|---|
+| **Display Name** | Gemini CLI |
+| **Type** | **CLI Provider** |
+| **Driver** | Subprocess (CLI) |
+| **Env Var** | None (uses Google OAuth by default) |
+| **Binary** | `gemini` (must be on PATH) |
+| **Key Required** | No (uses Google OAuth) |
+| **Free Tier** | Yes (via Google account) |
+
+**Setup:**
+1. Install Gemini CLI: `npm install -g @google/gemini-cli`
+2. Authenticate: `gemini auth login`
+3. No additional LibreFang configuration needed
+
+**Notes:** CLI Provider — LibreFang spawns the `gemini` binary as a subprocess in print mode (`-p`). The driver preserves `GEMINI_*` and `GOOGLE_*` environment variables while stripping other providers' secrets. No separate API key is needed when using Google OAuth authentication.
+
+---
+
+### 33. Qwen Code
+
+| | |
+|---|---|
+| **Display Name** | Qwen Code |
+| **Type** | **CLI Provider** |
+| **Driver** | Subprocess (CLI) |
+| **Env Var** | None (uses Qwen OAuth by default) |
+| **Binary** | `qwen` (must be on PATH) |
+| **Key Required** | No (uses Qwen OAuth) |
+| **Free Tier** | Yes (via Alibaba Cloud account) |
+
+**Setup:**
+1. Install Qwen Code: `npm install -g @alibaba/qwen-code`
+2. Authenticate: `qwen auth login`
+3. No additional LibreFang configuration needed
+
+**Notes:** CLI Provider — LibreFang spawns the `qwen` binary as a subprocess in print mode (`-p`). The driver preserves `QWEN_*` environment variables while stripping other providers' secrets. Supports streaming JSON output from the Qwen Code CLI. No separate API key is needed when using Qwen OAuth authentication.
+
+---
+
+### 34. Qwen (DashScope)
+
+| | |
+|---|---|
+| **Display Name** | Qwen |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `DASHSCOPE_API_KEY` |
+| **Base URL** | `https://dashscope.aliyuncs.com/compatible-mode/v1` |
+| **Aliases** | `dashscope`, `model_studio` |
+| **Key Required** | Yes |
+| **Free Tier** | Yes (limited credits on signup) |
+| **Auth** | `Authorization: Bearer` header |
+
+**Regions:**
+
+| Region | Endpoint | API Key Env |
+|--------|----------|-------------|
+| *(default)* | `dashscope.aliyuncs.com` | `DASHSCOPE_API_KEY` |
+| `intl` | `dashscope-intl.aliyuncs.com` | `DASHSCOPE_API_KEY` |
+| `us` | `dashscope-us.aliyuncs.com` | `DASHSCOPE_API_KEY` |
+
+**Setup:**
+1. Sign up at [DashScope Console](https://dashscope.console.aliyun.com)
+2. Create an API key
+3. `export DASHSCOPE_API_KEY="sk-..."`
+4. Optionally select a region in `config.toml`:
+   ```toml
+   [provider_regions]
+   qwen = "intl"    # or "us"
+   ```
+
+**Notes:** Qwen uses Alibaba Cloud's DashScope API. The default endpoint serves mainland China; use the `intl` or `us` region for lower latency outside China. Models are defined in the registry TOML and loaded at boot.
+
+---
+
+### 35. MiniMax
+
+| | |
+|---|---|
+| **Display Name** | MiniMax |
+| **Driver** | OpenAI-compatible |
+| **Env Var** | `MINIMAX_API_KEY` |
+| **Base URL** | `https://api.minimax.io/v1` |
+| **Key Required** | Yes |
+| **Free Tier** | No |
+| **Auth** | `Authorization: Bearer` header |
+
+**Regions:**
+
+| Region | Endpoint | API Key Env |
+|--------|----------|-------------|
+| *(default)* | `api.minimax.io` | `MINIMAX_API_KEY` |
+| `china` | `api.minimaxi.com` | `MINIMAX_CN_API_KEY` |
+
+**Setup:**
+1. Sign up at [minimax.io](https://www.minimax.io) (international) or [minimaxi.com](https://www.minimaxi.com) (China)
+2. Create an API key
+3. `export MINIMAX_API_KEY="..."`
+4. For China region:
+   ```toml
+   [provider_regions]
+   minimax = "china"
+   ```
+   ```bash
+   export MINIMAX_CN_API_KEY="..."
+   ```
+
+**Notes:** MiniMax international (`minimax.io`) and China (`minimaxi.com`) use separate API keys. When selecting the `china` region, LibreFang automatically reads from `MINIMAX_CN_API_KEY` instead of `MINIMAX_API_KEY`.
+
+---
+
+### 36. Vertex AI
+
+| | |
+|---|---|
+| **Display Name** | Google Vertex AI |
+| **Driver** | Native Gemini (generateContent API via Vertex) |
+| **Config Section** | `[vertex_ai]` |
+| **Env Var** | `GOOGLE_APPLICATION_CREDENTIALS`, `VERTEX_PROJECT`, `VERTEX_LOCATION` |
+| **Base URL** | `https://<location>-aiplatform.googleapis.com` |
+| **Key Required** | Yes (service account JSON or gcloud CLI) |
+| **Free Tier** | No |
+| **Auth** | OAuth2 service account or `gcloud auth print-access-token` |
+| **Models** | Gemini models via Google Cloud Vertex AI enterprise endpoint |
+
+**Setup:**
+1. Enable Vertex AI API in [Google Cloud Console](https://console.cloud.google.com)
+2. Either create a service account key file, or authenticate with `gcloud auth application-default login`
+3. Set environment variables:
+   ```bash
+   # Option A: Service account key file
+   export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+   export VERTEX_PROJECT="your-gcp-project"
+   export VERTEX_LOCATION="us-central1"
+
+   # Option B: gcloud CLI (no key file needed)
+   gcloud auth application-default login
+   export VERTEX_PROJECT="your-gcp-project"
+   export VERTEX_LOCATION="us-central1"
+   ```
+4. Configure in `config.toml`:
+   ```toml
+   [vertex_ai]
+   project = "your-gcp-project"
+   location = "us-central1"
+   ```
+
+**Notes:** Vertex AI uses the same Gemini `generateContent` API format as the native Gemini driver but authenticates via Google Cloud OAuth2 instead of an API key. Access tokens are cached with a ~50-minute TTL and auto-refreshed before expiry. The endpoint format is `https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent`.
+
+---
+
+## Dynamic Provider Loading
+
+Place custom provider definitions in `~/.librefang/providers/`. Each `.toml` file defines one provider:
+
+```toml
+# ~/.librefang/providers/my-endpoint.toml
+id = "my-endpoint"
+display_name = "My Private Endpoint"
+driver = "openai_compatible"
+base_url = "https://llm.internal.company.com/v1"
+api_key_env = "MY_ENDPOINT_KEY"
+key_required = true
+
+[[models]]
+id = "my-model-7b"
+display_name = "My Model 7B"
+tier = "Balanced"
+context_window = 32768
+max_output_tokens = 4096
+input_cost_per_m = 0.0
+output_cost_per_m = 0.0
+supports_tools = true
+supports_vision = false
+```
+
+Files in `~/.librefang/providers/` are loaded at startup and merged into the catalog alongside the builtin providers.
+
+### Provider Regions
+
+Some providers offer region-specific endpoints. Regions are defined in registry TOML files with an optional `api_key_env` override:
+
+```toml
+# In a provider's registry TOML:
+[provider.regions.intl]
+base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+[provider.regions.china]
+base_url = "https://api.minimaxi.com/v1"
+api_key_env = "MINIMAX_CN_API_KEY"    # Optional: override the default API key env var
+```
+
+Select a region in `config.toml`:
+
+```toml
+[provider_regions]
+qwen = "intl"
+minimax = "china"
+```
+
+**Priority:** Region selections are applied *before* explicit `[provider_urls]` entries. If both are set for the same provider, `provider_urls` wins.
+
+---
+
 ## Model Catalog
 
 The complete catalog of all 51 builtin models, sorted by provider. Pricing is per million tokens.
@@ -903,7 +1343,7 @@ Returns a map of all alias-to-canonical-ID mappings.
 GET /api/providers
 ```
 
-Returns all 20 providers with auth status and model counts.
+Returns all 28 providers with auth status and model counts.
 
 **Response:**
 ```json
@@ -998,7 +1438,7 @@ Local:
 
 ### `/providers`
 
-Lists all 20 providers with their authentication status.
+Lists all 28 providers with their authentication status.
 
 ```
 /providers
@@ -1006,7 +1446,7 @@ Lists all 20 providers with their authentication status.
 
 Example output:
 ```
-LLM Providers (20):
+LLM Providers (28):
 
   Anthropic          ANTHROPIC_API_KEY       Configured    3 models
   OpenAI             OPENAI_API_KEY          Missing       6 models
@@ -1047,6 +1487,14 @@ Quick reference for all provider environment variables:
 | Hugging Face | `HF_API_KEY` | Yes |
 | xAI | `XAI_API_KEY` | Yes |
 | Replicate | `REPLICATE_API_TOKEN` | Yes |
+| Claude Code | `ANTHROPIC_API_KEY` | Yes |
+| NVIDIA NIM | `NVIDIA_API_KEY` | Yes |
+| Voyage AI | `VOYAGE_API_KEY` | Yes |
+| Anyscale | `ANYSCALE_API_KEY` | Yes |
+| DeepInfra | `DEEPINFRA_API_KEY` | Yes |
+| Azure OpenAI | `AZURE_OPENAI_API_KEY`, `AZURE_OPENAI_ENDPOINT` | Yes |
+| Amazon Bedrock | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION` | Yes |
+| Google Vertex AI | `GOOGLE_APPLICATION_CREDENTIALS`, `VERTEX_PROJECT`, `VERTEX_LOCATION` | Yes |
 
 ---
 
@@ -1062,4 +1510,3 @@ Quick reference for all provider environment variables:
 
 
 
-export const sections = [];

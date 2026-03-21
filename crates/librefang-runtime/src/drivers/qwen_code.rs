@@ -71,9 +71,38 @@ impl QwenCodeDriver {
         }
     }
 
-    /// Detect if the Qwen Code CLI is available on PATH.
+    /// Detect if the Qwen Code CLI is available.
+    ///
+    /// Tries the bare `qwen` command first (standard PATH lookup), then falls
+    /// back to common install locations that may not be on PATH when LibreFang
+    /// runs as a daemon/service.
     pub fn detect() -> Option<String> {
-        let output = std::process::Command::new("qwen")
+        // 1. Try bare command on PATH.
+        if let Some(version) = Self::try_cli("qwen") {
+            return Some(version);
+        }
+
+        // 2. Try `which qwen` to resolve through shell aliases / env managers.
+        if let Some(path) = Self::which("qwen") {
+            if let Some(version) = Self::try_cli(&path) {
+                return Some(version);
+            }
+        }
+
+        // 3. Try common install locations (npm global, cargo, etc.).
+        let candidates = Self::common_cli_paths("qwen");
+        for candidate in &candidates {
+            if let Some(version) = Self::try_cli(candidate) {
+                return Some(version);
+            }
+        }
+
+        None
+    }
+
+    /// Try to run a CLI binary and return its version string.
+    fn try_cli(path: &str) -> Option<String> {
+        let output = std::process::Command::new(path)
             .arg("--version")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -85,6 +114,80 @@ impl QwenCodeDriver {
         } else {
             None
         }
+    }
+
+    /// Use `which` (Unix) or `where` (Windows) to resolve a binary path.
+    fn which(name: &str) -> Option<String> {
+        #[cfg(target_os = "windows")]
+        let cmd = "where";
+        #[cfg(not(target_os = "windows"))]
+        let cmd = "which";
+
+        let output = std::process::Command::new(cmd)
+            .arg(name)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()?
+                .trim()
+                .to_string();
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    /// Return common install locations for a CLI binary.
+    fn common_cli_paths(name: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+        if let Some(home) = home_dir() {
+            // npm global installs (nvm, fnm, volta, etc.)
+            paths.push(
+                home.join(".local")
+                    .join("bin")
+                    .join(name)
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            paths.push(
+                home.join(".nvm")
+                    .join("versions")
+                    .join("node")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            // Cargo-installed binaries
+            paths.push(
+                home.join(".cargo")
+                    .join("bin")
+                    .join(name)
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+
+        // System-wide locations
+        #[cfg(not(target_os = "windows"))]
+        {
+            paths.push(format!("/usr/local/bin/{name}"));
+            paths.push(format!("/usr/bin/{name}"));
+            paths.push(format!("/opt/homebrew/bin/{name}"));
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok(appdata) = std::env::var("APPDATA") {
+                paths.push(format!("{appdata}\\npm\\{name}.cmd"));
+            }
+        }
+
+        paths
     }
 
     /// Build the CLI arguments for a given request.
@@ -224,7 +327,10 @@ impl LlmDriver for QwenCodeDriver {
         let output = cmd.output().await.map_err(|e| {
             LlmError::Http(format!(
                 "Qwen Code CLI not found or failed to start ({}). \
-                 Install: npm install -g @qwen-code/qwen-code && qwen auth",
+                 Install: npm install -g @qwen-code/qwen-code && qwen auth. \
+                 If the CLI is installed in a non-standard location, set \
+                 provider_urls.qwen-code in your LibreFang config.toml \
+                 (e.g. provider_urls.qwen-code = \"/path/to/qwen\")",
                 e
             ))
         })?;
@@ -314,7 +420,10 @@ impl LlmDriver for QwenCodeDriver {
         let mut child = cmd.spawn().map_err(|e| {
             LlmError::Http(format!(
                 "Qwen Code CLI not found or failed to start ({}). \
-                 Install: npm install -g @qwen-code/qwen-code && qwen auth",
+                 Install: npm install -g @qwen-code/qwen-code && qwen auth. \
+                 If the CLI is installed in a non-standard location, set \
+                 provider_urls.qwen-code in your LibreFang config.toml \
+                 (e.g. provider_urls.qwen-code = \"/path/to/qwen\")",
                 e
             ))
         })?;
@@ -458,6 +567,9 @@ impl LlmDriver for QwenCodeDriver {
 }
 
 /// Check if the Qwen Code CLI is available.
+///
+/// Returns `true` if the CLI binary is found (via PATH or common install
+/// locations) or if Qwen credentials files exist on disk.
 pub fn qwen_code_available() -> bool {
     QwenCodeDriver::detect().is_some() || qwen_credentials_exist()
 }
@@ -631,5 +743,50 @@ mod tests {
         assert_eq!(event.r#type, "result");
         assert_eq!(event.result.unwrap(), "Final answer");
         assert_eq!(event.usage.unwrap().output_tokens, 10);
+    }
+
+    #[test]
+    fn test_common_cli_paths_contains_standard_locations() {
+        let paths = QwenCodeDriver::common_cli_paths("qwen");
+        assert!(!paths.is_empty(), "should return at least some candidates");
+
+        // On Unix, /usr/local/bin/qwen should be in the list.
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert!(
+                paths.contains(&"/usr/local/bin/qwen".to_string()),
+                "should include /usr/local/bin/qwen"
+            );
+            assert!(
+                paths.contains(&"/usr/bin/qwen".to_string()),
+                "should include /usr/bin/qwen"
+            );
+        }
+
+        // Should include ~/.local/bin/qwen
+        if let Some(home) = home_dir() {
+            let local_bin = home
+                .join(".local")
+                .join("bin")
+                .join("qwen")
+                .to_string_lossy()
+                .to_string();
+            assert!(
+                paths.contains(&local_bin),
+                "should include ~/.local/bin/qwen"
+            );
+        }
+    }
+
+    #[test]
+    fn test_try_cli_nonexistent_binary() {
+        // A binary that definitely doesn't exist should return None.
+        assert!(QwenCodeDriver::try_cli("__nonexistent_binary_12345__").is_none());
+    }
+
+    #[test]
+    fn test_which_nonexistent_binary() {
+        // `which` for a non-existent binary should return None.
+        assert!(QwenCodeDriver::which("__nonexistent_binary_12345__").is_none());
     }
 }

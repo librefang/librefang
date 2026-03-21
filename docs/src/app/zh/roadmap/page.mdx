@@ -1,180 +1,118 @@
 # 发布路线图
 
-LibreFang 竞争差距分析。组织为 4 个冲刺阶段。
+LibreFang v0.1.0 发布路线图，按 4 个迭代阶段组织。
+
+<Note>
+  当前进度：18/18 项功能已完成，1751 个测试全部通过，仅剩安装脚本域名部署待完成。
+</Note>
 
 ---
 
-## Sprint 1 — 止血 (3-4 天)
+## 总览
 
-这些是阻止性问题。应用会崩溃或显示异常。
-
-### 1.1 修复 Token 膨胀 — ✅ 完成
-
-**状态: 已完成** — 在 compactor.rs, context_overflow.rs, context_budget.rs, agent_loop.rs, kernel.rs, agent.rs 和 prompt_builder.rs 中实现了全部 13 项。
-
-**问题:** 单条聊天消息消耗约 45K 输入 token（工具定义 + 系统提示）。到第 3 条消息时，达到 100K 配额并崩溃。
-
-**完成标准:**
-- `cargo test --workspace` 通过
-- 启动 Agent，发送 10+ 条消息 — 无 "Token quota exceeded" 错误
-- 首条消息 token 数从 ~45K 降至 ~15-20K
-
-### 1.2 品牌与图标资源 — ✅ 完成
-
-**状态: 已完成** — 桌面应用显示 LibreFang 品牌图标。
-
-### 1.3 Tauri 签名密钥对 — ✅ 完成
-
-**状态: 已完成** — 通过 `cargo tauri signer generate --ci` 生成 Ed25519 签名密钥对。
-
-### 1.4 首次运行体验审计 — ✅ 完成
-
-**状态: 已完成** — 完整代码审计验证：全部 8 个向导 API 端点存在并已实现。
+| 阶段 | 目标 | 进度 |
+|------|------|------|
+| Sprint 1 | 核心稳定性 | 4/4 已完成 |
+| Sprint 2 | 竞争对等 | 4/5 已完成 |
+| Sprint 3 | 差异化功能 | 5/5 已完成 |
+| Sprint 4 | 优化与发布 | 5/5 已完成 |
 
 ---
 
-## Sprint 2 — 竞争对等 (4-5 天)
+## Sprint 1 — 核心稳定性
 
-这些缩小与 OpenClaw 的差距。
+解决影响基本可用性的关键问题。
 
-### 2.1 浏览器截图渲染 — ✅ 完成
-
-**状态: 已完成** — browser.rs 保存截图到上传目录并返回 JSON 包含 `image_urls`。chat.js 检测 `browser_screenshot` 工具结果并显示内联图像。
-
-### 2.2 聊天消息搜索 — ✅ 完成
-
-**状态: 已完成** — 搜索栏支持 Ctrl+F 快捷键，实时过滤，高亮匹配文本。
-
-### 2.3 技能市场优化 — ✅ 完成
-
-**状态: 已完成** — 技能页面已优化，包含 4 个标签页（已安装、ClawHub、MCP 服务器、快速开始）、实时搜索、分类排序。
-
-### 2.4 安装脚本部署
-
-**问题:** `librefang.ai` 安装端点需要连接。
-
-**完成标准:**
-- `curl -fsSL https://librefang.ai/install.sh | sh` 安装最新版本
-- `irm https://librefang.ai/install.ps1 | iex` 在 Windows PowerShell 中工作
-
-### 2.5 向导端到端 — ✅ 完成
-
-**状态: 已完成** — 6 步向导（欢迎 → 提供商 → Agent → 试用 → 通道 → 完成）完全连接。
+| 功能 | 描述 | 状态 |
+|------|------|------|
+| Token 上下文管理 | 智能 Token 预算控制，从 ~45K 降至 ~15-20K，支持自动压缩和上下文窗口保护 | 已完成 |
+| 品牌资产 | 桌面应用和 Web UI 完整品牌集成，包括图标、Logo 和 Favicon | 已完成 |
+| 应用签名 | Tauri 桌面应用 Ed25519 签名，支持自动更新验证 | 已完成 |
+| 首次运行体验 | 8 个向导 API 端点完整实现，6 步引导流程开箱即用 | 已完成 |
 
 ---
 
-## Sprint 3 — 差异化 (5-7 天)
+## Sprint 2 — 竞争对等
 
-这些是 LibreFang 可以超越 OpenClaw 的功能。
+缩小与同类产品的功能差距。
 
-### 3.1 语音输入/输出 — ✅ 完成
-
-**状态: 已完成** — 麦克风按钮支持按住录音，MediaRecorder 使用 webm/opus 编解码器，自动上传和转录，TTS 音频播放器。
-
-### 3.2 Canvas 渲染验证 — ✅ 完成
-
-**状态: 已完成** — 修复 CSP 允许 `frame-src 'self' blob:` 和 `media-src 'self' blob:`。
-
-### 3.3 JavaScript/Python SDK — ✅ 完成
-
-**状态: 已完成** — 创建了 `sdk/javascript/` (@librefang/sdk) 和 `sdk/python/librefang_client.py`。
-
-### 3.4 可观测性与指标导出 — ✅ 完成
-
-**状态: 已完成** — 添加 `GET /api/metrics` 端点返回 Prometheus 格式。
-
-### 3.5 可视化工作流构建器 — ✅ 完成
-
-**状态: 已完成** — 添加了基于 SVG canvas 的完整可视化构建器。支持节点拖放、贝塞尔曲线连接、缩放/平移、TOML 导出。
+| 功能 | 描述 | 状态 |
+|------|------|------|
+| 浏览器截图渲染 | 浏览器自动化截图直接在聊天中内联显示 | 已完成 |
+| 聊天搜索 | 支持 Ctrl+F 快捷键、实时过滤和高亮匹配 | 已完成 |
+| 技能市场 | 4 个标签页（已安装、社区、MCP 服务器、快速开始），支持搜索和分类 | 已完成 |
+| 安装脚本 | `curl` / `irm` 一键安装，需要域名部署 | 待部署 |
+| 设置向导 | 6 步引导（欢迎 → 提供商 → Agent → 试用 → 通道 → 完成），支持 API Key 自动检测 | 已完成 |
 
 ---
 
-## Sprint 4 — 优化与发布 (3-4 天)
+## Sprint 3 — 差异化功能
 
-### 4.1 多会话支持 — ✅ 完成
+超越竞品的核心创新。
 
-**状态: 已完成** — 每个 Agent 支持多个会话，UI 中有会话下拉切换。
+| 功能 | 描述 | 状态 |
+|------|------|------|
+| 语音交互 | 麦克风按住录音、自动转录、TTS 语音播放 | 已完成 |
+| Canvas 渲染 | 安全沙箱 iframe 渲染，支持 Web 和桌面应用 | 已完成 |
+| 多语言 SDK | JavaScript (@librefang/sdk) 和 Python SDK，覆盖全部 API | 已完成 |
+| 可观测性 | Prometheus 格式指标导出（`/api/metrics`），支持 Grafana 集成 | 已完成 |
+| 可视化工作流 | 拖放式 DAG 构建器，支持 7 种节点类型、贝塞尔曲线连接、TOML 导出 | 已完成 |
 
-### 4.2 配置热重载 — ✅ 完成
+---
 
-**状态: 已完成** — 添加了基于轮询的配置监视器（每 30 秒），自动检测 `config.toml` 变化。
+## Sprint 4 — 优化与发布
 
-### 4.3 CHANGELOG 和 README 优化 — ✅ 完成
+性能调优和发布准备。
 
-**状态: 已完成** — 更新了 CHANGELOG.md 和 README.md。
+| 功能 | 描述 | 状态 |
+|------|------|------|
+| 多会话 | 每个 Agent 支持多个独立会话，UI 下拉切换 | 已完成 |
+| 配置热重载 | 自动检测 `config.toml` 变更并应用，无需重启 | 已完成 |
+| 文档完善 | CHANGELOG 和 README 全面更新 | 已完成 |
+| 负载测试 | 7 项基准测试，API p99 延迟 < 5ms，吞吐量 2,792 req/s | 已完成 |
+| 发布就绪 | 全部代码完成，生产审计通过 | 已完成 |
 
-### 4.4 性能与负载测试 — ✅ 完成
+---
 
-**状态: 已完成** — 创建了 `load_test.rs` 包含 7 个负载测试。
+## 性能基准
 
-**结果:**
-- Health: p99 = 0.8ms
-- Agent list: p99 = 0.5ms
-- Metrics: 2,792 req/sec
-- 并发读取: 1,728 req/sec
-- 生成: 97/sec
-
-### 4.5 最终发布 — ✅ 就绪
-
-**状态: 全部代码完成** — 全部 18 项代码完成。1751 个测试通过。生产审计完成。
+| 指标 | 结果 |
+|------|------|
+| Health 端点 p99 | 0.8ms |
+| Agent 列表 p99 | 0.5ms |
+| Metrics 吞吐量 | 2,792 req/s |
+| 并发读取 | 1,728 req/s |
+| Agent 创建 | 97/s |
 
 ---
 
 ## 功能对比
 
-| 功能 | OpenClaw | LibreFang | 胜者 |
-|------|-----------|-----------|------|
-| 语言/性能 | Node.js (~200MB) | Rust (~30MB 单二进制) | **LibreFang** |
-| 通道 | ~15 | **40** | **LibreFang** |
-| 内置工具 | ~19 | **41** | **LibreFang** |
-| 安全系统 | Token + 沙箱 | **16 层防御** | **LibreFang** |
-| Agent 模板 | 手动配置 | **30 个预配置** | **LibreFang** |
-| Hands (自主) | 无 | **7 个包** | **LibreFang** |
-| 工作流引擎 | Cron + webhooks | **完整 DAG** | **LibreFang** |
-| 知识图谱 | 平面向量存储 | **实体关系图** | **LibreFang** |
-| P2P 网络 | 无 | **OFP 协议** | **LibreFang** |
-| WASM 沙箱 | 仅 Docker | **双计量 WASM** | **LibreFang** |
-| 桌面应用 | Electron (~200MB) | **Tauri (~30MB)** | **LibreFang** |
-| 迁移 | N/A | **`migrate --from openclaw`** | **LibreFang** |
-| 技能 | 54 个捆绑 | **60 个捆绑** | **LibreFang** |
-| LLM 提供商 | ~15 | **27 提供商, 130+ 模型** | **LibreFang** |
-| 插件 SDK | TypeScript | JS + Python SDK | **平局** |
-| 本地移动 | iOS + Android + macOS | 仅 Web 响应式 | OpenClaw |
-| 语音模式 | 唤醒词 + TTS | 麦克风 + TTS 播放 | OpenClaw (略胜) |
-| 浏览器自动化 | Playwright | Playwright + 内联截图 | **平局** |
-| 可视化工作流 | 无 | **拖放构建器** | **LibreFang** |
+LibreFang 与同类开源方案的横向对比。
 
-**LibreFang 赢得 15/18 类别。**
+| 功能 | 同类方案 | LibreFang | 优势方 |
+|------|----------|-----------|--------|
+| 语言 / 性能 | Node.js (~200MB) | Rust (~30MB 单二进制) | **LibreFang** |
+| 通道集成 | ~15 | 40 | **LibreFang** |
+| 内置工具 | ~19 | 41 | **LibreFang** |
+| 安全体系 | Token + 沙箱 | 16 层纵深防御 | **LibreFang** |
+| Agent 模板 | 手动配置 | 30 个预配置模板 | **LibreFang** |
+| 自主能力 | 无 | 7 个 Hands 包 | **LibreFang** |
+| 工作流引擎 | Cron + Webhooks | 完整 DAG（并行 / 循环） | **LibreFang** |
+| 知识图谱 | 平面向量存储 | 实体关系图 | **LibreFang** |
+| P2P 网络 | 无 | OFP 协议 | **LibreFang** |
+| WASM 沙箱 | 仅 Docker | 双计量 WASM | **LibreFang** |
+| 桌面应用 | Electron (~200MB) | Tauri (~30MB) | **LibreFang** |
+| 迁移工具 | 无 | `migrate --from openfang/openclaw` | **LibreFang** |
+| 技能生态 | 54 个 | 60 个 | **LibreFang** |
+| LLM 提供商 | ~15 | 27 提供商 / 130+ 模型 | **LibreFang** |
+| SDK | TypeScript | JS + Python | 平局 |
+| 原生移动端 | iOS + Android + macOS | Web 响应式 | 同类方案 |
+| 语音模式 | 唤醒词 + TTS | 麦克风 + TTS 播放 | 同类方案（略胜） |
+| 可视化工作流 | 无 | 拖放构建器 | **LibreFang** |
 
----
+<Note>
+  LibreFang 在 18 项对比中赢得 15 项。剩余差距：原生移动端应用和语音唤醒词。
+</Note>
 
-## 快速参考: 状态
-
-```
-Sprint 1: 已完成
-  1.1 Token 膨胀修复 .............. ✅
-  1.2 品牌资源 ................. ✅
-  1.3 Tauri 签名密钥 ........... ✅
-  1.4 首次运行审计 ............ ✅
-
-Sprint 2: 4/5 已完成
-  2.1 浏览器截图 ............ ✅
-  2.2 聊天搜索 .............. ✅
-  2.3 技能市场 .............. ✅
-  2.4 安装脚本域名 .......... 待定
-  2.5 向导端到端 ............ ✅
-
-Sprint 3: 已完成
-  3.1 语音 UI .............. ✅
-  3.2 Canvas 验证 .......... ✅
-  3.3 JS/Python SDK ........ ✅
-  3.4 可观测性 .............. ✅
-  3.5 可视化工作流构建器 .... ✅
-
-Sprint 4: 已完成
-  4.1 多会话 ................ ✅
-  4.2 配置热重载 ........... ✅
-  4.3 CHANGELOG + README ... ✅
-  4.4 负载测试 ............. ✅
-  4.5 最终发布 .............. ✅ 就绪
-```
+export const sections = [];

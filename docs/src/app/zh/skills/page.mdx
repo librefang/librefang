@@ -280,7 +280,21 @@ librefang skill trending
 
 ---
 
-## 迁移 OpenClaw 技能
+## 迁移技能
+
+### 从 OpenFang 迁移
+
+LibreFang 兼容 OpenFang 技能（共享相同格式）：
+
+```bash
+# 自动迁移
+librefang migrate --from openfang
+
+# 手动迁移
+cp -r ~/.openfang/skills/* ~/.librefang/skills/
+```
+
+### 从 OpenClaw 迁移
 
 LibreFang 兼容 OpenClaw 技能：
 

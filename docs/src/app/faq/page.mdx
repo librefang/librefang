@@ -137,11 +137,11 @@ def my_tool(param: str) -> str:
 
 ### Q: Which messaging platforms are supported?
 
-LibreFang supports 40+ channel adapters:
+LibreFang supports 44 channel adapters:
 
 - **Core**: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email
 - **Enterprise**: Microsoft Teams, Google Chat, Webex, Feishu
-- **Social**: LINE, Viber, Facebook Messenger, Twitter
+- **Social**: LINE, Viber, Facebook Messenger, Mastodon, Bluesky
 
 ### Q: How to configure Telegram Bot?
 
@@ -211,12 +211,7 @@ agent_spawn = false  # Disable sub-agent spawning
 2. **Enable compression**: Auto-compact session history
 3. **Configure limits**: Limit concurrent Agent count
 
-```toml
-[compaction]
-threshold = 80
-keep_recent = 20
-max_summary_tokens = 1024
-```
+Compaction parameters (threshold, keep_recent, max_summary_tokens) are managed internally by the runtime. They are not configurable in `config.toml` — auto-compaction is enabled by default and triggers when a session exceeds 80 messages.
 
 ### Q: What to do if memory usage is too high?
 
@@ -287,6 +282,16 @@ RUST_LOG=debug librefang skill list
 
 ## Migration
 
+### Q: How to migrate from OpenFang?
+
+```bash
+# Automatic migration (copies ~/.openfang → ~/.librefang)
+librefang migrate --from openfang
+
+# Preview mode
+librefang migrate --from openfang --dry-run
+```
+
 ### Q: How to migrate from OpenClaw?
 
 ```bash
@@ -299,9 +304,10 @@ librefang migrate --from openclaw --dry-run
 
 ### Q: Which migration sources are supported?
 
-- OpenClaw (direct support)
-- LangChain (compatibility layer)
-- AutoGPT (configuration conversion)
+- OpenFang (automated migration via `librefang migrate --from openfang`)
+- OpenClaw (automated migration via `librefang migrate --from openclaw`)
+- LangChain (manual migration guide — no automated tooling)
+- AutoGPT (manual migration guide — no automated tooling)
 
 ---
 
@@ -358,7 +364,7 @@ Refer to the "Adding New Channels" section in the Development Guide.
 |---------|-----------|----------|-----------|
 | Language | Rust | Node.js | Python |
 | Memory | ~40MB | ~200MB | Language-dependent |
-| Channels | 40+ | ~15 | None |
+| Channels | 42 | ~15 | None |
 | Security | 16-layer | Basic | None |
 | Desktop | Tauri | Electron | None |
 

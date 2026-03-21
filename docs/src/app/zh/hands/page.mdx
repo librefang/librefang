@@ -1,6 +1,6 @@
 # 自主 Hands
 
-LibreFang 的核心创新——7 个预构建的自主能力包，独立运行、按计划执行，无需人工干预。
+LibreFang 的核心创新——14 个预构建的自主能力包，独立运行、按计划执行，无需人工干预。
 
 <Note>
 **提示**: Hands 可以通过 cron 表达式配置定时执行，也支持事件触发模式。
@@ -18,7 +18,7 @@ Hands 是 LibreFang 的独特功能，它们是自主工作的 Agent，可以：
 
 ---
 
-## 7 个内置 Hands
+## 14 个内置 Hands
 
 | Hand | 功能 | 自主级别 |
 |------|------|----------|
@@ -29,6 +29,13 @@ Hands 是 LibreFang 的独特功能，它们是自主工作的 Agent，可以：
 | **Researcher** | 深度自主研究、CRAAP 可信度评估、APA 引用 | 高 |
 | **Twitter** | 自主 X/Twitter 账号管理、7 种内容格式、审批队列 | 高 |
 | **Browser** | Web 自动化、Playwright、强制购买审批 gate | 中 |
+| **Analytics** | 业务分析、KPI 追踪、自动化报告、趋势检测 | 高 |
+| **ApiTester** | 自动化 API 测试、合约验证、回归检测 | 高 |
+| **DevOps** | CI/CD 监控、部署自动化、基础设施告警 | 高 |
+| **LinkedIn** | LinkedIn 档案监控、外展自动化、线索丰富 | 高 |
+| **Reddit** | Reddit 社区监控、帖子排期、情感追踪 | 高 |
+| **Strategist** | 战略分析、竞争情报、场景规划 | 高 |
+| **Trader** | 市场数据监控、信号生成、投资组合追踪 | 高 |
 
 ---
 
@@ -325,6 +332,267 @@ librefang hand browser list
 
 ---
 
+## Analytics Hand
+
+业务分析和 KPI 追踪 Hand。
+
+### 功能
+
+- 自动化 KPI 仪表板
+- 趋势检测和异常告警
+- 定时报告生成
+- 多源数据聚合
+- 成本和营收分析
+
+### 配置
+
+```toml
+[analytics]
+data_sources = ["postgres", "bigquery"]
+report_schedule = "0 8 * * 1"
+kpi_metrics = ["mrr", "churn", "cac"]
+alert_threshold = 0.15
+```
+
+### CLI 命令
+
+```bash
+# 激活 Analytics Hand
+librefang hand activate analytics
+
+# 生成报告
+librefang hand analytics report --period weekly
+
+# 查看 KPI 仪表板
+librefang hand analytics dashboard
+```
+
+---
+
+## ApiTester Hand
+
+自动化 API 测试和合约验证 Hand。
+
+### 功能
+
+- OpenAPI/Swagger 规范验证
+- 自动化回归测试
+- 响应合约检查
+- 延迟和可用性监控
+- 破坏性变更告警
+
+### 配置
+
+```toml
+[apitester]
+spec_url = "https://api.example.com/openapi.json"
+base_url = "https://api.example.com"
+schedule = "0 */6 * * *"
+alert_channels = ["telegram", "email"]
+```
+
+### CLI 命令
+
+```bash
+# 激活 ApiTester Hand
+librefang hand activate apitester
+
+# 运行测试套件
+librefang hand apitester run --spec openapi.json
+
+# 查看测试历史
+librefang hand apitester history
+```
+
+---
+
+## DevOps Hand
+
+CI/CD 监控和部署自动化 Hand。
+
+### 功能
+
+- 流水线状态监控
+- 部署自动化触发
+- 基础设施健康告警
+- 日志聚合和异常检测
+- 回滚协调
+
+### 配置
+
+```toml
+[devops]
+ci_provider = "github_actions"
+monitor_repos = ["org/repo-a", "org/repo-b"]
+alert_on_failure = true
+alert_channels = ["slack", "telegram"]
+```
+
+### CLI 命令
+
+```bash
+# 激活 DevOps Hand
+librefang hand activate devops
+
+# 检查流水线状态
+librefang hand devops status --repo org/repo
+
+# 触发部署
+librefang hand devops deploy --env production
+```
+
+---
+
+## LinkedIn Hand
+
+LinkedIn 档案监控和外展自动化 Hand。
+
+### 功能
+
+- 档案和公司页面监控
+- 连接请求自动化
+- 个性化外展序列
+- LinkedIn 数据线索丰富
+- 互动追踪
+
+### 配置
+
+```toml
+[linkedin]
+access_token_env = "LINKEDIN_ACCESS_TOKEN"
+outreach_daily_limit = 20
+personalize = true
+icp = "VP Engineering, >200 employees"
+```
+
+### CLI 命令
+
+```bash
+# 激活 LinkedIn Hand
+librefang hand activate linkedin
+
+# 启动外展活动
+librefang hand linkedin outreach --template "intro"
+
+# 查看连接统计
+librefang hand linkedin stats
+```
+
+---
+
+## Reddit Hand
+
+Reddit 社区监控和帖子排期 Hand。
+
+### 功能
+
+- 子版块监控和关键词告警
+- 定时帖子发布
+- 情感和趋势追踪
+- 评论管理辅助
+- 社区分析
+
+### 配置
+
+```toml
+[reddit]
+client_id_env = "REDDIT_CLIENT_ID"
+client_secret_env = "REDDIT_CLIENT_SECRET"
+subreddits = ["r/MachineLearning", "r/LocalLLaMA"]
+monitor_keywords = ["librefang", "agent OS"]
+post_schedule = "0 14 * * 2"
+```
+
+### CLI 命令
+
+```bash
+# 激活 Reddit Hand
+librefang hand activate reddit
+
+# 监控子版块
+librefang hand reddit monitor --subreddit MachineLearning
+
+# 排期帖子
+librefang hand reddit post --subreddit LocalLLaMA --title "..." --body "..."
+```
+
+---
+
+## Strategist Hand
+
+战略分析和竞争情报 Hand。
+
+### 功能
+
+- 竞争格局分析
+- 市场信号聚合
+- 场景规划和沙盘推演
+- SWOT 和波特五力自动化
+- 每周战略摘要生成
+
+### 配置
+
+```toml
+[strategist]
+competitors = ["competitor-a.com", "competitor-b.com"]
+market_sources = ["crunchbase", "pitchbook", "sec"]
+digest_schedule = "0 7 * * 1"
+scenario_depth = 3
+```
+
+### CLI 命令
+
+```bash
+# 激活 Strategist Hand
+librefang hand activate strategist
+
+# 生成竞争分析
+librefang hand strategist analyze --competitor competitor-a.com
+
+# 运行场景规划
+librefang hand strategist scenario --topic "AI 监管影响"
+```
+
+---
+
+## Trader Hand
+
+市场数据监控和投资组合追踪 Hand。
+
+### 功能
+
+- 实时价格和成交量监控
+- 技术指标信号生成
+- 投资组合盈亏追踪
+- 阈值突破告警
+- 交易日志自动化
+
+### 配置
+
+```toml
+[trader]
+data_provider = "alpaca"
+watchlist = ["AAPL", "MSFT", "BTC-USD"]
+alert_threshold_pct = 5.0
+journal = true
+paper_trading = true
+```
+
+### CLI 命令
+
+```bash
+# 激活 Trader Hand
+librefang hand activate trader
+
+# 查看投资组合
+librefang hand trader portfolio
+
+# 设置价格告警
+librefang hand trader alert --symbol AAPL --price 200.00
+```
+
+---
+
 ## Hand 管理
 
 ### CLI 命令
@@ -473,3 +741,35 @@ librefang hand error <hand-name> --last
 # 重置 Hand
 librefang hand reset <hand-name>
 ```
+
+---
+
+## REST API 端点
+
+### Hand 发现与安装
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/hands` | GET | 列出所有已注册的 hands 及状态 |
+| `/api/hands/active` | GET | 列出当前活跃的 hands |
+| `/api/hands/{hand_id}` | GET | 获取指定 hand 的详情 |
+| `/api/hands/install` | POST | 从 URL 或注册表安装 hand |
+| `/api/hands/{hand_id}/activate` | POST | 激活 hand（开始调度） |
+| `/api/hands/{hand_id}/check-deps` | POST | 检查依赖可用性 |
+| `/api/hands/{hand_id}/install-deps` | POST | 安装缺失的依赖 |
+
+### Hand 配置
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/hands/{hand_id}/settings` | GET | 获取当前 hand 配置 |
+| `/api/hands/{hand_id}/settings` | PUT | 更新 hand 配置 |
+
+### 实例生命周期
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/hands/instances/{id}/pause` | POST | 暂停运行中的 hand 实例 |
+| `/api/hands/instances/{id}/resume` | POST | 恢复已暂停的 hand 实例 |
+| `/api/hands/instances/{id}` | DELETE | 停用并移除 hand 实例 |
+| `/api/hands/instances/{id}/stats` | GET | 获取实例执行统计 |

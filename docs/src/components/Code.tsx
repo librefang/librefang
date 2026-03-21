@@ -1,44 +1,58 @@
-'use client';
+"use client";
 
-import { Tab, TabGroup, TabList, TabPanel, TabPanels } from '@headlessui/react';
-import clsx from 'clsx';
-import { Children, createContext, isValidElement, useContext, useEffect, useRef, useState } from 'react';
-import { create } from 'zustand';
+import { Tab, TabGroup, TabList, TabPanel, TabPanels } from "@headlessui/react";
+import clsx from "clsx";
+import {
+	Children,
+	createContext,
+	isValidElement,
+	useContext,
+	useEffect,
+	useRef,
+	useState,
+} from "react";
+import { create } from "zustand";
 
-import { Tag } from '@/components/Tag';
+import { Tag } from "@/components/Tag";
 
 const languageNames: Record<string, string> = {
-	js: 'JavaScript',
-	ts: 'TypeScript',
-	javascript: 'JavaScript',
-	typescript: 'TypeScript',
-	php: 'PHP',
-	python: 'Python',
-	ruby: 'Ruby',
-	go: 'Go',
+	js: "JavaScript",
+	ts: "TypeScript",
+	javascript: "JavaScript",
+	typescript: "TypeScript",
+	php: "PHP",
+	python: "Python",
+	ruby: "Ruby",
+	go: "Go",
 };
 
-function getPanelTitle({ title, language }: { title?: string; language?: string }) {
+function getPanelTitle({
+	title,
+	language,
+}: {
+	title?: string;
+	language?: string;
+}) {
 	if (title) {
 		return title;
 	}
 	if (language && language in languageNames) {
 		return languageNames[language];
 	}
-	return 'Code';
+	return "Code";
 }
 
-function ClipboardIcon(props: React.ComponentPropsWithoutRef<'svg'>) {
+function ClipboardIcon(props: React.ComponentPropsWithoutRef<"svg">) {
 	return (
-		<svg viewBox='0 0 20 20' aria-hidden='true' {...props}>
+		<svg viewBox="0 0 20 20" aria-hidden="true" {...props}>
 			<path
-				strokeWidth='0'
-				d='M5.5 13.5v-5a2 2 0 0 1 2-2l.447-.894A2 2 0 0 1 9.737 4.5h.527a2 2 0 0 1 1.789 1.106l.447.894a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-5a2 2 0 0 1-2-2Z'
+				strokeWidth="0"
+				d="M5.5 13.5v-5a2 2 0 0 1 2-2l.447-.894A2 2 0 0 1 9.737 4.5h.527a2 2 0 0 1 1.789 1.106l.447.894a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-5a2 2 0 0 1-2-2Z"
 			/>
 			<path
-				fill='none'
-				strokeLinejoin='round'
-				d='M12.5 6.5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2m5 0-.447-.894a2 2 0 0 0-1.79-1.106h-.527a2 2 0 0 0-1.789 1.106L7.5 6.5m5 0-1 1h-3l-1-1'
+				fill="none"
+				strokeLinejoin="round"
+				d="M12.5 6.5a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-5a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2m5 0-.447-.894a2 2 0 0 0-1.79-1.106h-.527a2 2 0 0 0-1.789 1.106L7.5 6.5m5 0-1 1h-3l-1-1"
 			/>
 		</svg>
 	);
@@ -65,7 +79,7 @@ function CopyButton({ code }: { code: string }) {
 				"group/button absolute top-3.5 right-4 overflow-hidden rounded-full py-1 pr-3 pl-2 text-2xs font-medium opacity-0 backdrop-blur-sm transition group-hover:opacity-100 focus:opacity-100",
 				copied
 					? "bg-emerald-400/10 ring-1 ring-emerald-400/20 ring-inset"
-					: "bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700"
+					: "bg-zinc-100 dark:bg-zinc-800 hover:bg-zinc-200 dark:hover:bg-zinc-700",
 			)}
 			onClick={() => {
 				window.navigator.clipboard.writeText(code).then(() => {
@@ -77,7 +91,7 @@ function CopyButton({ code }: { code: string }) {
 				aria-hidden={copied}
 				className={clsx(
 					"pointer-events-none flex items-center gap-0.5 text-zinc-500 dark:text-zinc-400 transition duration-300",
-					copied && "-translate-y-1.5 opacity-0"
+					copied && "-translate-y-1.5 opacity-0",
 				)}
 			>
 				<ClipboardIcon className="h-5 w-5 fill-zinc-400/20 stroke-zinc-500 dark:stroke-zinc-400 transition-colors group-hover/button:stroke-zinc-600 dark:group-hover/button:stroke-zinc-200" />
@@ -87,7 +101,7 @@ function CopyButton({ code }: { code: string }) {
 				aria-hidden={!copied}
 				className={clsx(
 					"pointer-events-none absolute inset-0 flex items-center justify-center text-emerald-500 dark:text-emerald-400 transition duration-300",
-					!copied && "translate-y-1.5 opacity-0"
+					!copied && "translate-y-1.5 opacity-0",
 				)}
 			>
 				Copied!
@@ -108,8 +122,14 @@ function CodePanelHeader({ tag, label }: { tag?: string; label?: string }) {
 					<Tag variant="small">{tag}</Tag>
 				</div>
 			)}
-			{tag && label && <span className="h-0.5 w-0.5 rounded-full bg-zinc-400" />}
-			{label && <span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">{label}</span>}
+			{tag && label && (
+				<span className="h-0.5 w-0.5 rounded-full bg-zinc-400" />
+			)}
+			{label && (
+				<span className="font-mono text-xs text-zinc-500 dark:text-zinc-400">
+					{label}
+				</span>
+			)}
 		</div>
 	);
 }
@@ -142,17 +162,17 @@ function CodePanel({
 
 	if (!code) {
 		// 尝试从子元素中提取代码内容
-		if (child && isValidElement(child) && child.type === 'pre') {
+		if (child && isValidElement(child) && child.type === "pre") {
 			const childProps = child.props as { children?: React.ReactNode };
 			const codeChild = childProps.children;
-			if (isValidElement(codeChild) && codeChild.type === 'code') {
+			if (isValidElement(codeChild) && codeChild.type === "code") {
 				const codeProps = codeChild.props as { children?: string };
-				code = codeProps.children || '';
+				code = codeProps.children || "";
 			}
 		}
 		// 如果仍然没有代码使用空字符串
 		if (!code) {
-			code = '';
+			code = "";
 		}
 	}
 
@@ -184,7 +204,11 @@ function CodeGroupHeader({
 
 	return (
 		<div className="flex min-h-[calc(--spacing(12)+1px)] flex-wrap items-start gap-x-4 border-b border-zinc-200 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800 px-4 rounded-t-lg">
-			{title && <h3 className="mr-auto pt-3 text-xs font-semibold text-zinc-700 dark:text-zinc-200">{title}</h3>}
+			{title && (
+				<h3 className="mr-auto pt-3 text-xs font-semibold text-zinc-700 dark:text-zinc-200">
+					{title}
+				</h3>
+			)}
 			{hasTabs && (
 				<TabList className="-mb-px flex gap-4 text-xs font-medium">
 					{Children.map(children, (child, childIndex) => (
@@ -193,10 +217,14 @@ function CodeGroupHeader({
 								"border-b py-3 transition data-selected:not-data-focus:outline-hidden",
 								childIndex === selectedIndex
 									? "border-emerald-500 text-emerald-600 dark:text-emerald-400"
-									: "border-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
+									: "border-transparent text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200",
 							)}
 						>
-							{getPanelTitle(isValidElement(child) ? (child.props as { title?: string; language?: string }) : {})}
+							{getPanelTitle(
+								isValidElement(child)
+									? (child.props as { title?: string; language?: string })
+									: {},
+							)}
 						</Tab>
 					))}
 				</TabList>
@@ -205,7 +233,10 @@ function CodeGroupHeader({
 	);
 }
 
-function CodeGroupPanels({ children, ...props }: React.ComponentPropsWithoutRef<typeof CodePanel>) {
+function CodeGroupPanels({
+	children,
+	...props
+}: React.ComponentPropsWithoutRef<typeof CodePanel>) {
 	const hasTabs = Children.count(children) > 1;
 
 	if (hasTabs) {
@@ -229,7 +260,7 @@ function usePreventLayoutShift() {
 
 	useEffect(() => {
 		return () => {
-			if (typeof rafRef.current !== 'undefined') {
+			if (typeof rafRef.current !== "undefined") {
 				window.cancelAnimationFrame(rafRef.current);
 			}
 		};
@@ -247,7 +278,8 @@ function usePreventLayoutShift() {
 			callback();
 
 			rafRef.current = window.requestAnimationFrame(() => {
-				const newTop = positionRef.current?.getBoundingClientRect().top ?? initialTop;
+				const newTop =
+					positionRef.current?.getBoundingClientRect().top ?? initialTop;
 				window.scrollBy(0, newTop - initialTop);
 			});
 		},
@@ -262,17 +294,20 @@ const usePreferredLanguageStore = create<{
 	addPreferredLanguage: (language) =>
 		set((state) => ({
 			preferredLanguages: [
-				...state.preferredLanguages.filter((preferredLanguage) => preferredLanguage !== language),
+				...state.preferredLanguages.filter(
+					(preferredLanguage) => preferredLanguage !== language,
+				),
 				language,
 			],
 		})),
 }));
 
 function useTabGroupProps(availableLanguages: Array<string>) {
-	const { preferredLanguages, addPreferredLanguage } = usePreferredLanguageStore();
+	const { preferredLanguages, addPreferredLanguage } =
+		usePreferredLanguageStore();
 	const [selectedIndex, setSelectedIndex] = useState(0);
 	const activeLanguage = [...availableLanguages].sort(
-		(a, z) => preferredLanguages.indexOf(z) - preferredLanguages.indexOf(a)
+		(a, z) => preferredLanguages.indexOf(z) - preferredLanguages.indexOf(a),
 	)[0];
 	const languageIndex = availableLanguages.indexOf(activeLanguage);
 	const newSelectedIndex = languageIndex === -1 ? selectedIndex : languageIndex;
@@ -283,11 +318,13 @@ function useTabGroupProps(availableLanguages: Array<string>) {
 	const { positionRef, preventLayoutShift } = usePreventLayoutShift();
 
 	return {
-		as: 'div' as const,
+		as: "div" as const,
 		ref: positionRef,
 		selectedIndex,
 		onChange: (newSelectedIndex: number) => {
-			preventLayoutShift(() => addPreferredLanguage(availableLanguages[newSelectedIndex]));
+			preventLayoutShift(() =>
+				addPreferredLanguage(availableLanguages[newSelectedIndex]),
+			);
 		},
 	};
 }
@@ -301,7 +338,11 @@ export function CodeGroup({
 }: React.ComponentPropsWithoutRef<typeof CodeGroupPanels> & { title: string }) {
 	const languages =
 		Children.map(children, (child) =>
-			getPanelTitle(isValidElement(child) ? (child.props as { title?: string; language?: string }) : {})
+			getPanelTitle(
+				isValidElement(child)
+					? (child.props as { title?: string; language?: string })
+					: {},
+			),
 		) ?? [];
 	const tabGroupProps = useTabGroupProps(languages);
 	const hasTabs = Children.count(children) > 1;
@@ -335,11 +376,14 @@ export function CodeGroup({
 	);
 }
 
-export function Code({ children, ...props }: React.ComponentPropsWithoutRef<'code'>) {
+export function Code({
+	children,
+	...props
+}: React.ComponentPropsWithoutRef<"code">) {
 	const isGrouped = useContext(CodeGroupContext);
 
 	if (isGrouped) {
-		if (typeof children === 'string') {
+		if (typeof children === "string") {
 			return <code {...props} dangerouslySetInnerHTML={{ __html: children }} />;
 		}
 
@@ -349,7 +393,10 @@ export function Code({ children, ...props }: React.ComponentPropsWithoutRef<'cod
 	return <code {...props}>{children}</code>;
 }
 
-export function Pre({ children, ...props }: React.ComponentPropsWithoutRef<typeof CodeGroup>) {
+export function Pre({
+	children,
+	...props
+}: React.ComponentPropsWithoutRef<typeof CodeGroup>) {
 	const isGrouped = useContext(CodeGroupContext);
 
 	if (isGrouped) {

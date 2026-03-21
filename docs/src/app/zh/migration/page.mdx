@@ -6,11 +6,47 @@
 
 ## 概述
 
-LibreFang 提供全面的迁移支持：
+LibreFang 提供以下迁移支持：
 
-- **OpenClaw** - 直接迁移
-- **LangChain** - 兼容层
-- **AutoGPT** - 配置转换
+- **OpenFang** - 通过 `librefang-migrate` crate 自动迁移（`librefang migrate --from openfang`）
+- **OpenClaw** - 通过 `librefang-migrate` crate 自动迁移（`librefang migrate --from openclaw`）
+- **LangChain** - 手动迁移指南（无自动化工具支持）
+- **AutoGPT** - 手动迁移指南（无自动化工具支持）
+
+---
+
+## 从 OpenFang 迁移
+
+OpenFang 和 LibreFang 共享相同的目录结构和配置格式（LibreFang 是 OpenFang 的社区分支）。迁移过程是将 `~/.openfang` 递归复制到 `~/.librefang`，同时自动重写 `.toml` 和 `.env` 文件中的引用。
+
+### 自动迁移
+
+```bash
+# 迁移所有内容
+librefang migrate --from openfang
+
+# 从特定路径迁移
+librefang migrate --from openfang --path ~/.openfang
+
+# 预览模式 (不执行)
+librefang migrate --from openfang --dry-run
+```
+
+### 迁移内容
+
+| 内容 | 支持 | 说明 |
+|------|------|------|
+| Agent 清单 | ✅ | 直接复制（共享 TOML 格式） |
+| 技能配置 | ✅ | 直接复制 |
+| 通道配置 | ✅ | 直接复制 |
+| 记忆数据 | ✅ | 直接复制 |
+| 会话数据 | ✅ | 直接复制 |
+| 配置文件 | ✅ | 内容重写（`openfang` → `librefang`） |
+| 环境变量文件 | ✅ | 变量重写（`OPENFANG_` → `LIBREFANG_`） |
+
+<Note>
+  `~/.librefang` 中已存在的文件不会被覆盖。迁移只会复制目标位置不存在的文件。
+</Note>
 
 ---
 
@@ -56,6 +92,9 @@ librefang migrate --from openclaw --import
 ---
 
 ## 从 LangChain 迁移
+
+> **注意**: LangChain 迁移是**手动过程**，没有自动化工具支持。
+> 以下指南展示如何手动将 LangChain 配置转换为 LibreFang 格式。
 
 ### Agent 配置转换
 
@@ -114,6 +153,9 @@ result = agent.run("What is the capital of France?")
 ---
 
 ## 从 AutoGPT 迁移
+
+> **注意**: AutoGPT 迁移是**手动过程**，没有自动化工具支持。
+> 以下指南展示如何手动将 AutoGPT 配置转换为 LibreFang 格式。
 
 ### 配置转换
 

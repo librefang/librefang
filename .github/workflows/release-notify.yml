@@ -42,8 +42,13 @@ jobs:
             exit 0
           fi
 
-          VERSION="${TAG#v}"
-          VERSION="${VERSION%-*}"
+          FULL_VERSION="${TAG#v}"
+          # Strip pre-release suffix then strip hour for CHANGELOG lookup
+          CHANGELOG_VERSION=$(echo "$FULL_VERSION" | sed 's/-.*//')
+          PATCH=$(echo "$CHANGELOG_VERSION" | cut -d. -f3)
+          if [ ${#PATCH} -eq 4 ]; then
+            CHANGELOG_VERSION="$(echo "$CHANGELOG_VERSION" | cut -d. -f1,2).${PATCH:0:2}"
+          fi
 
           echo "Checking release workflows for tag $TAG..."
 
@@ -101,7 +106,7 @@ jobs:
             if [ "$1" = "success" ]; then echo "✅"; else echo "❌"; fi
           }
 
-          CHANGES=$(awk '/^## \['"$VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md | head -20)
+          CHANGES=$(awk '/^## \['"$CHANGELOG_VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' CHANGELOG.md | head -20)
           if [ -z "$CHANGES" ]; then
             CHANGES="See [CHANGELOG](https://github.com/librefang/librefang/blob/main/CHANGELOG.md) for details."
           fi
@@ -114,9 +119,9 @@ jobs:
           done
 
           if [ "$SUCCESS" -eq "$TOTAL" ]; then
-            HEADER="🚀 **LibreFang $VERSION Released!**"
+            HEADER="🚀 **LibreFang $TAG Released!**"
           else
-            HEADER="⚠️ **LibreFang $VERSION Release — $SUCCESS/$TOTAL succeeded**"
+            HEADER="⚠️ **LibreFang $TAG Release — $SUCCESS/$TOTAL succeeded**"
           fi
 
           CONTENT=$(cat <<MSG_EOF
@@ -166,7 +171,7 @@ jobs:
           # Build post text (max 300 graphemes for Bluesky)
           RELEASE_URL="https://github.com/librefang/librefang/releases/tag/$TAG"
           BSKY_CHANGES=$(echo "$CHANGES" | head -5 | sed 's/^- /- /')
-          BSKY_TEXT=$(printf 'LibreFang v%s released!\n\n%s\n\n%s' "$VERSION" "$BSKY_CHANGES" "$RELEASE_URL")
+          BSKY_TEXT=$(printf 'LibreFang %s released!\n\n%s\n\n%s' "$TAG" "$BSKY_CHANGES" "$RELEASE_URL")
 
           # Truncate to 300 graphemes (cut on valid UTF-8 boundary using python)
           BSKY_TEXT=$(python3 -c "import sys; t=sys.stdin.read(); print(t[:297]+'...' if len(t)>300 else t, end='')" <<< "$BSKY_TEXT")
@@ -212,10 +217,10 @@ jobs:
           echo "✓ Bluesky post published"
 
           # --- GitHub Discussion announcement ---
-          ARTICLE_FILE="articles/release-${VERSION}.md"
+          ARTICLE_FILE="articles/release-${CHANGELOG_VERSION}.md"
           if [ -f "$ARTICLE_FILE" ]; then
             DISC_BODY=$(sed '/^```markdown$/d; /^```$/d' "$ARTICLE_FILE" | awk 'BEGIN{s=0} /^---$/{s++; next} s<2{next} {print}')
-            DISC_TITLE="LibreFang ${VERSION} Released"
+            DISC_TITLE="LibreFang ${TAG} Released"
             REPO_ID="R_kgDORkvylw"
             CATEGORY_ID="DIC_kwDORkvyl84C4NIY"
 

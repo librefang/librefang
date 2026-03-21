@@ -278,6 +278,23 @@ This permits the WebView to load content from the localhost API server while blo
   - **macOS**: Xcode Command Line Tools
   - **Linux**: `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `libssl-dev`, `build-essential`
 
+### React Dashboard
+
+The embedded web UI served by the axum API server has two implementations that coexist:
+
+- **Legacy Alpine.js dashboard** — served from `crates/librefang-api/static/` as a single HTML file. Always present; no build step required.
+- **React dashboard** — located at `crates/librefang-api/dashboard-react/`. Built with Vite + React + TanStack Router + TanStack Query. Compiled artifacts are committed to `crates/librefang-api/static/react/` and served at `/react/`.
+
+To rebuild the React dashboard after making frontend changes:
+
+```bash
+cd crates/librefang-api/dashboard-react
+npm install
+npm run build
+```
+
+The output is written to `../static/react/` and is immediately picked up by the embedded axum server on next launch.
+
 ### Development
 
 ```bash
@@ -412,4 +429,3 @@ crates/librefang-desktop/
 All other LibreFang environment variables (API keys, configuration) apply as normal since the desktop app boots the same kernel as the headless daemon.
 
 
-export const sections = [];
