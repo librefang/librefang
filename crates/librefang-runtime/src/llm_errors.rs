@@ -51,6 +51,15 @@ pub struct ClassifiedError {
     pub sanitized_message: String,
     /// Original error message for logging.
     pub raw_message: String,
+    /// Provider that produced this error (e.g., "openai", "anthropic", "groq").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Model that was being used when the error occurred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Actionable suggestion for the user to resolve this error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggestion: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -241,6 +250,9 @@ pub fn classify_error(message: &str, status: Option<u16>) -> ClassifiedError {
         suggested_delay_ms: delay,
         sanitized_message: sanitize_for_user(category, message),
         raw_message: message.to_string(),
+        provider: None,
+        model: None,
+        suggestion: None,
     };
 
     // --- Status-code fast paths (some statuses are unambiguous) ---
@@ -372,6 +384,135 @@ pub fn classify_error(message: &str, status: Option<u16>) -> ClassifiedError {
         build(LlmErrorCategory::Timeout)
     } else {
         build(LlmErrorCategory::Format)
+    }
+}
+
+/// Classify an error with provider and model context for richer diagnostics.
+///
+/// This is the preferred entry point when provider/model information is available.
+/// It enriches the classified error with actionable suggestions based on the
+/// error category and provider context.
+pub fn classify_error_with_context(
+    message: &str,
+    status: Option<u16>,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> ClassifiedError {
+    let mut classified = classify_error(message, status);
+    classified.provider = provider.map(|s| s.to_string());
+    classified.model = model.map(|s| s.to_string());
+    classified.suggestion = generate_suggestion(classified.category, provider, model);
+
+    // Enrich sanitized message with context
+    if provider.is_some() || model.is_some() {
+        classified.sanitized_message =
+            enrich_message(&classified.sanitized_message, provider, model);
+    }
+
+    classified
+}
+
+/// Generate an actionable suggestion based on the error category and context.
+fn generate_suggestion(
+    category: LlmErrorCategory,
+    provider: Option<&str>,
+    model: Option<&str>,
+) -> Option<String> {
+    let suggestion = match category {
+        LlmErrorCategory::RateLimit => {
+            if let Some(p) = provider {
+                format!(
+                    "Consider upgrading your {} plan or reducing request frequency.",
+                    p
+                )
+            } else {
+                "Consider upgrading your API plan or reducing request frequency.".to_string()
+            }
+        }
+        LlmErrorCategory::Billing => {
+            if let Some(p) = provider {
+                format!("Check your {} account balance and billing settings.", p)
+            } else {
+                "Check your account balance and billing settings.".to_string()
+            }
+        }
+        LlmErrorCategory::Auth => {
+            if let Some(p) = provider {
+                format!(
+                    "Verify your {} API key in config.toml or environment variables.",
+                    p
+                )
+            } else {
+                "Verify your API key in config.toml or environment variables.".to_string()
+            }
+        }
+        LlmErrorCategory::ModelNotFound => {
+            if let Some(m) = model {
+                if let Some(p) = provider {
+                    format!(
+                        "Model '{}' may not be available on {}. Check available models with `librefang models list`.",
+                        m, p
+                    )
+                } else {
+                    format!(
+                        "Model '{}' was not found. Check available models with `librefang models list`.",
+                        m
+                    )
+                }
+            } else {
+                "Check the model name and availability with `librefang models list`.".to_string()
+            }
+        }
+        LlmErrorCategory::ContextOverflow => {
+            if let Some(m) = model {
+                format!(
+                    "The conversation exceeds {}'s context window. Try clearing history or using a model with a larger context.",
+                    m
+                )
+            } else {
+                "The conversation exceeds the model's context window. Try clearing history or switching to a model with a larger context.".to_string()
+            }
+        }
+        LlmErrorCategory::Overloaded => {
+            if let Some(p) = provider {
+                format!(
+                    "{} is temporarily overloaded. The request will be retried automatically.",
+                    p
+                )
+            } else {
+                "The provider is temporarily overloaded. The request will be retried automatically."
+                    .to_string()
+            }
+        }
+        LlmErrorCategory::Timeout => {
+            return Some(
+                "Check your network connection. If the issue persists, try a different provider."
+                    .to_string(),
+            );
+        }
+        LlmErrorCategory::Format => {
+            return Some(
+                "This may be a compatibility issue. Try updating LibreFang or switching models."
+                    .to_string(),
+            );
+        }
+    };
+    Some(suggestion)
+}
+
+/// Enrich a sanitized error message with provider/model context.
+fn enrich_message(base: &str, provider: Option<&str>, model: Option<&str>) -> String {
+    let mut parts = Vec::new();
+    if let Some(p) = provider {
+        parts.push(format!("provider={}", p));
+    }
+    if let Some(m) = model {
+        parts.push(format!("model={}", m));
+    }
+    if parts.is_empty() {
+        base.to_string()
+    } else {
+        format!("{} [{}]", base, parts.join(", "))
     }
 }
 
@@ -1027,5 +1168,80 @@ mod tests {
             Some(401),
         );
         assert_eq!(e.category, LlmErrorCategory::Auth);
+    }
+
+    // -----------------------------------------------------------------------
+    // Rich error context tests (issue #1008)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_classify_with_provider_context() {
+        let e = classify_error_with_context(
+            "rate limit exceeded",
+            Some(429),
+            Some("openai"),
+            Some("gpt-4"),
+        );
+        assert_eq!(e.category, LlmErrorCategory::RateLimit);
+        assert_eq!(e.provider, Some("openai".to_string()));
+        assert_eq!(e.model, Some("gpt-4".to_string()));
+        assert!(e.suggestion.is_some());
+        assert!(e.sanitized_message.contains("openai"));
+    }
+
+    #[test]
+    fn test_classify_with_model_not_found_context() {
+        let e = classify_error_with_context(
+            "model not found",
+            Some(404),
+            Some("anthropic"),
+            Some("claude-99"),
+        );
+        assert_eq!(e.category, LlmErrorCategory::ModelNotFound);
+        assert!(e.suggestion.unwrap().contains("claude-99"));
+        assert!(e.sanitized_message.contains("anthropic"));
+    }
+
+    #[test]
+    fn test_classify_without_context_backward_compatible() {
+        let e = classify_error("rate limit exceeded", Some(429));
+        assert_eq!(e.category, LlmErrorCategory::RateLimit);
+        assert!(e.provider.is_none());
+        assert!(e.model.is_none());
+        assert!(e.suggestion.is_none());
+    }
+
+    #[test]
+    fn test_enrich_message() {
+        let msg = enrich_message("Rate limited", Some("openai"), Some("gpt-4"));
+        assert_eq!(msg, "Rate limited [provider=openai, model=gpt-4]");
+
+        let msg = enrich_message("Error", Some("groq"), None);
+        assert_eq!(msg, "Error [provider=groq]");
+
+        let msg = enrich_message("Error", None, None);
+        assert_eq!(msg, "Error");
+    }
+
+    #[test]
+    fn test_generate_suggestion_all_categories() {
+        // Verify every category produces a suggestion
+        for (cat, provider, model) in [
+            (LlmErrorCategory::RateLimit, Some("openai"), Some("gpt-4")),
+            (LlmErrorCategory::Billing, Some("anthropic"), None),
+            (LlmErrorCategory::Auth, None, None),
+            (
+                LlmErrorCategory::ModelNotFound,
+                Some("groq"),
+                Some("llama-99"),
+            ),
+            (LlmErrorCategory::ContextOverflow, None, Some("gpt-4")),
+            (LlmErrorCategory::Overloaded, Some("openai"), None),
+            (LlmErrorCategory::Timeout, None, None),
+            (LlmErrorCategory::Format, None, None),
+        ] {
+            let suggestion = generate_suggestion(cat, provider, model);
+            assert!(suggestion.is_some(), "No suggestion for {:?}", cat);
+        }
     }
 }
