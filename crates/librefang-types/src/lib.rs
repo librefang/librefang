@@ -27,6 +27,7 @@ pub mod tool;
 pub mod tool_compat;
 pub mod tool_policy;
 pub mod webhook;
+pub mod workflow_template;
 
 /// Safely truncate a string to at most `max_bytes`, never splitting a UTF-8 char.
 pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
