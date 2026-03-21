@@ -153,11 +153,20 @@ jobs:
             echo "APPLE_SIGNING_IDENTITY=" >> $GITHUB_ENV
           fi
 
-      - name: Verify Tauri version (CalVer, all components ≤ 65535)
+      - name: Verify Tauri version (CalVer, Major ≤ 255 for WiX MSI)
         shell: bash
         run: |
           cd crates/librefang-desktop
-          echo "Tauri version: $(grep '"version"' tauri.conf.json)"
+          TAURI_VER=$(grep '"version"' tauri.conf.json | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
+          echo "Tauri version: $TAURI_VER"
+          MAJOR=$(echo "$TAURI_VER" | cut -d. -f1)
+          MINOR=$(echo "$TAURI_VER" | cut -d. -f2)
+          PATCH=$(echo "$TAURI_VER" | cut -d. -f3)
+          if [ "$MAJOR" -gt 255 ] || [ "$MINOR" -gt 255 ] || [ "$PATCH" -gt 65535 ]; then
+            echo "::error::Tauri version $TAURI_VER exceeds MSI limits (Major/Minor ≤ 255, Patch ≤ 65535)"
+            exit 1
+          fi
+          echo "✓ Version $TAURI_VER is MSI-compatible"
 
       - name: Delete existing assets for this target (allows re-release)
         shell: bash
