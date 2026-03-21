@@ -11,7 +11,7 @@ import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -68,39 +68,41 @@ export function AgentsPage() {
 
   const renderAgentCard = (agent: any) => {
     const isSuspended = (agent.state || "").toLowerCase() === "suspended";
-    const isHand = agent.name.includes("-hand");
     return (
       <Card key={agent.id} hover padding="lg" className={`cursor-pointer ${isSuspended ? "opacity-60" : ""}`} onClick={async () => {
         setDetailLoading(true);
         try { const d = await getAgentDetail(agent.id); setDetailAgent(d); } catch { setDetailAgent({ name: agent.name, id: agent.id }); }
         setDetailLoading(false);
       }}>
-        <div className="flex items-start justify-between gap-4 mb-6">
-          <div className="flex items-center gap-4 min-w-0">
-            <Avatar fallback={agent.name} size="lg" />
+        <div className="flex items-start justify-between gap-4 mb-5">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="relative">
+              <Avatar fallback={agent.name} size="lg" />
+              {!isSuspended && <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface animate-pulse" />}
+            </div>
             <div className="min-w-0">
-              <h2 className="text-lg font-black tracking-tight truncate">{agent.name}</h2>
-              <div className="flex items-center gap-2">
-                <p className="text-[10px] font-mono text-text-dim/60 truncate">{agent.id.slice(0, 8)}</p>
-                {isHand && <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400 font-bold">{t("agents.hand_badge")}</span>}
-              </div>
+              <h2 className="text-base font-black tracking-tight truncate">{agent.name}</h2>
+              <p className="text-[10px] font-mono text-text-dim/50 truncate mt-0.5">{agent.id.slice(0, 8)}</p>
             </div>
           </div>
-          <Badge variant={getStatusVariant(agent.state)}>
+          <Badge variant={getStatusVariant(agent.state)} dot>
             {agent.state ? t(`common.${agent.state.toLowerCase()}`, { defaultValue: agent.state }) : t("common.idle")}
           </Badge>
         </div>
-        <div className="space-y-3 mb-6">
-          <div className="flex justify-between items-center text-xs">
-            <span className="text-text-dim font-bold uppercase tracking-wider text-[10px]">{t("agents.model")}</span>
-            <span className="font-black text-slate-700 dark:text-slate-300">{agent.model_name || t("common.unknown")}</span>
+        <div className="space-y-2.5 mb-5">
+          <div className="flex items-center gap-3 text-xs">
+            <div className="w-5 h-5 rounded bg-brand/10 flex items-center justify-center shrink-0"><Cpu className="w-3 h-3 text-brand" /></div>
+            <span className="text-text-dim flex-1">{t("agents.model")}</span>
+            <span className="font-black text-sm">{agent.model_name || t("common.unknown")}</span>
           </div>
-          <div className="flex justify-between items-center text-xs">
-            <span className="text-text-dim font-bold uppercase tracking-wider text-[10px]">{t("agents.provider")}</span>
-            <span className="font-black text-brand">{agent.model_provider || t("common.local")}</span>
+          <div className="flex items-center gap-3 text-xs">
+            <div className="w-5 h-5 rounded bg-success/10 flex items-center justify-center shrink-0"><Shield className="w-3 h-3 text-success" /></div>
+            <span className="text-text-dim flex-1">{t("agents.provider")}</span>
+            <span className="font-black text-brand text-sm">{agent.model_provider || t("common.local")}</span>
           </div>
-          <div className="flex justify-between items-center text-xs">
-            <span className="text-text-dim font-bold uppercase tracking-wider text-[10px]">{t("agents.last_active")}</span>
+          <div className="flex items-center gap-3 text-xs">
+            <div className="w-5 h-5 rounded bg-warning/10 flex items-center justify-center shrink-0"><Clock className="w-3 h-3 text-warning" /></div>
+            <span className="text-text-dim flex-1">{t("agents.last_active")}</span>
             <span className="font-mono text-[10px]">{agent.last_active ? new Date(agent.last_active).toLocaleTimeString() : t("common.never")}</span>
           </div>
         </div>
@@ -227,26 +229,35 @@ export function AgentsPage() {
       )}
       {/* Agent Detail Modal */}
       {detailAgent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm" onClick={() => setDetailAgent(null)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[560px] max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle sticky top-0 bg-surface z-10">
-              <div className="flex items-center gap-3">
-                <Avatar fallback={detailAgent.name} size="lg" />
-                <div>
-                  <h3 className="text-sm font-bold">{detailAgent.name}</h3>
-                  <p className="text-[9px] text-text-dim font-mono">{detailAgent.id}</p>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm" onClick={() => setDetailAgent(null)}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[560px] max-h-[80vh] overflow-y-auto animate-fade-in-up" onClick={e => e.stopPropagation()}>
+            {/* Modal Header */}
+            <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface/95 backdrop-blur-sm z-10">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4">
+                  <div className="relative">
+                    <Avatar fallback={detailAgent.name} size="lg" />
+                    <span className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-success border-2 border-surface" />
+                  </div>
+                  <div>
+                    <h3 className="text-lg font-black tracking-tight">{detailAgent.name}</h3>
+                    <p className="text-[10px] text-text-dim font-mono mt-0.5">{detailAgent.id?.slice(0, 16)}...</p>
+                  </div>
                 </div>
+                <button onClick={() => setDetailAgent(null)} className="p-2 rounded-xl hover:bg-main transition-colors"><X className="w-4 h-4" /></button>
               </div>
-              <button onClick={() => setDetailAgent(null)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
             </div>
-            <div className="p-5 space-y-4">
+            <div className="p-6 space-y-5">
               {/* Model */}
               {detailAgent.model && (
                 <div>
-                  <h4 className="text-[10px] font-bold text-text-dim uppercase mb-2 flex items-center gap-1"><Cpu className="w-3 h-3" /> {t("agents.model")}</h4>
-                  <div className="p-3 rounded-xl bg-main space-y-1 text-xs">
-                    <div className="flex justify-between"><span className="text-text-dim">Provider</span><span className="font-bold">{detailAgent.model.provider}</span></div>
-                    <div className="flex justify-between"><span className="text-text-dim">Model</span><span className="font-bold">{detailAgent.model.model}</span></div>
+                  <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3 flex items-center gap-2">
+                    <div className="w-5 h-5 rounded bg-brand/10 flex items-center justify-center"><Cpu className="w-3 h-3 text-brand" /></div>
+                    {t("agents.model")}
+                  </h4>
+                  <div className="p-4 rounded-xl bg-main/50 border border-border-subtle/50 space-y-2.5 text-xs">
+                    <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.provider")}</span><span className="font-black text-brand">{detailAgent.model.provider}</span></div>
+                    <div className="flex justify-between items-center"><span className="text-text-dim">{t("agents.model")}</span><span className="font-black">{detailAgent.model.model}</span></div>
                   </div>
                 </div>
               )}
@@ -254,18 +265,21 @@ export function AgentsPage() {
               {/* System Prompt */}
               {detailAgent.system_prompt && (
                 <div>
-                  <h4 className="text-[10px] font-bold text-text-dim uppercase mb-2">{t("agents.system_prompt")}</h4>
-                  <pre className="p-3 rounded-xl bg-main text-xs text-text-dim whitespace-pre-wrap max-h-32 overflow-y-auto">{detailAgent.system_prompt}</pre>
+                  <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3">{t("agents.system_prompt")}</h4>
+                  <pre className="p-4 rounded-xl bg-main/50 border border-border-subtle/50 text-xs text-text-dim whitespace-pre-wrap max-h-40 overflow-y-auto leading-relaxed font-mono">{detailAgent.system_prompt}</pre>
                 </div>
               )}
 
               {/* Capabilities */}
               {detailAgent.capabilities && (
                 <div>
-                  <h4 className="text-[10px] font-bold text-text-dim uppercase mb-2 flex items-center gap-1"><Wrench className="w-3 h-3" /> {t("agents.capabilities")}</h4>
-                  <div className="flex flex-wrap gap-1.5">
-                    {detailAgent.capabilities.tools && <Badge variant="brand">{t("agents.tools_cap")}</Badge>}
-                    {detailAgent.capabilities.network && <Badge variant="brand">{t("agents.network")}</Badge>}
+                  <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3 flex items-center gap-2">
+                    <div className="w-5 h-5 rounded bg-success/10 flex items-center justify-center"><Wrench className="w-3 h-3 text-success" /></div>
+                    {t("agents.capabilities")}
+                  </h4>
+                  <div className="flex flex-wrap gap-2">
+                    {detailAgent.capabilities.tools && <Badge variant="brand" dot>{t("agents.tools_cap")}</Badge>}
+                    {detailAgent.capabilities.network && <Badge variant="brand" dot>{t("agents.network")}</Badge>}
                   </div>
                 </div>
               )}
@@ -273,8 +287,8 @@ export function AgentsPage() {
               {/* Skills */}
               {detailAgent.skills && detailAgent.skills.length > 0 && (
                 <div>
-                  <h4 className="text-[10px] font-bold text-text-dim uppercase mb-2">{t("agents.skills")}</h4>
-                  <div className="flex flex-wrap gap-1.5">
+                  <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3">{t("agents.skills")}</h4>
+                  <div className="flex flex-wrap gap-2">
                     {detailAgent.skills.map((s: string, i: number) => (
                       <Badge key={i} variant="default">{s}</Badge>
                     ))}
@@ -285,10 +299,10 @@ export function AgentsPage() {
               {/* Tags */}
               {detailAgent.tags && detailAgent.tags.length > 0 && (
                 <div>
-                  <h4 className="text-[10px] font-bold text-text-dim uppercase mb-2">{t("agents.tags")}</h4>
+                  <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3">{t("agents.tags")}</h4>
                   <div className="flex flex-wrap gap-1.5">
                     {detailAgent.tags.map((tag: string, i: number) => (
-                      <span key={i} className="text-[10px] px-2 py-0.5 rounded-full bg-main text-text-dim">{tag}</span>
+                      <span key={i} className="text-[10px] px-2.5 py-1 rounded-lg bg-main border border-border-subtle/50 text-text-dim font-medium">{tag}</span>
                     ))}
                   </div>
                 </div>
@@ -296,10 +310,10 @@ export function AgentsPage() {
 
               {/* Mode */}
               {detailAgent.mode && (
-                <div className="flex items-center gap-2">
-                  <Shield className="w-3.5 h-3.5 text-text-dim" />
-                  <span className="text-xs font-bold">{t("agents.mode")}:</span>
-                  <Badge variant="default">{detailAgent.mode}</Badge>
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-main/50 border border-border-subtle/50">
+                  <div className="w-5 h-5 rounded bg-warning/10 flex items-center justify-center"><Shield className="w-3 h-3 text-warning" /></div>
+                  <span className="text-xs font-bold flex-1">{t("agents.mode")}</span>
+                  <Badge variant="warning">{detailAgent.mode}</Badge>
                 </div>
               )}
 
