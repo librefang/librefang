@@ -197,10 +197,10 @@ export function ModelsPage() {
                   <p className="text-[10px] text-text-dim/40 font-mono truncate">{m.id}</p>
                 )}
               </div>
-              <span className="text-xs font-semibold text-text-dim truncate">{m.provider}</span>
+              <span className="text-xs font-semibold text-text truncate">{m.provider}</span>
               <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md w-fit ${tierColor(m.tier)}`}>{m.tier || "-"}</span>
-              <span className="text-xs font-mono text-text-dim">{formatCtx(m.context_window)}</span>
-              <span className="text-xs font-mono text-text-dim">{formatCost(m.input_cost_per_m)}</span>
+              <span className="text-xs font-mono text-text">{formatCtx(m.context_window)}</span>
+              <span className="text-xs font-mono text-text">{formatCost(m.input_cost_per_m)}</span>
               <span className="text-center">{m.supports_tools ? <Check className="w-4 h-4 text-success inline" /> : <X className="w-4 h-4 text-text-dim/15 inline" />}</span>
               <span className="text-center">{m.supports_vision ? <Check className="w-4 h-4 text-success inline" /> : <X className="w-4 h-4 text-text-dim/15 inline" />}</span>
               <span className="text-center">{m.supports_streaming ? <Check className="w-4 h-4 text-success inline" /> : <X className="w-4 h-4 text-text-dim/15 inline" />}</span>
