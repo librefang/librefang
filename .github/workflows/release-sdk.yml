@@ -87,7 +87,11 @@ jobs:
           if npm view "${PKG_NAME}@${PKG_VERSION}" version 2>/dev/null; then
             echo "✓ ${PKG_NAME}@${PKG_VERSION} already published to npm, skipping"
           else
-            npm publish --access public
+            NPM_TAG=""
+            if echo "$PKG_VERSION" | grep -qE '-(beta|rc)[0-9]'; then
+              NPM_TAG="--tag next"
+            fi
+            npm publish --access public $NPM_TAG
           fi
 
       - name: Publish to GitHub Packages
@@ -192,7 +196,7 @@ jobs:
           DDHH=$(echo "$VERSION" | cut -d. -f3 | sed 's/-.*//')
           PRERELEASE=$(echo "$VERSION" | grep -oE '\-.*' || true)
           DD=${DDHH:0:2}
-          HH=${DDHH:2:2}
+          HH=$((10#${DDHH:2:2}))  # strip leading zero (SemVer forbids 01, 02, etc.)
           GO_VERSION="0.${YEAR}${MONTH}${DD}.${HH}${PRERELEASE}"
           GO_TAG="sdk/go/v${GO_VERSION}"
 

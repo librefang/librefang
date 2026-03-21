@@ -82,11 +82,12 @@ if [ -f "$RS_README" ]; then
     echo "  Updated sdk/rust/README.md"
 fi
 
-# --- Python SDK ---
+# --- Python SDK (PEP 440: -beta1 → b1, -rc1 → rc1) ---
 PY_SETUP="$REPO_ROOT/sdk/python/setup.py"
 if [ -f "$PY_SETUP" ]; then
-    sed -i.bak 's/version="[^"]*"/version="'"$VERSION"'"/' "$PY_SETUP" && rm -f "$PY_SETUP.bak"
-    echo "  Updated sdk/python/setup.py"
+    PY_VERSION=$(echo "$VERSION" | sed 's/-beta/b/; s/-rc/rc/')
+    sed -i.bak 's/version="[^"]*"/version="'"$PY_VERSION"'"/' "$PY_SETUP" && rm -f "$PY_SETUP.bak"
+    echo "  Updated sdk/python/setup.py (PEP 440: $PY_VERSION)"
 fi
 
 # --- WhatsApp gateway (only the top-level "version" field) ---
@@ -96,11 +97,12 @@ if [ -f "$WA_PKG" ]; then
     echo "  Updated packages/whatsapp-gateway/package.json"
 fi
 
-# --- Tauri desktop app ---
+# --- Tauri desktop app (strip pre-release suffix — MSI requires strict X.Y.Z numeric) ---
 TAURI_CONF="$REPO_ROOT/crates/librefang-desktop/tauri.conf.json"
 if [ -f "$TAURI_CONF" ]; then
-    sed -i.bak 's/"version": "[^"]*"/"version": "'"$VERSION"'"/' "$TAURI_CONF" && rm -f "$TAURI_CONF.bak"
-    echo "  Updated crates/librefang-desktop/tauri.conf.json"
+    TAURI_VERSION=$(echo "$VERSION" | sed 's/-.*//')
+    sed -i.bak 's/"version": "[^"]*"/"version": "'"$TAURI_VERSION"'"/' "$TAURI_CONF" && rm -f "$TAURI_CONF.bak"
+    echo "  Updated crates/librefang-desktop/tauri.conf.json ($TAURI_VERSION)"
 fi
 
 # --- Verify ---

@@ -178,10 +178,13 @@ if command -v cargo &>/dev/null; then
     cargo update --workspace 2>/dev/null || echo "Warning: cargo update failed, continuing"
 fi
 
-# --- Generate Dev.to release article ---
+# --- Generate Dev.to release article (skip for pre-releases) ---
 
 ARTICLE="$REPO_ROOT/articles/release-${CHANGELOG_VERSION}.md"
-if [ ! -f "$ARTICLE" ]; then
+if [ "$IS_PRERELEASE" = true ]; then
+    echo ""
+    echo "Skipping Dev.to article for pre-release"
+elif [ ! -f "$ARTICLE" ]; then
     CHANGES=$(awk '/^## \['"$CHANGELOG_VERSION"'\]/{found=1; next} found && /^## \[/{exit} found{print}' "$REPO_ROOT/CHANGELOG.md")
     if [ -n "$CHANGES" ]; then
         echo "Generating Dev.to article..."
