@@ -219,6 +219,9 @@ impl std::fmt::Debug for DriverConfig {
                     .as_ref()
                     .map(|_| "<redacted>"),
             )
+            .field("azure_openai.endpoint", &self.azure_openai.endpoint)
+            .field("azure_openai.deployment", &self.azure_openai.deployment)
+            .field("azure_openai.api_version", &self.azure_openai.api_version)
             .field("skip_permissions", &self.skip_permissions)
             .finish()
     }

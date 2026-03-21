@@ -771,6 +771,7 @@ pub fn detect_available_provider() -> Option<(&'static str, &'static str, &'stat
             "PERPLEXITY_API_KEY",
         ),
         ("cohere", "command-r-plus", "COHERE_API_KEY"),
+        ("azure-openai", "gpt-4o", "AZURE_OPENAI_API_KEY"),
     ];
     for &(provider, model, env_var) in PROBE_ORDER {
         if std::env::var(env_var)
@@ -861,6 +862,7 @@ mod tests {
             api_key: Some("test".to_string()),
             base_url: Some("http://localhost:9999/v1".to_string()),
             vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -874,6 +876,7 @@ mod tests {
             api_key: None,
             base_url: None,
             vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -983,6 +986,7 @@ mod tests {
             api_key: None, // not explicitly passed
             base_url: Some("https://integrate.api.nvidia.com/v1".to_string()),
             vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -1001,6 +1005,7 @@ mod tests {
             api_key: None,
             base_url: None,
             vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -1017,6 +1022,7 @@ mod tests {
             api_key: None,
             base_url: None,
             vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
         };
         let result = create_driver(&config);
@@ -1046,6 +1052,7 @@ mod tests {
             api_key: Some("explicit-key".to_string()),
             base_url: Some("https://api.example.com/v1".to_string()),
             vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
         };
         let driver = create_driver(&config);
@@ -1069,6 +1076,7 @@ mod tests {
                     .to_string(),
                 ),
             },
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
             skip_permissions: true,
         };
 
@@ -1076,6 +1084,66 @@ mod tests {
         assert!(
             driver.is_ok(),
             "Vertex AI driver should initialize from [vertex_ai] config without env vars"
+        );
+    }
+
+    #[test]
+    fn test_azure_openai_provider_lookup() {
+        let d = provider_defaults("azure-openai").unwrap();
+        assert_eq!(d.api_key_env, "AZURE_OPENAI_API_KEY");
+        assert!(d.key_required);
+    }
+
+    #[test]
+    fn test_azure_openai_alias() {
+        let d = provider_defaults("azure").unwrap();
+        assert_eq!(d.api_key_env, "AZURE_OPENAI_API_KEY");
+        assert!(d.key_required);
+    }
+
+    #[test]
+    fn test_azure_openai_driver_creation() {
+        let config = DriverConfig {
+            provider: "azure-openai".to_string(),
+            api_key: Some("test-azure-key".to_string()),
+            base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig {
+                endpoint: Some("https://my-resource.openai.azure.com".to_string()),
+                deployment: Some("gpt-4o".to_string()),
+                api_version: Some("2024-02-01".to_string()),
+            },
+            skip_permissions: true,
+        };
+        let driver = create_driver(&config);
+        assert!(
+            driver.is_ok(),
+            "Azure OpenAI driver should create successfully with config"
+        );
+    }
+
+    #[test]
+    fn test_azure_openai_missing_endpoint_errors() {
+        let config = DriverConfig {
+            provider: "azure-openai".to_string(),
+            api_key: Some("test-azure-key".to_string()),
+            base_url: None,
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
+            skip_permissions: true,
+        };
+        // Clear any env var that might interfere
+        std::env::remove_var("AZURE_OPENAI_ENDPOINT");
+        let driver = create_driver(&config);
+        assert!(
+            driver.is_err(),
+            "Azure OpenAI should error without endpoint"
+        );
+        let err = driver.err().unwrap().to_string();
+        assert!(
+            err.contains("endpoint"),
+            "Error should mention endpoint: {}",
+            err
         );
     }
 }
