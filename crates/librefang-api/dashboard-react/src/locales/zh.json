@@ -8,7 +8,7 @@
     "analytics": "分析", "memory": "记忆", "comms": "通信", "runtime": "运行时", "logs": "日志", "settings": "设置"
   },
   "common": {
-    "refresh": "刷新", "status": "状态", "daemon_online": "守护进程在线", "infrastructure": "基础设施",
+    "refresh": "刷新", "status": "状态", "daemon_online": "守护进程在线", "infrastructure": "控制台",
     "toggle_theme": "切换主题", "change_language": "切换语言", "delete": "删除", "cancel": "取消",
     "save": "保存", "saving": "保存中...", "edit": "编辑", "confirm": "确认", "loading": "加载中...", "search": "搜索", "back": "返回",
     "actions": "操作", "clear": "清空", "load": "加载", "active": "活跃", "idle": "空闲", "running": "运行中",
@@ -29,13 +29,13 @@
     "providers": "供应商", "configured": "已配置", "channels": "通道", "adapters_available": "个适配器可用",
     "quick_actions": "快速操作", "new_workflow": "新建工作流", "deploy_agent": "部署智能体", "open_chat": "打开对话",
     "recent_agents": "最近智能体", "view_all": "查看全部", "system_status": "系统状态", "uptime": "运行时间", "memory_usage": "内存",
-    "version": "版本", "telemetry": "服务遥测", "pro_tip": "小贴士", "pro_tip_text": "使用画布跨多个通道编排智能体。",
-    "no_active_agents": "暂未配置活跃智能体", "no_telemetry": "暂无遥测数据可用",
+    "version": "版本", "telemetry": "服务监控", "pro_tip": "小贴士", "pro_tip_text": "使用画布设计跨通道的智能体工作流。",
+    "no_active_agents": "暂未配置活跃智能体", "no_telemetry": "暂无监控数据",
     "active_sessions": "活跃会话", "agent_count": "Agent 数量",
     "health_checks": "健康检查", "pro_tip_shortcut": "使用 ⌘K 快速搜索 · 按 ← 折叠侧边栏"
   },
   "agents": {
-    "title": "智能体", "subtitle": "由内核管理的自主智能体。",
+    "title": "智能体", "subtitle": "内核管理的智能体。",
     "model": "模型", "provider": "供应商", "last_active": "最后活跃", "no_matching": "没有匹配的智能体。",
     "system_prompt": "系统提示词", "capabilities": "能力", "skills": "技能", "tags": "标签", "mode": "模式",
     "create_agent": "创建智能体", "from_template": "从模板", "from_toml": "从 TOML",
@@ -84,14 +84,14 @@
     "stars_count": "星标", "downloads_count": "下载", "install_timeout": "安装超时"
   },
   "hands": {
-    "title": "Hands", "subtitle": "自主功能包。",
+    "title": "Hands", "subtitle": "可组合的功能扩展包。",
     "available": "可用能力", "instances": "活跃实例", "activate": "激活", "deactivate": "停用",
-    "orchestration": "能力编排", "active_label": "活跃", "total_label": "总计",
+    "orchestration": "能力管理", "active_label": "活跃", "total_label": "总计",
     "search_placeholder": "搜索 Hands...", "ready": "就绪", "missing_req": "缺少依赖",
     "instance": "实例"
   },
   "analytics": {
-    "title": "分析", "subtitle": "使用统计和性能遥测。",
+    "title": "分析", "subtitle": "使用统计和性能监控。",
     "intelligence": "数据分析", "compute": "计算消耗", "compute_desc": "供应商消耗的资源。",
     "runtime": "运行时状态", "runtime_desc": "核心系统执行指标。",
     "active_agents": "活跃智能体", "configured_channels": "配置通道", "available_skills": "可用技能", "health_checks": "健康检查",
@@ -120,13 +120,13 @@
   "comms": {
     "bus": "通信总线", "subtitle": "实时消息流量和连接性。",
     "active_channels": "通道", "active_channels_description": "适配器的连接状态。",
-    "unconfigured": "需配置", "health_description": "子系统检查。", "awaiting_telemetry": "正在获取遥测数据...",
-    "topology": "网络拓扑", "topology_description": "事件总线和消息协调。", "no_channels": "未发现通信通道。",
+    "unconfigured": "需配置", "health_description": "子系统检查。", "awaiting_telemetry": "正在获取监控数据...",
+    "topology": "网络拓扑", "topology_description": "事件总线和消息路由。", "no_channels": "未发现通信通道。",
     "total_channels": "总通道数", "connected": "已连接", "events_today": "今日事件", "uptime": "可用率",
     "events": "事件流", "events_desc": "实时消息事件。", "connections": "连接"
   },
   "canvas": {
-    "title": "流程设计器", "subtitle": "使用可视化逻辑流设计自主智能体行为。", "node_library": "节点库",
+    "title": "流程设计器", "subtitle": "可视化设计智能体工作流。", "node_library": "节点库",
     "triggers": "触发器", "logic": "逻辑", "actions": "动作", "clear_confirm": "确定要清空画布吗？",
     "no_agent_steps": "没有已分配智能体的节点。点击节点可绑定智能体。", "name_required": "请输入工作流名称。",
     "node_config": "节点配置", "node_label": "名称", "node_desc": "描述", "assign_agent": "绑定智能体", "no_agent": "-- 不绑定 --", "agent_steps": "个智能体步骤", "run_result": "运行结果",
@@ -170,9 +170,9 @@
     }
   },
   "workflows": {
-    "title": "工作流", "subtitle": "自动化枢纽。", "all_workflows": "所有工作流", "run_workflow": "运行工作流",
+    "title": "工作流", "subtitle": "自动化中心。", "all_workflows": "所有工作流", "run_workflow": "运行工作流",
     "select_workflow": "选择工作流", "recent_runs": "最近运行记录", "no_runs": "暂无运行记录",
-    "select_workflow_hint": "请选择一个工作流以查看记录", "steps_count": "{{count}} 步", "nodes_unit": "个节点", "automation_hub": "自动化枢纽",
+    "select_workflow_hint": "请选择一个工作流以查看记录", "steps_count": "{{count}} 步", "nodes_unit": "个节点", "automation_hub": "自动化中心",
     "templates": "模板", "use_template": "使用模板", "create_blank": "创建空白工作流",
     "new_workflow": "新建工作流", "workflow_name": "工作流名称", "description": "描述", "delete_confirm": "确定要删除此工作流吗？", "open_workflows": "工作流列表", "untitled_workflow": "未命名工作流",
     "search_placeholder": "搜索工作流...", "empty_title": "还没有工作流", "empty_desc": "从模板快速创建，或从空白开始设计。",
@@ -217,7 +217,7 @@
     "system": "系统状态", "queue": "任务队列", "pending_tasks": "待处理", "running_tasks": "运行中", "completed_today": "今日完成", "active_agents": "活跃智能体", "status": "状态"
   },
   "logs": {
-    "title": "日志", "subtitle": "实时诊断事件。", "export_json": "导出 JSON",
+    "title": "日志", "subtitle": "实时系统日志。", "export_json": "导出 JSON",
     "timestamp": "时间戳", "module": "模块", "agent": "智能体", "message": "内容", "all_modules": "全部模块"
   },
   "settings": {
@@ -240,7 +240,7 @@
     "toggle_reset": "完成/重置", "delete_confirm": "确定要删除此目标吗？"
   },
   "sessions": {
-    "title": "会话", "subtitle": "活跃的智能体对话和历史执行上下文。",
+    "title": "会话", "subtitle": "智能体的对话记录和历史会话。",
     "active_count": "活跃", "total": "总计", "search_placeholder": "按智能体名称搜索...",
     "empty_title": "暂无会话", "empty_desc": "智能体开始对话时会话将出现在这里。",
     "unknown_agent": "未知智能体", "just_now": "刚刚"
@@ -253,7 +253,7 @@
     "welcome": "欢迎", "step_1": "第一步", "connect_provider": "连接供应商"
   },
   "models": {
-    "section": "基础设施", "title": "模型目录", "subtitle": "浏览所有供应商的可用 LLM 模型。",
+    "section": "模型管理", "title": "模型目录", "subtitle": "浏览所有供应商的可用 LLM 模型。",
     "search_placeholder": "搜索模型...", "all_providers": "所有供应商", "all_tiers": "全部",
     "available_only": "仅可用", "available": "可用", "results": "个模型",
     "free": "免费", "no_results": "没有匹配的模型。", "no_models": "未加载任何模型。守护进程是否在运行？", "load_error": "加载模型失败。请检查守护进程是否在运行。",
