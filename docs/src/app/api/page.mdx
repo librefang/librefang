@@ -221,14 +221,6 @@ Set an agent's operating mode. `Stable` mode pins the current model and freezes 
 }
 ```
 
-### PUT /api/agents/&lbrace;id&rbrace;/suspend
-
-Suspend a running agent, pausing its event loop.
-
-### PUT /api/agents/&lbrace;id&rbrace;/resume
-
-Resume a suspended agent.
-
 ### PATCH /api/agents/&lbrace;id&rbrace;/identity
 
 Update an agent's identity fields (name, avatar, persona).
@@ -3229,8 +3221,6 @@ The `Retry-After` header indicates the window duration in seconds.
 | PATCH | `/api/agents/{id}` | Partial update agent |
 | PUT | `/api/agents/{id}/update` | Full update agent config |
 | PUT | `/api/agents/{id}/mode` | Set agent mode (Stable/Normal) |
-| PUT | `/api/agents/{id}/suspend` | Suspend agent |
-| PUT | `/api/agents/{id}/resume` | Resume agent |
 | PATCH | `/api/agents/{id}/identity` | Update agent identity |
 | PATCH | `/api/agents/{id}/config` | Patch agent config |
 | POST | `/api/agents/{id}/clone` | Clone agent |

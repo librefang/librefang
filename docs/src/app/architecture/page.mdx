@@ -24,7 +24,7 @@ This document describes the internal architecture of LibreFang, the open-source 
 
 ## Crate Structure
 
-LibreFang is organized as a Cargo workspace with 16 crates (15 code crates + xtask). Dependencies flow downward (lower crates depend on nothing above them).
+LibreFang is organized as a Cargo workspace with 14 crates (13 code crates + xtask). Dependencies flow downward (lower crates depend on nothing above them).
 
 ```
 librefang-cli            CLI interface, daemon auto-detect, MCP server
@@ -65,7 +65,7 @@ librefang-types          Shared types: Agent, Capability, Event, Memory, Message
 | **librefang-migrate** | Migration engine. Supports OpenClaw (`~/.openclaw/`). Converts YAML configs to TOML, maps tool names, maps provider names, imports agent manifests, copies memory files, converts channel configs. Produces a `MigrationReport` with imported items, skipped items, and warnings. |
 | **librefang-skills** | Skill system for pluggable tool bundles. 60 bundled skills compiled via `include_str!()`. Skills are `skill.toml` + Python/WASM/Node.js/PromptOnly code. `SkillManifest` defines metadata, runtime config, provided tools, and requirements. `SkillRegistry` manages installed and bundled skills. `FangHubClient` connects to FangHub marketplace. `ClawHubClient` connects to clawhub.ai for cross-ecosystem skill discovery. `SKILL.md` parser for OpenClaw compatibility (YAML frontmatter + Markdown body). `SkillVerifier` with SHA256 verification. Prompt injection scanner (`scan_prompt_content()`) detects override attempts, data exfiltration, and shell references. |
 | **librefang-extensions** | Extension and integration system. Provides a credential vault for securely storing third-party service credentials, OAuth2 PKCE flow for user-authorized integrations, and one-click MCP setup helpers for popular external services. |
-| **librefang-hands** | Autonomous Hands system. 14 built-in hand agents that operate independently with specialized domain expertise: analyst, browser, coder, comms, files, researcher, scheduler, sysadmin, analytics, apitester, devops, linkedin, reddit, strategist, trader. Each hand exposes a structured tool surface and can be activated/deactivated at runtime via the `hand_activate`/`hand_deactivate` tools. |
+| **librefang-hands** | Autonomous Hands system. 14 built-in hand agents that operate independently with specialized domain expertise: analytics, apitester, browser, clip, collector, devops, lead, linkedin, predictor, reddit, researcher, strategist, trader, twitter. Each hand exposes a structured tool surface and can be activated/deactivated at runtime via the `hand_activate`/`hand_deactivate` tools. |
 | **xtask** | Build automation tasks (cargo-xtask pattern). |
 
 ---
@@ -668,15 +668,17 @@ All skills pass through a security pipeline before activation:
 
 | Category | Tools |
 |----------|-------|
-| **File & Memory (12)** | file_read, file_write, file_list, file_delete, file_move, memory_store, memory_recall, memory_search, memory_delete, task_post, task_claim, task_complete |
-| **Web & Search (6)** | web_search, web_fetch, web_read, image_search, news_search, location_get |
-| **Code & Shell (5)** | code_run, shell_exec, code_format, apply_patch, docker_exec |
-| **Agent Ops (5)** | agent_spawn, agent_message, agent_list, agent_kill, system_time |
+| **File & Patch (4)** | file_read, file_write, file_list, apply_patch |
+| **Web & Location (3)** | web_search, web_fetch, location_get |
+| **Shell & Docker (2)** | shell_exec, docker_exec |
+| **Agent Ops (6)** | agent_spawn, agent_send, agent_list, agent_kill, agent_find, system_time |
+| **Memory & Knowledge (5)** | memory_store, memory_recall, knowledge_add_entity, knowledge_add_relation, knowledge_query |
+| **Tasks & Events (5)** | task_post, task_claim, task_complete, task_list, event_publish |
 | **Browser Automation (10)** | browser_navigate, browser_click, browser_type, browser_screenshot, browser_read_page, browser_close, browser_scroll, browser_wait, browser_run_js, browser_back |
 | **Process Management (5)** | process_start, process_poll, process_write, process_kill, process_list |
-| **Media & AI (5)** | media_describe, media_transcribe, image_generate, text_to_speech, speech_to_text |
+| **Media & AI (6)** | image_analyze, media_describe, media_transcribe, image_generate, text_to_speech, speech_to_text |
 | **Hands Control (4)** | hand_list, hand_activate, hand_status, hand_deactivate |
-| **Scheduling & Comms (6)** | cron_create, cron_list, cron_cancel, channel_send, schedule_create, schedule_list |
+| **Scheduling & Comms (7)** | cron_create, cron_list, cron_cancel, channel_send, schedule_create, schedule_list, schedule_delete |
 | **A2A & Canvas (3)** | a2a_discover, a2a_send, canvas_present |
 
 ### Ecosystem Bridges
@@ -696,21 +698,20 @@ The Hands system (`librefang-hands`) provides 14 built-in autonomous hand agents
 
 | Hand | Domain |
 |------|--------|
-| `analyst` | Data analysis and reporting |
-| `browser` | Web browsing and scraping via Playwright |
-| `coder` | Code generation, review, and debugging |
-| `comms` | Communication channel management |
-| `files` | File system operations and management |
-| `researcher` | Deep research and information gathering |
-| `scheduler` | Task scheduling and cron management |
-| `sysadmin` | System administration and DevOps |
 | `analytics` | Business analytics and metrics |
 | `apitester` | API testing and validation |
+| `browser` | Web browsing and scraping via Playwright |
+| `clip` | Content clipping and extraction |
+| `collector` | Data collection and aggregation |
 | `devops` | CI/CD pipeline and infrastructure |
+| `lead` | Lead generation and outreach |
 | `linkedin` | LinkedIn professional networking automation |
+| `predictor` | Predictive analysis and forecasting |
 | `reddit` | Reddit content and community management |
+| `researcher` | Deep research and information gathering |
 | `strategist` | Strategic planning and decision support |
 | `trader` | Trading signals and market analysis |
+| `twitter` | Twitter/X content and community management |
 
 ### Hand Lifecycle Tools
 
