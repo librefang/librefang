@@ -247,6 +247,7 @@
     "search_placeholder": "搜索模型...", "all_providers": "所有供应商", "all_tiers": "全部",
     "available_only": "仅可用", "available": "可用", "results": "个模型",
     "free": "免费", "no_results": "没有匹配的模型。", "no_models": "未加载任何模型。守护进程是否在运行？", "load_error": "加载模型失败。请检查守护进程是否在运行。",
+    "tier_all": "全部", "tier_frontier": "前沿", "tier_smart": "智能", "tier_balanced": "均衡", "tier_fast": "快速", "tier_local": "本地", "tier_basic": "基础", "tier_standard": "标准", "tier_advanced": "高级", "tier_enterprise": "企业",
     "col_model": "模型", "col_provider": "供应商", "col_tier": "等级", "col_context": "上下文", "col_input": "输入 $/M"
   },
   "plugins": {

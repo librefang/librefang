@@ -131,7 +131,7 @@ export function ModelsPage() {
               className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${
                 tierFilter === tier ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
               }`}>
-              {tier === "all" ? t("models.all_tiers") : tier}
+              {t(`models.tier_${tier}`, { defaultValue: tier })}
             </button>
           ))}
         </div>
