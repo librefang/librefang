@@ -47,11 +47,6 @@ export function ModelsPage() {
   const providers = ["all", ...Array.from(new Set(allModels.map(m => m.provider))).sort()];
   const tiers = ["all", ...Array.from(new Set(allModels.map(m => m.tier).filter(Boolean))).sort()];
 
-  // DEBUG
-  const localCount = allModels.filter(m => m.tier === "local").length;
-  const localMinimax = allModels.filter(m => m.tier === "local" && m.provider.includes("minimax")).length;
-  if (localMinimax > 0) console.error(`[BUG] allModels has ${localMinimax} minimax in local tier! total local=${localCount} allModels.length=${allModels.length}`);
-
   const filtered = allModels.filter(m => {
     const q = search.toLowerCase();
     if (search && !m.id.toLowerCase().includes(q) && !(m.display_name || "").toLowerCase().includes(q) && !m.provider.toLowerCase().includes(q)) return false;
