@@ -1034,6 +1034,15 @@ pub fn load_workflow_definitions(dir: &Path) -> Vec<Workflow> {
 
 use librefang_types::workflow_template::WorkflowTemplate;
 
+/// Convert a `serde_json::Value` to a plain string for template substitution.
+fn value_to_string(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
 /// In-memory registry for storing and retrieving [`WorkflowTemplate`]s.
 ///
 /// Thread-safe: the registry is designed to be wrapped in an `Arc` and shared
@@ -1075,6 +1084,73 @@ impl WorkflowTemplateRegistry {
     pub async fn remove(&self, id: &str) -> Option<WorkflowTemplate> {
         let mut map = self.templates.write().await;
         map.remove(id)
+    }
+
+    /// Instantiate a concrete [`Workflow`] from a template by substituting
+    /// parameter values into step prompt templates.
+    ///
+    /// Returns an error if any required parameter is missing and has no default.
+    pub fn instantiate(
+        &self,
+        template: &WorkflowTemplate,
+        params: &HashMap<String, serde_json::Value>,
+    ) -> Result<Workflow, String> {
+        // Build the resolved parameter map (apply defaults, validate required).
+        let mut resolved: HashMap<String, String> = HashMap::new();
+        for p in &template.parameters {
+            if let Some(val) = params.get(&p.name) {
+                resolved.insert(p.name.clone(), value_to_string(val));
+            } else if let Some(ref default) = p.default {
+                resolved.insert(p.name.clone(), value_to_string(default));
+            } else if p.required {
+                return Err(format!("Missing required parameter: {}", p.name));
+            }
+        }
+
+        // Also include any extra params the caller provided that aren't declared
+        // (pass-through), so users can use ad-hoc placeholders.
+        for (k, v) in params {
+            resolved.entry(k.clone()).or_insert_with(|| value_to_string(v));
+        }
+
+        // Convert template steps → workflow steps.
+        let steps = template
+            .steps
+            .iter()
+            .map(|ts| {
+                let mut prompt = ts.prompt_template.clone();
+                for (k, v) in &resolved {
+                    prompt = prompt.replace(&format!("{{{{{}}}}}", k), v);
+                }
+                WorkflowStep {
+                    name: ts.name.clone(),
+                    agent: match &ts.agent {
+                        Some(a) => StepAgent::ByName { name: a.clone() },
+                        None => StepAgent::ByName {
+                            name: "default".into(),
+                        },
+                    },
+                    prompt_template: prompt,
+                    mode: if ts.depends_on.is_empty() {
+                        StepMode::Sequential
+                    } else {
+                        StepMode::Sequential
+                    },
+                    timeout_secs: 120,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                }
+            })
+            .collect();
+
+        Ok(Workflow {
+            id: WorkflowId::new(),
+            name: template.name.clone(),
+            description: template.description.clone(),
+            steps,
+            created_at: Utc::now(),
+            layout: None,
+        })
     }
 }
 
