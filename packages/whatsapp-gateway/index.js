@@ -39,6 +39,7 @@ let reconnectAttempts = 0;
 let isConnecting = false;
 const MAX_RECONNECT_DELAY = 60_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
+const MAX_FORWARD_RETRIES = 1;
 
 // Cached agent UUID — resolved from DEFAULT_AGENT name on first use
 let cachedAgentId = null;
@@ -365,7 +366,7 @@ async function forwardToLibreFang(text, phone, pushName, retryCount = 0) {
         res.on('end', () => {
           // If the agent UUID became stale (404), invalidate cache and retry once
           if (res.statusCode === 404) {
-            if (retryCount < 1) {
+            if (retryCount < MAX_FORWARD_RETRIES) {
               console.log('[gateway] Agent UUID stale (404), re-resolving...');
               cachedAgentId = null;
               // Retry once with fresh UUID
@@ -486,15 +487,18 @@ function parseBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
     let size = 0;
+    let aborted = false;
     req.on('data', (chunk) => {
       size += chunk.length;
       if (size > MAX_BODY_SIZE) {
+        aborted = true;
         req.destroy();
         return reject(new Error('Request body too large'));
       }
       body += chunk;
     });
     req.on('end', () => {
+      if (aborted) return;
       try {
         resolve(body ? JSON.parse(body) : {});
       } catch (e) {
