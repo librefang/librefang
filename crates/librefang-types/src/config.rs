@@ -2533,6 +2533,10 @@ pub struct SlackConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// When true, bot replies are posted as top-level channel messages instead
+    /// of threaded replies. Defaults to `None` (i.e. use normal threading).
+    #[serde(default)]
+    pub force_flat_replies: Option<bool>,
 }
 
 impl Default for SlackConfig {
@@ -2544,6 +2548,7 @@ impl Default for SlackConfig {
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
+            force_flat_replies: None,
         }
     }
 }

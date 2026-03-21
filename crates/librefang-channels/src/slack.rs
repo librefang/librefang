@@ -35,6 +35,8 @@ pub struct SlackAdapter {
     shutdown_rx: watch::Receiver<bool>,
     /// Bot's own user ID (populated after auth.test).
     bot_user_id: Arc<RwLock<Option<String>>>,
+    /// When true, replies are posted as top-level channel messages instead of threads.
+    force_flat_replies: bool,
 }
 
 impl SlackAdapter {
@@ -49,12 +51,19 @@ impl SlackAdapter {
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_user_id: Arc::new(RwLock::new(None)),
+            force_flat_replies: false,
         }
     }
 
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Force replies to be posted as top-level channel messages instead of threads.
+    pub fn with_force_flat_replies(mut self, force: bool) -> Self {
+        self.force_flat_replies = force;
         self
     }
 
@@ -346,7 +355,15 @@ impl ChannelAdapter for SlackAdapter {
             _ => "(Unsupported content type)".to_string(),
         };
 
-        self.api_send_message_opts(&user.platform_id, &text, Some(thread_id))
+        // When force_flat_replies is enabled, skip threading so the message
+        // appears as a top-level channel message instead of a thread reply.
+        let ts = if self.force_flat_replies {
+            None
+        } else {
+            Some(thread_id)
+        };
+
+        self.api_send_message_opts(&user.platform_id, &text, ts)
             .await?;
         Ok(())
     }
