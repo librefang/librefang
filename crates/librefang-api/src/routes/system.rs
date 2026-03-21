@@ -1674,6 +1674,7 @@ pub async fn list_commands(State(state): State<Arc<AppState>>) -> impl IntoRespo
     let mut commands = vec![
         serde_json::json!({"cmd": "/help", "desc": "Show available commands"}),
         serde_json::json!({"cmd": "/new", "desc": "Reset session (clear history)"}),
+        serde_json::json!({"cmd": "/reboot", "desc": "Hard reset session (full context clear, no summary)"}),
         serde_json::json!({"cmd": "/compact", "desc": "Trigger LLM session compaction"}),
         serde_json::json!({"cmd": "/model", "desc": "Show or switch model (/model [name])"}),
         serde_json::json!({"cmd": "/stop", "desc": "Cancel current agent run"}),
@@ -1721,6 +1722,10 @@ pub async fn get_command(
     let builtins = [
         ("/help", "Show available commands"),
         ("/new", "Reset session (clear history)"),
+        (
+            "/reboot",
+            "Hard reset session (full context clear, no summary)",
+        ),
         ("/compact", "Trigger LLM session compaction"),
         ("/model", "Show or switch model (/model [name])"),
         ("/stop", "Cancel current agent run"),

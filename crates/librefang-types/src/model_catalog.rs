@@ -62,6 +62,9 @@ pub const BEDROCK_BASE_URL: &str = "https://bedrock-runtime.us-east-1.amazonaws.
 // ── Google Cloud Vertex AI ───────────────────────────────────────
 pub const VERTEX_AI_BASE_URL: &str = "https://us-central1-aiplatform.googleapis.com";
 
+// ── DeepInfra ─────────────────────────────────────────────────
+pub const DEEPINFRA_BASE_URL: &str = "https://api.deepinfra.com/v1/openai";
+
 // ── NVIDIA NIM ──────────────────────────────────────────────────
 pub const NVIDIA_NIM_BASE_URL: &str = "https://integrate.api.nvidia.com/v1";
 
