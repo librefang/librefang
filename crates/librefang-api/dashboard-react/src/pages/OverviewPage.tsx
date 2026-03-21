@@ -215,7 +215,7 @@ export function OverviewPage() {
             {isLoading ? (
               <div className="grid gap-3 sm:grid-cols-2">
                 {[1, 2].map(i => (
-                  <div key={i} className="h-16 bg-surface-hover rounded-xl animate-pulse" />
+                  <div key={i} className="h-16 rounded-xl bg-gradient-to-r from-main via-surface-hover to-main bg-[length:200%_100%]" style={{ animation: "shimmer 1.5s ease-in-out infinite" }} />
                 ))}
               </div>
             ) : snapshot?.agents && snapshot.agents.length > 0 ? (
