@@ -257,7 +257,7 @@ pub fn convert_skillmd(dir: &Path) -> Result<ConvertedSkillMd, SkillError> {
         requirements: SkillRequirements::default(),
         prompt_context: Some(body.clone()),
         source: Some(SkillSource::OpenClaw),
-        extra: std::collections::HashMap::new(),
+        config: std::collections::HashMap::new(),
     };
 
     info!(
@@ -350,7 +350,7 @@ pub fn convert_skillmd_str(name_hint: &str, content: &str) -> Result<ConvertedSk
         requirements: SkillRequirements::default(),
         prompt_context: Some(body.clone()),
         source: Some(SkillSource::Bundled),
-        extra: std::collections::HashMap::new(),
+        config: std::collections::HashMap::new(),
     };
 
     Ok(ConvertedSkillMd {
@@ -468,7 +468,7 @@ pub fn convert_openclaw_skill(dir: &Path) -> Result<SkillManifest, SkillError> {
         requirements: SkillRequirements::default(),
         prompt_context: None,
         source: Some(SkillSource::OpenClaw),
-        extra: std::collections::HashMap::new(),
+        config: std::collections::HashMap::new(),
     })
 }
 

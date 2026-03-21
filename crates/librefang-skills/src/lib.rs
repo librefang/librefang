@@ -125,8 +125,7 @@ pub struct SkillManifest {
     pub source: Option<SkillSource>,
     /// Arbitrary user-defined configuration keys.
     ///
-    /// Any keys in the skill TOML that don't match a known field are
-    /// captured here, allowing skills to define custom configuration:
+    /// Skill authors place custom config under a `[config]` table:
     ///
     /// ```toml
     /// [skill]
@@ -137,8 +136,8 @@ pub struct SkillManifest {
     /// custom_endpoint = "https://api.example.com"
     /// max_retries = 3
     /// ```
-    #[serde(default, flatten)]
-    pub extra: HashMap<String, serde_json::Value>,
+    #[serde(default)]
+    pub config: HashMap<String, serde_json::Value>,
 }
 
 /// Skill metadata section.
@@ -283,6 +282,7 @@ description = "A skill with custom config"
 type = "python"
 entry = "main.py"
 
+[config]
 apiKey = "sk-test-123"
 custom_endpoint = "https://api.example.com"
 max_retries = 3
@@ -291,23 +291,23 @@ nested_config = { timeout = 30, retries = 5 }
 
         let manifest: SkillManifest = toml::from_str(toml_str).unwrap();
         assert_eq!(manifest.skill.name, "my-custom-skill");
-        assert_eq!(manifest.extra.len(), 4);
+        assert_eq!(manifest.config.len(), 4);
         assert_eq!(
-            manifest.extra.get("apiKey").and_then(|v| v.as_str()),
+            manifest.config.get("apiKey").and_then(|v| v.as_str()),
             Some("sk-test-123")
         );
         assert_eq!(
             manifest
-                .extra
+                .config
                 .get("custom_endpoint")
                 .and_then(|v| v.as_str()),
             Some("https://api.example.com")
         );
         assert_eq!(
-            manifest.extra.get("max_retries").and_then(|v| v.as_i64()),
+            manifest.config.get("max_retries").and_then(|v| v.as_i64()),
             Some(3)
         );
-        assert!(manifest.extra.get("nested_config").unwrap().is_object());
+        assert!(manifest.config.get("nested_config").unwrap().is_object());
     }
 
     #[test]
@@ -321,7 +321,7 @@ description = "No extra config"
 
         let manifest: SkillManifest = toml::from_str(toml_str).unwrap();
         assert_eq!(manifest.skill.name, "plain-skill");
-        assert!(manifest.extra.is_empty());
+        assert!(manifest.config.is_empty());
     }
 
     #[test]
@@ -332,17 +332,18 @@ name = "roundtrip-skill"
 version = "1.0.0"
 description = "Test serialization roundtrip"
 
+[config]
 custom_key = "custom_value"
 "#;
 
         let manifest: SkillManifest = toml::from_str(toml_str).unwrap();
-        assert_eq!(manifest.extra.len(), 1);
+        assert_eq!(manifest.config.len(), 1);
 
         // Serialize back and verify the extra key is preserved
         let serialized = toml::to_string(&manifest).unwrap();
         let reparsed: SkillManifest = toml::from_str(&serialized).unwrap();
         assert_eq!(
-            reparsed.extra.get("custom_key").and_then(|v| v.as_str()),
+            reparsed.config.get("custom_key").and_then(|v| v.as_str()),
             Some("custom_value")
         );
     }

@@ -28,7 +28,7 @@ pub async fn execute_skill_tool(
                 &manifest.runtime.entry,
                 tool_name,
                 input,
-                &manifest.extra,
+                &manifest.config,
             )
             .await
         }
@@ -38,7 +38,7 @@ pub async fn execute_skill_tool(
                 &manifest.runtime.entry,
                 tool_name,
                 input,
-                &manifest.extra,
+                &manifest.config,
             )
             .await
         }
@@ -67,7 +67,7 @@ async fn execute_python(
     entry: &str,
     tool_name: &str,
     input: &serde_json::Value,
-    extra: &std::collections::HashMap<String, serde_json::Value>,
+    config: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<SkillToolResult, SkillError> {
     let script_path = skill_dir.join(entry);
     if !script_path.exists() {
@@ -77,8 +77,8 @@ async fn execute_python(
         )));
     }
 
-    // Build the JSON payload to send via stdin, including any extra config
-    let payload = if extra.is_empty() {
+    // Build the JSON payload to send via stdin, including any skill config
+    let payload = if config.is_empty() {
         serde_json::json!({
             "tool": tool_name,
             "input": input,
@@ -87,7 +87,7 @@ async fn execute_python(
         serde_json::json!({
             "tool": tool_name,
             "input": input,
-            "config": extra,
+            "config": config,
         })
     };
 
@@ -182,7 +182,7 @@ async fn execute_node(
     entry: &str,
     tool_name: &str,
     input: &serde_json::Value,
-    extra: &std::collections::HashMap<String, serde_json::Value>,
+    config: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<SkillToolResult, SkillError> {
     let script_path = skill_dir.join(entry);
     if !script_path.exists() {
@@ -198,8 +198,8 @@ async fn execute_node(
         )
     })?;
 
-    // Build the JSON payload to send via stdin, including any extra config
-    let payload = if extra.is_empty() {
+    // Build the JSON payload to send via stdin, including any skill config
+    let payload = if config.is_empty() {
         serde_json::json!({
             "tool": tool_name,
             "input": input,
@@ -208,7 +208,7 @@ async fn execute_node(
         serde_json::json!({
             "tool": tool_name,
             "input": input,
-            "config": extra,
+            "config": config,
         })
     };
 
@@ -362,7 +362,7 @@ mod tests {
             requirements: SkillRequirements::default(),
             prompt_context: Some("You are a helpful assistant.".to_string()),
             source: None,
-            extra: std::collections::HashMap::new(),
+            config: std::collections::HashMap::new(),
         };
 
         let result = execute_skill_tool(&manifest, dir.path(), "test_tool", &serde_json::json!({}))
