@@ -1328,6 +1328,7 @@ fn cli_librefang_home() -> std::path::PathBuf {
 struct DaemonConfigContext {
     home_dir: PathBuf,
     api_key: Option<String>,
+    log_dir: Option<PathBuf>,
 }
 
 fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContext {
@@ -1343,12 +1344,15 @@ fn daemon_config_context(config: Option<&std::path::Path>) -> DaemonConfigContex
     DaemonConfigContext {
         home_dir: config.home_dir,
         api_key,
+        log_dir: config.log_dir,
     }
 }
 
 /// Redirect tracing to a log file so it doesn't corrupt the ratatui TUI.
-fn init_tracing_file(log_level: &str) {
-    let log_dir = cli_librefang_home();
+fn init_tracing_file(log_level: &str, custom_log_dir: Option<&std::path::Path>) {
+    let log_dir = custom_log_dir
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(cli_librefang_home);
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join("tui.log");
 
@@ -1392,6 +1396,15 @@ fn load_log_level_from_config() -> String {
     level.unwrap_or_else(|| "info".to_string())
 }
 
+/// Load just the `log_dir` field from config.toml without fully deserializing.
+/// Returns the configured custom log directory, or `None` to use the default.
+fn load_log_dir_from_config() -> Option<PathBuf> {
+    let config_path = dirs::home_dir()?.join(".librefang").join("config.toml");
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let config: toml::Value = toml::from_str(&content).ok()?;
+    config.get("log_dir")?.as_str().map(PathBuf::from)
+}
+
 fn main() {
     // Initialize rustls crypto provider FIRST, before any async/TLS operations
     // This is required because rustls 0.23 needs explicit crypto provider initialization
@@ -1422,9 +1435,10 @@ fn main() {
         );
 
     let log_level = load_log_level_from_config();
+    let custom_log_dir = load_log_dir_from_config();
 
     if is_tui_mode {
-        init_tracing_file(&log_level);
+        init_tracing_file(&log_level, custom_log_dir.as_deref());
     } else {
         // CLI subcommands: install Ctrl+C handler for clean interrupt of
         // blocking read_line calls, and trace to stderr.
@@ -2097,7 +2111,11 @@ fn daemon_log_path_for_home(home_dir: &std::path::Path) -> PathBuf {
 
 fn daemon_log_path_for_config(config: Option<&std::path::Path>) -> PathBuf {
     let daemon = daemon_config_context(config);
-    daemon_log_path_for_home(&daemon.home_dir)
+    if let Some(ref log_dir) = daemon.log_dir {
+        log_dir.join("daemon.log")
+    } else {
+        daemon_log_path_for_home(&daemon.home_dir)
+    }
 }
 
 fn detached_daemon_args(config: Option<&std::path::Path>) -> Vec<OsString> {
@@ -7501,7 +7519,8 @@ fn cmd_logs(config: Option<PathBuf>, lines: usize, follow: bool) {
         return;
     }
 
-    let tui_log = daemon.home_dir.join("tui.log");
+    let tui_log_dir = daemon.log_dir.as_deref().unwrap_or(&daemon.home_dir);
+    let tui_log = tui_log_dir.join("tui.log");
     if tui_log.exists() {
         ui::hint(&format!(
             "Daemon log not found; showing TUI log at {}",

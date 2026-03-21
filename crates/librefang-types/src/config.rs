@@ -1318,6 +1318,10 @@ pub struct KernelConfig {
     /// Default: `~/.librefang/workspace`
     #[serde(default)]
     pub workspace_dir: Option<PathBuf>,
+    /// Custom log directory. When set, log files are written here instead of
+    /// the default `~/.librefang/` directory.
+    #[serde(default)]
+    pub log_dir: Option<PathBuf>,
     /// Media understanding configuration.
     #[serde(default)]
     pub media: crate::media::MediaConfig,
@@ -2057,6 +2061,7 @@ impl Default for KernelConfig {
             vault: VaultConfig::default(),
             workspaces_dir: None,
             workspace_dir: None,
+            log_dir: None,
             media: crate::media::MediaConfig::default(),
             links: crate::media::LinkConfig::default(),
             reload: ReloadConfig::default(),
@@ -2175,6 +2180,7 @@ impl std::fmt::Debug for KernelConfig {
             .field("vault", &format!("enabled={}", self.vault.enabled))
             .field("workspaces_dir", &self.workspaces_dir)
             .field("workspace_dir", &self.workspace_dir)
+            .field("log_dir", &self.log_dir)
             .field(
                 "media",
                 &format!(
