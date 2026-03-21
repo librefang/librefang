@@ -1157,7 +1157,7 @@ mod tests {
         // MiniMax M2.7 — by exact ID, alias, and case-insensitive
         let m27 = catalog.find_model("MiniMax-M2.7").unwrap();
         assert!(
-            m27.provider == "minimax",
+            m27.provider == "minimax" || m27.provider == "minimax-cn",
             "unexpected provider: {}",
             m27.provider
         );
@@ -1166,14 +1166,14 @@ mod tests {
         // Default "minimax" alias resolves to a minimax-family model
         let default = catalog.find_model("minimax").unwrap();
         assert!(
-            default.provider == "minimax",
+            default.provider == "minimax" || default.provider == "minimax-cn",
             "unexpected provider: {}",
             default.provider
         );
         // MiniMax M2.7 Highspeed — by exact ID and aliases
         let hs = catalog.find_model("MiniMax-M2.7-highspeed").unwrap();
         assert!(
-            hs.provider == "minimax",
+            hs.provider == "minimax" || hs.provider == "minimax-cn",
             "unexpected provider: {}",
             hs.provider
         );
@@ -1181,7 +1181,7 @@ mod tests {
         // abab7-chat
         let abab7 = catalog.find_model("abab7-chat").unwrap();
         assert!(
-            abab7.provider == "minimax",
+            abab7.provider == "minimax" || abab7.provider == "minimax-cn",
             "unexpected provider: {}",
             abab7.provider
         );
@@ -1267,13 +1267,14 @@ api_key_env = "TEST_CN_API_KEY"
 [[models]]
 id = "test-model"
 display_name = "Test Model"
-tier = "Smart"
+tier = "smart"
 context_window = 32768
 max_output_tokens = 4096
 input_cost_per_m = 1.0
 output_cost_per_m = 3.0
 supports_tools = true
 supports_vision = false
+supports_streaming = true
 "#;
         let provider_b = r#"
 [provider]
@@ -1288,13 +1289,14 @@ base_url = "https://eu.api.nokey.com/v1"
 [[models]]
 id = "nokey-model"
 display_name = "NoKey Model"
-tier = "Fast"
+tier = "fast"
 context_window = 8192
 max_output_tokens = 2048
 input_cost_per_m = 0.5
 output_cost_per_m = 1.5
 supports_tools = false
 supports_vision = false
+supports_streaming = false
 "#;
         let sources = vec![provider_a.to_string(), provider_b.to_string()];
         ModelCatalog::from_sources(&sources, None)

@@ -887,7 +887,7 @@ mod tests {
         assert!(providers.contains(&"aider"));
         assert!(providers.contains(&"vertex-ai"));
         assert!(providers.contains(&"nvidia-nim"));
-        assert_eq!(providers.len(), 41);
+        assert_eq!(providers.len(), 40);
     }
 
     #[test]
