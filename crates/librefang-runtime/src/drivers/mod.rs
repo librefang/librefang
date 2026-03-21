@@ -665,6 +665,9 @@ fn create_driver_from_entry(
 /// - `replicate` — Replicate
 /// - `chutes` — Chutes.ai (serverless open-source model inference)
 /// - `vertex-ai` — Google Cloud Vertex AI (OAuth2 auth, enterprise Gemini)
+/// - `qwen` — Qwen / DashScope (China mainland)
+/// - `qwen-intl` — Qwen International (Singapore)
+/// - `qwen-us` — Qwen US (Virginia)
 /// - Any custom provider with `base_url` set uses OpenAI-compatible format
 pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmError> {
     let provider = config.provider.as_str();
