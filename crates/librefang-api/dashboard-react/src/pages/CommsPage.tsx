@@ -268,8 +268,11 @@ export function CommsPage() {
                   </Badge>
                 </div>
               ))}
-              {(!snapshot?.health.checks || snapshot.health.checks.length === 0) && (
-                <p className="text-xs text-text-dim italic py-4 text-center col-span-full">{t("comms.awaiting_telemetry")}</p>
+              {(!snapshot?.health?.checks || snapshot.health.checks.length === 0) && (
+                <div className="flex items-center gap-2 py-4 col-span-full justify-center">
+                  <div className="w-2 h-2 rounded-full bg-success" />
+                  <p className="text-xs text-text-dim">{snapshot?.health?.status === "ok" ? t("common.daemon_online") : t("common.no_data")}</p>
+                </div>
               )}
             </div>
           </Card>

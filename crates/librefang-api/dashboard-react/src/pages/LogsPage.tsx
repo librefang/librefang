@@ -22,7 +22,7 @@ export function LogsPage() {
   const [limit, setLimit] = useState(100);
   const auditQuery = useQuery({ queryKey: ["audit", "recent", limit], queryFn: () => listAuditRecent(limit), refetchInterval: REFRESH_MS });
 
-  const logs = auditQuery.data?.events ?? [];
+  const logs = auditQuery.data?.entries ?? auditQuery.data?.events ?? [];
   const modules = Array.from(new Set(logs.map(l => l.source).filter(Boolean))) as string[];
   const [search, setSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState<string | null>(null);
