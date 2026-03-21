@@ -1072,7 +1072,10 @@ impl LibreFangKernel {
         // Auto-detect embedding driver for vector similarity search
         let embedding_driver: Option<
             Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>,
-        > = {
+        > = if config.memory.fts_only == Some(true) {
+            info!("FTS-only memory mode active — skipping embedding driver, using SQLite FTS5 text search");
+            None
+        } else {
             use librefang_runtime::embedding::create_embedding_driver;
             let configured_model = &config.memory.embedding_model;
             if let Some(ref provider) = config.memory.embedding_provider {

@@ -2266,6 +2266,10 @@ pub struct MemoryConfig {
     /// How often to run memory consolidation (hours). 0 = disabled.
     #[serde(default = "default_consolidation_interval")]
     pub consolidation_interval_hours: u64,
+    /// When true, use SQLite FTS5 full-text search instead of embedding-based
+    /// vector similarity. Eliminates the need for an external embedding provider.
+    #[serde(default)]
+    pub fts_only: Option<bool>,
 }
 
 fn default_consolidation_interval() -> u64 {
@@ -2282,6 +2286,7 @@ impl Default for MemoryConfig {
             embedding_provider: None,
             embedding_api_key_env: None,
             consolidation_interval_hours: default_consolidation_interval(),
+            fts_only: None,
         }
     }
 }
