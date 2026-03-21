@@ -23,10 +23,24 @@ pub async fn execute_skill_tool(
 
     match manifest.runtime.runtime_type {
         SkillRuntime::Python => {
-            execute_python(skill_dir, &manifest.runtime.entry, tool_name, input).await
+            execute_python(
+                skill_dir,
+                &manifest.runtime.entry,
+                tool_name,
+                input,
+                &manifest.extra,
+            )
+            .await
         }
         SkillRuntime::Node => {
-            execute_node(skill_dir, &manifest.runtime.entry, tool_name, input).await
+            execute_node(
+                skill_dir,
+                &manifest.runtime.entry,
+                tool_name,
+                input,
+                &manifest.extra,
+            )
+            .await
         }
         SkillRuntime::Wasm => Err(SkillError::RuntimeNotAvailable(
             "WASM skill runtime not yet implemented".to_string(),
@@ -53,6 +67,7 @@ async fn execute_python(
     entry: &str,
     tool_name: &str,
     input: &serde_json::Value,
+    extra: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<SkillToolResult, SkillError> {
     let script_path = skill_dir.join(entry);
     if !script_path.exists() {
@@ -62,11 +77,19 @@ async fn execute_python(
         )));
     }
 
-    // Build the JSON payload to send via stdin
-    let payload = serde_json::json!({
-        "tool": tool_name,
-        "input": input,
-    });
+    // Build the JSON payload to send via stdin, including any extra config
+    let payload = if extra.is_empty() {
+        serde_json::json!({
+            "tool": tool_name,
+            "input": input,
+        })
+    } else {
+        serde_json::json!({
+            "tool": tool_name,
+            "input": input,
+            "config": extra,
+        })
+    };
 
     let python = find_python().ok_or_else(|| {
         SkillError::RuntimeNotAvailable(
@@ -159,6 +182,7 @@ async fn execute_node(
     entry: &str,
     tool_name: &str,
     input: &serde_json::Value,
+    extra: &std::collections::HashMap<String, serde_json::Value>,
 ) -> Result<SkillToolResult, SkillError> {
     let script_path = skill_dir.join(entry);
     if !script_path.exists() {
@@ -174,10 +198,19 @@ async fn execute_node(
         )
     })?;
 
-    let payload = serde_json::json!({
-        "tool": tool_name,
-        "input": input,
-    });
+    // Build the JSON payload to send via stdin, including any extra config
+    let payload = if extra.is_empty() {
+        serde_json::json!({
+            "tool": tool_name,
+            "input": input,
+        })
+    } else {
+        serde_json::json!({
+            "tool": tool_name,
+            "input": input,
+            "config": extra,
+        })
+    };
 
     debug!(
         "Executing Node.js skill: {} {}",
@@ -329,6 +362,7 @@ mod tests {
             requirements: SkillRequirements::default(),
             prompt_context: Some("You are a helpful assistant.".to_string()),
             source: None,
+            extra: std::collections::HashMap::new(),
         };
 
         let result = execute_skill_tool(&manifest, dir.path(), "test_tool", &serde_json::json!({}))
