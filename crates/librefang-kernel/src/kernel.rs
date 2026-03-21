@@ -1714,12 +1714,24 @@ system_prompt = "You are a helpful assistant."
         }
 
         // Load workflow templates from ~/.librefang/workflows/templates/
+        // Load bundled workflow templates from the source tree
+        {
+            let bundled_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../workflows/templates");
+            let loaded = kernel.template_registry.load_templates_from_dir(&bundled_dir);
+            if loaded > 0 {
+                info!("Loaded {loaded} bundled workflow template(s)");
+            }
+        }
+
+        // Load user workflow templates from ~/.librefang/workflows/templates/
         {
             let user_dir = kernel.config.home_dir.join("workflows").join("templates");
             let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
             if loaded > 0 {
                 info!(
                     "Loaded {loaded} workflow template(s) from {}",
+                    "Loaded {loaded} user workflow template(s) from {}",
                     user_dir.display()
                 );
             }
