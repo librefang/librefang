@@ -1568,6 +1568,7 @@ pub async fn start_channel_bridge_with_config(
                     dc_config.allowed_guilds.clone(),
                     dc_config.allowed_users.clone(),
                     dc_config.ignore_bots,
+                    dc_config.mention_patterns.clone(),
                     dc_config.intents,
                 )
                 .with_account_id(dc_config.account_id.clone()),

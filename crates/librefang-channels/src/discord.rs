@@ -41,6 +41,8 @@ pub struct DiscordAdapter {
     allowed_guilds: Vec<String>,
     allowed_users: Vec<String>,
     ignore_bots: bool,
+    /// Custom text patterns that trigger the bot (case-insensitive).
+    mention_patterns: Vec<String>,
     intents: u64,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
@@ -60,6 +62,7 @@ impl DiscordAdapter {
         allowed_guilds: Vec<String>,
         allowed_users: Vec<String>,
         ignore_bots: bool,
+        mention_patterns: Vec<String>,
         intents: u64,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -69,6 +72,7 @@ impl DiscordAdapter {
             allowed_guilds,
             allowed_users,
             ignore_bots,
+            mention_patterns,
             intents,
             account_id: None,
             shutdown_tx: Arc::new(shutdown_tx),
@@ -172,6 +176,7 @@ impl ChannelAdapter for DiscordAdapter {
         let allowed_guilds = self.allowed_guilds.clone();
         let allowed_users = self.allowed_users.clone();
         let ignore_bots = self.ignore_bots;
+        let mention_patterns = self.mention_patterns.clone();
         let bot_user_id = self.bot_user_id.clone();
         let session_id_store = self.session_id.clone();
         let resume_url_store = self.resume_gateway_url.clone();
@@ -338,6 +343,7 @@ impl ChannelAdapter for DiscordAdapter {
                                         &allowed_guilds,
                                         &allowed_users,
                                         ignore_bots,
+                                        &mention_patterns,
                                     )
                                     .await
                                     {
@@ -466,6 +472,7 @@ async fn parse_discord_message(
     allowed_guilds: &[String],
     allowed_users: &[String],
     ignore_bots: bool,
+    mention_patterns: &[String],
 ) -> Option<ChannelMessage> {
     let author = d.get("author")?;
     let author_id = author["id"].as_str()?;
@@ -562,6 +569,14 @@ async fn parse_discord_message(
     } else {
         false
     };
+    // Also check custom mention patterns (case-insensitive contains match)
+    let was_mentioned = was_mentioned
+        || (!mention_patterns.is_empty() && {
+            let lower = content_text.to_lowercase();
+            mention_patterns
+                .iter()
+                .any(|pat| lower.contains(&pat.to_lowercase()))
+        });
 
     let mut metadata = HashMap::new();
     if was_mentioned {
@@ -683,7 +698,7 @@ mod tests {
             "timestamp": "2024-01-01T00:00:00+00:00"
         });
 
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], true)
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true, &[])
             .await
             .unwrap();
         assert_eq!(msg.channel, ChannelType::Discord);
@@ -707,7 +722,7 @@ mod tests {
             "timestamp": "2024-01-01T00:00:00+00:00"
         });
 
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], true).await;
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true, &[]).await;
         assert!(msg.is_none());
     }
 
@@ -727,7 +742,7 @@ mod tests {
             "timestamp": "2024-01-01T00:00:00+00:00"
         });
 
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], true).await;
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true, &[]).await;
         assert!(msg.is_none());
     }
 
@@ -748,7 +763,7 @@ mod tests {
         });
 
         // With ignore_bots=false, other bots' messages should be allowed
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], false).await;
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], false, &[]).await;
         assert!(msg.is_some());
         let msg = msg.unwrap();
         assert_eq!(msg.sender.display_name, "somebot");
@@ -772,7 +787,7 @@ mod tests {
         });
 
         // Even with ignore_bots=false, the bot's own messages must still be filtered
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], false).await;
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], false, &[]).await;
         assert!(msg.is_none());
     }
 
@@ -794,11 +809,11 @@ mod tests {
 
         // Not in allowed guilds
         let msg =
-            parse_discord_message(&d, &bot_id, &["111".into(), "222".into()], &[], true).await;
+            parse_discord_message(&d, &bot_id, &["111".into(), "222".into()], &[], true, &[]).await;
         assert!(msg.is_none());
 
         // In allowed guilds
-        let msg = parse_discord_message(&d, &bot_id, &["999".into()], &[], true).await;
+        let msg = parse_discord_message(&d, &bot_id, &["999".into()], &[], true, &[]).await;
         assert!(msg.is_some());
     }
 
@@ -817,7 +832,7 @@ mod tests {
             "timestamp": "2024-01-01T00:00:00+00:00"
         });
 
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], true)
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true, &[])
             .await
             .unwrap();
         match &msg.content {
@@ -844,7 +859,7 @@ mod tests {
             "timestamp": "2024-01-01T00:00:00+00:00"
         });
 
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], true).await;
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true, &[]).await;
         assert!(msg.is_none());
     }
 
@@ -863,7 +878,7 @@ mod tests {
             "timestamp": "2024-01-01T00:00:00+00:00"
         });
 
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], true)
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true, &[])
             .await
             .unwrap();
         assert_eq!(msg.sender.display_name, "alice#1234");
@@ -887,7 +902,7 @@ mod tests {
         });
 
         // MESSAGE_UPDATE uses the same parse function as MESSAGE_CREATE
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], true)
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true, &[])
             .await
             .unwrap();
         assert_eq!(msg.channel, ChannelType::Discord);
@@ -918,16 +933,17 @@ mod tests {
             &[],
             &["user111".into(), "user222".into()],
             true,
+            &[],
         )
         .await;
         assert!(msg.is_none());
 
         // In allowed users
-        let msg = parse_discord_message(&d, &bot_id, &[], &["user999".into()], true).await;
+        let msg = parse_discord_message(&d, &bot_id, &[], &["user999".into()], true, &[]).await;
         assert!(msg.is_some());
 
         // Empty allowed_users = allow all
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], true).await;
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true, &[]).await;
         assert!(msg.is_some());
     }
 
@@ -950,7 +966,7 @@ mod tests {
             "timestamp": "2024-01-01T00:00:00+00:00"
         });
 
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], true)
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true, &[])
             .await
             .unwrap();
         assert!(msg.is_group);
@@ -973,7 +989,7 @@ mod tests {
             "timestamp": "2024-01-01T00:00:00+00:00"
         });
 
-        let msg2 = parse_discord_message(&d2, &bot_id, &[], &[], true)
+        let msg2 = parse_discord_message(&d2, &bot_id, &[], &[], true, &[])
             .await
             .unwrap();
         assert!(msg2.is_group);
@@ -995,7 +1011,7 @@ mod tests {
             "timestamp": "2024-01-01T00:00:00+00:00"
         });
 
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], true)
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true, &[])
             .await
             .unwrap();
         assert!(!msg.is_group);
@@ -1008,6 +1024,7 @@ mod tests {
             vec!["123".to_string(), "456".to_string()],
             vec![],
             true,
+            vec![],
             37376,
         );
         assert_eq!(adapter.name(), "discord");
@@ -1113,7 +1130,7 @@ mod tests {
             }]
         });
 
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], true)
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true, &[])
             .await
             .unwrap();
         match &msg.content {
@@ -1149,7 +1166,7 @@ mod tests {
         });
 
         // Should NOT be None — attachment-only messages must be accepted
-        let msg = parse_discord_message(&d, &bot_id, &[], &[], true)
+        let msg = parse_discord_message(&d, &bot_id, &[], &[], true, &[])
             .await
             .unwrap();
         assert!(matches!(msg.content, ChannelContent::File { .. }));

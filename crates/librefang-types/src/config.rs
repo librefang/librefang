@@ -2494,6 +2494,11 @@ pub struct DiscordConfig {
     /// Set to false to allow bot-to-bot interactions in multi-agent setups.
     #[serde(default = "default_true")]
     pub ignore_bots: bool,
+    /// Custom text patterns that trigger the bot (case-insensitive contains match).
+    /// When any pattern matches the message content, the bot treats it as if it was mentioned.
+    /// Example: `["hey bot", "!ask"]`
+    #[serde(default)]
+    pub mention_patterns: Vec<String>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2509,6 +2514,7 @@ impl Default for DiscordConfig {
             default_agent: None,
             intents: 37376,
             ignore_bots: true,
+            mention_patterns: vec![],
             overrides: ChannelOverrides::default(),
         }
     }
