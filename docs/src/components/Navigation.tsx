@@ -211,8 +211,8 @@ function NavigationGroup({
 											transition: { duration: 0.15 },
 										}}
 									>
-										{sections.map((section) => (
-											<li key={section.id}>
+										{sections.map((section, sectionIndex) => (
+											<li key={section.id || `section-${sectionIndex}`}>
 												<NavLink
 													href={`${link.href}#${section.id}`}
 													tag={section.tag}
