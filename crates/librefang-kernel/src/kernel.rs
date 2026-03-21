@@ -1090,7 +1090,13 @@ impl LibreFangKernel {
                     .provider_urls
                     .get(provider.as_str())
                     .map(|s| s.as_str());
-                match create_embedding_driver(provider, model, api_key_env, custom_url) {
+                match create_embedding_driver(
+                    provider,
+                    model,
+                    api_key_env,
+                    custom_url,
+                    config.memory.embedding_dimensions,
+                ) {
                     Ok(d) => {
                         info!(provider = %provider, model = %model, "Embedding driver configured from memory config");
                         Some(Arc::from(d))
@@ -1107,7 +1113,13 @@ impl LibreFangKernel {
                     configured_model.as_str()
                 };
                 let openai_url = config.provider_urls.get("openai").map(|s| s.as_str());
-                match create_embedding_driver("openai", model, "OPENAI_API_KEY", openai_url) {
+                match create_embedding_driver(
+                    "openai",
+                    model,
+                    "OPENAI_API_KEY",
+                    openai_url,
+                    config.memory.embedding_dimensions,
+                ) {
                     Ok(d) => {
                         info!(model = %model, "Embedding driver auto-detected: OpenAI");
                         Some(Arc::from(d))
@@ -1125,7 +1137,13 @@ impl LibreFangKernel {
                     configured_model.as_str()
                 };
                 let ollama_url = config.provider_urls.get("ollama").map(|s| s.as_str());
-                match create_embedding_driver("ollama", model, "", ollama_url) {
+                match create_embedding_driver(
+                    "ollama",
+                    model,
+                    "",
+                    ollama_url,
+                    config.memory.embedding_dimensions,
+                ) {
                     Ok(d) => {
                         info!(model = %model, "Embedding driver auto-detected: Ollama (local)");
                         Some(Arc::from(d))

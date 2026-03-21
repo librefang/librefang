@@ -2263,6 +2263,9 @@ pub struct MemoryConfig {
     /// Environment variable name for the embedding API key.
     #[serde(default)]
     pub embedding_api_key_env: Option<String>,
+    /// Override embedding dimensions instead of auto-inferring from model name.
+    #[serde(default)]
+    pub embedding_dimensions: Option<usize>,
     /// How often to run memory consolidation (hours). 0 = disabled.
     #[serde(default = "default_consolidation_interval")]
     pub consolidation_interval_hours: u64,
@@ -2281,6 +2284,7 @@ impl Default for MemoryConfig {
             decay_rate: 0.1,
             embedding_provider: None,
             embedding_api_key_env: None,
+            embedding_dimensions: None,
             consolidation_interval_hours: default_consolidation_interval(),
         }
     }
