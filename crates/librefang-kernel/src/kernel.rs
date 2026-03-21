@@ -7647,6 +7647,68 @@ mod tests {
     }
 
     #[test]
+    fn test_hand_reactivation_rebuilds_same_runtime_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home_dir = tmp.path().join("librefang-kernel-reactivation-test");
+        std::fs::create_dir_all(&home_dir).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        let first_instance = kernel
+            .activate_hand("browser", HashMap::new())
+            .expect("browser hand should activate the first time");
+        let first_agent_id = first_instance.agent_id.expect("first browser agent id");
+        let first_entry = kernel
+            .registry
+            .get(first_agent_id)
+            .expect("first browser hand agent entry");
+        let first_manifest = first_entry.manifest.clone();
+
+        kernel
+            .deactivate_hand(first_instance.instance_id)
+            .expect("browser hand should deactivate cleanly");
+
+        let second_instance = kernel
+            .activate_hand("browser", HashMap::new())
+            .expect("browser hand should activate the second time");
+        let second_agent_id = second_instance.agent_id.expect("second browser agent id");
+        let second_entry = kernel
+            .registry
+            .get(second_agent_id)
+            .expect("second browser hand agent entry");
+        let second_manifest = second_entry.manifest.clone();
+
+        assert_eq!(
+            second_manifest.capabilities.tools, first_manifest.capabilities.tools,
+            "reactivation should rebuild the same explicit tool set"
+        );
+        assert_eq!(
+            second_manifest.profile, first_manifest.profile,
+            "reactivation should preserve the same runtime profile"
+        );
+        assert_eq!(
+            second_manifest.tool_allowlist, first_manifest.tool_allowlist,
+            "reactivation should preserve the runtime tool allowlist"
+        );
+        assert_eq!(
+            second_manifest.tool_blocklist, first_manifest.tool_blocklist,
+            "reactivation should preserve the runtime tool blocklist"
+        );
+        assert_eq!(
+            second_manifest.mcp_servers, first_manifest.mcp_servers,
+            "reactivation should preserve MCP server assignments"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[test]
     fn test_available_tools_returns_empty_when_tools_disabled() {
         let tmp = tempfile::tempdir().unwrap();
         let home_dir = tmp.path().join("librefang-kernel-tools-disabled-test");
