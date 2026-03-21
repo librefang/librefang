@@ -1,12 +1,12 @@
 # Channel Adapters
 
-LibreFang connects to messaging platforms through **43 channel adapters**, allowing users to interact with their agents across every major communication platform. Adapters span consumer messaging, enterprise collaboration, social media, community platforms, privacy-focused protocols, and generic webhooks.
+LibreFang connects to messaging platforms through **44 channel adapters**, allowing users to interact with their agents across every major communication platform. Adapters span consumer messaging, enterprise collaboration, social media, community platforms, privacy-focused protocols, generic webhooks, and extensible sidecar processes.
 
 All adapters share a common foundation: graceful shutdown via `watch::channel`, exponential backoff on connection failures, `Zeroizing<String>` for secrets, automatic message splitting for platform limits, per-channel model/prompt overrides, DM/group policy enforcement, per-user rate limiting, and output formatting (Markdown, TelegramHTML, SlackMrkdwn, PlainText).
 
 ## Table of Contents
 
-- [All 43 Channels](#all-43-channels)
+- [All 44 Channels](#all-44-channels)
 - [Channel Configuration](#channel-configuration)
 - [Channel Overrides](#channel-overrides)
 - [Formatter, Rate Limiter, and Policies](#formatter-rate-limiter-and-policies)
@@ -23,7 +23,7 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 
 ---
 
-## All 43 Channels
+## All 44 Channels
 
 ### Core (7)
 
@@ -106,12 +106,13 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 | ntfy | SSE pub/sub | `NTFY_TOPIC`, `NTFY_SERVER` | `Custom("ntfy")` |
 | Gotify | WebSocket | `GOTIFY_TOKEN`, `GOTIFY_URL` | `Custom("gotify")` |
 
-### Integration (2)
+### Integration (3)
 
 | Channel | Protocol | Env Vars | ChannelType Variant |
 |---------|----------|----------|---------------------|
 | Webhook | Generic HTTP with HMAC-SHA256 | `WEBHOOK_URL`, `WEBHOOK_SECRET` | `Custom("webhook")` |
 | MQTT | MQTT v3.1.1/v5 pub/sub | `MQTT_HOST`, `MQTT_USERNAME`, `MQTT_PASSWORD` (optional) | `Custom("mqtt")` |
+| Sidecar | JSON-RPC over stdin/stdout | _(configured per sidecar)_ | `Custom("sidecar")` |
 
 **MQTT Notes:** Requires the `all-channels` feature flag at compile time. Uses the `rumqttc` crate for MQTT v3.1.1/v5 support with automatic reconnection and exponential backoff. Subscribes to configurable topics for incoming messages and publishes agent responses to a configurable response topic.
 
@@ -180,7 +181,7 @@ default_agent = "home-assistant"
 | Matrix | `MATRIX_TOKEN` |
 | Email | `EMAIL_PASSWORD` |
 
-Env vars for all other channels are listed in the [All 43 Channels](#all-43-channels) tables above.
+Env vars for all other channels are listed in the [All 44 Channels](#all-44-channels) tables above.
 
 ---
 

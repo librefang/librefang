@@ -36,7 +36,7 @@ librefang-api            REST/WS/SSE API server (Axum 0.8), 230+ endpoints
 librefang-kernel         Kernel: assembles all subsystems, workflow engine, RBAC, metering
     |
     +-- librefang-runtime      Agent loop, 3 LLM drivers, 60 tools, WASM sandbox, MCP, A2A
-    +-- librefang-channels     42 channel adapters, bridge, formatter, rate limiter
+    +-- librefang-channels     44 channel adapters, bridge, formatter, rate limiter
     +-- librefang-wire         OFP peer-to-peer networking with HMAC-SHA256 auth
     +-- librefang-migrate      Migration engine (OpenClaw YAML->TOML)
     +-- librefang-skills       60 bundled skills, FangHub marketplace, ClawHub client
@@ -58,7 +58,7 @@ librefang-types          Shared types: Agent, Capability, Event, Memory, Message
 | **librefang-runtime** | Agent execution engine. Contains the agent loop (`run_agent_loop`, `run_agent_loop_streaming`), 3 native LLM drivers (Anthropic, Gemini, OpenAI-compatible covering 28 providers), 60 built-in tools, WASM sandbox (Wasmtime with dual fuel+epoch metering), MCP client/server (JSON-RPC 2.0 over stdio/SSE), A2A protocol (AgentCard, task management), web search engine (4 providers: Tavily/Brave/Perplexity/DuckDuckGo), web fetch with SSRF protection, loop guard (SHA256-based tool loop detection), session repair (history validation), LLM session compactor (block-aware), Merkle hash chain audit trail, embedding driver, browser automation (Playwright, `browser.rs`), Docker sandbox execution (`docker_sandbox.rs`), image generation (`image_gen.rs`), text-to-speech (`tts.rs`), plugin manager (`plugin_manager.rs`), context engine (`context_engine.rs`), proactive memory (`proactive_memory.rs`), and process manager (`process_manager.rs`). Defines the `KernelHandle` trait that enables inter-agent tools without circular crate dependencies. |
 | **librefang-kernel** | The central coordinator. `LibreFangKernel` assembles all subsystems: `AgentRegistry`, `AgentScheduler`, `CapabilityManager`, `EventBus`, `Supervisor`, `WorkflowEngine`, `TriggerEngine`, `BackgroundExecutor`, `WasmSandbox`, `ModelCatalog`, `MeteringEngine`, `ModelRouter`, `AuthManager` (RBAC), `HeartbeatMonitor`, `SetupWizard`, `SkillRegistry`, MCP connections, and `WebToolsContext`. Implements `KernelHandle` for inter-agent operations. Handles agent spawn/kill, message dispatch, workflow execution, trigger evaluation, capability inheritance validation, and graceful shutdown with state persistence. |
 | **librefang-api** | HTTP API server built on Axum 0.8 with 230+ endpoints. Routes for agents, workflows, triggers, memory, channels, templates, models, providers, skills, ClawHub, MCP, health, status, version, and shutdown. WebSocket handler for real-time agent chat with streaming. SSE endpoint for streaming responses. OpenAI-compatible endpoints (`POST /v1/chat/completions`, `GET /v1/models`). A2A endpoints (`/.well-known/agent.json`, `/a2a/*`). Middleware: Bearer token auth, request ID injection, structured request logging, GCRA rate limiter (cost-aware), security headers (CSP, X-Frame-Options, etc.), health endpoint redaction. Serves two dashboard UIs: the legacy Alpine.js SPA (`static/index_body.html`) and the modern React dashboard (`static/react/`, built with Vite + React + TanStack Router/Query). Both dashboards coexist and share the same REST/WS API surface. |
-| **librefang-channels** | Channel bridge layer with 42 adapters. Each adapter implements the `ChannelAdapter` trait. Includes: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, SMS, Webhook, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP, LINE, Viber, Messenger, Reddit, Mastodon, Bluesky, Feishu, Revolt, Nextcloud, Guilded, Keybase, Threema, Nostr, Webex, Pumble, Flock, Twist, Mumble, DingTalk, QQ, WeCom (WeChat Work), Discourse, Gitter, Ntfy, Gotify, LinkedIn. Features: `AgentRouter` for message routing, `BridgeManager` for lifecycle coordination, `ChannelRateLimiter` (per-user DashMap tracking), `formatter.rs` (Markdown to TelegramHTML/SlackMrkdwn/PlainText), `ChannelOverrides` (model/system_prompt/dm_policy/group_policy/rate_limit/threading/output_format), DM/group policy enforcement, sidecar_channels mechanism for auxiliary channel wiring. |
+| **librefang-channels** | Channel bridge layer with 44 adapters. Each adapter implements the `ChannelAdapter` trait. Includes: Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Webhook, MQTT, Sidecar, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP, LINE, Viber, Messenger, Reddit, Mastodon, Bluesky, Feishu, Revolt, Nextcloud, Guilded, Keybase, Threema, Nostr, Webex, Pumble, Flock, Twist, Mumble, DingTalk, QQ, WeCom (WeChat Work), Discourse, Gitter, Ntfy, Gotify, LinkedIn. Features: `AgentRouter` for message routing, `BridgeManager` for lifecycle coordination, `ChannelRateLimiter` (per-user DashMap tracking), `formatter.rs` (Markdown to TelegramHTML/SlackMrkdwn/PlainText), `ChannelOverrides` (model/system_prompt/dm_policy/group_policy/rate_limit/threading/output_format), DM/group policy enforcement, sidecar_channels mechanism for auxiliary channel wiring. |
 | **librefang-wire** | LibreFang Protocol (OFP) for peer-to-peer agent communication. JSON-framed messages over TCP with HMAC-SHA256 mutual authentication (nonce + constant-time verify via `subtle`). `PeerNode` listens for connections and manages peers. `PeerRegistry` tracks known remote peers and their agents. |
 | **librefang-cli** | Clap-based CLI. Supports all commands: `init`, `start`, `status`, `doctor`, `agent spawn/list/chat/kill`, `workflow list/create/run`, `trigger list/create/delete`, `migrate`, `skill install/list/remove/search/create`, `channel list/setup/test/enable/disable`, `config show/edit`, `chat`, `mcp`. Daemon auto-detect: checks `~/.librefang/daemon.json` and health pings; uses HTTP when a daemon is running, boots an in-process kernel as fallback. Built-in MCP server mode. |
 | **librefang-desktop** | Tauri 2.0 native desktop application. Boots the kernel in-process, runs the axum server on a background thread, and points a WebView at `http://127.0.0.1:{random_port}`. Features: system tray (Show/Browser/Status/Quit), single-instance enforcement, desktop notifications, hide-to-tray on close. IPC commands: `get_port`, `get_status`. Mobile-ready with `#[cfg(desktop)]` guards. |
@@ -611,7 +611,7 @@ See [Agent Loop Stability](#agent-loop-stability) above.
 
 ## Channel System
 
-The channel system (`librefang-channels`) provides 42 adapters for messaging platform integration.
+The channel system (`librefang-channels`) provides 44 adapters for messaging platform integration.
 
 ### Adapter List
 
@@ -620,9 +620,9 @@ The channel system (`librefang-channels`) provides 42 adapters for messaging pla
 | **Wave 1 (15)** | Telegram, Discord, Slack, WhatsApp, Signal, Matrix, Email, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP |
 | **Wave 2 (8)** | LINE, Viber, Messenger, Reddit, Mastodon, Bluesky, Feishu, Revolt |
 | **Wave 3 (9)** | Nextcloud, Guilded, Keybase, Threema, Nostr, Webex, Pumble, Flock, Twist |
-| **Wave 4 (10)** | Mumble, DingTalk, QQ, WeCom (WeChat Work), Discourse, Gitter, Ntfy, Gotify, Webhook, LinkedIn |
+| **Wave 4 (12)** | Mumble, DingTalk, QQ, WeCom (WeChat Work), Discourse, Gitter, Ntfy, Gotify, Webhook, LinkedIn, MQTT, Sidecar |
 
-> Note: Webhook adapter in Wave 4 supports MQTT-over-webhook payloads via the sidecar_channels mechanism. Total: 42 adapters.
+> Total: 44 adapters. The Sidecar adapter enables external processes written in any language to act as channel adapters via JSON-RPC over stdin/stdout.
 
 ### Channel Features
 
@@ -928,7 +928,7 @@ The desktop app (`librefang-desktop`) wraps the full LibreFang stack in a native
 |                  |  | channels     |  | fang-  |  | skills    |
 | +------------+   |  |              |  | wire   |  |           |
 | | Agent Loop |   |  | +----------+|  |        |  | +-------+ |
-| | +LoopGuard |   |  | | 42 Chan  ||  | +----+ |  | |60 Bun| |
+| | +LoopGuard |   |  | | 44 Chan  ||  | +----+ |  | |60 Bun| |
 | | +SessRepair|   |  | | Adapters ||  | |OFP | |  | |Skills | |
 | +------------+   |  | +----------+|  | |HMAC| |  | +-------+ |
 | +------------+   |  | +----------+|  | +----+ |  | +-------+ |

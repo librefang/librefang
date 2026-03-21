@@ -292,7 +292,7 @@ role = "user"
 slack = "U0123ABCDEF"
 
 # --- Channel Adapters ---
-# (See "Channels" section below for all 40 adapters)
+# (See "Channels" section below for all 44 adapters)
 
 [channels.telegram]
 bot_token_env = "TELEGRAM_BOT_TOKEN"
@@ -699,7 +699,7 @@ timeout_secs = 10
 
 ### `[channels]`
 
-All 42 channel adapters are configured under `[channels.<name>]`. Each channel is `Option<T>` -- omitting the section disables the adapter entirely. Including the section header (even empty) enables it with default values.
+All 44 channel adapters are configured under `[channels.<name>]`. Each channel is `Option<T>` -- omitting the section disables the adapter entirely. Including the section header (even empty) enables it with default values.
 
 **Universal channel fields:** Every channel adapter supports the following common fields in addition to its own specific fields:
 

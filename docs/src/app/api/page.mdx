@@ -898,7 +898,7 @@ Import proactive memory entries for an agent from JSON.
 
 ### GET /api/channels
 
-List configured channel adapters and their status. Supports 42 channel adapters including Telegram, Discord, Slack, WhatsApp, Matrix, Email, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP, LINE, Viber, Messenger, Reddit, Mastodon, Bluesky, and more.
+List configured channel adapters and their status. Supports 44 channel adapters including Telegram, Discord, Slack, WhatsApp, Matrix, Email, Teams, Mattermost, IRC, Google Chat, Twitch, Rocket.Chat, Zulip, XMPP, LINE, Viber, Messenger, Reddit, Mastodon, Bluesky, and more.
 
 **Response** `200 OK`:
 
@@ -3305,7 +3305,7 @@ The `Retry-After` header indicates the window duration in seconds.
 | GET | `/api/memory/agents/{id}/export` | Export agent memories |
 | POST | `/api/memory/agents/{id}/import` | Import agent memories |
 | **Channels** | | |
-| GET | `/api/channels` | List channels (40 adapters) |
+| GET | `/api/channels` | List channels (44 adapters) |
 | GET | `/api/channels/{name}` | Get channel config |
 | POST | `/api/channels/{name}/configure` | Configure channel |
 | DELETE | `/api/channels/{name}/configure` | Remove channel config |
