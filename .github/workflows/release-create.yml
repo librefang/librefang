@@ -54,14 +54,11 @@ jobs:
             echo ""
             echo "## Installation"
             echo ""
-            echo '**Desktop App (macOS):**'
+            echo '**Homebrew (macOS):**'
             echo '```bash'
-            echo 'brew install --cask librefang/tap/librefang'
-            echo '```'
-            echo ""
-            echo '**CLI (macOS):**'
-            echo '```bash'
-            echo 'brew install librefang/tap/librefang'
+            echo 'brew tap librefang/tap'
+            echo 'brew install librefang        # CLI'
+            echo 'brew install --cask librefang  # Desktop App'
             echo '```'
             echo ""
             echo '**CLI (Linux/macOS):**'
