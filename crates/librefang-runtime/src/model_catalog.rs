@@ -153,9 +153,25 @@ impl ModelCatalog {
     /// Find a model by its canonical ID, display name, or alias.
     pub fn find_model(&self, id_or_alias: &str) -> Option<&ModelCatalogEntry> {
         let lower = id_or_alias.to_lowercase();
-        // Direct ID match first
-        if let Some(entry) = self.models.iter().find(|m| m.id.to_lowercase() == lower) {
-            return Some(entry);
+        // Direct ID match — prefer Custom tier entries over builtins so that
+        // user-defined custom models (from custom_models.json) take precedence
+        // when the same model ID exists under a different provider (#983).
+        {
+            let mut found: Option<&ModelCatalogEntry> = None;
+            for m in &self.models {
+                if m.id.to_lowercase() == lower {
+                    if m.tier == ModelTier::Custom {
+                        // Custom model always wins — return immediately
+                        return Some(m);
+                    }
+                    if found.is_none() {
+                        found = Some(m);
+                    }
+                }
+            }
+            if let Some(entry) = found {
+                return Some(entry);
+            }
         }
         // Display-name match for dashboard/UI payloads that send labels.
         if let Some(entry) = self
@@ -1093,6 +1109,39 @@ mod tests {
 
         assert_eq!(qwen_count, 1);
         assert_eq!(minimax_count, 1);
+    }
+
+    #[test]
+    fn test_find_model_prefers_custom_over_builtin() {
+        // Regression test for #983: when a custom model shares the same ID as a
+        // builtin model but specifies a different provider, find_model must
+        // return the custom entry so the correct provider is used for routing.
+        let mut catalog = test_catalog();
+
+        // Pick a known builtin model and verify it exists
+        let builtin = catalog.find_model("grok-2").unwrap();
+        assert_eq!(builtin.provider, "xai");
+
+        // Add a custom model with the same ID but a different provider
+        assert!(catalog.add_custom_model(ModelCatalogEntry {
+            id: "grok-2".to_string(),
+            display_name: "Grok 2 via OpenRouter".to_string(),
+            provider: "openrouter".to_string(),
+            tier: ModelTier::Custom,
+            context_window: 131_072,
+            max_output_tokens: 8_192,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: Vec::new(),
+        }));
+
+        // find_model should now return the custom entry, not the builtin
+        let found = catalog.find_model("grok-2").unwrap();
+        assert_eq!(found.provider, "openrouter");
+        assert_eq!(found.tier, ModelTier::Custom);
     }
 
     #[test]
