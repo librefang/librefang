@@ -5,6 +5,88 @@ All notable changes to LibreFang will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Calendar Versioning](https://calver.org/) (YYYY.M.DDHH).
 
+## [2026.3.22] - 2026-03-22
+
+### Added
+
+- Add pipeline runner agents + IMAP email reader script (#1307) (@devatsecure)
+- Add ChatGPT device auth flow (#1332) (@poruru-code)
+- Add Qwen International and US provider endpoints (#1370) (@houko)
+- Add custom log directory config (#1379) (@houko)
+- Enrich ClassifiedError with provider/model context (#1380) (@houko)
+- Add rustfmt.toml for consistent code formatting (#1381) (@houko)
+- Display version and git hash in startup logs (#1382) (@houko)
+- Add unfurl_links config option for Slack channel (#1383) (@houko)
+- Add DeepInfra as LLM provider (#1384) (@houko)
+- Add configurable embedding dimensions (#1386) (@houko)
+- Add config validation with tolerant mode (#1387) (@houko)
+- Add Azure OpenAI provider support (#1388) (@houko)
+- Add force_flat_replies config for Slack channels (#1390) (@houko)
+- Add fts_only mode for memory indexing without embedding (#1391) (@houko)
+- Add global workspace directory for cross-session persistence (#1392) (@houko)
+- Add mention_patterns config for Discord channels (#1394) (@houko)
+- Add WorkflowTemplate types and in-memory registry (#1395) (@houko)
+- Add configurable session reset prompt (#1396) (@houko)
+- Add per-agent plugin scoping with allowed_plugins (#1399) (@houko)
+- Add /reboot slash command for graceful context reset (#1401) (@houko)
+- Support arbitrary config keys in skill entries (#1402) (@houko)
+- Add Homebrew Cask CI sync and improve Formula generation (#1404) (@houko)
+- Comprehensive React dashboard UI/UX overhaul (#1419) (@houko)
+- Add refresh param to bypass worker cache for migration (#1426) (@houko)
+- Add Japanese dashboard localization (#1427) (@poruru-code)
+- Add a new Librefang promotional SVG banner and update the corre… (#1429) (@houko)
+- Just api starts dashboard dev server alongside API (#1434) (@houko)
+
+### Fixed
+
+- Register aliases for custom models (#1366) (@TechWizard9999)
+- Knowledge_query JOIN matches entities by name or ID (#1369) (@houko)
+- Browser hand connection failure on Windows (#1371) (@houko)
+- Infinite retry guard, dead branch cleanup, body size limit (#1372) (@houko)
+- Workflow editor save handles nested mode/error_mode from frontend (#1373) (@houko)
+- Scope knowledge JOIN by agent_id and add entities.name index (#1374) (@houko)
+- Replace fragile cmd.len() < 50 heuristic in LoopGuard poll detection (#1378) (@houko)
+- Fix sidebar navigation, broken links, and i18n issues (#1385) (@houko)
+- Comprehensive website polish and bug fixes (#1389) (@houko)
+- Accept [hand] wrapper in HAND.toml format (#1393) (@houko)
+- Fix OG image, brand naming, PWA manifest, and missing i18n keys (#1397) (@houko)
+- Improve Qwen Code CLI path detection (#1398) (@houko)
+- Respect provider field when routing custom models (#1400) (@houko)
+- Remove empty sections overrides and fix mobile nav indicators (#1406) (@houko)
+- Correct Docker compose port binding for admin interface (#944) (#1407) (@houko)
+- Allow hyphens in MCP server names (#947) (#1408) (@houko)
+- Resolve GitHub stats zeros and optimize KV operations (#1409) (@houko)
+- Load .env files in desktop app (#1410) (@houko)
+- Prevent streaming interrupts during multi-tool sequences (#1411) (@houko)
+- Resolve skill file paths for installed skill execution (#1412) (@houko)
+- Cache workspace and skill metadata to reduce per-message overhead (#1414) (@houko)
+- Replace processed images with text placeholders in session history (#911) (#1416) (@houko)
+- Migrate old KV keys to history blob and handle sparse chart data (#1422) (@houko)
+- Complete dashboard i18n coverage for goals and analytics (#1423) (@poruru-code)
+- Correct provider counts, model numbers, and free tier status (#1424) (@houko)
+- Update Hands count to 14 and add deploy/registry links (#1428) (@houko)
+- Release.sh grep compatibility on macOS (#1431) (@houko)
+- Correct Cloudflare Pages _redirects SPA fallback format (#1432) (@houko)
+- Release.sh — macOS grep compat + full diff link (#1433) (@houko)
+- Generate anchor IDs for h3 headings and preserve TOML-style names (#1435) (@houko)
+
+### Changed
+
+- Switch to CalVer (YYYY.M.DDHH) (#1375) (@houko)
+
+### Documentation
+
+- Comprehensive review — fix errors, update numbers, add missing sections (#1368) (@houko)
+
+### Maintenance
+
+- Lock api status version regression (#1363) (@TechWizard9999)
+- Cover hand reactivation runtime profile (#1365) (@TechWizard9999)
+- Cover local model default override routing (#1367) (@TechWizard9999)
+- Auto-update PR branches on main push (#1417) (@houko)
+- Add GitHub Stats Worker to deploy workflow (#1420) (@houko)
+- Remove deploy worker job-level if conditions that fail on squash merges (#1425) (@houko)
+
 ## [2026.3.21] - 2026-03-21
 
 ### Added
