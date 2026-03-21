@@ -3498,6 +3498,15 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]</pre>
                   </div>
                   <div class="card-meta" x-text="providerModelsText(p)"></div>
                   <div class="text-xs text-dim mt-2" x-show="p.api_key_env" x-text="envText(p.api_key_env)"></div>
+                  <!-- Region badges for multi-region providers -->
+                  <template x-if="p.regions && Object.keys(p.regions).length > 0">
+                    <div class="mt-2" style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+                      <span class="text-xs text-dim">Regions:</span>
+                      <template x-for="rn in Object.keys(p.regions)" :key="rn">
+                        <span class="badge" :style="p.active_region === rn ? 'font-size:10px;padding:1px 6px;background:var(--accent);color:white;border:1px solid var(--accent)' : 'font-size:10px;padding:1px 6px;background:var(--surface2);color:var(--text-dim);border:1px solid var(--border)'" x-text="p.active_region === rn ? rn + ' (active)' : rn"></span>
+                      </template>
+                    </div>
+                  </template>
                   <!-- Key input for unconfigured providers -->
                   <template x-if="p.auth_status !== 'configured' && p.api_key_env">
                     <div class="key-input-group">

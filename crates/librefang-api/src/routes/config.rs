@@ -798,6 +798,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
     set!("provider_urls", config.provider_urls);
     set!("provider_api_keys", provider_api_keys);
+    set!("provider_regions", config.provider_regions);
 
     set!("vertex_ai", {
         "project_id": config.vertex_ai.project_id,

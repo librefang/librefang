@@ -23,12 +23,12 @@ use librefang_types::model_catalog::{
     AI21_BASE_URL, ANTHROPIC_BASE_URL, CEREBRAS_BASE_URL, CHATGPT_BASE_URL, CHUTES_BASE_URL,
     COHERE_BASE_URL, DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL,
     GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL, KIMI_CODING_BASE_URL,
-    LEMONADE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_CN_BASE_URL, MINIMAX_INTL_BASE_URL,
-    MISTRAL_BASE_URL, MOONSHOT_BASE_URL, NVIDIA_NIM_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL,
-    OPENROUTER_BASE_URL, PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL,
-    SAMBANOVA_BASE_URL, TOGETHER_BASE_URL, VENICE_BASE_URL, VERTEX_AI_BASE_URL, VLLM_BASE_URL,
-    VOLCENGINE_BASE_URL, VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL,
-    ZAI_CODING_BASE_URL, ZHIPU_BASE_URL, ZHIPU_CODING_BASE_URL,
+    LEMONADE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL,
+    NVIDIA_NIM_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL,
+    PERPLEXITY_BASE_URL, QIANFAN_BASE_URL, QWEN_BASE_URL, REPLICATE_BASE_URL, SAMBANOVA_BASE_URL,
+    TOGETHER_BASE_URL, VENICE_BASE_URL, VERTEX_AI_BASE_URL, VLLM_BASE_URL, VOLCENGINE_BASE_URL,
+    VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL,
+    ZHIPU_CODING_BASE_URL,
 };
 use std::sync::Arc;
 
@@ -398,18 +398,8 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
     ProviderEntry {
         name: "minimax",
         aliases: &[],
-        base_url: MINIMAX_INTL_BASE_URL,
+        base_url: MINIMAX_BASE_URL,
         api_key_env: "MINIMAX_API_KEY",
-        key_required: true,
-        api_format: ApiFormat::OpenAI,
-        alt_api_key_env: None,
-        hidden: false,
-    },
-    ProviderEntry {
-        name: "minimax-cn",
-        aliases: &[],
-        base_url: MINIMAX_CN_BASE_URL,
-        api_key_env: "MINIMAX_CN_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
         alt_api_key_env: None,
@@ -645,6 +635,7 @@ fn create_driver_from_entry(
 /// - `replicate` — Replicate
 /// - `chutes` — Chutes.ai (serverless open-source model inference)
 /// - `vertex-ai` — Google Cloud Vertex AI (OAuth2 auth, enterprise Gemini)
+/// - `qwen` — Qwen / DashScope (use `provider_regions` for intl/us endpoints)
 /// - Any custom provider with `base_url` set uses OpenAI-compatible format
 pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmError> {
     let provider = config.provider.as_str();
@@ -695,7 +686,8 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
              deepseek, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
              chutes, venice, vertex-ai, nvidia-nim, codex, claude-code, qwen-code, \
-             gemini-cli, codex-cli, aider. Or set base_url for a custom OpenAI-compatible endpoint.",
+             gemini-cli, codex-cli, aider, qwen, minimax, zhipu. \
+             Or set base_url for a custom OpenAI-compatible endpoint.",
             provider
         ),
     })
@@ -881,7 +873,6 @@ mod tests {
         assert!(providers.contains(&"moonshot"));
         assert!(providers.contains(&"qwen"));
         assert!(providers.contains(&"minimax"));
-        assert!(providers.contains(&"minimax-cn"));
         assert!(providers.contains(&"zhipu"));
         assert!(providers.contains(&"zhipu_coding"));
         assert!(providers.contains(&"zai"));
@@ -896,7 +887,7 @@ mod tests {
         assert!(providers.contains(&"aider"));
         assert!(providers.contains(&"vertex-ai"));
         assert!(providers.contains(&"nvidia-nim"));
-        assert_eq!(providers.len(), 41);
+        assert_eq!(providers.len(), 40);
     }
 
     #[test]

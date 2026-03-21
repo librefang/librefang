@@ -31,6 +31,13 @@ listen_addr = "127.0.0.1:4545"           # OFP listen address
 # Prompt caching — reduces LLM costs by caching system prompts (default: true)
 # prompt_caching = true                   # Anthropic cache_control + OpenAI auto-cache
 
+# Provider region selection (provider ID → region name)
+# Some providers offer region-specific endpoints defined in registry TOML files.
+# Selecting a region overrides the provider's base_url (and optionally api_key_env).
+# [provider_regions]
+# qwen = "intl"                           # Use Qwen's international endpoint
+# minimax = "china"                       # Use MiniMax's China endpoint (uses MINIMAX_CN_API_KEY)
+
 # Channel adapters (configure tokens via environment variables)
 # [telegram]
 # bot_token_env = "TELEGRAM_BOT_TOKEN"

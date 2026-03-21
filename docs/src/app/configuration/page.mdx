@@ -156,6 +156,10 @@ include = []                          # Config file includes
 [provider_api_keys]
 # nvidia = "NVIDIA_API_KEY"
 
+[provider_regions]
+# qwen = "intl"        # Use Qwen international endpoint (dashscope-intl)
+# minimax = "china"    # Use MiniMax China endpoint (MINIMAX_CN_API_KEY)
+
 # --- Default LLM Provider ---
 [default_model]
 provider = "anthropic"
@@ -470,6 +474,7 @@ These fields sit at the root of `config.toml` (not inside any `[section]`).
 | `include` | list of strings | `[]` | Config file includes (relative paths). See [Config Include Mechanism](#config-include-mechanism). |
 | `provider_urls` | map of string→string | `{}` | Provider base URL overrides. Maps provider ID to custom base URL (e.g., `ollama = "http://192.168.1.100:11434/v1"`). Useful for self-hosted or proxied endpoints. |
 | `provider_api_keys` | map of string→string | `{}` | Provider API key env var overrides. Maps provider ID to the name of an environment variable holding the key (e.g., `nvidia = "NVIDIA_API_KEY"`). When not set for a provider, the convention `{PROVIDER_UPPER}_API_KEY` is used. |
+| `provider_regions` | map of string→string | `{}` | Provider region selection. Maps provider ID to a region name defined in the provider's registry TOML (e.g., `qwen = "intl"`). Overrides the provider's base URL and optionally its API key env var. Applied before `provider_urls` (lower priority). |
 
 **`mode` values:**
 
