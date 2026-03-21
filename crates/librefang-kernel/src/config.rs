@@ -66,6 +66,9 @@ pub fn load_config(path: Option<&Path>) -> KernelConfig {
                                     }
                                 }
                             }
+                            // Remove the legacy [api] section after migration so that
+                            // unknown-field detection does not flag it.
+                            tbl.remove("api");
                         }
                     }
 
