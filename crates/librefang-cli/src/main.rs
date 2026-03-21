@@ -6632,15 +6632,37 @@ async fn persist_chatgpt_auth(
     std::fs::create_dir_all(&home)
         .map_err(|e| format!("Failed to create LibreFang home directory: {e}"))?;
 
-    let secrets_path = home.join("secrets.env");
     let access_token = auth_result.access_token;
     let refresh_token = auth_result.refresh_token;
+    let secrets_path = write_chatgpt_secrets(
+        &home,
+        access_token.as_str(),
+        refresh_token.as_ref().map(|rt| rt.as_str()),
+    )?;
 
+    println!("\nChatGPT tokens saved to {}", secrets_path.display());
+
+    println!("Detecting best available model...");
+    let best_model = chatgpt_oauth::fetch_best_codex_model(&access_token).await;
+    println!("Selected model: {best_model}");
+
+    update_chatgpt_config(&home, &best_model)?;
+
+    println!("config.toml updated: provider = \"chatgpt\", model = \"{best_model}\"");
+    Ok(())
+}
+
+fn write_chatgpt_secrets(
+    home: &std::path::Path,
+    access_token: &str,
+    refresh_token: Option<&str>,
+) -> Result<std::path::PathBuf, String> {
+    let secrets_path = home.join("secrets.env");
     let mut env_vars: Vec<(String, String)> = vec![(
         "CHATGPT_SESSION_TOKEN".to_string(),
         access_token.to_string(),
     )];
-    if let Some(ref rt) = refresh_token {
+    if let Some(rt) = refresh_token {
         env_vars.push(("CHATGPT_REFRESH_TOKEN".to_string(), rt.to_string()));
     }
 
@@ -6665,12 +6687,10 @@ async fn persist_chatgpt_auth(
     std::fs::write(&secrets_path, updated)
         .map_err(|e| format!("Failed to write secrets.env: {e}"))?;
 
-    println!("\nChatGPT tokens saved to {}", secrets_path.display());
+    Ok(secrets_path)
+}
 
-    println!("Detecting best available model...");
-    let best_model = chatgpt_oauth::fetch_best_codex_model(&access_token).await;
-    println!("Selected model: {best_model}");
-
+fn update_chatgpt_config(home: &std::path::Path, best_model: &str) -> Result<(), String> {
     let config_path = home.join("config.toml");
     let config_str = std::fs::read_to_string(&config_path).unwrap_or_default();
     let mut doc = if config_str.trim().is_empty() {
@@ -6688,16 +6708,15 @@ async fn persist_chatgpt_auth(
         .ok_or("default_model is not a table")?;
     dm.insert("provider", toml_edit::value("chatgpt"));
     dm.insert("api_key_env", toml_edit::value("CHATGPT_SESSION_TOKEN"));
-    dm.insert("model", toml_edit::value(&best_model));
+    dm.insert("model", toml_edit::value(best_model));
     dm.insert(
         "base_url",
-        toml_edit::value(chatgpt_oauth::CHATGPT_BASE_URL),
+        toml_edit::value(librefang_runtime::chatgpt_oauth::CHATGPT_BASE_URL),
     );
 
     std::fs::write(&config_path, doc.to_string())
         .map_err(|e| format!("Failed to write config.toml: {e}"))?;
 
-    println!("config.toml updated: provider = \"chatgpt\", model = \"{best_model}\"");
     Ok(())
 }
 

@@ -89,21 +89,6 @@ pub enum DeviceAuthFlowError {
     Fatal(String),
 }
 
-impl DeviceAuthFlowError {
-    /// Return true when the caller should fall back to browser auth.
-    pub fn should_fallback_to_browser(&self) -> bool {
-        matches!(self, Self::BrowserFallback { .. })
-    }
-
-    /// Return the user-facing message for logging or CLI output.
-    pub fn message(&self) -> &str {
-        match self {
-            Self::BrowserFallback { message } => message,
-            Self::Fatal(message) => message,
-        }
-    }
-}
-
 #[derive(Debug, Deserialize)]
 struct DeviceAuthPromptEnvelope {
     device_auth_id: String,
@@ -271,7 +256,13 @@ pub async fn poll_device_auth_flow(prompt: &DeviceAuthPrompt) -> Result<ChatGptA
                 )
                 .await;
             }
-            reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND => {}
+            _ if is_device_auth_poll_pending_status(status) => {
+                debug!(
+                    "Device auth still pending (HTTP {}); retrying in {}s",
+                    status,
+                    prompt.interval_secs.max(1)
+                );
+            }
             _ => {
                 return Err(format!(
                     "Device auth polling failed (HTTP {status}): {body}"
@@ -288,14 +279,6 @@ pub async fn poll_device_auth_flow(prompt: &DeviceAuthPrompt) -> Result<ChatGptA
 
         tokio::time::sleep(std::time::Duration::from_secs(prompt.interval_secs.max(1))).await;
     }
-}
-
-/// Run the full device auth flow without any browser automation.
-pub async fn run_device_auth_flow() -> Result<ChatGptAuthResult, DeviceAuthFlowError> {
-    let prompt = start_device_auth_flow().await?;
-    poll_device_auth_flow(&prompt)
-        .await
-        .map_err(DeviceAuthFlowError::Fatal)
 }
 
 /// Run the local callback server, waiting for the OAuth redirect.
@@ -506,6 +489,14 @@ pub fn chatgpt_session_available() -> bool {
 
 fn browser_redirect_uri(port: u16) -> String {
     format!("http://localhost:{port}/auth/callback")
+}
+
+/// Treat 403/404 as "authorization still pending" during device auth polling.
+fn is_device_auth_poll_pending_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND
+    )
 }
 
 fn build_token_exchange_form(
@@ -911,6 +902,19 @@ mod tests {
 
         assert_eq!(parsed.authorization_code, "code-123");
         assert_eq!(parsed.code_verifier, "verifier-456");
+    }
+
+    #[test]
+    fn test_device_auth_poll_pending_statuses() {
+        assert!(is_device_auth_poll_pending_status(
+            reqwest::StatusCode::FORBIDDEN
+        ));
+        assert!(is_device_auth_poll_pending_status(
+            reqwest::StatusCode::NOT_FOUND
+        ));
+        assert!(!is_device_auth_poll_pending_status(
+            reqwest::StatusCode::BAD_REQUEST
+        ));
     }
 
     #[test]

@@ -255,6 +255,62 @@ impl ChatGptDriver {
         Ok(token)
     }
 
+    async fn post_responses_request(
+        &self,
+        url: &str,
+        api_request: &ResponsesApiRequest,
+        bearer_token: &str,
+    ) -> Result<reqwest::Response, LlmError> {
+        self.client
+            .post(url)
+            .bearer_auth(bearer_token)
+            .json(api_request)
+            .send()
+            .await
+            .map_err(|e| LlmError::Http(e.to_string()))
+    }
+
+    async fn send_with_auth_retry(
+        &self,
+        url: &str,
+        api_request: &ResponsesApiRequest,
+    ) -> Result<reqwest::Response, LlmError> {
+        let token = self.ensure_token()?;
+        let http_resp = self
+            .post_responses_request(url, api_request, token.token.as_str())
+            .await?;
+        match http_resp.status() {
+            reqwest::StatusCode::UNAUTHORIZED => {}
+            reqwest::StatusCode::FORBIDDEN => {
+                let body = http_resp.text().await.unwrap_or_default();
+                if !should_refresh_after_forbidden(&body) {
+                    return Err(LlmError::Api {
+                        status: reqwest::StatusCode::FORBIDDEN.as_u16(),
+                        message: body,
+                    });
+                }
+            }
+            _ => return Ok(http_resp),
+        }
+
+        let refreshed = self.refresh_token().await?;
+        let http_resp = self
+            .post_responses_request(url, api_request, refreshed.token.as_str())
+            .await?;
+
+        // Preserve post-refresh 403s so higher-level classification can
+        // distinguish quota/model-access/region errors from real auth failures.
+        if should_treat_post_refresh_status_as_auth_failure(http_resp.status()) {
+            let status = http_resp.status();
+            let body = http_resp.text().await.unwrap_or_default();
+            return Err(LlmError::AuthenticationFailed(format!(
+                "ChatGPT API auth failed after refresh ({status}): {body}. Run `librefang auth chatgpt` to re-authenticate."
+            )));
+        }
+
+        Ok(http_resp)
+    }
+
     /// Convert a CompletionRequest (messages-based) to Responses API format.
     fn build_responses_request(request: &CompletionRequest) -> ResponsesApiRequest {
         let mut instructions: Option<String> = request.system.clone();
@@ -466,45 +522,26 @@ fn extract_text_content(content: &MessageContent) -> String {
     }
 }
 
+fn should_treat_post_refresh_status_as_auth_failure(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::UNAUTHORIZED
+}
+
+fn should_refresh_after_forbidden(body: &str) -> bool {
+    crate::llm_errors::classify_error(body, Some(reqwest::StatusCode::FORBIDDEN.as_u16())).category
+        == crate::llm_errors::LlmErrorCategory::Auth
+}
+
 #[async_trait::async_trait]
 impl crate::llm_driver::LlmDriver for ChatGptDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let token = self.ensure_token()?;
         let api_request = Self::build_responses_request(&request);
 
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{base}/codex/responses");
 
         debug!("ChatGPT Responses API POST {url}");
-        let mut http_resp = self
-            .client
-            .post(&url)
-            .bearer_auth(token.token.as_str())
-            .json(&api_request)
-            .send()
-            .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
-        let mut status = http_resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            let refreshed = self.refresh_token().await?;
-            http_resp = self
-                .client
-                .post(&url)
-                .bearer_auth(refreshed.token.as_str())
-                .json(&api_request)
-                .send()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
-            status = http_resp.status();
-            if status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN
-            {
-                let body = http_resp.text().await.unwrap_or_default();
-                return Err(LlmError::AuthenticationFailed(format!(
-                    "ChatGPT API auth failed after refresh ({status}): {body}. Run `librefang auth chatgpt` to re-authenticate."
-                )));
-            }
-        }
+        let http_resp = self.send_with_auth_retry(&url, &api_request).await?;
+        let status = http_resp.status();
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             return Err(LlmError::RateLimited {
@@ -530,42 +567,14 @@ impl crate::llm_driver::LlmDriver for ChatGptDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
-        let token = self.ensure_token()?;
         let api_request = Self::build_responses_request(&request);
 
         let base = self.base_url.trim_end_matches('/');
         let url = format!("{base}/codex/responses");
 
         debug!("ChatGPT Responses API SSE stream POST {url}");
-        let mut http_resp = self
-            .client
-            .post(&url)
-            .bearer_auth(token.token.as_str())
-            .json(&api_request)
-            .send()
-            .await
-            .map_err(|e| LlmError::Http(e.to_string()))?;
-        let mut status = http_resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            let refreshed = self.refresh_token().await?;
-            http_resp = self
-                .client
-                .post(&url)
-                .bearer_auth(refreshed.token.as_str())
-                .json(&api_request)
-                .send()
-                .await
-                .map_err(|e| LlmError::Http(e.to_string()))?;
-            status = http_resp.status();
-            if status == reqwest::StatusCode::UNAUTHORIZED
-                || status == reqwest::StatusCode::FORBIDDEN
-            {
-                let body = http_resp.text().await.unwrap_or_default();
-                return Err(LlmError::AuthenticationFailed(format!(
-                    "ChatGPT API auth failed after refresh ({status}): {body}. Run `librefang auth chatgpt` to re-authenticate."
-                )));
-            }
-        }
+        let http_resp = self.send_with_auth_retry(&url, &api_request).await?;
+        let status = http_resp.status();
 
         if !status.is_success() {
             let body = http_resp.text().await.unwrap_or_default();
@@ -656,12 +665,37 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_token_prefers_session_token_even_with_refresh_token_present() {
-        std::env::set_var("CHATGPT_REFRESH_TOKEN", "refresh-token");
+    fn test_ensure_token_uses_session_token() {
         let driver = ChatGptDriver::new("my-token".to_string(), String::new());
         let token = driver.ensure_token().unwrap();
         assert_eq!(*token.token, "my-token".to_string());
-        std::env::remove_var("CHATGPT_REFRESH_TOKEN");
+    }
+
+    #[test]
+    fn test_post_refresh_only_401_is_auth_failure() {
+        assert!(should_treat_post_refresh_status_as_auth_failure(
+            reqwest::StatusCode::UNAUTHORIZED
+        ));
+        assert!(!should_treat_post_refresh_status_as_auth_failure(
+            reqwest::StatusCode::FORBIDDEN
+        ));
+    }
+
+    #[test]
+    fn test_should_refresh_after_forbidden_for_auth_like_body() {
+        assert!(should_refresh_after_forbidden(
+            "Invalid API key or unauthorized access"
+        ));
+    }
+
+    #[test]
+    fn test_should_not_refresh_after_forbidden_for_model_or_quota_body() {
+        assert!(!should_refresh_after_forbidden(
+            "Model access is not enabled for your account"
+        ));
+        assert!(!should_refresh_after_forbidden(
+            "Quota exceeded for this model"
+        ));
     }
 
     #[test]
