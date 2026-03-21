@@ -19,6 +19,7 @@ function chatPage() {
     dragOver: false,
     contextPressure: 'low', // green/yellow/orange/red indicator
     _typingTimeout: null,
+    _wsPingInterval: null,
     // Multi-session state
     sessions: [],
     sessionsOpen: false,
@@ -789,18 +790,29 @@ function chatPage() {
       this._wsAgent = agentId;
       var self = this;
 
+      // Clear any previous keepalive interval
+      if (self._wsPingInterval) { clearInterval(self._wsPingInterval); self._wsPingInterval = null; }
+
       LibreFangAPI.wsConnect(agentId, {
         onOpen: function() {
           Alpine.store('app').wsConnected = true;
+          // Start client-side keepalive ping every 30s to prevent
+          // proxies/NAT from closing idle connections during long
+          // multi-tool sequences.
+          self._wsPingInterval = setInterval(function() {
+            LibreFangAPI.wsSend({ type: 'ping' });
+          }, 30000);
         },
         onMessage: function(data) { self.handleWsMessage(data); },
         onClose: function() {
           Alpine.store('app').wsConnected = false;
           self._wsAgent = null;
+          if (self._wsPingInterval) { clearInterval(self._wsPingInterval); self._wsPingInterval = null; }
         },
         onError: function() {
           Alpine.store('app').wsConnected = false;
           self._wsAgent = null;
+          if (self._wsPingInterval) { clearInterval(self._wsPingInterval); self._wsPingInterval = null; }
         }
       });
     },
@@ -848,6 +860,8 @@ function chatPage() {
           break;
 
         case 'phase':
+          // Reset typing timeout — phase change proves the agent is alive
+          this._resetTypingTimeout();
           // Show tool/phase progress so the user sees the agent is working
           var phaseMsg = this.messages.length ? this.messages[this.messages.length - 1] : null;
           if (phaseMsg && (phaseMsg.thinking || phaseMsg.streaming)) {
@@ -885,6 +899,8 @@ function chatPage() {
           break;
 
         case 'text_delta':
+          // Reset typing timeout — streaming data proves the agent is alive
+          this._resetTypingTimeout();
           var last = this.messages.length ? this.messages[this.messages.length - 1] : null;
           if (last && last.streaming) {
             if (last.thinking) { last.text = ''; last.thinking = false; }
@@ -921,6 +937,8 @@ function chatPage() {
           break;
 
         case 'tool_start':
+          // Reset typing timeout — tool execution proves the agent is alive
+          this._resetTypingTimeout();
           var lastMsg = this.messages.length ? this.messages[this.messages.length - 1] : null;
           if (lastMsg && lastMsg.streaming) {
             if (!lastMsg.tools) lastMsg.tools = [];
@@ -943,6 +961,8 @@ function chatPage() {
           break;
 
         case 'tool_result':
+          // Reset typing timeout — tool result proves the agent is alive
+          this._resetTypingTimeout();
           // Tool execution completed — update tool card with result
           var lastMsg3 = this.messages.length ? this.messages[this.messages.length - 1] : null;
           if (lastMsg3 && lastMsg3.tools) {

@@ -1122,10 +1122,17 @@ pub fn spawn_fetch_agent_mcp_servers(
                     .unwrap_or_default();
                 let mut available = Vec::new();
                 if let Ok(mcp_tools) = kernel.mcp_tools.lock() {
+                    let configured_servers: Vec<String> = kernel
+                        .effective_mcp_servers
+                        .read()
+                        .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
+                        .unwrap_or_default();
                     let mut seen = std::collections::HashSet::new();
                     for tool in mcp_tools.iter() {
-                        if let Some(server) = librefang_runtime::mcp::extract_mcp_server(&tool.name)
-                        {
+                        if let Some(server) = librefang_runtime::mcp::resolve_mcp_server_from_known(
+                            &tool.name,
+                            configured_servers.iter().map(String::as_str),
+                        ) {
                             if seen.insert(server.to_string()) {
                                 available.push(server.to_string());
                             }
