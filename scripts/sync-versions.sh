@@ -97,10 +97,27 @@ if [ -f "$WA_PKG" ]; then
     echo "  Updated packages/whatsapp-gateway/package.json"
 fi
 
-# --- Tauri desktop app (strip pre-release suffix — MSI requires strict X.Y.Z numeric) ---
+# --- Tauri desktop app (MSI requires numeric X.Y.Z, all components ≤ 65535) ---
+# Encode pre-release into patch so beta/rc/stable each get a unique version:
+#   beta N → DDHH*10 + N       (e.g. beta1=21141, beta2=21142)
+#   rc N   → DDHH*10 + 4 + N   (e.g. rc1=21145, rc2=21146)
+#   stable → DDHH*10 + 9       (e.g. 21149)
+# Ordering: beta1 < beta4 < rc1 < rc4 < stable.  Max patch: 3123*10+9 = 31239 ≤ 65535.
 TAURI_CONF="$REPO_ROOT/crates/librefang-desktop/tauri.conf.json"
 if [ -f "$TAURI_CONF" ]; then
-    TAURI_VERSION=$(echo "$VERSION" | sed 's/-.*//')
+    BASE_VER=$(echo "$VERSION" | sed 's/-.*//')
+    DDHH=$(echo "$BASE_VER" | cut -d. -f3)
+    PRERELEASE=$(echo "$VERSION" | grep -oE '-(beta|rc)([0-9]+)' || true)
+    if [ -z "$PRERELEASE" ]; then
+        TAURI_PATCH=$((DDHH * 10 + 9))
+    elif echo "$PRERELEASE" | grep -q 'beta'; then
+        N=$(echo "$PRERELEASE" | grep -oE '[0-9]+')
+        TAURI_PATCH=$((DDHH * 10 + N))
+    else
+        N=$(echo "$PRERELEASE" | grep -oE '[0-9]+')
+        TAURI_PATCH=$((DDHH * 10 + 4 + N))
+    fi
+    TAURI_VERSION="$(echo "$BASE_VER" | cut -d. -f1,2).${TAURI_PATCH}"
     sed -i.bak 's/"version": "[^"]*"/"version": "'"$TAURI_VERSION"'"/' "$TAURI_CONF" && rm -f "$TAURI_CONF.bak"
     echo "  Updated crates/librefang-desktop/tauri.conf.json ($TAURI_VERSION)"
 fi
