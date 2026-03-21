@@ -189,8 +189,7 @@ async function startConnection() {
         if (fs.existsSync(authPath)) {
           fs.rmSync(authPath, { recursive: true, force: true });
         }
-      } else if (statusCode === DisconnectReason.loggedOut ||
-                 statusCode === DisconnectReason.forbidden) {
+      } else if (statusCode === DisconnectReason.forbidden) {
         // Non-recoverable — don't auto-reconnect
         connStatus = 'disconnected';
         statusMessage = `Disconnected: ${reason}. Use POST /login/start to reconnect.`;
@@ -325,7 +324,7 @@ async function startConnection() {
 // ---------------------------------------------------------------------------
 // Forward incoming message to LibreFang API, return agent response
 // ---------------------------------------------------------------------------
-async function forwardToLibreFang(text, phone, pushName) {
+async function forwardToLibreFang(text, phone, pushName, retryCount = 0) {
   // Resolve agent UUID if not cached (or if invalidated on reconnect)
   if (!cachedAgentId) {
     try {
@@ -366,14 +365,18 @@ async function forwardToLibreFang(text, phone, pushName) {
         res.on('end', () => {
           // If the agent UUID became stale (404), invalidate cache and retry once
           if (res.statusCode === 404) {
-            console.log('[gateway] Agent UUID stale (404), re-resolving...');
-            cachedAgentId = null;
-            // Retry once with fresh UUID
-            resolveAgentId()
-              .then(() => forwardToLibreFang(text, phone, pushName))
-              .then(resolve)
-              .catch(reject);
-            return;
+            if (retryCount < 1) {
+              console.log('[gateway] Agent UUID stale (404), re-resolving...');
+              cachedAgentId = null;
+              // Retry once with fresh UUID
+              resolveAgentId()
+                .then(() => forwardToLibreFang(text, phone, pushName, retryCount + 1))
+                .then(resolve)
+                .catch(reject);
+              return;
+            }
+            console.error('[gateway] Agent UUID still 404 after retry, giving up');
+            return reject(new Error('Agent not found after retry'));
           }
 
           try {
@@ -477,10 +480,20 @@ async function sendMessage(to, text) {
 // ---------------------------------------------------------------------------
 // HTTP server
 // ---------------------------------------------------------------------------
+const MAX_BODY_SIZE = 64 * 1024;
+
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
-    req.on('data', (chunk) => (body += chunk));
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > MAX_BODY_SIZE) {
+        req.destroy();
+        return reject(new Error('Request body too large'));
+      }
+      body += chunk;
+    });
     req.on('end', () => {
       try {
         resolve(body ? JSON.parse(body) : {});
