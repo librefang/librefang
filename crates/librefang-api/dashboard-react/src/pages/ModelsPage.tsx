@@ -23,7 +23,16 @@ export function ModelsPage() {
 
   const modelsQuery = useQuery({ queryKey: ["models"], queryFn: () => listModels(), refetchInterval: REFRESH_MS });
 
-  const allModels = modelsQuery.data?.models ?? [];
+  // Deduplicate models by ID (backend may return duplicates after catalog sync)
+  const allModels = useMemo(() => {
+    const models = modelsQuery.data?.models ?? [];
+    const seen = new Set<string>();
+    return models.filter(m => {
+      if (seen.has(m.id)) return false;
+      seen.add(m.id);
+      return true;
+    });
+  }, [modelsQuery.data]);
   const totalAvailable = modelsQuery.data?.available ?? 0;
 
   const providers = useMemo(() => {
@@ -38,7 +47,8 @@ export function ModelsPage() {
 
   const filtered = useMemo(() => {
     return allModels.filter(m => {
-      if (search && !m.id.toLowerCase().includes(search.toLowerCase()) && !(m.display_name || "").toLowerCase().includes(search.toLowerCase())) return false;
+      const q = search.toLowerCase();
+      if (search && !m.id.toLowerCase().includes(q) && !(m.display_name || "").toLowerCase().includes(q) && !m.provider.toLowerCase().includes(q)) return false;
       if (tierFilter !== "all" && m.tier !== tierFilter) return false;
       if (providerFilter !== "all" && m.provider !== providerFilter) return false;
       if (availableOnly && !m.available) return false;
