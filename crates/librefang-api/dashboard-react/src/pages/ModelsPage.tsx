@@ -23,13 +23,14 @@ export function ModelsPage() {
 
   const modelsQuery = useQuery({ queryKey: ["models"], queryFn: () => listModels(), refetchInterval: REFRESH_MS });
 
-  // Deduplicate models by ID (backend may return duplicates after catalog sync)
+  // Deduplicate models by id+provider (backend may return duplicates after catalog sync)
   const allModels = useMemo(() => {
     const models = modelsQuery.data?.models ?? [];
     const seen = new Set<string>();
     return models.filter(m => {
-      if (seen.has(m.id)) return false;
-      seen.add(m.id);
+      const key = `${m.provider}:${m.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
       return true;
     });
   }, [modelsQuery.data]);
