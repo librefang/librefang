@@ -107,7 +107,6 @@ async function recordDailyStats(env) {
       try {
         const raw = await env.KV.get('stats_history')
         if (raw) history = JSON.parse(raw)
-      } catch { /* ignore */ }
       } catch (e) { console.log('KV read error:', e.message) }
 
       // Run migration if needed
@@ -223,7 +222,6 @@ async function handleGitHubStats(env, cors, forceRefresh = false) {
     try {
       const raw = await env.KV.get('stats_history')
       if (raw) history = JSON.parse(raw)
-    } catch { /* ignore */ }
     } catch (e) { console.log('KV read error:', e.message) }
 
     // Run migration if needed
