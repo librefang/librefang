@@ -5572,6 +5572,14 @@ system_prompt = "You are a helpful assistant."
                 }
             }
         }
+        // 3. Dedicated CLI path config fields (more discoverable than provider_urls).
+        if provider == "qwen-code" {
+            if let Some(ref path) = self.config.qwen_code_path {
+                if !path.is_empty() {
+                    return Some(path.clone());
+                }
+            }
+        }
         None
     }
 

@@ -1442,6 +1442,16 @@ pub struct KernelConfig {
     /// boots normally. This is the "tolerant mode" toggle.
     #[serde(default)]
     pub strict_config: bool,
+    /// Override path to the Qwen Code CLI binary.
+    ///
+    /// When LibreFang runs as a daemon/service the subprocess may not inherit
+    /// the user's full PATH, so the `qwen` binary is not found even though it
+    /// is installed.  Set this to the absolute path of the CLI
+    /// (e.g. `"/home/user/.local/bin/qwen"`).
+    ///
+    /// Alternatively you can set `provider_urls.qwen-code` to the same value.
+    #[serde(default)]
+    pub qwen_code_path: Option<String>,
 }
 
 /// Vertex AI provider configuration.
@@ -2100,6 +2110,7 @@ impl Default for KernelConfig {
             plugins: PluginsConfig::default(),
             cors_origin: Vec::new(),
             strict_config: false,
+            qwen_code_path: None,
         }
     }
 }
@@ -2233,6 +2244,7 @@ impl std::fmt::Debug for KernelConfig {
                 &format!("enabled={}", self.external_auth.enabled),
             )
             .field("strict_config", &self.strict_config)
+            .field("qwen_code_path", &self.qwen_code_path)
             .finish()
     }
 }
