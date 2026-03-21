@@ -1,9 +1,9 @@
-//! ChatGPT OAuth 2.0 + PKCE authentication flow.
+//! ChatGPT OAuth 2.0 authentication helpers for browser and device login.
 //!
 //! Uses OpenAI's official Codex OAuth endpoints to authenticate. The flow
-//! opens the user's browser to the OpenAI authorization page, receives the
-//! callback on a local HTTP server, and exchanges the authorization code for
-//! access and refresh tokens.
+//! can either open the user's browser and wait for the localhost callback or
+//! use the device auth flow for headless environments, then exchange the
+//! resulting authorization code for access and refresh tokens.
 
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -13,6 +13,7 @@ use zeroize::Zeroizing;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 /// Default ChatGPT API base URL (ChatGPT backend, used with OAuth tokens).
@@ -29,6 +30,18 @@ const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 /// OpenAI OAuth token endpoint.
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 
+/// Device auth endpoint for requesting a one-time user code.
+const DEVICE_AUTH_USERCODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
+
+/// Device auth endpoint for polling authorization completion.
+const DEVICE_AUTH_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
+
+/// Device auth verification page shown to the user.
+pub const DEVICE_AUTH_URL: &str = "https://auth.openai.com/codex/device";
+
+/// Device auth redirect URI used for the final token exchange.
+pub const DEVICE_AUTH_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
+
 /// OAuth scopes.
 const SCOPE: &str = "openid profile email offline_access api.connectors.read api.connectors.invoke";
 
@@ -38,6 +51,12 @@ const CALLBACK_BIND: &str = "127.0.0.1:1455";
 /// Local callback server timeout (seconds).
 const AUTH_TIMEOUT_SECS: u64 = 300;
 
+/// Device auth poll timeout (seconds).
+const DEVICE_AUTH_TIMEOUT_SECS: u64 = 15 * 60;
+
+/// Default server poll interval when the response omits a usable value.
+const DEFAULT_DEVICE_AUTH_POLL_INTERVAL_SECS: u64 = 5;
+
 /// Result of a successful OAuth flow.
 pub struct ChatGptAuthResult {
     /// The bearer access token.
@@ -46,6 +65,42 @@ pub struct ChatGptAuthResult {
     pub refresh_token: Option<Zeroizing<String>>,
     /// Seconds until the access token expires (from server response).
     pub expires_in: Option<u64>,
+}
+
+/// Device auth prompt details that must be shown to the user before polling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceAuthPrompt {
+    /// Server-issued device auth identifier used for polling.
+    pub device_auth_id: String,
+    /// One-time code the user must enter on the verification page.
+    pub user_code: String,
+    /// Recommended poll interval from the server, in seconds.
+    pub interval_secs: u64,
+}
+
+/// Errors returned by the device auth flow.
+#[derive(Debug, thiserror::Error)]
+pub enum DeviceAuthFlowError {
+    /// Device auth is not enabled for the current OpenAI account or workspace.
+    #[error("{message}")]
+    BrowserFallback { message: String },
+    /// Device auth failed and should not silently fall back.
+    #[error("{0}")]
+    Fatal(String),
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceAuthPromptEnvelope {
+    device_auth_id: String,
+    #[serde(alias = "usercode")]
+    user_code: Option<String>,
+    interval: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeviceAuthPollEnvelope {
+    authorization_code: String,
+    code_verifier: String,
 }
 
 /// PKCE code verifier and challenge pair.
@@ -87,7 +142,7 @@ pub fn create_state() -> String {
 
 /// Build the full authorization URL with all required parameters.
 pub fn build_authorization_url(port: u16, code_challenge: &str, state: &str) -> String {
-    let redirect_uri = format!("http://localhost:{port}/auth/callback");
+    let redirect_uri = browser_redirect_uri(port);
 
     // Build query parameters manually to keep full control of encoding.
     let params = [
@@ -134,6 +189,96 @@ pub async fn start_oauth_flow() -> Result<(String, u16, String, String), String>
     debug!("Authorization URL: {auth_url}");
 
     Ok((auth_url, port, pkce.verifier, state))
+}
+
+/// Request a one-time device auth code from OpenAI.
+pub async fn start_device_auth_flow() -> Result<DeviceAuthPrompt, DeviceAuthFlowError> {
+    let client = crate::http_client::proxied_client();
+    let resp = client
+        .post(DEVICE_AUTH_USERCODE_URL)
+        .json(&serde_json::json!({ "client_id": CLIENT_ID }))
+        .send()
+        .await
+        .map_err(|e| DeviceAuthFlowError::Fatal(format!("Device auth request failed: {e}")))?;
+
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| {
+        DeviceAuthFlowError::Fatal(format!("Failed to read device auth response: {e}"))
+    })?;
+
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err(DeviceAuthFlowError::BrowserFallback {
+            message: format!(
+                "Device code login does not appear to be enabled for this OpenAI account or workspace (HTTP {status}). Check OpenAI security settings or workspace permissions, then retry. Falling back to the standard browser login flow."
+            ),
+        });
+    }
+
+    if !status.is_success() {
+        return Err(DeviceAuthFlowError::Fatal(format!(
+            "Device auth request failed (HTTP {status}): {body}"
+        )));
+    }
+
+    parse_device_auth_prompt_response(&body).map_err(DeviceAuthFlowError::Fatal)
+}
+
+/// Poll the device auth endpoint until the user completes verification.
+pub async fn poll_device_auth_flow(prompt: &DeviceAuthPrompt) -> Result<ChatGptAuthResult, String> {
+    let client = crate::http_client::proxied_client();
+    let deadline =
+        tokio::time::Instant::now() + std::time::Duration::from_secs(DEVICE_AUTH_TIMEOUT_SECS);
+
+    loop {
+        let resp = client
+            .post(DEVICE_AUTH_TOKEN_URL)
+            .json(&serde_json::json!({
+                "device_auth_id": prompt.device_auth_id,
+                "user_code": prompt.user_code,
+            }))
+            .send()
+            .await
+            .map_err(|e| format!("Device auth poll request failed: {e}"))?;
+
+        let status = resp.status();
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read device auth poll response: {e}"))?;
+
+        match status {
+            reqwest::StatusCode::OK => {
+                let poll = parse_device_auth_poll_response(&body)?;
+                return exchange_code_for_tokens_with_redirect_uri(
+                    &poll.authorization_code,
+                    &poll.code_verifier,
+                    DEVICE_AUTH_REDIRECT_URI,
+                )
+                .await;
+            }
+            _ if is_device_auth_poll_pending_status(status) => {
+                debug!(
+                    "Device auth still pending (HTTP {}); retrying in {}s",
+                    status,
+                    prompt.interval_secs.max(1)
+                );
+            }
+            _ => {
+                return Err(format!(
+                    "Device auth polling failed (HTTP {status}): {body}"
+                ));
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!(
+                "Device auth timed out after {} minutes",
+                DEVICE_AUTH_TIMEOUT_SECS / 60
+            ));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(prompt.interval_secs.max(1))).await;
+    }
 }
 
 /// Run the local callback server, waiting for the OAuth redirect.
@@ -199,15 +344,17 @@ pub async fn exchange_code_for_tokens(
     code_verifier: &str,
     port: u16,
 ) -> Result<ChatGptAuthResult, String> {
-    let redirect_uri = format!("http://localhost:{port}/auth/callback");
+    exchange_code_for_tokens_with_redirect_uri(code, code_verifier, &browser_redirect_uri(port))
+        .await
+}
 
-    let params = [
-        ("grant_type", "authorization_code"),
-        ("client_id", CLIENT_ID),
-        ("code", code),
-        ("code_verifier", code_verifier),
-        ("redirect_uri", &redirect_uri),
-    ];
+/// Exchange an authorization code for tokens using an explicit redirect URI.
+pub async fn exchange_code_for_tokens_with_redirect_uri(
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> Result<ChatGptAuthResult, String> {
+    let params = build_token_exchange_form(code, code_verifier, redirect_uri);
 
     let client = crate::http_client::proxied_client();
     let resp = client
@@ -227,29 +374,7 @@ pub async fn exchange_code_for_tokens(
         return Err(format!("Token exchange failed (HTTP {status}): {body}"));
     }
 
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse token response JSON: {e}"))?;
-
-    let access_token = json
-        .get("access_token")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing access_token in token response")?
-        .to_string();
-
-    let refresh_token = json
-        .get("refresh_token")
-        .and_then(|v| v.as_str())
-        .map(|s| Zeroizing::new(s.to_string()));
-
-    let expires_in = json.get("expires_in").and_then(|v| v.as_u64());
-
-    info!("OAuth tokens obtained successfully");
-
-    Ok(ChatGptAuthResult {
-        access_token: Zeroizing::new(access_token),
-        refresh_token,
-        expires_in,
-    })
+    parse_chatgpt_auth_result(&body, "token response")
 }
 
 /// Refresh an expired access token using a refresh token.
@@ -278,29 +403,7 @@ pub async fn refresh_access_token(refresh_token: &str) -> Result<ChatGptAuthResu
         return Err(format!("Token refresh failed (HTTP {status}): {body}"));
     }
 
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse refresh response JSON: {e}"))?;
-
-    let access_token = json
-        .get("access_token")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing access_token in refresh response")?
-        .to_string();
-
-    let new_refresh = json
-        .get("refresh_token")
-        .and_then(|v| v.as_str())
-        .map(|s| Zeroizing::new(s.to_string()));
-
-    let expires_in = json.get("expires_in").and_then(|v| v.as_u64());
-
-    info!("OAuth access token refreshed successfully");
-
-    Ok(ChatGptAuthResult {
-        access_token: Zeroizing::new(access_token),
-        refresh_token: new_refresh,
-        expires_in,
-    })
+    parse_chatgpt_auth_result(&body, "refresh response")
 }
 
 /// Fetch the best available Codex model from the ChatGPT backend API.
@@ -383,6 +486,108 @@ pub fn chatgpt_session_available() -> bool {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+fn browser_redirect_uri(port: u16) -> String {
+    format!("http://localhost:{port}/auth/callback")
+}
+
+/// Treat 403/404 as "authorization still pending" during device auth polling.
+fn is_device_auth_poll_pending_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::NOT_FOUND
+    )
+}
+
+fn build_token_exchange_form(
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> Vec<(String, String)> {
+    vec![
+        ("grant_type".to_string(), "authorization_code".to_string()),
+        ("client_id".to_string(), CLIENT_ID.to_string()),
+        ("code".to_string(), code.to_string()),
+        ("code_verifier".to_string(), code_verifier.to_string()),
+        ("redirect_uri".to_string(), redirect_uri.to_string()),
+    ]
+}
+
+fn parse_chatgpt_auth_result(
+    body: &str,
+    response_label: &str,
+) -> Result<ChatGptAuthResult, String> {
+    let json: serde_json::Value = serde_json::from_str(body)
+        .map_err(|e| format!("Failed to parse {response_label} JSON: {e}"))?;
+
+    let access_token = json
+        .get("access_token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("Missing access_token in {response_label}"))?
+        .to_string();
+
+    let refresh_token = json
+        .get("refresh_token")
+        .and_then(|v| v.as_str())
+        .map(|s| Zeroizing::new(s.to_string()));
+
+    let expires_in = json.get("expires_in").and_then(|v| v.as_u64());
+
+    info!("OAuth tokens obtained successfully");
+
+    Ok(ChatGptAuthResult {
+        access_token: Zeroizing::new(access_token),
+        refresh_token,
+        expires_in,
+    })
+}
+
+fn parse_device_auth_prompt_response(body: &str) -> Result<DeviceAuthPrompt, String> {
+    let parsed: DeviceAuthPromptEnvelope = serde_json::from_str(body)
+        .map_err(|e| format!("Failed to parse device auth response JSON: {e}"))?;
+
+    let user_code = parsed
+        .user_code
+        .filter(|code| !code.trim().is_empty())
+        .ok_or("Missing user_code in device auth response")?;
+
+    if parsed.device_auth_id.trim().is_empty() {
+        return Err("Missing device_auth_id in device auth response".to_string());
+    }
+
+    Ok(DeviceAuthPrompt {
+        device_auth_id: parsed.device_auth_id,
+        user_code,
+        interval_secs: parse_poll_interval_secs(parsed.interval.as_ref()),
+    })
+}
+
+fn parse_device_auth_poll_response(body: &str) -> Result<DeviceAuthPollEnvelope, String> {
+    let parsed: DeviceAuthPollEnvelope = serde_json::from_str(body)
+        .map_err(|e| format!("Failed to parse device auth poll response JSON: {e}"))?;
+
+    if parsed.authorization_code.trim().is_empty() {
+        return Err("Missing authorization_code in device auth poll response".to_string());
+    }
+
+    if parsed.code_verifier.trim().is_empty() {
+        return Err("Missing code_verifier in device auth poll response".to_string());
+    }
+
+    Ok(parsed)
+}
+
+fn parse_poll_interval_secs(value: Option<&serde_json::Value>) -> u64 {
+    let parsed = match value {
+        Some(serde_json::Value::Number(n)) => n.as_u64(),
+        Some(serde_json::Value::String(s)) => s.parse::<u64>().ok(),
+        _ => None,
+    };
+
+    parsed
+        .filter(|secs| *secs > 0)
+        .unwrap_or(DEFAULT_DEVICE_AUTH_POLL_INTERVAL_SECS)
+}
 
 /// Handle a single HTTP connection on the OAuth callback server.
 async fn handle_oauth_callback(
@@ -639,6 +844,77 @@ mod tests {
         assert!(url.contains("state=test_state"));
         assert!(url.contains("codex_cli_simplified_flow=true"));
         assert!(url.contains("originator=codex_cli_rs"));
+    }
+
+    #[test]
+    fn test_build_token_exchange_form_uses_explicit_redirect_uri() {
+        let form =
+            build_token_exchange_form("auth-code", "code-verifier", DEVICE_AUTH_REDIRECT_URI);
+
+        assert!(form.iter().any(|(k, v)| k == "code" && v == "auth-code"));
+        assert!(form
+            .iter()
+            .any(|(k, v)| k == "code_verifier" && v == "code-verifier"));
+        assert!(form
+            .iter()
+            .any(|(k, v)| k == "redirect_uri" && v == DEVICE_AUTH_REDIRECT_URI));
+    }
+
+    #[test]
+    fn test_parse_device_auth_prompt_response_supports_user_code() {
+        let prompt = parse_device_auth_prompt_response(
+            r#"{"device_auth_id":"device-1","user_code":"ABCD-EFGH","interval":7}"#,
+        )
+        .unwrap();
+
+        assert_eq!(prompt.device_auth_id, "device-1");
+        assert_eq!(prompt.user_code, "ABCD-EFGH");
+        assert_eq!(prompt.interval_secs, 7);
+    }
+
+    #[test]
+    fn test_parse_device_auth_prompt_response_supports_usercode_alias() {
+        let prompt = parse_device_auth_prompt_response(
+            r#"{"device_auth_id":"device-2","usercode":"WXYZ-1234","interval":"11"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(prompt.user_code, "WXYZ-1234");
+        assert_eq!(prompt.interval_secs, 11);
+    }
+
+    #[test]
+    fn test_parse_device_auth_prompt_response_defaults_interval_defensively() {
+        let prompt = parse_device_auth_prompt_response(
+            r#"{"device_auth_id":"device-3","user_code":"SAFE-0001","interval":"invalid"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(prompt.interval_secs, DEFAULT_DEVICE_AUTH_POLL_INTERVAL_SECS);
+    }
+
+    #[test]
+    fn test_parse_device_auth_poll_response_requires_fields() {
+        let parsed = parse_device_auth_poll_response(
+            r#"{"authorization_code":"code-123","code_verifier":"verifier-456"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.authorization_code, "code-123");
+        assert_eq!(parsed.code_verifier, "verifier-456");
+    }
+
+    #[test]
+    fn test_device_auth_poll_pending_statuses() {
+        assert!(is_device_auth_poll_pending_status(
+            reqwest::StatusCode::FORBIDDEN
+        ));
+        assert!(is_device_auth_poll_pending_status(
+            reqwest::StatusCode::NOT_FOUND
+        ));
+        assert!(!is_device_auth_poll_pending_status(
+            reqwest::StatusCode::BAD_REQUEST
+        ));
     }
 
     #[test]
