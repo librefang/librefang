@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { listModels, type ModelItem } from "../api";
 import { Badge } from "../components/ui/Badge";
@@ -21,28 +21,19 @@ export function ModelsPage() {
   const [availableOnly, setAvailableOnly] = useState(false);
   const [page, setPage] = useState(0);
 
-  const [allModels, setAllModels] = useState<ModelItem[]>([]);
-  const [totalAvailable, setTotalAvailable] = useState(0);
-
   const modelsQuery = useQuery({
     queryKey: ["models"],
     queryFn: () => listModels(),
     refetchInterval: REFRESH_MS,
   });
 
-  // Update state only when API data changes
-  useEffect(() => {
-    if (!modelsQuery.data?.models) return;
-    const seen = new Set<string>();
-    const deduped = modelsQuery.data.models.filter(m => {
-      const key = `${m.provider}:${m.id}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    setAllModels(deduped);
-    setTotalAvailable(modelsQuery.data.available ?? 0);
-  }, [modelsQuery.data]);
+  // Available models first, unavailable last
+  const allModels = [...(modelsQuery.data?.models ?? [])].sort((a, b) => {
+    if (a.available && !b.available) return -1;
+    if (!a.available && b.available) return 1;
+    return 0;
+  });
+  const totalAvailable = modelsQuery.data?.available ?? 0;
 
   const providers = ["all", ...Array.from(new Set(allModels.map(m => m.provider))).sort()];
   const tiers = ["all", ...Array.from(new Set(allModels.map(m => m.tier).filter(Boolean))).sort()];

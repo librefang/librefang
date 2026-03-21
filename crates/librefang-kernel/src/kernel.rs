@@ -1407,10 +1407,6 @@ impl LibreFangKernel {
 
                     // Check enabled flag — also do a direct TOML read as fallback
                     let mut is_enabled = restored_entry.manifest.enabled;
-                    eprintln!(
-                        "[BOOT] agent={} manifest.enabled={} source_toml={:?}",
-                        name, is_enabled, restored_entry.source_toml_path
-                    );
                     if is_enabled {
                         // Double-check: read directly from hands/agents TOML in case DB is stale
                         for dir in &["agents", "hands"] {
