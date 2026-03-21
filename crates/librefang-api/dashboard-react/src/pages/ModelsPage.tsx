@@ -23,19 +23,18 @@ export function ModelsPage() {
 
   const modelsQuery = useQuery({ queryKey: ["models"], queryFn: () => listModels(), refetchInterval: REFRESH_MS });
 
-  // Compute everything from raw query data on every render — no stale memos
-  const rawModels = modelsQuery.data?.models ?? [];
+  // Deep copy to prevent React Query cache mutation
+  const rawModels: ModelItem[] = JSON.parse(JSON.stringify(modelsQuery.data?.models ?? []));
   const totalAvailable = modelsQuery.data?.available ?? 0;
 
-  // Deduplicate
-  const allModels: ModelItem[] = [];
-  {
-    const seen = new Set<string>();
-    for (const m of rawModels) {
-      const key = `${m.provider}:${m.id}`;
-      if (!seen.has(key)) { seen.add(key); allModels.push(m); }
-    }
-  }
+  // Deduplicate by provider:id
+  const seen = new Set<string>();
+  const allModels = rawModels.filter(m => {
+    const key = `${m.provider}:${m.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   const providers = ["all", ...Array.from(new Set(allModels.map(m => m.provider))).sort()];
   const tiers = ["all", ...Array.from(new Set(allModels.map(m => m.tier).filter(Boolean))).sort()];
