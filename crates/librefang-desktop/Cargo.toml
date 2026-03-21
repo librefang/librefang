@@ -12,6 +12,8 @@ tauri-build = { version = "2", features = [] }
 librefang-kernel = { path = "../librefang-kernel" }
 librefang-api = { path = "../librefang-api", default-features = false }
 librefang-types = { path = "../librefang-types" }
+librefang-extensions = { path = "../librefang-extensions" }
+dirs = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde_json = { workspace = true }
