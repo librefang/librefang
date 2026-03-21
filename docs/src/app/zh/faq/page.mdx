@@ -282,6 +282,16 @@ RUST_LOG=debug librefang skill list
 
 ## 迁移
 
+### Q: 如何从 OpenFang 迁移？
+
+```bash
+# 自动迁移（复制 ~/.openfang → ~/.librefang）
+librefang migrate --from openfang
+
+# 预览模式
+librefang migrate --from openfang --dry-run
+```
+
 ### Q: 如何从 OpenClaw 迁移？
 
 ```bash
@@ -294,6 +304,7 @@ librefang migrate --from openclaw --dry-run
 
 ### Q: 支持哪些迁移来源？
 
+- OpenFang（自动迁移，通过 `librefang migrate --from openfang`）
 - OpenClaw（自动迁移，通过 `librefang migrate --from openclaw`）
 - LangChain（仅有手动迁移指南，无自动化工具）
 - AutoGPT（仅有手动迁移指南，无自动化工具）
