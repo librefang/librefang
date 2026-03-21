@@ -1613,10 +1613,12 @@ system_prompt = "You are a helpful assistant."
 
         info!(agent = %name, id = %agent_id, parent = ?parent, "Spawning agent");
 
-        // Create session
-        self.memory
+        // Create session and inject reset prompt if configured
+        let mut session = self
+            .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
+        self.inject_reset_prompt(&mut session);
 
         // Inherit kernel exec_policy as fallback if agent manifest doesn't have one
         let mut manifest = manifest;
@@ -3404,11 +3406,12 @@ system_prompt = "You are a helpful assistant."
         // Delete the old session
         let _ = self.memory.delete_session(entry.session_id);
 
-        // Create a fresh session
-        let new_session = self
+        // Create a fresh session and inject reset prompt if configured
+        let mut new_session = self
             .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
+        self.inject_reset_prompt(&mut new_session);
 
         // Update registry with new session ID
         self.registry
@@ -3436,11 +3439,12 @@ system_prompt = "You are a helpful assistant."
         // Delete canonical (cross-channel) session
         let _ = self.memory.delete_canonical_session(agent_id);
 
-        // Create a fresh session
-        let new_session = self
+        // Create a fresh session and inject reset prompt if configured
+        let mut new_session = self
             .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
+        self.inject_reset_prompt(&mut new_session);
 
         // Update registry with new session ID
         self.registry
@@ -3489,10 +3493,11 @@ system_prompt = "You are a helpful assistant."
             KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
         })?;
 
-        let session = self
+        let mut session = self
             .memory
             .create_session_with_label(agent_id, label)
             .map_err(KernelError::LibreFang)?;
+        self.inject_reset_prompt(&mut session);
 
         // Switch to the new session
         self.registry
@@ -3539,6 +3544,23 @@ system_prompt = "You are a helpful assistant."
 
         info!(agent_id = %agent_id, session_id = %session_id.0, "Switched session");
         Ok(())
+    }
+
+    /// Inject the configured `session.reset_prompt` into a newly created session
+    /// as the first system message (if configured).
+    fn inject_reset_prompt(&self, session: &mut librefang_memory::session::Session) {
+        if let Some(ref prompt) = self.config.session.reset_prompt {
+            if !prompt.is_empty() {
+                session
+                    .messages
+                    .push(librefang_types::message::Message::system(prompt.clone()));
+                let _ = self.memory.save_session(session);
+                debug!(
+                    session_id = %session.id.0,
+                    "Injected session reset prompt"
+                );
+            }
+        }
     }
 
     /// Save a summary of the current session to agent memory before reset.

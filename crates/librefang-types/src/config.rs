@@ -1073,13 +1073,15 @@ pub struct SidecarChannelConfig {
 
 /// Session retention policy configuration.
 ///
-/// Controls automatic cleanup of idle or excess sessions.
+/// Controls automatic cleanup of idle or excess sessions and optional
+/// startup prompt injection.
 /// Configure in `config.toml`:
 /// ```toml
 /// [session]
 /// retention_days = 30
 /// max_sessions_per_agent = 100
 /// cleanup_interval_hours = 24
+/// reset_prompt = "You are a helpful coding assistant. Always respond in English."
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1090,6 +1092,11 @@ pub struct SessionConfig {
     pub max_sessions_per_agent: u32,
     /// How often the cleanup job runs (in hours).
     pub cleanup_interval_hours: u32,
+    /// Optional message injected as the first system message when a new session
+    /// starts or when the session is reset. Useful for setting up persistent
+    /// context or instructions across all agents.
+    #[serde(default)]
+    pub reset_prompt: Option<String>,
 }
 
 impl Default for SessionConfig {
@@ -1098,6 +1105,7 @@ impl Default for SessionConfig {
             retention_days: 0,
             max_sessions_per_agent: 0,
             cleanup_interval_hours: 24,
+            reset_prompt: None,
         }
     }
 }
