@@ -35,6 +35,7 @@
         <div class="language-switcher" x-data="{ lang: (typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en') }">
           <button class="lang-opt" :class="{ active: lang === 'en' }" @click="i18n.setLanguage('en').then(() => lang = 'en')" title="English">EN</button>
           <button class="lang-opt" :class="{ active: lang === 'zh-CN' }" @click="i18n.setLanguage('zh-CN').then(() => lang = 'zh-CN')" title="中文">中</button>
+          <button class="lang-opt" :class="{ active: lang === 'ja' }" @click="i18n.setLanguage('ja').then(() => lang = 'ja')" title="日本語">日</button>
         </div>
       </div>
     </div>

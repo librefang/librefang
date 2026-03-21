@@ -1,7 +1,7 @@
 (function(global) {
   'use strict';
 
-  var SUPPORTED_LANGUAGES = ['en', 'zh-CN'];
+  var SUPPORTED_LANGUAGES = ['en', 'zh-CN', 'ja'];
   var DEFAULT_LANGUAGE = 'en';
   var STORAGE_KEY = 'librefang-language';
 
@@ -148,6 +148,12 @@
     updateTree(document.body || document.documentElement || document);
   }
 
+  function updateDocumentLanguage(lang) {
+    if (document && document.documentElement) {
+      document.documentElement.lang = lang || DEFAULT_LANGUAGE;
+    }
+  }
+
   function ensureObserver() {
     if (observer || typeof MutationObserver === 'undefined') return;
     var target = document.body || document.documentElement;
@@ -166,6 +172,7 @@
 
   async function init(lang) {
     currentLanguage = lang || detectLanguage();
+    updateDocumentLanguage(currentLanguage);
     translations = await loadTranslations(currentLanguage);
     localStorage.setItem(STORAGE_KEY, currentLanguage);
     loaded = true;
@@ -178,6 +185,7 @@
   async function setLanguage(lang) {
     if (SUPPORTED_LANGUAGES.indexOf(lang) < 0) return false;
     currentLanguage = lang;
+    updateDocumentLanguage(currentLanguage);
     translations = await loadTranslations(lang);
     localStorage.setItem(STORAGE_KEY, currentLanguage);
     updateDOM();
