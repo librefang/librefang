@@ -107,7 +107,7 @@ async function recordDailyStats(env) {
       try {
         const raw = await env.KV.get('stats_history')
         if (raw) history = JSON.parse(raw)
-      } catch {}
+      } catch (e) { console.log('KV read error:', e.message) }
 
       // Run migration if needed
       history = await migrateOldKeys(env, history)
@@ -148,31 +148,34 @@ function handleFetch(request, env) {
   }
 
   if (path === '/api/github' && request.method === 'GET') {
-    return handleGitHubStats(env, cors)
+    const forceRefresh = url.searchParams.has('refresh')
+    return handleGitHubStats(env, cors, forceRefresh)
   }
 
   return new Response('Not Found', { status: 404 })
 }
 
-async function handleGitHubStats(env, cors) {
+async function handleGitHubStats(env, cors, forceRefresh = false) {
   const cacheKey = 'github_stats'
   const cacheTimeKey = 'github_stats_time'
   const cacheDuration = 1000 * 60 * 30 // 30 minutes
 
   try {
-    // Check cache (2 KV reads)
-    let cached, cacheTime
-    try {
-      cached = await env.KV.get(cacheKey)
-      cacheTime = parseInt(await env.KV.get(cacheTimeKey) || '0', 10)
-    } catch (e) {
-      console.log('KV get error:', e.message)
-    }
+    // Check cache (2 KV reads) - skip if force refresh
+    if (!forceRefresh) {
+      let cached, cacheTime
+      try {
+        cached = await env.KV.get(cacheKey)
+        cacheTime = parseInt(await env.KV.get(cacheTimeKey) || '0', 10)
+      } catch (e) {
+        console.log('KV get error:', e.message)
+      }
 
-    if (cached && cacheTime && (Date.now() - cacheTime < cacheDuration)) {
-      return new Response(cached, {
-        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', ...cors }
-      })
+      if (cached && cacheTime && (Date.now() - cacheTime < cacheDuration)) {
+        return new Response(cached, {
+          headers: { 'Content-Type': 'application/json', 'Cache-Control': 'public, max-age=300', ...cors }
+        })
+      }
     }
 
     // Fetch from GitHub (3 API calls)
@@ -219,7 +222,7 @@ async function handleGitHubStats(env, cors) {
     try {
       const raw = await env.KV.get('stats_history')
       if (raw) history = JSON.parse(raw)
-    } catch {}
+    } catch (e) { console.log('KV read error:', e.message) }
 
     // Run migration if needed
     history = await migrateOldKeys(env, history)
