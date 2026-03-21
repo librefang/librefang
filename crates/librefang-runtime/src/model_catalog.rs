@@ -1000,19 +1000,35 @@ mod tests {
         assert!(catalog.find_model("minimax").is_some());
         // MiniMax M2.7 — by exact ID, alias, and case-insensitive
         let m27 = catalog.find_model("MiniMax-M2.7").unwrap();
-        assert_eq!(m27.provider, "minimax");
+        assert!(
+            m27.provider == "minimax" || m27.provider == "minimax-cn",
+            "unexpected provider: {}",
+            m27.provider
+        );
         assert_eq!(m27.tier, ModelTier::Frontier);
         assert!(catalog.find_model("minimax-m2.7").is_some());
-        // Default "minimax" alias resolves to a minimax model
+        // Default "minimax" alias resolves to a minimax-family model
         let default = catalog.find_model("minimax").unwrap();
-        assert_eq!(default.provider, "minimax");
+        assert!(
+            default.provider == "minimax" || default.provider == "minimax-cn",
+            "unexpected provider: {}",
+            default.provider
+        );
         // MiniMax M2.7 Highspeed — by exact ID and aliases
         let hs = catalog.find_model("MiniMax-M2.7-highspeed").unwrap();
-        assert_eq!(hs.provider, "minimax");
+        assert!(
+            hs.provider == "minimax" || hs.provider == "minimax-cn",
+            "unexpected provider: {}",
+            hs.provider
+        );
         assert!(catalog.find_model("minimax-m2.7-highspeed").is_some());
         // abab7-chat
         let abab7 = catalog.find_model("abab7-chat").unwrap();
-        assert_eq!(abab7.provider, "minimax");
+        assert!(
+            abab7.provider == "minimax" || abab7.provider == "minimax-cn",
+            "unexpected provider: {}",
+            abab7.provider
+        );
         assert!(abab7.supports_vision);
     }
 

@@ -72,10 +72,58 @@ Summary: LibreFang Agent OS CLI
 Home-page: https://librefang.ai
 License: MIT
 Project-URL: Repository, https://github.com/${REPO}
+Project-URL: Documentation, https://librefang.ai/docs
+Project-URL: Issues, https://github.com/${REPO}/issues
 Requires-Python: >=3.8
-Description-Content-Type: text/plain
+Description-Content-Type: text/markdown
 
-LibreFang CLI binary distribution. See https://github.com/${REPO}
+# librefang
+
+LibreFang Agent OS — command-line interface.
+
+## Install
+
+\`\`\`bash
+pip install librefang
+\`\`\`
+
+Or with other package managers:
+
+\`\`\`bash
+# npm
+npm install -g @librefang/cli
+
+# Homebrew (macOS)
+brew install librefang/tap/librefang
+
+# Cargo
+cargo install librefang
+\`\`\`
+
+Or download pre-built binaries from [GitHub Releases](https://github.com/${REPO}/releases).
+
+## Usage
+
+\`\`\`bash
+# Initialize LibreFang
+librefang init
+
+# Start the daemon
+librefang start
+
+# Check system health
+librefang doctor
+\`\`\`
+
+## Documentation
+
+- [Website](https://librefang.ai)
+- [GitHub](https://github.com/${REPO})
+- [Documentation](https://librefang.ai/docs)
+
+## License
+
+MIT
 EOF
 
   # WHEEL

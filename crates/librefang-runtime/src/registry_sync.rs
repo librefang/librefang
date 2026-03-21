@@ -35,6 +35,11 @@ pub fn sync_registry(home_dir: &Path) {
             tracing::warn!("Failed to pull registry: {e}");
         }
     } else {
+        // If the directory exists but is not a git repo (e.g. stale or
+        // interrupted clone), remove it so the fresh clone can proceed.
+        if registry_cache.exists() {
+            let _ = std::fs::remove_dir_all(&registry_cache);
+        }
         let status = Command::new("git")
             .args([
                 "clone",
@@ -212,6 +217,8 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("providers")).unwrap();
         std::fs::create_dir_all(tmp.path().join("hands")).unwrap();
         std::fs::create_dir_all(tmp.path().join("agents")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("skills")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("integrations")).unwrap();
 
         assert!(!needs_sync(tmp.path()));
     }
