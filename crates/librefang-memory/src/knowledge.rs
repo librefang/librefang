@@ -137,8 +137,8 @@ impl KnowledgeStore {
                 r.id, r.source_entity, r.relation_type, r.target_entity, r.properties, r.confidence, r.created_at,
                 t.id, t.entity_type, t.name, t.properties, t.created_at, t.updated_at
              FROM relations r
-             JOIN entities s ON r.source_entity = s.id
-             JOIN entities t ON r.target_entity = t.id
+             JOIN entities s ON (r.source_entity = s.id OR r.source_entity = s.name)
+             JOIN entities t ON (r.target_entity = t.id OR r.target_entity = t.name)
              WHERE 1=1",
         );
         let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
@@ -398,6 +398,70 @@ mod tests {
             })
             .unwrap();
         assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].target.name, "Acme Corp");
+    }
+
+    /// Regression test for #1022: when relations reference entities by name
+    /// (as the MCP tool does) instead of by ID, the JOIN must still match.
+    #[test]
+    fn test_query_graph_relation_references_by_name() {
+        let store = setup();
+        // Simulate MCP tool: entities get UUID ids, relations reference by name
+        let _alice_id = store
+            .add_entity(
+                Entity {
+                    id: String::new(), // will be assigned a UUID
+                    entity_type: EntityType::Person,
+                    name: "Alice".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "",
+            )
+            .unwrap();
+        let _corp_id = store
+            .add_entity(
+                Entity {
+                    id: String::new(),
+                    entity_type: EntityType::Organization,
+                    name: "Acme Corp".to_string(),
+                    properties: HashMap::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                },
+                "",
+            )
+            .unwrap();
+        // Relation references entities by name (as MCP knowledge_add_relation does)
+        store
+            .add_relation(
+                Relation {
+                    source: "Alice".to_string(),
+                    relation: RelationType::WorksAt,
+                    target: "Acme Corp".to_string(),
+                    properties: HashMap::new(),
+                    confidence: 0.9,
+                    created_at: Utc::now(),
+                },
+                "",
+            )
+            .unwrap();
+
+        let matches = store
+            .query_graph(GraphPattern {
+                source: Some("Alice".to_string()),
+                relation: None,
+                target: None,
+                max_depth: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            matches.len(),
+            1,
+            "Should find match when relation references entity by name"
+        );
+        assert_eq!(matches[0].source.name, "Alice");
         assert_eq!(matches[0].target.name, "Acme Corp");
     }
 }
