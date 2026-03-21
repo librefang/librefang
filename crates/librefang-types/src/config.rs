@@ -1424,6 +1424,12 @@ pub struct KernelConfig {
     /// Plugin registry configuration.
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// Strict config mode: when `true`, the daemon refuses to start if the
+    /// config file contains unknown or unrecognised fields. When `false`
+    /// (the default), unknown fields are logged as warnings but the daemon
+    /// boots normally. This is the "tolerant mode" toggle.
+    #[serde(default)]
+    pub strict_config: bool,
 }
 
 /// Vertex AI provider configuration.
@@ -2080,6 +2086,7 @@ impl Default for KernelConfig {
             health_check: HealthCheckConfig::default(),
             plugins: PluginsConfig::default(),
             cors_origin: Vec::new(),
+            strict_config: false,
         }
     }
 }
@@ -2204,6 +2211,7 @@ impl std::fmt::Debug for KernelConfig {
                 "external_auth",
                 &format!("enabled={}", self.external_auth.enabled),
             )
+            .field("strict_config", &self.strict_config)
             .finish()
     }
 }
@@ -3956,9 +3964,101 @@ impl Default for LinkedInConfig {
 }
 
 impl KernelConfig {
+    /// Returns the set of known top-level field names for `KernelConfig`.
+    ///
+    /// Used by the config loader to detect unknown/misspelled fields in the
+    /// TOML file and warn (tolerant mode) or reject (strict mode).
+    pub fn known_top_level_fields() -> &'static [&'static str] {
+        &[
+            "home_dir",
+            "data_dir",
+            "log_level",
+            "api_listen",
+            "listen_addr", // alias for api_listen
+            "cors_origin",
+            "network_enabled",
+            "default_model",
+            "memory",
+            "network",
+            "channels",
+            "api_key",
+            "mode",
+            "language",
+            "users",
+            "mcp_servers",
+            "a2a",
+            "usage_footer",
+            "stable_prefix_mode",
+            "web",
+            "fallback_providers",
+            "browser",
+            "extensions",
+            "vault",
+            "workspaces_dir",
+            "media",
+            "links",
+            "reload",
+            "webhook_triggers",
+            "approval",
+            "approval_policy", // alias for approval
+            "max_cron_jobs",
+            "include",
+            "exec_policy",
+            "bindings",
+            "broadcast",
+            "auto_reply",
+            "canvas",
+            "tts",
+            "docker",
+            "pairing",
+            "auth_profiles",
+            "thinking",
+            "budget",
+            "provider_urls",
+            "provider_regions",
+            "provider_api_keys",
+            "vertex_ai",
+            "oauth",
+            "sidecar_channels",
+            "proxy",
+            "prompt_caching",
+            "session",
+            "queue",
+            "external_auth",
+            "tool_policy",
+            "proactive_memory",
+            "context_engine",
+            "audit",
+            "health_check",
+            "plugins",
+            "strict_config",
+        ]
+    }
+
+    /// Detect unknown top-level keys in a raw TOML value.
+    ///
+    /// Returns a list of field names that appear at the top level of the
+    /// config file but are not recognised by `KernelConfig`.
+    pub fn detect_unknown_fields(raw: &toml::Value) -> Vec<String> {
+        let known: std::collections::HashSet<&str> =
+            Self::known_top_level_fields().iter().copied().collect();
+        let mut unknown = Vec::new();
+        if let toml::Value::Table(tbl) = raw {
+            for key in tbl.keys() {
+                if !known.contains(key.as_str()) {
+                    unknown.push(key.clone());
+                }
+            }
+        }
+        unknown.sort();
+        unknown
+    }
+
     /// Validate the configuration, returning a list of warnings.
     ///
-    /// Checks that env vars referenced by configured channels are set.
+    /// Checks for common misconfigurations such as missing API keys for
+    /// configured channels, invalid port numbers, unreachable paths,
+    /// and unrecognised log levels.
     pub fn validate(&self) -> Vec<String> {
         let mut warnings = Vec::new();
 
@@ -4395,8 +4495,72 @@ impl KernelConfig {
             SearchProvider::DuckDuckGo | SearchProvider::Auto => {}
         }
 
-        // --- Production bounds validation ---
-        // Clamp dangerous zero/extreme values to safe defaults instead of crashing.
+        // --- Structural validation ---
+
+        // Validate api_listen has a parseable port
+        if let Some(colon_pos) = self.api_listen.rfind(':') {
+            let port_str = &self.api_listen[colon_pos + 1..];
+            match port_str.parse::<u16>() {
+                Ok(0) => {
+                    warnings
+                        .push("api_listen port is 0 (OS will assign a random port)".to_string());
+                }
+                Err(_) => {
+                    warnings.push(format!("api_listen port '{}' is not a valid u16", port_str));
+                }
+                Ok(_) => {}
+            }
+        } else {
+            warnings.push(format!(
+                "api_listen '{}' does not contain a port (expected host:port)",
+                self.api_listen
+            ));
+        }
+
+        // Validate log_level is a recognised value
+        match self.log_level.to_lowercase().as_str() {
+            "trace" | "debug" | "info" | "warn" | "error" | "off" => {}
+            other => {
+                warnings.push(format!(
+                    "log_level '{}' is not a recognised level (expected trace/debug/info/warn/error/off)",
+                    other
+                ));
+            }
+        }
+
+        // Validate home_dir exists (or can be created)
+        if !self.home_dir.as_os_str().is_empty() && !self.home_dir.exists() {
+            warnings.push(format!(
+                "home_dir '{}' does not exist (will be created on first use)",
+                self.home_dir.display()
+            ));
+        }
+
+        // Validate data_dir parent is writable (basic path sanity)
+        if !self.data_dir.as_os_str().is_empty() && !self.data_dir.exists() {
+            if let Some(parent) = self.data_dir.parent() {
+                if !parent.as_os_str().is_empty() && !parent.exists() {
+                    warnings.push(format!(
+                        "data_dir parent '{}' does not exist",
+                        parent.display()
+                    ));
+                }
+            }
+        }
+
+        // Validate max_cron_jobs is within a reasonable range
+        if self.max_cron_jobs > 10_000 {
+            warnings.push(format!(
+                "max_cron_jobs {} exceeds reasonable limit (10000)",
+                self.max_cron_jobs
+            ));
+        }
+
+        // Validate network config: shared_secret must be set if network is enabled
+        if self.network_enabled && self.network.shared_secret.is_empty() {
+            warnings.push("network_enabled is true but network.shared_secret is empty".to_string());
+        }
+
         warnings
     }
 
@@ -5063,5 +5227,201 @@ mod tests {
             debug.contains("***"),
             "Debug output should contain redacted marker"
         );
+    }
+
+    // --- Config validation with tolerant mode tests ---
+
+    #[test]
+    fn test_strict_config_defaults_to_false() {
+        let config = KernelConfig::default();
+        assert!(!config.strict_config);
+    }
+
+    #[test]
+    fn test_strict_config_toml_roundtrip() {
+        let config = KernelConfig {
+            strict_config: true,
+            ..Default::default()
+        };
+        let toml_str = toml::to_string_pretty(&config).unwrap();
+        let back: KernelConfig = toml::from_str(&toml_str).unwrap();
+        assert!(back.strict_config);
+    }
+
+    #[test]
+    fn test_known_top_level_fields_not_empty() {
+        let fields = KernelConfig::known_top_level_fields();
+        assert!(fields.len() > 30, "expected many known fields");
+        assert!(fields.contains(&"api_listen"));
+        assert!(fields.contains(&"log_level"));
+        assert!(fields.contains(&"strict_config"));
+        // Aliases must also be present
+        assert!(fields.contains(&"listen_addr"));
+        assert!(fields.contains(&"approval_policy"));
+    }
+
+    #[test]
+    fn test_detect_unknown_fields_clean() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            log_level = "info"
+            api_listen = "0.0.0.0:4545"
+        "#,
+        )
+        .unwrap();
+        let unknown = KernelConfig::detect_unknown_fields(&raw);
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn test_detect_unknown_fields_with_typos() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            log_level = "info"
+            api_listn = "0.0.0.0:4545"
+            frobnicate = true
+        "#,
+        )
+        .unwrap();
+        let unknown = KernelConfig::detect_unknown_fields(&raw);
+        assert_eq!(unknown.len(), 2);
+        assert!(unknown.contains(&"api_listn".to_string()));
+        assert!(unknown.contains(&"frobnicate".to_string()));
+    }
+
+    #[test]
+    fn test_detect_unknown_fields_aliases_accepted() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            listen_addr = "0.0.0.0:4545"
+            approval_policy = {}
+        "#,
+        )
+        .unwrap();
+        let unknown = KernelConfig::detect_unknown_fields(&raw);
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn test_validate_invalid_port_string() {
+        let config = KernelConfig {
+            api_listen: "0.0.0.0:notaport".to_string(),
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(
+            warnings.iter().any(|w| w.contains("not a valid u16")),
+            "expected port parse warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_port_zero_warns() {
+        let config = KernelConfig {
+            api_listen: "0.0.0.0:0".to_string(),
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(
+            warnings.iter().any(|w| w.contains("port is 0")),
+            "expected port-zero warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_missing_port_colon() {
+        let config = KernelConfig {
+            api_listen: "localhost".to_string(),
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("does not contain a port")),
+            "expected missing-port warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_bad_log_level() {
+        let config = KernelConfig {
+            log_level: "verbose".to_string(),
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("not a recognised level")),
+            "expected bad log_level warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_good_log_levels() {
+        for level in &["trace", "debug", "info", "warn", "error", "off"] {
+            let config = KernelConfig {
+                log_level: level.to_string(),
+                ..Default::default()
+            };
+            let warnings = config.validate();
+            assert!(
+                !warnings
+                    .iter()
+                    .any(|w| w.contains("not a recognised level")),
+                "level '{}' should be accepted, got: {:?}",
+                level,
+                warnings
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_max_cron_jobs_too_large() {
+        let config = KernelConfig {
+            max_cron_jobs: 100_000,
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(
+            warnings.iter().any(|w| w.contains("max_cron_jobs")),
+            "expected max_cron_jobs warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_network_enabled_without_secret() {
+        let config = KernelConfig {
+            network_enabled: true,
+            network: NetworkConfig {
+                shared_secret: String::new(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let warnings = config.validate();
+        assert!(
+            warnings.iter().any(|w| w.contains("shared_secret")),
+            "expected shared_secret warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_default_config_no_structural_errors() {
+        // Default config should only have path warnings (home_dir may not exist
+        // in test environment) but no port/log_level/structural issues.
+        let config = KernelConfig::default();
+        let warnings = config.validate();
+        for w in &warnings {
+            assert!(
+                !w.contains("not a valid u16"),
+                "default config should have valid port"
+            );
+            assert!(
+                !w.contains("not a recognised level"),
+                "default config should have valid log_level"
+            );
+        }
     }
 }
