@@ -1,0 +1,43 @@
+id = "research"
+name = "Research & Summarise"
+description = "Research pipeline that investigates a topic from multiple angles, cross-checks findings for accuracy, and produces a concise executive summary with citations."
+category = "research"
+tags = ["research", "fact-check", "summarise", "analysis"]
+
+[[parameters]]
+name = "topic"
+description = "The research topic or question to investigate"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "depth"
+description = "Research depth: overview, standard, or deep-dive"
+param_type = "string"
+required = false
+default = "standard"
+
+[[parameters]]
+name = "audience"
+description = "Target audience for the summary (executive, technical, general)"
+param_type = "string"
+required = false
+default = "general"
+
+[[steps]]
+name = "research_primary"
+prompt_template = "Conduct {{depth}}-level research on the following topic. Identify key facts, major viewpoints, recent developments, and relevant data points. Organise findings into clear sections with source attribution where possible.\n\nTopic: {{topic}}"
+
+[[steps]]
+name = "research_counter"
+prompt_template = "Investigate counter-arguments, alternative perspectives, and potential criticisms related to the following topic. Identify areas of genuine controversy or debate, and note any commonly cited claims that are misleading or outdated.\n\nTopic: {{topic}}"
+
+[[steps]]
+name = "fact_check"
+prompt_template = "Cross-check the following research findings for factual accuracy. For each major claim, assess confidence level (confirmed, likely, uncertain, disputed). Flag any contradictions between the primary research and counter-arguments. Note any claims that require additional verification.\n\nPrimary research:\n{{research_primary}}\n\nCounter-arguments:\n{{research_counter}}"
+depends_on = ["research_primary", "research_counter"]
+
+[[steps]]
+name = "summarise"
+prompt_template = "Produce a concise executive summary suitable for a {{audience}} audience. Incorporate verified findings from the fact-check step. Structure as:\n1. Key takeaways (3-5 bullet points)\n2. Detailed analysis with confidence levels\n3. Areas of uncertainty or debate\n4. Recommendations for further investigation\n\nFact-checked research:\n{{fact_check}}\n\nPrimary findings:\n{{research_primary}}\n\nAlternative perspectives:\n{{research_counter}}"
+depends_on = ["fact_check"]

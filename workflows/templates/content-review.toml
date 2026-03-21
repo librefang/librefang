@@ -1,0 +1,44 @@
+id = "content-review"
+name = "Content Review"
+description = "Multi-agent content review pipeline that drafts, reviews for quality and accuracy, then produces a final edited version incorporating feedback."
+category = "content"
+tags = ["content", "review", "writing", "editing"]
+
+[[parameters]]
+name = "topic"
+description = "The topic or subject to write about"
+param_type = "string"
+required = true
+
+[[parameters]]
+name = "tone"
+description = "Desired tone (formal, casual, technical, persuasive)"
+param_type = "string"
+required = false
+default = "formal"
+
+[[parameters]]
+name = "word_count"
+description = "Target word count for the content"
+param_type = "number"
+required = false
+default = 500
+
+[[steps]]
+name = "draft"
+prompt_template = "Write a {{tone}} article about {{topic}} with approximately {{word_count}} words. Include a clear introduction, well-structured body, and conclusion. Use concrete examples where appropriate."
+
+[[steps]]
+name = "review_quality"
+prompt_template = "Review the following draft for writing quality. Evaluate clarity, coherence, grammar, tone consistency (target: {{tone}}), and overall readability. Provide specific, actionable feedback with line-level suggestions.\n\nDraft:\n{{draft}}"
+depends_on = ["draft"]
+
+[[steps]]
+name = "review_accuracy"
+prompt_template = "Review the following draft for factual accuracy and logical consistency. Flag any claims that appear unsupported, statistics that need citation, logical fallacies, or misleading statements. List each issue with a suggested correction.\n\nDraft:\n{{draft}}"
+depends_on = ["draft"]
+
+[[steps]]
+name = "final_edit"
+prompt_template = "Produce a final edited version of the draft below, incorporating the quality and accuracy feedback. Preserve the original voice and intent while addressing all identified issues.\n\nOriginal draft:\n{{draft}}\n\nQuality feedback:\n{{review_quality}}\n\nAccuracy feedback:\n{{review_accuracy}}"
+depends_on = ["review_quality", "review_accuracy"]
