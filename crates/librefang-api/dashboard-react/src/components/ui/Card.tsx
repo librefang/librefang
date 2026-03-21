@@ -26,7 +26,7 @@ export function Card({
       className={`
         rounded-2xl border border-border-subtle bg-surface shadow-sm
         ${paddingStyles[padding]}
-        ${hover ? "hover:border-brand/30 transition-all duration-200 cursor-pointer" : ""}
+        ${hover ? "hover:border-brand/30 hover:shadow-md hover:-translate-y-0.5 transition-all duration-300 cursor-pointer" : ""}
         ${className}
       `}
       {...props}

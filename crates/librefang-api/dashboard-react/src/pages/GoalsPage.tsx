@@ -165,18 +165,31 @@ export function GoalsPage() {
       ) : (
         <>
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-            {[{ label: t("goals.total"), value: stats.total, color: "text-brand" }, { label: t("goals.pending"), value: stats.pending, color: "text-text-dim" }, { label: t("goals.in_progress"), value: stats.inProgress, color: "text-warning" }, { label: t("goals.completed"), value: stats.completed, color: "text-success" }].map((s, i) => (
+            {[
+              { label: t("goals.total"), value: stats.total, color: "text-brand", bg: "bg-brand/10", icon: Target },
+              { label: t("goals.pending"), value: stats.pending, color: "text-text-dim", bg: "bg-main", icon: Shield },
+              { label: t("goals.in_progress"), value: stats.inProgress, color: "text-warning", bg: "bg-warning/10", icon: Zap },
+              { label: t("goals.completed"), value: stats.completed, color: "text-success", bg: "bg-success/10", icon: Target },
+            ].map((s, i) => (
               <Card key={i} hover padding="md">
-                <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{s.label}</span>
-                <div className="mt-1 flex items-baseline gap-2"><strong className={`text-3xl font-black tracking-tight ${s.color}`}>{s.value}</strong></div>
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{s.label}</span>
+                  <div className={`w-8 h-8 rounded-lg ${s.bg} flex items-center justify-center`}>
+                    <s.icon className={`w-4 h-4 ${s.color}`} />
+                  </div>
+                </div>
+                <div className="mt-2"><strong className={`text-3xl font-black tracking-tight ${s.color}`}>{s.value}</strong></div>
               </Card>
             ))}
           </div>
 
           <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
-            <Card padding="lg">
-              <h2 className="text-lg font-black tracking-tight">{t("goals.create_goal")}</h2>
-              <form className="mt-6 flex flex-col gap-4" onSubmit={handleCreate}>
+            <Card padding="lg" hover>
+              <div className="flex items-center gap-2 mb-5">
+                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Plus className="w-4 h-4 text-brand" /></div>
+                <h2 className="text-sm font-black tracking-tight uppercase">{t("goals.create_goal")}</h2>
+              </div>
+              <form className="flex flex-col gap-4" onSubmit={handleCreate}>
                 <input value={createDraft.title} onChange={e => setCreateDraft({...createDraft, title: e.target.value})} placeholder={t("goals.goal_title_placeholder")} className={inputClass} />
                 <textarea value={createDraft.description} onChange={e => setCreateDraft({...createDraft, description: e.target.value})} placeholder={t("goals.goal_desc_placeholder")} className={`${inputClass} resize-none`} rows={3} />
                 <Button type="submit" variant="primary" disabled={createMutation.isPending || !createDraft.title.trim()} className="mt-2">

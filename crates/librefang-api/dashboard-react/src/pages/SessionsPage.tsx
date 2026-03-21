@@ -120,12 +120,15 @@ export function SessionsPage() {
           ))}
         </div>
       ) : sessions.length === 0 ? (
-        <div className="text-center py-16">
-          <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">
-            <MessageCircle className="w-7 h-7 text-brand" />
+        <div className="flex flex-col items-center py-20">
+          <div className="relative mb-6">
+            <div className="w-20 h-20 rounded-3xl bg-brand/10 flex items-center justify-center">
+              <MessageCircle className="w-10 h-10 text-brand" />
+            </div>
+            <span className="absolute inset-0 rounded-3xl bg-brand/5 animate-ping" style={{ animationDuration: "3s" }} />
           </div>
-          <h3 className="text-lg font-bold">{t("sessions.empty_title")}</h3>
-          <p className="text-sm text-text-dim mt-1">{t("sessions.empty_desc")}</p>
+          <h3 className="text-xl font-black tracking-tight">{t("sessions.empty_title")}</h3>
+          <p className="text-sm text-text-dim mt-2 max-w-xs text-center">{t("sessions.empty_desc")}</p>
         </div>
       ) : (
         <div className="space-y-2">

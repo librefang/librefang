@@ -330,13 +330,13 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
             placeholder={placeholder}
             disabled={disabled}
             rows={1}
-            className="w-full min-h-[52px] max-h-[150px] rounded-xl border border-border-subtle bg-surface px-4 py-3 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/50"
+            className="w-full min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-5 py-3.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
           />
         </div>
         <button
           type="submit"
           disabled={!message.trim() || disabled}
-          className="group relative px-5 py-3 rounded-xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+          className="group relative px-5 py-3.5 rounded-2xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
         >
           <Send className="h-4 w-4" />
           <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">

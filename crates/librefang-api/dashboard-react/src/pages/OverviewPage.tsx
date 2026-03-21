@@ -5,7 +5,7 @@ import type { DashboardSnapshot, HealthCheck } from "../api";
 import { loadDashboardSnapshot } from "../api";
 import { Card } from "../components/ui/Card";
 import { Badge } from "../components/ui/Badge";
-import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, User, Clock, Shield, Sparkles, Calendar } from "lucide-react";
+import { Home, RefreshCw, Users, Layers, Server, Network, Zap, MessageCircle, User, Clock, Shield, Sparkles, Calendar, HardDrive, Activity } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -186,13 +186,17 @@ export function OverviewPage() {
                 <button
                   key={i}
                   onClick={() => navigate({ to: action.to as any })}
-                  className={`flex flex-col items-center gap-2 rounded-xl border p-4 transition-all duration-200 ${
+                  className={`group flex flex-col items-center gap-3 rounded-2xl border p-5 transition-all duration-300 hover:-translate-y-1 hover:shadow-lg ${
                     action.primary
-                      ? "border-brand/30 bg-brand-muted text-brand hover:bg-brand/20 shadow-sm"
-                      : "border-border-subtle bg-surface text-text-dim hover:border-brand/30 hover:bg-surface-hover hover:text-brand shadow-sm"
+                      ? "border-brand/20 bg-gradient-to-b from-brand/5 to-brand/10 text-brand hover:shadow-brand/15"
+                      : "border-border-subtle bg-surface text-text-dim hover:border-brand/30 hover:text-brand"
                   }`}
                 >
-                  <action.icon className="h-5 w-5" />
+                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all duration-300 group-hover:scale-110 ${
+                    action.primary ? "bg-brand/15" : "bg-main group-hover:bg-brand/10"
+                  }`}>
+                    <action.icon className="h-5 w-5" />
+                  </div>
                   <span className="text-[11px] font-bold text-center">{action.label}</span>
                 </button>
               ))}
@@ -287,45 +291,43 @@ export function OverviewPage() {
         {/* Right Column */}
         <div className="flex flex-col gap-6">
           {/* System Status */}
-          <Card padding="lg">
+          <Card padding="lg" hover>
             <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim mb-4">{t("overview.system_status")}</h3>
-            <div className="space-y-4">
-              <div className="flex justify-between items-center py-2 border-b border-border-subtle/30">
-                <span className="text-xs font-medium text-text-dim uppercase">{t("overview.uptime")}</span>
-                <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-200">
-                  {formatUptime(snapshot?.status?.uptime_seconds)}
-                </span>
+            <div className="space-y-3">
+              <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
+                <div className="w-8 h-8 rounded-lg bg-success/10 flex items-center justify-center shrink-0"><Clock className="w-4 h-4 text-success" /></div>
+                <span className="text-xs text-text-dim flex-1">{t("overview.uptime")}</span>
+                <span className="text-sm font-mono font-black">{formatUptime(snapshot?.status?.uptime_seconds)}</span>
               </div>
-              <div className="flex justify-between items-center py-2 border-b border-border-subtle/30">
-                <span className="text-xs font-medium text-text-dim uppercase">{t("overview.memory_usage")}</span>
-                <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-200">
-                  {snapshot?.status?.memory_used_mb ? `${snapshot.status.memory_used_mb} MB` : "-"}
-                </span>
+              <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
+                <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0"><HardDrive className="w-4 h-4 text-brand" /></div>
+                <span className="text-xs text-text-dim flex-1">{t("overview.memory_usage")}</span>
+                <span className="text-sm font-mono font-black">{snapshot?.status?.memory_used_mb ? `${snapshot.status.memory_used_mb} MB` : "-"}</span>
               </div>
-              <div className="flex justify-between items-center py-2 border-b border-border-subtle/30">
-                <span className="text-xs font-medium text-text-dim uppercase">{t("overview.version")}</span>
-                <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-200">
-                  {snapshot?.status?.version || "-"}
-                </span>
+              <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
+                <div className="w-8 h-8 rounded-lg bg-warning/10 flex items-center justify-center shrink-0"><Activity className="w-4 h-4 text-warning" /></div>
+                <span className="text-xs text-text-dim flex-1">{t("overview.version")}</span>
+                <span className="text-sm font-mono font-black text-brand">{snapshot?.status?.version || "-"}</span>
               </div>
-              <div className="flex justify-between items-center py-2">
-                <span className="text-xs font-medium text-text-dim uppercase">{t("overview.agent_count")}</span>
-                <span className="text-sm font-mono font-bold text-slate-700 dark:text-slate-200">
-                  {agentsTotal}
-                </span>
+              <div className="flex items-center gap-3 p-2.5 rounded-lg bg-main/40">
+                <div className="w-8 h-8 rounded-lg bg-accent/10 flex items-center justify-center shrink-0"><User className="w-4 h-4 text-accent" /></div>
+                <span className="text-xs text-text-dim flex-1">{t("overview.agent_count")}</span>
+                <span className="text-sm font-mono font-black">{agentsTotal}</span>
               </div>
             </div>
           </Card>
 
           {/* Health Checks */}
-          <Card padding="lg">
+          <Card padding="lg" hover>
             <h3 className="text-xs font-bold uppercase tracking-wider text-text-dim mb-4">{t("overview.health_checks")}</h3>
             {snapshot?.health?.checks && snapshot.health.checks.length > 0 ? (
-              <div className="space-y-3">
+              <div className="space-y-2">
                 {snapshot.health.checks.map((check: HealthCheck, i: number) => (
-                  <div key={i} className="flex items-center gap-3">
-                    <div className={`h-2 w-2 rounded-full ${check.status === "ok" ? "bg-success" : "bg-warning"}`} />
-                    <span className="flex-1 text-xs font-medium text-slate-600 dark:text-slate-300">{check.name}</span>
+                  <div key={i} className="flex items-center gap-3 p-2 rounded-lg hover:bg-main/40 transition-colors">
+                    <div className={`relative h-2.5 w-2.5 rounded-full ${check.status === "ok" ? "bg-success" : "bg-warning"}`}>
+                      {check.status === "ok" && <span className="absolute inset-0 rounded-full bg-success/40 animate-ping" />}
+                    </div>
+                    <span className="flex-1 text-xs font-medium">{check.name}</span>
                     <Badge variant={check.status === "ok" ? "success" : "warning"}>
                       {check.status === "ok" ? "OK" : "WARN"}
                     </Badge>
@@ -333,7 +335,15 @@ export function OverviewPage() {
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-text-dim italic">{t("overview.no_telemetry")}</p>
+              <div className="flex flex-col items-center py-6">
+                <div className="relative mb-3">
+                  <div className="w-10 h-10 rounded-full bg-success/10 flex items-center justify-center">
+                    <Shield className="w-5 h-5 text-success" />
+                  </div>
+                  <span className="absolute inset-0 rounded-full bg-success/10 animate-ping" />
+                </div>
+                <p className="text-xs font-bold text-success">{t("common.daemon_online")}</p>
+              </div>
             )}
           </Card>
 

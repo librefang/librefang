@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 import { approveApproval, listApprovals } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
-import { EmptyState } from "../components/ui/EmptyState";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -51,19 +50,31 @@ export function ApprovalsPage() {
       {approvalsQuery.isLoading ? (
         <ListSkeleton rows={3} />
       ) : approvals.length === 0 ? (
-        <EmptyState
-          title={t("approvals.queue_clear")}
-          description={t("approvals.queue_clear_desc")}
-          icon={<CheckCircle className="h-6 w-6" />}
-        />
+        <div className="flex flex-col items-center py-20">
+          <div className="relative mb-6">
+            <div className="w-20 h-20 rounded-3xl bg-success/10 flex items-center justify-center">
+              <CheckCircle className="h-10 w-10 text-success" />
+            </div>
+            <span className="absolute inset-0 rounded-3xl bg-success/5 animate-ping" style={{ animationDuration: "3s" }} />
+          </div>
+          <h3 className="text-xl font-black tracking-tight">{t("approvals.queue_clear")}</h3>
+          <p className="text-sm text-text-dim mt-2 max-w-xs text-center">{t("approvals.queue_clear_desc")}</p>
+        </div>
       ) : (
         <div className="grid gap-4">
           {approvals.map((a) => (
             <Card key={a.id} hover padding="lg">
               <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
                 <div className="min-w-0 flex-1">
-                  <Badge variant="warning">{t("approvals.pending_review")}</Badge>
-                  <p className="mt-4 text-sm font-medium leading-relaxed">{a.action_summary || a.description || t("common.actions")}</p>
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-warning/10 flex items-center justify-center shrink-0">
+                      <CheckCircle className="w-5 h-5 text-warning" />
+                    </div>
+                    <div>
+                      <Badge variant="warning">{t("approvals.pending_review")}</Badge>
+                      <p className="mt-1 text-sm font-medium leading-relaxed">{a.action_summary || a.description || t("common.actions")}</p>
+                    </div>
+                  </div>
                 </div>
                 <div className="flex gap-3 shrink-0">
                   <Button variant="danger" onClick={() => handleDecision(a.id, "reject")} disabled={pendingId === a.id}>{t("approvals.reject")}</Button>
