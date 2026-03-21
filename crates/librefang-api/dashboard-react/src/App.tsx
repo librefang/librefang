@@ -20,8 +20,8 @@ export function App() {
   }, [theme]);
 
   const navBase =
-    "flex items-center gap-3 rounded-lg border border-transparent px-3 py-2 text-sm text-text-dim transition-all duration-200 hover:border-border-subtle hover:bg-surface-hover hover:text-brand group";
-  const navActive = "border-brand/20 bg-brand-muted text-brand font-medium shadow-sm";
+    "flex items-center gap-3 rounded-xl border border-transparent px-3 py-2.5 text-sm text-text-dim transition-all duration-200 hover:bg-surface-hover hover:text-brand group";
+  const navActive = "border-brand/20 bg-brand/10 text-brand font-semibold shadow-sm shadow-brand/5";
 
   const navGroups = [
     {
@@ -179,11 +179,14 @@ export function App() {
 
         {/* Sidebar Footer */}
         <div className={`border-t border-border-subtle p-4 ${isSidebarCollapsed ? "lg:hidden" : ""}`}>
-          <div className="rounded-xl bg-surface-hover p-3 ring-1 ring-border-subtle">
-            <p className="text-[10px] font-medium text-text-dim uppercase tracking-wider">{t("common.status")}</p>
+          <div className="rounded-xl bg-gradient-to-r from-success/5 to-transparent p-3 border border-success/10">
+            <p className="text-[10px] font-bold text-text-dim uppercase tracking-wider">{t("common.status")}</p>
             <div className="mt-2 flex items-center gap-2">
-              <div className="h-2 w-2 rounded-full bg-success shadow-[0_0_8px_var(--success-color)]" />
-              <span className="text-xs font-semibold">{t("common.daemon_online")}</span>
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full rounded-full bg-success opacity-75 animate-ping" />
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-success" />
+              </span>
+              <span className="text-xs font-semibold text-success">{t("common.daemon_online")}</span>
             </div>
           </div>
         </div>
@@ -195,28 +198,31 @@ export function App() {
         <header className="flex h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface/80 px-6 backdrop-blur-xl">
           <div className="flex items-center gap-3">
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
             <Link
               to="/settings"
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-border-subtle bg-surface text-text-dim hover:text-brand transition-all shadow-sm"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200"
+              title={t("nav.settings")}
             >
               <Settings className="h-4 w-4" />
             </Link>
             <button
               onClick={() => setLanguage(language === "en" ? "zh" : "en")}
-              className="flex h-8 w-8 items-center justify-center rounded-lg border border-border-subtle bg-surface text-text-dim hover:text-brand transition-all shadow-sm"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200"
+              title={t("common.change_language")}
             >
               <Globe className="h-4 w-4" />
             </button>
             <button
               onClick={toggleTheme}
-              className="rounded-md border border-border-subtle bg-surface p-2 text-text-dim hover:text-brand shadow-sm"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200"
+              title={t("common.toggle_theme")}
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
             <button
               onClick={() => setMobileMenuOpen(true)}
-              className="rounded-md border border-border-subtle bg-surface p-2 text-text-dim hover:text-brand shadow-sm lg:hidden"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200 lg:hidden"
             >
               <Menu className="h-5 w-5" />
             </button>
