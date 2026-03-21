@@ -2566,6 +2566,11 @@ pub struct SlackConfig {
     pub account_id: Option<String>,
     /// Default agent name to route messages to.
     pub default_agent: Option<String>,
+    /// Whether to disable link unfurling (preview expansion) in sent messages.
+    /// When set to `false`, Slack will not expand link previews.
+    /// When `None` (default), Slack uses its own default behavior.
+    #[serde(default)]
+    pub unfurl_links: Option<bool>,
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
@@ -2583,6 +2588,7 @@ impl Default for SlackConfig {
             allowed_channels: vec![],
             account_id: None,
             default_agent: None,
+            unfurl_links: None,
             overrides: ChannelOverrides::default(),
             force_flat_replies: None,
         }
@@ -4538,6 +4544,34 @@ mod tests {
         assert_eq!(sl.app_token_env, "SLACK_APP_TOKEN");
         assert_eq!(sl.bot_token_env, "SLACK_BOT_TOKEN");
         assert!(sl.allowed_channels.is_empty());
+        assert!(sl.unfurl_links.is_none());
+    }
+
+    #[test]
+    fn test_slack_config_unfurl_links_deserialization() {
+        let toml_str = r#"
+            app_token_env = "SLACK_APP_TOKEN"
+            bot_token_env = "SLACK_BOT_TOKEN"
+            unfurl_links = false
+        "#;
+        let sl: SlackConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(sl.unfurl_links, Some(false));
+
+        let toml_str2 = r#"
+            app_token_env = "SLACK_APP_TOKEN"
+            bot_token_env = "SLACK_BOT_TOKEN"
+            unfurl_links = true
+        "#;
+        let sl2: SlackConfig = toml::from_str(toml_str2).unwrap();
+        assert_eq!(sl2.unfurl_links, Some(true));
+
+        // Default (field omitted) should be None
+        let toml_str3 = r#"
+            app_token_env = "SLACK_APP_TOKEN"
+            bot_token_env = "SLACK_BOT_TOKEN"
+        "#;
+        let sl3: SlackConfig = toml::from_str(toml_str3).unwrap();
+        assert!(sl3.unfurl_links.is_none());
     }
 
     #[test]

@@ -1596,7 +1596,8 @@ pub async fn start_channel_bridge_with_config(
                 let adapter = Arc::new(
                     SlackAdapter::new(app_token, bot_token, sl_config.allowed_channels.clone())
                         .with_account_id(sl_config.account_id.clone())
-                        .with_force_flat_replies(sl_config.force_flat_replies.unwrap_or(false)),
+                        .with_force_flat_replies(sl_config.force_flat_replies.unwrap_or(false))
+                        .with_unfurl_links(sl_config.unfurl_links),
                 );
                 adapters.push((
                     adapter,

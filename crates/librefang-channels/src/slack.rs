@@ -31,6 +31,9 @@ pub struct SlackAdapter {
     allowed_channels: Vec<String>,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// Whether to unfurl (expand previews for) links in sent messages.
+    /// When `None`, Slack uses its own default behavior.
+    unfurl_links: Option<bool>,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
     /// Bot's own user ID (populated after auth.test).
@@ -48,6 +51,7 @@ impl SlackAdapter {
             client: crate::http_client::new_client(),
             allowed_channels,
             account_id: None,
+            unfurl_links: None,
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             bot_user_id: Arc::new(RwLock::new(None)),
@@ -64,6 +68,12 @@ impl SlackAdapter {
     /// Force replies to be posted as top-level channel messages instead of threads.
     pub fn with_force_flat_replies(mut self, force: bool) -> Self {
         self.force_flat_replies = force;
+        self
+    }
+
+    /// Set the unfurl_links option. Returns self for builder chaining.
+    pub fn with_unfurl_links(mut self, unfurl_links: Option<bool>) -> Self {
+        self.unfurl_links = unfurl_links;
         self
     }
 
@@ -120,6 +130,10 @@ impl SlackAdapter {
 
             if let Some(ts) = thread_ts {
                 body["thread_ts"] = serde_json::json!(ts);
+            }
+
+            if let Some(unfurl) = self.unfurl_links {
+                body["unfurl_links"] = serde_json::json!(unfurl);
             }
 
             let resp: serde_json::Value = self
