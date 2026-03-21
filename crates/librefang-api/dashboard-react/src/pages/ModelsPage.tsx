@@ -194,7 +194,7 @@ export function ModelsPage() {
           </div>
 
           {paged.map((m, i) => (
-            <div key={m.id}
+            <div key={`${m.provider}:${m.id}`}
               className={`grid grid-cols-[1fr_100px_80px_80px_80px_50px_50px_50px] gap-3 px-5 py-3 items-center border-t border-border-subtle/50 hover:bg-surface transition-colors ${
                 !m.available ? "opacity-40" : ""
               } ${i % 2 === 0 ? "" : "bg-main/30"}`}>
