@@ -2,7 +2,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { FormEvent, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { createSchedule, deleteSchedule, listAgents, listSchedules, listTriggers, listCronJobs, runSchedule } from "../api";
-import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";

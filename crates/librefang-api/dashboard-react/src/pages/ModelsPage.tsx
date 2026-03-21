@@ -1,15 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listModels, type ModelItem } from "../api";
+import { listModels } from "../api";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import {
   Cpu, Search, RefreshCw, Check, X, Eye, Wrench, Zap, AlertCircle, Lock
 } from "lucide-react";
 
-// Dynamic tiers from data - fallback list
-const DEFAULT_TIERS = ["all", "frontier", "smart", "balanced", "fast", "local"] as const;
 const REFRESH_MS = 60000;
 const PAGE_SIZE = 50;
 
@@ -128,7 +126,7 @@ export function ModelsPage() {
 
         <div className="flex gap-0.5 rounded-xl border border-border-subtle bg-surface p-0.5 flex-wrap">
           {tiers.map(tier => (
-            <button key={tier} onClick={() => setTierFilter(tier)}
+            <button key={tier} onClick={() => setTierFilter(tier || "all")}
               className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${
                 tierFilter === tier ? "bg-brand text-white shadow-sm" : "text-text-dim hover:text-text hover:bg-main"
               }`}>

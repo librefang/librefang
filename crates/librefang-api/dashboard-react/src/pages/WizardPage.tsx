@@ -1,13 +1,11 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { useUIStore } from "../lib/store";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Zap } from "lucide-react";
 
 export function WizardPage() {
   const { t } = useTranslation();
-  const { theme } = useUIStore();
   const [step, setStep] = useState(1);
 
   const containerClass = "max-w-2xl mx-auto py-12 px-6 transition-colors duration-300";

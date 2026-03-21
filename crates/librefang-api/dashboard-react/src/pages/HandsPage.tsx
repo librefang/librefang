@@ -2,11 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { activateHand, deactivateHand, listActiveHands, listHands } from "../api";
-import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
-import { Hand, RefreshCw, Search, Power, PowerOff, Loader2, Check, AlertCircle } from "lucide-react";
+import { Hand, RefreshCw, Search, Power, PowerOff, Loader2, Check } from "lucide-react";
 
 const REFRESH_MS = 15000;
 
@@ -61,7 +60,6 @@ export function HandsPage() {
   }
 
   const activeCount = activeHandIds.size;
-  const readyCount = hands.filter(h => h.requirements_met).length;
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
@@ -134,12 +132,12 @@ export function HandsPage() {
                     </div>
                     <p className="text-[10px] text-text-dim mt-0.5 line-clamp-2">{h.description || "-"}</p>
                     {instance && (
-                      <p className="text-[9px] text-text-dim/50 font-mono mt-1">{t("hands.instance")}: {instance.id?.slice(0, 8)}</p>
+                      <p className="text-[9px] text-text-dim/50 font-mono mt-1">{t("hands.instance")}: {instance.instance_id?.slice(0, 8)}</p>
                     )}
                   </div>
                   <div className="shrink-0">
                     {isActive ? (
-                      <Button variant="secondary" size="sm" onClick={() => instance && handleDeactivate(instance.id)} disabled={isPending}>
+                      <Button variant="secondary" size="sm" onClick={() => instance && handleDeactivate(instance.instance_id)} disabled={isPending}>
                         {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PowerOff className="w-3.5 h-3.5" />}
                       </Button>
                     ) : (

@@ -2,12 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { deleteSession, listAgents, listSessions, switchAgentSession } from "../api";
-import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
-import { Avatar } from "../components/ui/Avatar";
 import { useUIStore } from "../lib/store";
-import { Clock, RefreshCw, Search, MessageCircle, Trash2, Play, Users, X } from "lucide-react";
+import { Clock, RefreshCw, Search, MessageCircle, Trash2, Play, Users } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -38,13 +36,13 @@ export function SessionsPage() {
       })
       .sort((a, b) => {
         // Active first
-        if (a.active && !b.active) return -1;
-        if (!a.active && b.active) return 1;
+        if ((a as any).active && !(b as any).active) return -1;
+        if (!(a as any).active && (b as any).active) return 1;
         return (b.created_at || "").localeCompare(a.created_at || "");
       });
   }, [sessionsQuery.data, search, agentMap]);
 
-  const activeCount = sessions.filter(s => s.active).length;
+  const activeCount = sessions.filter(s => (s as any).active).length;
 
   async function handleSwitch(agentId: string, sessionId: string) {
     setPendingId(sessionId);
@@ -136,22 +134,22 @@ export function SessionsPage() {
             return (
               <div key={s.session_id}
                 className={`flex items-center gap-4 p-4 rounded-2xl border transition-all ${
-                  s.active ? "border-success/30 bg-success/5" : "border-border-subtle hover:border-brand/30"
+                  (s as any).active ? "border-success/30 bg-success/5" : "border-border-subtle hover:border-brand/30"
                 }`}>
                 {/* Agent avatar */}
                 <div className={`relative w-10 h-10 rounded-xl flex items-center justify-center text-lg font-bold shrink-0 ${
-                  s.active ? "bg-success/20 text-success" : "bg-main text-text-dim/40"
+                  (s as any).active ? "bg-success/20 text-success" : "bg-main text-text-dim/40"
                 }`}>
                   {agent?.name?.charAt(0).toUpperCase() || <Users className="w-5 h-5" />}
-                  {s.active && <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />}
+                  {(s as any).active && <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />}
                 </div>
 
                 {/* Info */}
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <h3 className="text-sm font-bold truncate">{agent?.name || t("sessions.unknown_agent")}</h3>
-                    <Badge variant={s.active ? "success" : "default"}>
-                      {s.active ? t("common.active") : t("common.idle")}
+                    <Badge variant={(s as any).active ? "success" : "default"}>
+                      {(s as any).active ? t("common.active") : t("common.idle")}
                     </Badge>
                   </div>
                   <div className="flex items-center gap-3 mt-1 text-[10px] text-text-dim/60">
@@ -165,7 +163,7 @@ export function SessionsPage() {
 
                 {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0">
-                  {!s.active && s.agent_id && (
+                  {!(s as any).active && s.agent_id && (
                     <Button variant="secondary" size="sm" onClick={() => handleSwitch(s.agent_id!, s.session_id)} disabled={pendingId === s.session_id}>
                       <Play className="w-3.5 h-3.5 mr-1" /> {t("common.resume")}
                     </Button>

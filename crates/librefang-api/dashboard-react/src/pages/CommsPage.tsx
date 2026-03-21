@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listChannels, loadDashboardSnapshot, getCommsTopology, listCommsEvents, type CommsTopology, type CommsEventItem } from "../api";
+import { listChannels, loadDashboardSnapshot, getCommsTopology, listCommsEvents, type CommsEventItem } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -10,8 +10,8 @@ import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import {
   Radio, Activity, Zap, Clock, CheckCircle2, XCircle, MessageSquare, Send,
-  Mail, Phone, Hash, Link2, Webhook, Wifi, Globe, ChevronRight, Search, X,
-  ArrowsUpFromLine, ArrowDownToLine, Users, Server
+  Mail, Phone, Link2, Wifi, Globe, ChevronRight, Search, X,
+  ArrowsUpFromLine, Users
 } from "lucide-react";
 
 const REFRESH_MS = 30000;

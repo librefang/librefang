@@ -3,7 +3,6 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import {
-  createWorkflow,
   deleteWorkflow,
   listWorkflowRuns,
   listWorkflows,
@@ -195,7 +194,7 @@ export function WorkflowsPage() {
                   <div className="flex items-center gap-2">
                     <h3 className="text-sm font-bold truncate">{wf.name}</h3>
                     <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-semibold shrink-0">
-                      {t("workflows.steps_count", { count: wf.steps || 0 })}
+                      {t("workflows.steps_count", { count: Array.isArray(wf.steps) ? wf.steps.length : (wf.steps || 0) })}
                     </span>
                   </div>
                   <p className="text-[10px] text-text-dim mt-0.5 truncate">{wf.description || t("common.no_data")}</p>

@@ -4,7 +4,6 @@ import { useTranslation } from "react-i18next";
 import {
   listPlugins, listPluginRegistries, installPlugin, uninstallPlugin,
   scaffoldPlugin, installPluginDeps,
-  type PluginItem, type RegistryEntry
 } from "../api";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";

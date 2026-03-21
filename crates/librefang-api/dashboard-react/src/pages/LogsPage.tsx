@@ -19,15 +19,15 @@ const LOG_LEVELS = {
 
 export function LogsPage() {
   const { t } = useTranslation();
-  const [limit, setLimit] = useState(100);
+  const [limit] = useState(100);
   const auditQuery = useQuery({ queryKey: ["audit", "recent", limit], queryFn: () => listAuditRecent(limit), refetchInterval: REFRESH_MS });
 
-  const logs = auditQuery.data?.entries ?? auditQuery.data?.events ?? [];
-  const modules = Array.from(new Set(logs.map(l => l.action || l.source).filter(Boolean))) as string[];
+  const logs = auditQuery.data?.entries ?? [];
+  const modules = Array.from(new Set(logs.map((l: any) => l.action || l.source).filter(Boolean))) as string[];
   const [search, setSearch] = useState("");
   const [moduleFilter, setModuleFilter] = useState<string | null>(null);
 
-  const filteredLogs = logs.filter(l => {
+  const filteredLogs = logs.filter((l: any) => {
     const matchesSearch = !search || (l.detail || l.outcome || l.message || "").toLowerCase().includes(search.toLowerCase());
     const matchesModule = !moduleFilter || (l.action || l.source) === moduleFilter;
     return matchesSearch && matchesModule;
@@ -91,7 +91,7 @@ export function LogsPage() {
           ) : filteredLogs.length === 0 ? (
             <div className="text-center py-8 text-text-dim">{t("common.no_data")}</div>
           ) : (
-            filteredLogs.map((l, i) => {
+            filteredLogs.map((l: any, i: any) => {
               const outcome = l.outcome || "";
               const isError = outcome.startsWith("error");
               const level = isError ? "error" : (l.event_type || "info").toLowerCase();

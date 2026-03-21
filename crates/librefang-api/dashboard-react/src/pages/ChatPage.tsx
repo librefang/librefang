@@ -210,10 +210,10 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   }
 
   return (
-    <div className={`flex ${isUser ? "justify-start" : "justify-end"} animate-fade-in-up`}>
-      <div className={`flex flex-col max-w-[75%] ${isUser ? "items-start" : "items-end"}`}>
+    <div className={`flex ${isUser ? "justify-end" : "justify-start"} animate-fade-in-up`}>
+      <div className={`flex flex-col max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
         {/* 头像 + 名字 */}
-        <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-start" : "self-end"}`}>
+        <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
           <div className={`h-7 w-7 rounded-lg flex items-center justify-center ${
             isUser ? "bg-gradient-to-br from-brand to-accent text-white shadow-md" : "bg-surface border border-border-subtle"
           }`}>
@@ -227,10 +227,10 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         {/* 消息内容 */}
         <div className={`relative px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm transition-all ${
           isUser
-            ? "bg-gradient-to-br from-brand to-brand/90 text-white rounded-tl-md"
+            ? "bg-gradient-to-br from-brand to-brand/90 text-white rounded-tr-md"
             : message.error
-              ? "bg-error/10 border border-error/20 text-error rounded-tr-md"
-              : "bg-surface border border-border-subtle rounded-tr-md"
+              ? "bg-error/10 border border-error/20 text-error rounded-tl-md"
+              : "bg-surface border border-border-subtle rounded-tl-md"
         }`}>
           {message.isStreaming ? (
             <div className="flex items-center gap-1">

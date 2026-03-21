@@ -1,7 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { listMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, decayMemories, searchMemories, type MemoryStatsResponse } from "../api";
+import { listMemories, deleteMemory, getMemoryStats, addMemoryFromText, updateMemory, cleanupMemories, decayMemories, type MemoryStatsResponse } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { CardSkeleton } from "../components/ui/Skeleton";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -10,7 +10,7 @@ import { Badge } from "../components/ui/Badge";
 import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { useUIStore } from "../lib/store";
-import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, RefreshCw, Edit2, Loader2, Filter, BarChart3 } from "lucide-react";
+import { Database, Search, Trash2, Plus, X, Sparkles, Zap, Clock, RefreshCw, Edit2, Loader2, BarChart3 } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -23,7 +23,7 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   const [level, setLevel] = useState("episodic");
 
   const addMutation = useMutation({
-    mutationFn: () => addMemoryFromText({ content, agent_id: agentId || undefined, level: level as any }),
+    mutationFn: () => addMemoryFromText(content, agentId || undefined),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["memory"] });
       onClose();
@@ -148,28 +148,28 @@ function MemoryStats({ stats }: { stats: MemoryStatsResponse | null }) {
           <Database className="w-4 h-4 text-brand" />
           <span className="text-[10px] font-black uppercase text-text-dim">{t("memory.total_memories")}</span>
         </div>
-        <p className="text-2xl font-black">{stats.total_memories ?? 0}</p>
+        <p className="text-2xl font-black">{stats.total ?? 0}</p>
       </Card>
       <Card padding="md" hover>
         <div className="flex items-center gap-2 mb-2">
           <Sparkles className="w-4 h-4 text-success" />
           <span className="text-[10px] font-black uppercase text-text-dim">{t("memory.episodic")}</span>
         </div>
-        <p className="text-2xl font-black">{stats.episodic_count ?? 0}</p>
+        <p className="text-2xl font-black">{(stats as any).episodic_count ?? 0}</p>
       </Card>
       <Card padding="md" hover>
         <div className="flex items-center gap-2 mb-2">
           <Zap className="w-4 h-4 text-warning" />
           <span className="text-[10px] font-black uppercase text-text-dim">{t("memory.semantic")}</span>
         </div>
-        <p className="text-2xl font-black">{stats.semantic_count ?? 0}</p>
+        <p className="text-2xl font-black">{(stats as any).semantic_count ?? 0}</p>
       </Card>
       <Card padding="md" hover>
         <div className="flex items-center gap-2 mb-2">
           <Clock className="w-4 h-4 text-accent" />
           <span className="text-[10px] font-black uppercase text-text-dim">{t("memory.working")}</span>
         </div>
-        <p className="text-2xl font-black">{stats.working_count ?? 0}</p>
+        <p className="text-2xl font-black">{(stats as any).working_count ?? 0}</p>
       </Card>
     </div>
   );
@@ -256,7 +256,7 @@ export function MemoryPage() {
       />
 
       {/* Stats */}
-      {showStats && <MemoryStats stats={statsQuery.data} />}
+      {showStats && <MemoryStats stats={statsQuery.data ?? null} />}
 
       {/* Filters */}
       <div className="flex flex-col sm:flex-row gap-3">
@@ -283,7 +283,7 @@ export function MemoryPage() {
           {levels.map(level => (
             <button
               key={level}
-              onClick={() => setLevelFilter(level)}
+              onClick={() => setLevelFilter(level || "all")}
               className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${levelFilter === level ? "bg-surface shadow-sm" : "text-text-dim hover:text-text-main"}`}
             >
               {level}
@@ -317,9 +317,9 @@ export function MemoryPage() {
                   <Badge variant={m.level === "episodic" ? "success" : m.level === "semantic" ? "warning" : "info"}>
                     {m.level || "Vector"}
                   </Badge>
-                  {m.importance !== undefined && (
-                    <Badge variant={m.importance > 0.7 ? "error" : m.importance > 0.3 ? "warning" : "default"}>
-                      {t("memory.importance")}: {Math.round(m.importance * 100)}%
+                  {(m as any).importance !== undefined && (
+                    <Badge variant={(m as any).importance > 0.7 ? "error" : (m as any).importance > 0.3 ? "warning" : "default"}>
+                      {t("memory.importance")}: {Math.round((m as any).importance * 100)}%
                     </Badge>
                   )}
                 </div>

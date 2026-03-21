@@ -13,8 +13,8 @@ import { Pagination } from "../components/ui/Pagination";
 import { useUIStore } from "../lib/store";
 import {
   Server, Zap, Clock, Key, Globe, CheckCircle2, XCircle, Loader2, AlertCircle, Search,
-  SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter, RotateCcw,
-  ChevronDown, ExternalLink, Activity, Cpu, Cloud, Bot, Globe2, Database, Sparkles
+  SortAsc, SortDesc, CheckSquare, Square, ChevronRight, X, Grid3X3, List, Filter,
+  ExternalLink, Activity, Cpu, Cloud, Bot, Globe2, Sparkles
 } from "lucide-react";
 
 const REFRESH_MS = 30000;
@@ -806,7 +806,7 @@ export function ProvidersPage() {
                   {providerIcons[configProvider.id] || <Server className="w-5 h-5 text-brand" />}
                 </div>
                 <div>
-                  <p className="text-sm font-bold">{configProvider.name || configProvider.id}</p>
+                  <p className="text-sm font-bold">{configProvider.display_name || configProvider.id}</p>
                   <p className="text-[10px] text-text-dim font-mono">{configProvider.id}</p>
                 </div>
                 <Badge variant={configProvider.auth_status === "configured" ? "success" : "error"} className="ml-auto">
