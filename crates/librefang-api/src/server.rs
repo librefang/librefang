@@ -102,6 +102,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::post(routes::reset_session),
         )
         .route(
+            "/agents/{id}/session/reboot",
+            axum::routing::post(routes::reboot_session),
+        )
+        .route(
             "/agents/{id}/history",
             axum::routing::delete(routes::clear_agent_history),
         )
@@ -999,6 +1003,13 @@ pub async fn run_daemon(
         }
     }
 
+    info!(
+        "LibreFang v{} ({}) built {} [{}]",
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_SHA"),
+        env!("BUILD_DATE"),
+        std::env::consts::ARCH,
+    );
     info!("LibreFang API server listening on http://{addr}");
     info!("WebChat UI available at http://{addr}/",);
     info!("WebSocket endpoint: ws://{addr}/api/agents/{{id}}/ws",);

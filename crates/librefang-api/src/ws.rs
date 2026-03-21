@@ -794,6 +794,14 @@ async fn handle_command(
             }
             Err(e) => serde_json::json!({"type": "error", "content": format!("Reset failed: {e}")}),
         },
+        "reboot" => match state.kernel.reboot_session(agent_id) {
+            Ok(()) => {
+                serde_json::json!({"type": "command_result", "command": "reboot", "message": "Session rebooted. Context cleared."})
+            }
+            Err(e) => {
+                serde_json::json!({"type": "error", "content": format!("Reboot failed: {e}")})
+            }
+        },
         "compact" => match state.kernel.compact_agent_session(agent_id).await {
             Ok(msg) => {
                 serde_json::json!({"type": "command_result", "command": cmd, "message": msg})

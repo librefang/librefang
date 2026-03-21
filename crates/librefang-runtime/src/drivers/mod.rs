@@ -1,8 +1,8 @@
 //! LLM driver implementations.
 //!
 //! Contains drivers for Anthropic Claude, Google Gemini, OpenAI-compatible APIs, and more.
-//! Supports: Anthropic, Gemini, OpenAI, Groq, OpenRouter, DeepSeek, Together,
-//! Mistral, Fireworks, Ollama, vLLM, Chutes.ai, and any OpenAI-compatible endpoint.
+//! Supports: Anthropic, Gemini, OpenAI, Groq, OpenRouter, DeepSeek, DeepInfra,
+//! Together, Mistral, Fireworks, Ollama, vLLM, Chutes.ai, and any OpenAI-compatible endpoint.
 
 pub mod aider;
 pub mod anthropic;
@@ -21,7 +21,7 @@ pub mod vertex_ai;
 use crate::llm_driver::{DriverConfig, LlmDriver, LlmError};
 use librefang_types::model_catalog::{
     AI21_BASE_URL, ANTHROPIC_BASE_URL, CEREBRAS_BASE_URL, CHATGPT_BASE_URL, CHUTES_BASE_URL,
-    COHERE_BASE_URL, DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL,
+    COHERE_BASE_URL, DEEPINFRA_BASE_URL, DEEPSEEK_BASE_URL, FIREWORKS_BASE_URL, GEMINI_BASE_URL,
     GITHUB_COPILOT_BASE_URL, GROQ_BASE_URL, HUGGINGFACE_BASE_URL, KIMI_CODING_BASE_URL,
     LEMONADE_BASE_URL, LMSTUDIO_BASE_URL, MINIMAX_BASE_URL, MISTRAL_BASE_URL, MOONSHOT_BASE_URL,
     NVIDIA_NIM_BASE_URL, OLLAMA_BASE_URL, OPENAI_BASE_URL, OPENROUTER_BASE_URL,
@@ -152,6 +152,16 @@ static PROVIDER_REGISTRY: &[ProviderEntry] = &[
         aliases: &[],
         base_url: DEEPSEEK_BASE_URL,
         api_key_env: "DEEPSEEK_API_KEY",
+        key_required: true,
+        api_format: ApiFormat::OpenAI,
+        alt_api_key_env: None,
+        hidden: false,
+    },
+    ProviderEntry {
+        name: "deepinfra",
+        aliases: &[],
+        base_url: DEEPINFRA_BASE_URL,
+        api_key_env: "DEEPINFRA_API_KEY",
         key_required: true,
         api_format: ApiFormat::OpenAI,
         alt_api_key_env: None,
@@ -661,6 +671,7 @@ fn create_driver_from_entry(
 /// - `groq` — Groq (ultra-fast inference)
 /// - `openrouter` — OpenRouter (multi-model gateway)
 /// - `deepseek` — DeepSeek
+/// - `deepinfra` — DeepInfra (OpenAI-compatible inference)
 /// - `together` — Together AI
 /// - `mistral` — Mistral AI
 /// - `fireworks` — Fireworks AI
@@ -726,7 +737,7 @@ pub fn create_driver(config: &DriverConfig) -> Result<Arc<dyn LlmDriver>, LlmErr
         status: 0,
         message: format!(
             "Unknown provider '{}'. Supported: anthropic, chatgpt, gemini, openai, groq, openrouter, \
-             deepseek, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
+             deepseek, deepinfra, together, mistral, fireworks, ollama, vllm, lmstudio, perplexity, \
              cohere, ai21, cerebras, sambanova, huggingface, xai, replicate, github-copilot, \
              chutes, venice, azure-openai, vertex-ai, nvidia-nim, codex, claude-code, qwen-code, \
              gemini-cli, codex-cli, aider, qwen, minimax, zhipu. \
@@ -925,6 +936,7 @@ mod tests {
         assert!(providers.contains(&"kimi_coding"));
         assert!(providers.contains(&"qianfan"));
         assert!(providers.contains(&"volcengine"));
+        assert!(providers.contains(&"deepinfra"));
         assert!(providers.contains(&"chutes"));
         assert!(providers.contains(&"claude-code"));
         assert!(providers.contains(&"qwen-code"));

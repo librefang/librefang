@@ -1078,6 +1078,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok("Session reset. Chat history cleared.".to_string())
     }
 
+    async fn reboot_session(&self, agent_id: AgentId) -> Result<String, String> {
+        self.kernel
+            .reboot_session(agent_id)
+            .map_err(|e| format!("{e}"))?;
+        Ok("Session rebooted. Context cleared.".to_string())
+    }
+
     async fn compact_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
             .compact_agent_session(agent_id)
@@ -1568,6 +1575,7 @@ pub async fn start_channel_bridge_with_config(
                     dc_config.allowed_guilds.clone(),
                     dc_config.allowed_users.clone(),
                     dc_config.ignore_bots,
+                    dc_config.mention_patterns.clone(),
                     dc_config.intents,
                 )
                 .with_account_id(dc_config.account_id.clone()),
@@ -1587,7 +1595,9 @@ pub async fn start_channel_bridge_with_config(
             if let Some(bot_token) = read_token(&sl_config.bot_token_env, "Slack (bot)") {
                 let adapter = Arc::new(
                     SlackAdapter::new(app_token, bot_token, sl_config.allowed_channels.clone())
-                        .with_account_id(sl_config.account_id.clone()),
+                        .with_account_id(sl_config.account_id.clone())
+                        .with_force_flat_replies(sl_config.force_flat_replies.unwrap_or(false))
+                        .with_unfurl_links(sl_config.unfurl_links),
                 );
                 adapters.push((
                     adapter,
