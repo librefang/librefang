@@ -364,6 +364,12 @@ impl ModelCatalog {
         {
             return false;
         }
+        for alias in &entry.aliases {
+            let lower = alias.to_lowercase();
+            self.aliases
+                .entry(lower)
+                .or_insert_with(|| entry.id.clone());
+        }
         let provider = entry.provider.clone();
         self.models.push(entry);
 
@@ -937,6 +943,81 @@ mod tests {
         catalog.merge_discovered_models("ollama", &["new-model:latest".to_string()]);
         let after_count = catalog.get_provider("ollama").unwrap().model_count;
         assert_eq!(after_count, before_count + 1);
+    }
+
+    #[test]
+    fn test_custom_model_keeps_assigned_provider() {
+        let mut catalog = ModelCatalog::new();
+        let added = catalog.add_custom_model(ModelCatalogEntry {
+            id: "custom-qwen-model".to_string(),
+            display_name: "Custom Qwen Model".to_string(),
+            provider: "qwen".to_string(),
+            tier: ModelTier::Custom,
+            context_window: 128_000,
+            max_output_tokens: 8_192,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: vec!["custom-qwen".to_string()],
+        });
+
+        assert!(added);
+        let model = catalog.find_model("custom-qwen-model").unwrap();
+        assert_eq!(model.provider, "qwen");
+
+        let aliased = catalog.find_model("custom-qwen").unwrap();
+        assert_eq!(aliased.provider, "qwen");
+    }
+
+    #[test]
+    fn test_custom_models_with_same_id_keep_distinct_providers() {
+        let mut catalog = ModelCatalog::new();
+
+        assert!(catalog.add_custom_model(ModelCatalogEntry {
+            id: "shared-custom-id".to_string(),
+            display_name: "Shared Custom ID".to_string(),
+            provider: "qwen".to_string(),
+            tier: ModelTier::Custom,
+            context_window: 64_000,
+            max_output_tokens: 4_096,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: Vec::new(),
+        }));
+
+        assert!(catalog.add_custom_model(ModelCatalogEntry {
+            id: "shared-custom-id".to_string(),
+            display_name: "Shared Custom ID".to_string(),
+            provider: "minimax".to_string(),
+            tier: ModelTier::Custom,
+            context_window: 64_000,
+            max_output_tokens: 4_096,
+            input_cost_per_m: 0.0,
+            output_cost_per_m: 0.0,
+            supports_tools: true,
+            supports_vision: false,
+            supports_streaming: true,
+            aliases: Vec::new(),
+        }));
+
+        let qwen_count = catalog
+            .models_by_provider("qwen")
+            .iter()
+            .filter(|m| m.id == "shared-custom-id")
+            .count();
+        let minimax_count = catalog
+            .models_by_provider("minimax")
+            .iter()
+            .filter(|m| m.id == "shared-custom-id")
+            .count();
+
+        assert_eq!(qwen_count, 1);
+        assert_eq!(minimax_count, 1);
     }
 
     #[test]
