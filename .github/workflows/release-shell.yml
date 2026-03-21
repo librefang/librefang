@@ -391,23 +391,27 @@ jobs:
 
             jq -e '.tag_name and (.assets | type == "array")' release.json >/dev/null
 
-            # Check that both macOS assets exist
-            ARM_OK=$(jq -r '.assets[] | select(.name == "librefang-aarch64-apple-darwin.tar.gz") | .name' release.json)
-            X86_OK=$(jq -r '.assets[] | select(.name == "librefang-x86_64-apple-darwin.tar.gz") | .name' release.json)
+            # Check that all 4 CLI assets exist (macOS + Linux, arm64 + x86_64)
+            MAC_ARM_OK=$(jq -r '.assets[] | select(.name == "librefang-aarch64-apple-darwin.tar.gz") | .name' release.json)
+            MAC_X86_OK=$(jq -r '.assets[] | select(.name == "librefang-x86_64-apple-darwin.tar.gz") | .name' release.json)
+            LNX_ARM_OK=$(jq -r '.assets[] | select(.name == "librefang-aarch64-unknown-linux-gnu.tar.gz") | .name' release.json)
+            LNX_X86_OK=$(jq -r '.assets[] | select(.name == "librefang-x86_64-unknown-linux-gnu.tar.gz") | .name' release.json)
 
-            if [ -n "$ARM_OK" ] && [ -n "$X86_OK" ]; then
-              echo "✓ Both macOS assets found on attempt $attempt"
+            if [ -n "$MAC_ARM_OK" ] && [ -n "$MAC_X86_OK" ] && [ -n "$LNX_ARM_OK" ] && [ -n "$LNX_X86_OK" ]; then
+              echo "✓ All 4 CLI assets found on attempt $attempt"
               break
             fi
 
             if [ "$attempt" -eq 10 ]; then
-              echo "::error::macOS assets not found in release after 10 attempts"
-              echo "  ARM asset: ${ARM_OK:-MISSING}"
-              echo "  x86 asset: ${X86_OK:-MISSING}"
+              echo "::error::CLI assets not found in release after 10 attempts"
+              echo "  macOS ARM: ${MAC_ARM_OK:-MISSING}"
+              echo "  macOS x86: ${MAC_X86_OK:-MISSING}"
+              echo "  Linux ARM: ${LNX_ARM_OK:-MISSING}"
+              echo "  Linux x86: ${LNX_X86_OK:-MISSING}"
               exit 1
             fi
 
-            echo "Waiting for macOS assets to be uploaded... ($attempt/10)"
+            echo "Waiting for CLI assets to be uploaded... ($attempt/10)"
             sleep 10
           done
 
@@ -433,31 +437,45 @@ jobs:
             local sha_url
             sha_url="$(jq -r --arg name "${1}.sha256" '.assets[] | select(.name == $name) | .browser_download_url' release.json)"
             if [ -z "$sha_url" ] || [ "$sha_url" = "null" ]; then
-              echo "" && return
+              # Download asset and compute SHA256 locally
+              local asset_url
+              asset_url="$(jq -r --arg name "$1" '.assets[] | select(.name == $name) | .browser_download_url' release.json)"
+              curl -fsSL "$asset_url" | sha256sum | awk '{print $1}'
+            else
+              curl -fsSL "$sha_url" | awk '{print $1}'
             fi
-            curl -fsSL "$sha_url" | awk '{print $1}'
           }
 
           asset_size() {
             jq -r --arg name "$1" '.assets[] | select(.name == $name) | .size' release.json
           }
 
+          # macOS assets
           ARM64_DARWIN_NAME="librefang-aarch64-apple-darwin.tar.gz"
           X86_DARWIN_NAME="librefang-x86_64-apple-darwin.tar.gz"
+          # Linux assets
+          ARM64_LINUX_NAME="librefang-aarch64-unknown-linux-gnu.tar.gz"
+          X86_LINUX_NAME="librefang-x86_64-unknown-linux-gnu.tar.gz"
 
           ARM64_DARWIN_URL="$(asset_url "$ARM64_DARWIN_NAME")"
           X86_DARWIN_URL="$(asset_url "$X86_DARWIN_NAME")"
+          ARM64_LINUX_URL="$(asset_url "$ARM64_LINUX_NAME")"
+          X86_LINUX_URL="$(asset_url "$X86_LINUX_NAME")"
 
           ARM64_DARWIN_SHA="$(asset_sha "$ARM64_DARWIN_NAME")"
           X86_DARWIN_SHA="$(asset_sha "$X86_DARWIN_NAME")"
+          ARM64_LINUX_SHA="$(asset_sha "$ARM64_LINUX_NAME")"
+          X86_LINUX_SHA="$(asset_sha "$X86_LINUX_NAME")"
 
           ARM64_DARWIN_SIZE="$(asset_size "$ARM64_DARWIN_NAME")"
           X86_DARWIN_SIZE="$(asset_size "$X86_DARWIN_NAME")"
+          ARM64_LINUX_SIZE="$(asset_size "$ARM64_LINUX_NAME")"
+          X86_LINUX_SIZE="$(asset_size "$X86_LINUX_NAME")"
 
           for required in \
-            ARM64_DARWIN_URL X86_DARWIN_URL \
-            ARM64_DARWIN_SHA X86_DARWIN_SHA \
-            ARM64_DARWIN_SIZE X86_DARWIN_SIZE
+            ARM64_DARWIN_URL X86_DARWIN_URL ARM64_LINUX_URL X86_LINUX_URL \
+            ARM64_DARWIN_SHA X86_DARWIN_SHA ARM64_LINUX_SHA X86_LINUX_SHA \
+            ARM64_DARWIN_SIZE X86_DARWIN_SIZE ARM64_LINUX_SIZE X86_LINUX_SIZE
           do
             if [ -z "${!required}" ] || [ "${!required}" = "null" ]; then
               echo "Missing release metadata: $required" >&2
@@ -465,7 +483,7 @@ jobs:
             fi
           done
 
-          for size_var in ARM64_DARWIN_SIZE X86_DARWIN_SIZE
+          for size_var in ARM64_DARWIN_SIZE X86_DARWIN_SIZE ARM64_LINUX_SIZE X86_LINUX_SIZE
           do
             if [ "${!size_var}" -le 0 ]; then
               echo "Release asset is empty: $size_var" >&2
@@ -474,21 +492,36 @@ jobs:
           done
 
           # --- Main formula (latest) ---
-          cat > tap/Formula/librefang.rb <<EOF
+          cat > tap/Formula/librefang.rb <<FORMULA
           class Librefang < Formula
             desc "Community-Maintained Agent Operating System written in Rust"
             homepage "https://librefang.ai"
             license "MIT"
             version "$SEMVER"
 
-            depends_on :macos
+            livecheck do
+              url "https://github.com/librefang/librefang/releases/latest"
+              strategy :header_match
+            end
 
-            if Hardware::CPU.arm?
-              url "$ARM64_DARWIN_URL"
-              sha256 "$ARM64_DARWIN_SHA"
-            else
-              url "$X86_DARWIN_URL"
-              sha256 "$X86_DARWIN_SHA"
+            on_macos do
+              if Hardware::CPU.arm?
+                url "$ARM64_DARWIN_URL"
+                sha256 "$ARM64_DARWIN_SHA"
+              else
+                url "$X86_DARWIN_URL"
+                sha256 "$X86_DARWIN_SHA"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "$ARM64_LINUX_URL"
+                sha256 "$ARM64_LINUX_SHA"
+              else
+                url "$X86_LINUX_URL"
+                sha256 "$X86_LINUX_SHA"
+              end
             end
 
             def install
@@ -496,31 +529,46 @@ jobs:
             end
 
             test do
-              system "#{bin}/librefang", "--version"
+              assert_match version.to_s, shell_output("#{bin}/librefang --version")
             end
           end
-          EOF
+          FORMULA
 
           # --- Versioned formula (e.g. librefang@2026.3.2114) ---
           # Class name: LibrefangAT202632114 (@ → AT, dots removed)
           CLASS_SUFFIX=$(echo "$SEMVER" | tr -d '.')
           CLASS_NAME="LibrefangAT${CLASS_SUFFIX}"
 
-          cat > "tap/Formula/librefang@${SEMVER}.rb" <<EOF
+          cat > "tap/Formula/librefang@${SEMVER}.rb" <<FORMULA
           class ${CLASS_NAME} < Formula
             desc "Community-Maintained Agent Operating System written in Rust"
             homepage "https://librefang.ai"
             license "MIT"
             version "$SEMVER"
 
-            depends_on :macos
+            livecheck do
+              url "https://github.com/librefang/librefang/releases/latest"
+              strategy :header_match
+            end
 
-            if Hardware::CPU.arm?
-              url "$ARM64_DARWIN_URL"
-              sha256 "$ARM64_DARWIN_SHA"
-            else
-              url "$X86_DARWIN_URL"
-              sha256 "$X86_DARWIN_SHA"
+            on_macos do
+              if Hardware::CPU.arm?
+                url "$ARM64_DARWIN_URL"
+                sha256 "$ARM64_DARWIN_SHA"
+              else
+                url "$X86_DARWIN_URL"
+                sha256 "$X86_DARWIN_SHA"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "$ARM64_LINUX_URL"
+                sha256 "$ARM64_LINUX_SHA"
+              else
+                url "$X86_LINUX_URL"
+                sha256 "$X86_LINUX_SHA"
+              end
             end
 
             keg_only :versioned_formula
@@ -530,10 +578,10 @@ jobs:
             end
 
             test do
-              system "#{bin}/librefang", "--version"
+              assert_match version.to_s, shell_output("#{bin}/librefang --version")
             end
           end
-          EOF
+          FORMULA
 
           echo "=== Main formula ==="
           cat tap/Formula/librefang.rb

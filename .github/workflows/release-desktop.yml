@@ -204,3 +204,137 @@ jobs:
           includeUpdaterJson: true
           projectPath: crates/librefang-desktop
           args: ${{ matrix.platform.args }}
+
+  # ── Sync Homebrew Cask ──────────────────────────────────────────────────
+  sync_homebrew_cask:
+    name: Sync Homebrew Cask
+    runs-on: ubuntu-latest
+    needs: [desktop]
+    if: ${{ !contains(github.ref, '-beta') && !contains(github.ref, '-rc') }}
+    steps:
+      - name: Check out tap repo
+        uses: actions/checkout@v6
+        with:
+          repository: librefang/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Fetch release metadata (with retry for DMG availability)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          for attempt in $(seq 1 10); do
+            curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG" \
+              > release.json
+
+            VERSION="${TAG#v}"
+
+            ARM_DMG="LibreFang_${VERSION}_aarch64.dmg"
+            X86_DMG="LibreFang_${VERSION}_x64.dmg"
+
+            ARM_OK=$(jq -r --arg name "$ARM_DMG" '.assets[] | select(.name == $name) | .name' release.json)
+            X86_OK=$(jq -r --arg name "$X86_DMG" '.assets[] | select(.name == $name) | .name' release.json)
+
+            if [ -n "$ARM_OK" ] && [ -n "$X86_OK" ]; then
+              echo "✓ Both DMG assets found on attempt $attempt"
+              break
+            fi
+
+            if [ "$attempt" -eq 10 ]; then
+              echo "::error::DMG assets not found in release after 10 attempts"
+              echo "  ARM DMG: ${ARM_OK:-MISSING}"
+              echo "  x86 DMG: ${X86_OK:-MISSING}"
+              exit 1
+            fi
+
+            echo "Waiting for DMG assets... ($attempt/10)"
+            sleep 10
+          done
+
+      - name: Generate Cask
+        run: |
+          set -euo pipefail
+
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+
+          asset_sha() {
+            local sha_url
+            sha_url="$(jq -r --arg name "${1}.sha256" '.assets[] | select(.name == $name) | .browser_download_url' release.json)"
+            if [ -z "$sha_url" ] || [ "$sha_url" = "null" ]; then
+              # Download asset and compute SHA256 locally
+              local asset_url
+              asset_url="$(jq -r --arg name "$1" '.assets[] | select(.name == $name) | .browser_download_url' release.json)"
+              curl -fsSL "$asset_url" | sha256sum | awk '{print $1}'
+            else
+              curl -fsSL "$sha_url" | awk '{print $1}'
+            fi
+          }
+
+          ARM_DMG="LibreFang_${VERSION}_aarch64.dmg"
+          X86_DMG="LibreFang_${VERSION}_x64.dmg"
+
+          ARM_SHA="$(asset_sha "$ARM_DMG")"
+          X86_SHA="$(asset_sha "$X86_DMG")"
+
+          for required in ARM_SHA X86_SHA; do
+            if [ -z "${!required}" ] || [ "${!required}" = "null" ]; then
+              echo "Missing SHA256 for $required" >&2
+              exit 1
+            fi
+          done
+
+          cat > tap/Casks/librefang.rb <<CASK
+          cask "librefang" do
+            arch arm: "aarch64", intel: "x64"
+
+            version "$VERSION"
+
+            on_arm do
+              sha256 "$ARM_SHA"
+            end
+            on_intel do
+              sha256 "$X86_SHA"
+            end
+
+            url "https://github.com/librefang/librefang/releases/download/$TAG/LibreFang_#{version}_#{arch}.dmg",
+                verified: "github.com/librefang/librefang/"
+            name "LibreFang"
+            desc "Community-Maintained Agent Operating System written in Rust"
+            homepage "https://librefang.ai"
+
+            livecheck do
+              url "https://github.com/librefang/librefang/releases/latest"
+              strategy :header_match
+            end
+
+            depends_on macos: ">= :ventura"
+
+            app "LibreFang.app"
+
+            zap trash: [
+              "~/Library/Application Support/ai.librefang.desktop",
+              "~/Library/Caches/ai.librefang.desktop",
+              "~/Library/Preferences/ai.librefang.desktop.plist",
+            ]
+          end
+          CASK
+
+          echo "=== Cask ==="
+          cat tap/Casks/librefang.rb
+
+      - name: Commit and push
+        working-directory: tap
+        run: |
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          mkdir -p Casks
+          git add .
+          git commit -m "chore: update cask to ${{ github.ref_name }}" || echo "No changes"
+          git push
