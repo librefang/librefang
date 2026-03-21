@@ -326,9 +326,12 @@ impl BrowserSession {
         // Try 127.0.0.1 first; fall back to localhost in case Chrome bound to IPv6
         let page_ws = match Self::find_page_ws(&list_url).await {
             Ok(ws) => ws,
-            Err(_) => {
+            Err(original_err) => {
                 let fallback_url = format!("http://localhost:{port}/json/list");
-                debug!("127.0.0.1 unreachable, falling back to localhost for /json/list");
+                debug!(
+                    "127.0.0.1 unreachable ({}), falling back to localhost for /json/list",
+                    original_err
+                );
                 Self::find_page_ws(&fallback_url).await?
             }
         };
