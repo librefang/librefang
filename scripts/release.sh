@@ -98,7 +98,7 @@ fi
 TAG="v${VERSION}"
 # Check if this is a pre-release
 IS_PRERELEASE=false
-if echo "$VERSION" | grep -qE '-(beta|rc)[0-9]'; then
+if echo "$VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
     IS_PRERELEASE=true
 fi
 
