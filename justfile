@@ -43,8 +43,9 @@ dashboard-build:
 dash:
     cd crates/librefang-api/dashboard && pnpm dev
 
-# Start API daemon in dev mode (requires GROQ_API_KEY or OPENAI_API_KEY env var)
+# Start API daemon with dashboard dev server (hot reload)
 api: dashboard-build
+    cd crates/librefang-api/dashboard && pnpm dev &
     cargo run -p librefang-cli -- start --foreground
 
 # Remove build artifacts
