@@ -96,7 +96,7 @@ jobs:
             echo "- [Contributing Guide](https://github.com/librefang/librefang/blob/main/docs/CONTRIBUTING.md)"
           } > /tmp/release-body.md
 
-          # Detect pre-release tags (-beta.N, -rc.N)
+          # Detect pre-release tags (-betaN, -rcN)
           PRERELEASE_FLAG=""
           if echo "$TAG" | grep -qE '-(beta|rc)[0-9]'; then
             PRERELEASE_FLAG="--prerelease"

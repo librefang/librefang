@@ -5,7 +5,7 @@
 # Usage:
 #   ./scripts/release.sh                    # interactive: choose stable/beta/rc
 #   ./scripts/release.sh 2026.3.2114        # explicit stable version
-#   ./scripts/release.sh 2026.3.2114-beta.1 # explicit pre-release version
+#   ./scripts/release.sh 2026.3.2114-beta1  # explicit pre-release version
 #
 # What it does:
 #   1. Validate environment (clean worktree, on main, up to date)
