@@ -6097,6 +6097,7 @@ fn cmd_config_set(key: &str, value: &str) {
             "max_cron_jobs",
             "usage_footer",
             "workspaces_dir",
+            "workspace_dir",
         ];
         if !known_scalars.contains(&last_key) {
             ui::error_with_fix(

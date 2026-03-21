@@ -105,6 +105,11 @@ pub trait ChannelBridgeHandle: Send + Sync {
         Err("Not implemented".to_string())
     }
 
+    /// Hard-reboot an agent's session — full context clear without saving summary.
+    async fn reboot_session(&self, _agent_id: AgentId) -> Result<String, String> {
+        Err("Not implemented".to_string())
+    }
+
     /// Trigger LLM-based session compaction for an agent.
     async fn compact_session(&self, _agent_id: AgentId) -> Result<String, String> {
         Err("Not implemented".to_string())
@@ -817,6 +822,7 @@ async fn dispatch_message(
                 | "models"
                 | "providers"
                 | "new"
+                | "reboot"
                 | "compact"
                 | "model"
                 | "stop"
@@ -1497,6 +1503,7 @@ async fn handle_command(
              /agents - list running agents\n\
              /agent <name> - select which agent to talk to\n\
              /new - reset session (clear messages)\n\
+             /reboot - hard reset session (full context clear, no summary)\n\
              /compact - trigger LLM session compaction\n\
              /model [name] - show or switch agent model\n\
              /stop - cancel current agent run\n\
@@ -1580,6 +1587,20 @@ async fn handle_command(
             match agent_id {
                 Some(aid) => handle
                     .reset_session(aid)
+                    .await
+                    .unwrap_or_else(|e| format!("Error: {e}")),
+                None => "No agent selected. Use /agent <name> first.".to_string(),
+            }
+        }
+        "reboot" => {
+            let agent_id = router.resolve(
+                &crate::types::ChannelType::CLI,
+                &sender.platform_id,
+                sender.librefang_user.as_deref(),
+            );
+            match agent_id {
+                Some(aid) => handle
+                    .reboot_session(aid)
                     .await
                     .unwrap_or_else(|e| format!("Error: {e}")),
                 None => "No agent selected. Use /agent <name> first.".to_string(),

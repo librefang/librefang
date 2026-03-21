@@ -4,6 +4,7 @@
 //! via `librefang init`). No compile-time embedding.
 
 use crate::{HandDefinition, HandError};
+use serde::Deserialize;
 
 /// Returns all hand definitions found on disk as (id, HAND.toml content, SKILL.md content).
 ///
@@ -57,14 +58,37 @@ fn disk_hands(home_dir: &std::path::Path) -> Vec<(String, String, String)> {
     results
 }
 
+/// Wrapper struct for HAND.toml files that use the documented `[hand]` section format.
+///
+/// The official docs show HAND.toml with a `[hand]` wrapper section:
+/// ```toml
+/// [hand]
+/// id = "my-hand"
+/// name = "My Hand"
+/// ...
+/// ```
+///
+/// Bundled hands use the flat format (no wrapper). Both are accepted.
+#[derive(Debug, Clone, Deserialize)]
+struct HandTomlWrapper {
+    hand: HandDefinition,
+}
+
 /// Parse a HAND.toml into a HandDefinition with its skill content attached.
+///
+/// Accepts both formats:
+/// - Flat format (used by bundled hands): fields at top level
+/// - Wrapped format (shown in docs): fields under `[hand]` section
 pub fn parse_bundled(
     _id: &str,
     toml_content: &str,
     skill_content: &str,
 ) -> Result<HandDefinition, HandError> {
-    let mut def: HandDefinition =
-        toml::from_str(toml_content).map_err(|e| HandError::TomlParse(e.to_string()))?;
+    // Try flat format first (backwards compatible with bundled hands),
+    // then try the documented [hand] wrapper format.
+    let mut def: HandDefinition = toml::from_str::<HandDefinition>(toml_content)
+        .or_else(|_flat_err| toml::from_str::<HandTomlWrapper>(toml_content).map(|w| w.hand))
+        .map_err(|e| HandError::TomlParse(e.to_string()))?;
     if !skill_content.is_empty() {
         def.skill_content = Some(skill_content.to_string());
     }
@@ -92,5 +116,26 @@ tools = ["file_read"]
         let def = parse_bundled("test", toml, "# Skill").unwrap();
         assert_eq!(def.id, "test");
         assert!(def.skill_content.is_some());
+    }
+
+    #[test]
+    fn parse_bundled_wrapped_hand_section() {
+        let toml = r#"
+[hand]
+id = "invoice-processor"
+name = "Invoice Processor"
+description = "Processes invoices automatically"
+category = "productivity"
+
+[hand.agent]
+name = "invoice-agent"
+description = "An invoice processing agent"
+system_prompt = "You process invoices."
+tools = ["file_read"]
+"#;
+        let def = parse_bundled("invoice-processor", toml, "").unwrap();
+        assert_eq!(def.id, "invoice-processor");
+        assert_eq!(def.name, "Invoice Processor");
+        assert!(def.skill_content.is_none());
     }
 }
