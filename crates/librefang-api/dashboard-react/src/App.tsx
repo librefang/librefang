@@ -225,7 +225,7 @@ export function App() {
 
         {/* Main Content */}
         <main className="flex-1 overflow-auto bg-main">
-          <div className="mx-auto max-w-7xl p-4 lg:p-8">
+          <div className="mx-auto max-w-7xl p-4 lg:p-8 animate-fade-in-up">
             <Outlet />
           </div>
         </main>

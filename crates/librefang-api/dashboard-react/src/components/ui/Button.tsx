@@ -1,4 +1,5 @@
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from "react";
+import { Loader2 } from "lucide-react";
 
 export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "success";
 type ButtonSize = "sm" | "md" | "lg";
@@ -12,11 +13,11 @@ interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const variantStyles: Record<ButtonVariant, string> = {
-  primary: "bg-brand text-white hover:opacity-90 shadow-lg shadow-brand/20",
-  secondary: "border border-border-subtle bg-surface text-text-main hover:bg-main/50",
+  primary: "bg-brand text-white hover:brightness-110 shadow-md shadow-brand/20 hover:shadow-lg hover:shadow-brand/30",
+  secondary: "border border-border-subtle bg-surface text-text-main hover:bg-main/50 hover:border-brand/20 shadow-sm",
   ghost: "bg-transparent text-text-dim hover:text-text-main hover:bg-main/30",
-  danger: "bg-error text-white hover:opacity-90",
-  success: "bg-success text-white hover:opacity-90 shadow-lg shadow-success/20",
+  danger: "bg-error text-white hover:brightness-110 shadow-md shadow-error/20",
+  success: "bg-success text-white hover:brightness-110 shadow-md shadow-success/20",
 };
 
 const sizeStyles: Record<ButtonSize, string> = {
@@ -46,9 +47,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         disabled={disabled || isLoading}
         className={`
           inline-flex items-center justify-center gap-2 rounded-xl font-bold
-          transition-all duration-200
-          focus:outline-none focus:ring-2 focus:ring-brand/30 focus:ring-offset-2
-          disabled:opacity-50 disabled:cursor-not-allowed
+          transition-all duration-300 active:scale-[0.98]
+          focus:outline-none focus:ring-2 focus:ring-brand/30 focus:ring-offset-1
+          disabled:opacity-50 disabled:cursor-not-allowed disabled:active:scale-100
           ${variantStyles[variant]}
           ${sizeStyles[size]}
           ${className}
@@ -56,7 +57,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
         {...props}
       >
         {isLoading ? (
-          <span className="animate-spin">⟳</span>
+          <Loader2 className="h-4 w-4 animate-spin" />
         ) : (
           leftIcon
         )}

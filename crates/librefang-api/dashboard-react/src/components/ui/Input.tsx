@@ -15,9 +15,9 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
             {label}
           </label>
         )}
-        <div className="relative">
+        <div className="relative group">
           {leftIcon && (
-            <div className="absolute left-3 top-1/2 -translate-y-1/2 text-text-dim">
+            <div className="absolute left-3.5 top-1/2 -translate-y-1/2 text-text-dim/40 group-focus-within:text-brand transition-colors">
               {leftIcon}
             </div>
           )}
@@ -25,18 +25,19 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(
             ref={ref}
             className={`
               w-full rounded-xl border border-border-subtle bg-surface px-4 py-2.5
-              text-sm font-medium text-text-main placeholder:text-text-dim/60
-              focus:border-brand focus:outline-none focus:ring-1 focus:ring-brand/30
+              text-sm font-medium text-text-main placeholder:text-text-dim/40
+              focus:border-brand focus:outline-none focus:ring-2 focus:ring-brand/10
+              hover:border-brand/20
               disabled:opacity-50 disabled:cursor-not-allowed
-              transition-all duration-200
-              ${leftIcon ? "pl-10" : ""}
-              ${rightIcon ? "pr-10" : ""}
+              transition-all duration-200 shadow-sm
+              ${leftIcon ? "pl-11" : ""}
+              ${rightIcon ? "pr-11" : ""}
               ${className}
             `}
             {...props}
           />
           {rightIcon && (
-            <div className="absolute right-3 top-1/2 -translate-y-1/2 text-text-dim">
+            <div className="absolute right-3.5 top-1/2 -translate-y-1/2 text-text-dim/40 group-focus-within:text-brand transition-colors">
               {rightIcon}
             </div>
           )}
