@@ -130,9 +130,14 @@ export function CommsPage() {
 
   const configuredCount = channels.filter(c => c.configured).length;
 
-  const filteredChannels = channels.filter(c =>
-    !search || (c.display_name || c.name).toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredChannels = channels
+    .filter(c => !search || (c.display_name || c.name).toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => {
+      // Configured first
+      if (a.configured && !b.configured) return -1;
+      if (!a.configured && b.configured) return 1;
+      return (a.display_name || a.name).localeCompare(b.display_name || b.name);
+    });
 
   const filteredEvents = events.filter(e =>
     !search || (e.source_name || e.source_id || "").toLowerCase().includes(search.toLowerCase()) ||
