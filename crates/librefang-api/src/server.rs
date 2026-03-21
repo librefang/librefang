@@ -999,6 +999,13 @@ pub async fn run_daemon(
         }
     }
 
+    info!(
+        "LibreFang v{} ({}) built {} [{}]",
+        env!("CARGO_PKG_VERSION"),
+        env!("GIT_SHA"),
+        env!("BUILD_DATE"),
+        std::env::consts::ARCH,
+    );
     info!("LibreFang API server listening on http://{addr}");
     info!("WebChat UI available at http://{addr}/",);
     info!("WebSocket endpoint: ws://{addr}/api/agents/{{id}}/ws",);
