@@ -3,6 +3,7 @@
 
 function goalsPage() {
   return {
+    _currentLang: typeof i18n !== 'undefined' ? i18n.getLanguage() : 'en',
     goals: [],
     loading: true,
     loadError: '',
@@ -21,7 +22,13 @@ function goalsPage() {
     expandedIds: {},
 
     init() {
+      if (typeof i18n !== 'undefined') i18n.bindPageLanguage(this);
       this.loadGoals();
+    },
+
+    t(key, fallback, params) {
+      if (typeof i18n === 'undefined') return fallback || key;
+      return i18n.tReactive(this, key, fallback, params);
     },
 
     async loadGoals() {
@@ -32,7 +39,7 @@ function goalsPage() {
         var data = await r.json();
         this.goals = data.goals || [];
       } catch (e) {
-        this.loadError = e.message || 'Failed to load goals';
+        this.loadError = e.message || this.t('goalsPage.loadError', 'Failed to load goals');
       }
       this.loading = false;
     },
@@ -105,10 +112,10 @@ function goalsPage() {
 
     statusLabel(status) {
       switch (status) {
-        case 'pending': return 'Pending';
-        case 'in_progress': return 'In Progress';
-        case 'completed': return 'Completed';
-        case 'cancelled': return 'Cancelled';
+        case 'pending': return this.t('goalsPage.statusPending', 'Pending');
+        case 'in_progress': return this.t('goalsPage.statusInProgress', 'In Progress');
+        case 'completed': return this.t('goalsPage.statusCompleted', 'Completed');
+        case 'cancelled': return this.t('goalsPage.statusCancelled', 'Cancelled');
         default: return status;
       }
     },
@@ -152,14 +159,14 @@ function goalsPage() {
         });
         if (!r.ok) {
           var err = await r.json();
-          alert(err.error || 'Failed to create goal');
+          alert(err.error || this.t('goalsPage.createFailed', 'Failed to create goal'));
         } else {
           this.showCreateForm = false;
           this.newGoal = { title: '', description: '', parent_id: '', agent_id: '', status: 'pending' };
           await this.loadGoals();
         }
       } catch (e) {
-        alert(e.message || 'Failed to create goal');
+        alert(e.message || this.t('goalsPage.createFailed', 'Failed to create goal'));
       }
       this.creating = false;
     },
@@ -206,13 +213,13 @@ function goalsPage() {
         });
         if (!r.ok) {
           var err = await r.json();
-          alert(err.error || 'Failed to update goal');
+          alert(err.error || this.t('goalsPage.updateFailed', 'Failed to update goal'));
         } else {
           this.editingGoal = null;
           await this.loadGoals();
         }
       } catch (e) {
-        alert(e.message || 'Failed to update goal');
+        alert(e.message || this.t('goalsPage.updateFailed', 'Failed to update goal'));
       }
       this.saving = false;
     },
@@ -220,19 +227,19 @@ function goalsPage() {
     async deleteGoal(goalId) {
       var hasKids = this.hasChildren(goalId);
       var msg = hasKids
-        ? 'Delete this goal and all its sub-goals?'
-        : 'Delete this goal?';
+        ? this.t('goalsPage.deleteWithChildrenConfirm', 'Delete this goal and all its sub-goals?')
+        : this.t('goalsPage.deleteConfirm', 'Delete this goal?');
       if (!confirm(msg)) return;
       try {
         var r = await fetch('/api/goals/' + goalId, { method: 'DELETE' });
         if (!r.ok) {
           var err = await r.json();
-          alert(err.error || 'Failed to delete goal');
+          alert(err.error || this.t('goalsPage.deleteFailed', 'Failed to delete goal'));
         } else {
           await this.loadGoals();
         }
       } catch (e) {
-        alert(e.message || 'Failed to delete goal');
+        alert(e.message || this.t('goalsPage.deleteFailed', 'Failed to delete goal'));
       }
     },
 
