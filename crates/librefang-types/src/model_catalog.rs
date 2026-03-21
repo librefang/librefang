@@ -1,6 +1,7 @@
 //! Model catalog types — shared data structures for the model registry.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -36,14 +37,8 @@ pub const GITHUB_COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
 
 // ── Chinese providers ─────────────────────────────────────────────
 pub const QWEN_BASE_URL: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
-/// Qwen International endpoint (Singapore).
-pub const QWEN_INTL_BASE_URL: &str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
-/// Qwen US endpoint (Virginia).
-pub const QWEN_US_BASE_URL: &str = "https://dashscope-us.aliyuncs.com/compatible-mode/v1";
-/// MiniMax China mainland (minimaxi.com)
-pub const MINIMAX_CN_BASE_URL: &str = "https://api.minimaxi.com/v1";
-/// MiniMax International (minimax.io)
-pub const MINIMAX_INTL_BASE_URL: &str = "https://api.minimax.io/v1";
+/// MiniMax International (minimax.io) — default base URL.
+pub const MINIMAX_BASE_URL: &str = "https://api.minimax.io/v1";
 pub const ZHIPU_BASE_URL: &str = "https://open.bigmodel.cn/api/paas/v4";
 pub const ZHIPU_CODING_BASE_URL: &str = "https://open.bigmodel.cn/api/coding/paas/v4";
 /// Z.AI domain aliases (same API, different domain).
@@ -178,6 +173,17 @@ impl Default for ModelCatalogEntry {
     }
 }
 
+/// Per-region endpoint configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegionConfig {
+    /// Region-specific base URL.
+    pub base_url: String,
+    /// Optional override for the API key environment variable.
+    /// When absent the provider-level `api_key_env` is used.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+}
+
 /// Provider metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderInfo {
@@ -197,6 +203,10 @@ pub struct ProviderInfo {
     pub model_count: usize,
     /// URL where users can sign up and get an API key.
     pub signup_url: Option<String>,
+    /// Regional endpoint overrides (region name → config).
+    /// e.g. `[provider.regions.us]` with `base_url = "https://..."`.
+    #[serde(default)]
+    pub regions: HashMap<String, RegionConfig>,
 }
 
 impl Default for ProviderInfo {
@@ -210,6 +220,7 @@ impl Default for ProviderInfo {
             auth_status: AuthStatus::default(),
             model_count: 0,
             signup_url: None,
+            regions: HashMap::new(),
         }
     }
 }
@@ -235,6 +246,10 @@ pub struct ProviderCatalogToml {
     /// URL where users can sign up and get an API key.
     #[serde(default)]
     pub signup_url: Option<String>,
+    /// Regional endpoint overrides (region name → config).
+    /// e.g. `[provider.regions.us]` with `base_url = "https://..."`.
+    #[serde(default)]
+    pub regions: HashMap<String, RegionConfig>,
 }
 
 fn default_key_required() -> bool {
@@ -252,6 +267,7 @@ impl From<ProviderCatalogToml> for ProviderInfo {
             auth_status: AuthStatus::default(),
             model_count: 0,
             signup_url: p.signup_url,
+            regions: p.regions,
         }
     }
 }
@@ -307,7 +323,7 @@ pub struct ModelCatalogFile {
 pub struct AliasesCatalogFile {
     /// Alias -> canonical model ID mappings.
     #[serde(default)]
-    pub aliases: std::collections::HashMap<String, String>,
+    pub aliases: HashMap<String, String>,
 }
 
 #[cfg(test)]
@@ -409,6 +425,7 @@ mod tests {
             auth_status: AuthStatus::Configured,
             model_count: 3,
             signup_url: None,
+            regions: HashMap::new(),
         };
         let json = serde_json::to_string(&info).unwrap();
         let parsed: ProviderInfo = serde_json::from_str(&json).unwrap();
@@ -483,11 +500,13 @@ aliases = []
             base_url: "https://api.anthropic.com".to_string(),
             key_required: true,
             signup_url: Some("https://console.anthropic.com/settings/keys".to_string()),
+            regions: HashMap::new(),
         };
         let info: ProviderInfo = toml_provider.into();
         assert_eq!(info.id, "anthropic");
         assert_eq!(info.auth_status, AuthStatus::Missing);
         assert_eq!(info.model_count, 0);
+        assert!(info.regions.is_empty());
     }
 
     #[test]
@@ -500,5 +519,146 @@ haiku = "claude-haiku-4-5-20251001"
         let file: AliasesCatalogFile = toml::from_str(toml_str).unwrap();
         assert_eq!(file.aliases.len(), 2);
         assert_eq!(file.aliases["sonnet"], "claude-sonnet-4-20250514");
+    }
+
+    #[test]
+    fn test_provider_regions_toml_parse() {
+        let toml_str = r#"
+[provider]
+id = "qwen"
+display_name = "Qwen (DashScope)"
+api_key_env = "DASHSCOPE_API_KEY"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+key_required = true
+
+[provider.regions.intl]
+base_url = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+
+[provider.regions.us]
+base_url = "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+
+[[models]]
+id = "qwen3-235b-a22b"
+display_name = "Qwen3 235B"
+provider = "qwen"
+tier = "frontier"
+context_window = 131072
+max_output_tokens = 8192
+input_cost_per_m = 2.0
+output_cost_per_m = 8.0
+supports_tools = true
+supports_vision = false
+supports_streaming = true
+aliases = []
+"#;
+        let file: ModelCatalogFile = toml::from_str(toml_str).unwrap();
+        let provider = file.provider.unwrap();
+        assert_eq!(provider.id, "qwen");
+        assert_eq!(provider.regions.len(), 2);
+        assert_eq!(
+            provider.regions["intl"].base_url,
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        );
+        assert_eq!(
+            provider.regions["us"].base_url,
+            "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+        );
+        // intl region has no api_key_env override
+        assert!(provider.regions["intl"].api_key_env.is_none());
+
+        // Verify conversion to ProviderInfo preserves regions
+        let info: ProviderInfo = provider.into();
+        assert_eq!(info.regions.len(), 2);
+        assert_eq!(
+            info.regions["us"].base_url,
+            "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+        );
+    }
+
+    #[test]
+    fn test_provider_without_regions_defaults_empty() {
+        let toml_str = r#"
+[provider]
+id = "anthropic"
+display_name = "Anthropic"
+api_key_env = "ANTHROPIC_API_KEY"
+base_url = "https://api.anthropic.com"
+key_required = true
+
+[[models]]
+id = "claude-sonnet-4-20250514"
+display_name = "Claude Sonnet 4"
+provider = "anthropic"
+tier = "smart"
+context_window = 200000
+max_output_tokens = 64000
+input_cost_per_m = 3.0
+output_cost_per_m = 15.0
+supports_tools = true
+supports_vision = true
+supports_streaming = true
+aliases = []
+"#;
+        let file: ModelCatalogFile = toml::from_str(toml_str).unwrap();
+        let provider = file.provider.unwrap();
+        assert!(
+            provider.regions.is_empty(),
+            "Provider without [provider.regions] should have empty regions map"
+        );
+    }
+
+    #[test]
+    fn test_region_selection_overrides_base_url() {
+        let provider = ProviderInfo {
+            id: "qwen".to_string(),
+            display_name: "Qwen".to_string(),
+            api_key_env: "DASHSCOPE_API_KEY".to_string(),
+            base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            key_required: true,
+            auth_status: AuthStatus::default(),
+            model_count: 0,
+            signup_url: None,
+            regions: HashMap::from([
+                (
+                    "intl".to_string(),
+                    RegionConfig {
+                        base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+                            .to_string(),
+                        api_key_env: None,
+                    },
+                ),
+                (
+                    "us".to_string(),
+                    RegionConfig {
+                        base_url: "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+                            .to_string(),
+                        api_key_env: None,
+                    },
+                ),
+            ]),
+        };
+
+        // Simulate region selection: if user picks "us", use that region's base_url
+        let selected_region = "us";
+        let resolved_url = provider
+            .regions
+            .get(selected_region)
+            .map(|r| r.base_url.as_str())
+            .unwrap_or(&provider.base_url);
+        assert_eq!(
+            resolved_url,
+            "https://dashscope-us.aliyuncs.com/compatible-mode/v1"
+        );
+
+        // Default when no region selected: use base_url
+        let no_region: Option<&str> = None;
+        let resolved_default = no_region
+            .and_then(|r| provider.regions.get(r))
+            .map(|r| r.base_url.as_str())
+            .unwrap_or(&provider.base_url);
+        assert_eq!(
+            resolved_default,
+            "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        );
     }
 }

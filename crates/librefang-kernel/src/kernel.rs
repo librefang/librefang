@@ -924,6 +924,14 @@ impl LibreFangKernel {
         let mut model_catalog =
             librefang_runtime::model_catalog::ModelCatalog::new(&config.home_dir);
         model_catalog.detect_auth();
+        // Apply region selections first (lower priority than explicit provider_urls)
+        if !config.provider_regions.is_empty() {
+            let region_urls = model_catalog.resolve_region_urls(&config.provider_regions);
+            if !region_urls.is_empty() {
+                model_catalog.apply_url_overrides(&region_urls);
+                info!("applied {} provider region override(s)", region_urls.len());
+            }
+        }
         if !config.provider_urls.is_empty() {
             model_catalog.apply_url_overrides(&config.provider_urls);
             info!(

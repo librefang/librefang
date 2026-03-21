@@ -1366,6 +1366,11 @@ pub struct KernelConfig {
     /// e.g. `ollama = "http://192.168.1.100:11434/v1"`
     #[serde(default)]
     pub provider_urls: HashMap<String, String>,
+    /// Provider region selection (provider ID → region name).
+    /// Selects a regional endpoint from the provider's `[provider.regions]` map.
+    /// e.g. `qwen = "us"` to use the US endpoint instead of China mainland.
+    #[serde(default)]
+    pub provider_regions: HashMap<String, String>,
     /// Provider API key env var overrides (provider ID → env var name).
     /// For custom/unknown providers, maps the provider name to the environment
     /// variable holding the API key. e.g. `nvidia = "NVIDIA_API_KEY"`.
@@ -2058,6 +2063,7 @@ impl Default for KernelConfig {
             thinking: None,
             budget: BudgetConfig::default(),
             provider_urls: HashMap::new(),
+            provider_regions: HashMap::new(),
             provider_api_keys: HashMap::new(),
             vertex_ai: VertexAiConfig::default(),
             oauth: OAuthConfig::default(),

@@ -271,6 +271,7 @@ impl ModelCatalog {
                 auth_status: AuthStatus::Missing,
                 model_count: 0,
                 signup_url: None,
+                regions: std::collections::HashMap::new(),
             });
             // Re-detect auth for the newly added provider
             self.detect_auth();
@@ -295,6 +296,28 @@ impl ModelCatalog {
                 }
             }
         }
+    }
+
+    /// Resolve provider region selections into URL overrides.
+    ///
+    /// For each entry in `region_selections` (provider ID → region name), looks up
+    /// the region URL from the provider's `regions` map. Returns a map of provider
+    /// IDs to resolved URLs that can be applied via [`apply_url_overrides`].
+    ///
+    /// Entries where the provider or region is not found are silently skipped.
+    pub fn resolve_region_urls(
+        &self,
+        region_selections: &HashMap<String, String>,
+    ) -> HashMap<String, String> {
+        let mut resolved = HashMap::new();
+        for (provider_id, region_name) in region_selections {
+            if let Some(provider) = self.get_provider(provider_id) {
+                if let Some(region_cfg) = provider.regions.get(region_name) {
+                    resolved.insert(provider_id.clone(), region_cfg.base_url.clone());
+                }
+            }
+        }
+        resolved
     }
 
     /// List models filtered by tier.
@@ -694,6 +717,7 @@ mod tests {
         crate::registry_sync::sync_registry(&home);
         ModelCatalog::new(&home)
     }
+
 
     #[test]
     fn test_catalog_has_models() {
