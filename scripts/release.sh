@@ -260,6 +260,8 @@ git -C "$REPO_ROOT" add \
     CHANGELOG.md \
     sdk/javascript/package.json \
     sdk/python/setup.py \
+    sdk/rust/Cargo.toml \
+    sdk/rust/README.md \
     packages/whatsapp-gateway/package.json \
     crates/librefang-desktop/tauri.conf.json
 [ -f "$ARTICLE" ] && git -C "$REPO_ROOT" add "$ARTICLE"
