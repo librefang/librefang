@@ -637,6 +637,7 @@ pub async fn run_agent_loop(
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     let mut hallucination_retried = false;
+    let mut action_nudge_retried = false;
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Agent loop iteration");
@@ -816,6 +817,32 @@ pub async fn run_agent_loop(
                     messages.push(Message::user(
                         "[System: You described performing an action but did not actually call any tools. \
                          Please use the provided tools to carry out the action rather than just describing it.]"
+                    ));
+                    continue;
+                }
+
+                // Detect missing tool execution for explicit user action requests.
+                // If the user asked for an action (e.g. "send to Telegram", "execute X")
+                // but the LLM responded with only text and no tool calls, nudge it to
+                // actually use the available tools.  Only retry once to avoid loops.
+                if !text.trim().is_empty()
+                    && response.tool_calls.is_empty()
+                    && !available_tools.is_empty()
+                    && !any_tools_executed
+                    && !action_nudge_retried
+                    && !hallucination_retried
+                    && user_message_has_action_intent(user_message)
+                {
+                    action_nudge_retried = true;
+                    warn!(
+                        agent = %manifest.name,
+                        iteration,
+                        "User requested action but LLM responded without tool calls — nudging retry"
+                    );
+                    messages.push(Message::assistant(&text));
+                    messages.push(Message::user(
+                        "[System: You described actions but didn't execute them. \
+                         Please use the available tools to complete the requested actions.]",
                     ));
                     continue;
                 }
@@ -1812,6 +1839,7 @@ pub async fn run_agent_loop_streaming(
     let mut any_tools_executed = false;
     let mut decision_traces: Vec<DecisionTrace> = Vec::new();
     let mut hallucination_retried = false;
+    let mut action_nudge_retried = false;
 
     for iteration in 0..max_iterations {
         debug!(iteration, "Streaming agent loop iteration");
@@ -2015,6 +2043,29 @@ pub async fn run_agent_loop_streaming(
                     messages.push(Message::user(
                         "[System: You described performing an action but did not actually call any tools. \
                          Please use the provided tools to carry out the action rather than just describing it.]"
+                    ));
+                    continue;
+                }
+
+                // Detect missing tool execution for explicit user action requests (streaming).
+                if !text.trim().is_empty()
+                    && response.tool_calls.is_empty()
+                    && !available_tools.is_empty()
+                    && !any_tools_executed
+                    && !action_nudge_retried
+                    && !hallucination_retried
+                    && user_message_has_action_intent(user_message)
+                {
+                    action_nudge_retried = true;
+                    warn!(
+                        agent = %manifest.name,
+                        iteration,
+                        "User requested action but LLM responded without tool calls (streaming) — nudging retry"
+                    );
+                    messages.push(Message::assistant(&text));
+                    messages.push(Message::user(
+                        "[System: You described actions but didn't execute them. \
+                         Please use the available tools to complete the requested actions.]",
                     ));
                     continue;
                 }
@@ -2555,6 +2606,34 @@ fn looks_like_hallucinated_action(text: &str) -> bool {
         "successfully modified",
     ];
     action_phrases.iter().any(|phrase| lower.contains(phrase))
+}
+
+/// Detect whether the **user's** message contains explicit action-oriented keywords
+/// that imply tool execution is required.  When the LLM responds with only text
+/// (no `tool_calls`) despite tools being available and the user clearly requesting
+/// an action, we should nudge the model to actually invoke tools.
+///
+/// This complements `looks_like_hallucinated_action` which checks the LLM's
+/// *response* text for claims of completion.  This function checks the *user
+/// intent* so we can catch cases where the LLM simply describes a plan or
+/// summarises the request without attempting to fulfill it.
+fn user_message_has_action_intent(user_message: &str) -> bool {
+    let lower = user_message.to_lowercase();
+    let action_keywords = [
+        "send", "execute", "create", "delete", "remove", "update", "write", "post", "publish",
+        "deploy", "run", "install", "upload", "download", "forward", "submit", "trigger", "launch",
+        "notify", "schedule", "move", "copy", "rename", "save", "fetch", "search",
+    ];
+    // Require the keyword to appear as a word boundary — avoid false positives
+    // from substrings (e.g. "create" inside "recreate" is fine, but "run" inside
+    // "running" should still match since intent is clear).
+    action_keywords.iter().any(|kw| {
+        lower.split_whitespace().any(|word| {
+            // Strip common punctuation so "send," or "send!" still match
+            let cleaned = word.trim_matches(|c: char| c.is_ascii_punctuation());
+            cleaned == *kw
+        })
+    })
 }
 
 /// Recover tool calls that LLMs output as plain text instead of the proper
@@ -4950,5 +5029,81 @@ mod tests {
         assert!(!needs_qualified_model_id("openai"));
         assert!(!needs_qualified_model_id("anthropic"));
         assert!(!needs_qualified_model_id("groq"));
+    }
+
+    // --- user_message_has_action_intent tests ---
+
+    #[test]
+    fn test_action_intent_send() {
+        assert!(user_message_has_action_intent("send this to Telegram"));
+        assert!(user_message_has_action_intent("Send the report via email"));
+    }
+
+    #[test]
+    fn test_action_intent_execute() {
+        assert!(user_message_has_action_intent("execute the script"));
+        assert!(user_message_has_action_intent(
+            "please execute X and report"
+        ));
+    }
+
+    #[test]
+    fn test_action_intent_create_delete() {
+        assert!(user_message_has_action_intent("create a new file"));
+        assert!(user_message_has_action_intent("delete the old records"));
+    }
+
+    #[test]
+    fn test_action_intent_combined() {
+        assert!(user_message_has_action_intent(
+            "search for news about AI and send to Telegram"
+        ));
+    }
+
+    #[test]
+    fn test_action_intent_with_punctuation() {
+        assert!(user_message_has_action_intent("send, please"));
+        assert!(user_message_has_action_intent("can you deploy!"));
+        assert!(user_message_has_action_intent("run?"));
+    }
+
+    #[test]
+    fn test_action_intent_negative_plain_question() {
+        // Simple questions without action keywords should not trigger
+        assert!(!user_message_has_action_intent("what is the weather?"));
+        assert!(!user_message_has_action_intent("explain how this works"));
+        assert!(!user_message_has_action_intent("tell me about Rust"));
+    }
+
+    #[test]
+    fn test_action_intent_negative_no_keyword() {
+        assert!(!user_message_has_action_intent("hello there"));
+        assert!(!user_message_has_action_intent(
+            "how do I configure logging?"
+        ));
+    }
+
+    #[test]
+    fn test_action_intent_case_insensitive() {
+        assert!(user_message_has_action_intent("SEND this now"));
+        assert!(user_message_has_action_intent("Deploy the app"));
+        assert!(user_message_has_action_intent("RUN the tests"));
+    }
+
+    #[test]
+    fn test_action_intent_all_keywords() {
+        let keywords = [
+            "send", "execute", "create", "delete", "remove", "update", "write", "post", "publish",
+            "deploy", "run", "install", "upload", "download", "forward", "submit", "trigger",
+            "launch", "notify", "schedule", "move", "copy", "rename", "save", "fetch", "search",
+        ];
+        for kw in &keywords {
+            let msg = format!("please {} the thing", kw);
+            assert!(
+                user_message_has_action_intent(&msg),
+                "Expected action intent for keyword '{}'",
+                kw
+            );
+        }
     }
 }
