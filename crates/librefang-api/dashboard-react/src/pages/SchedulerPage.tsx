@@ -151,9 +151,11 @@ export function SchedulerPage() {
         <div>
           <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("scheduler.event_triggers")}</h2>
           {triggers.length === 0 ? (
-            <div className="text-center py-8 rounded-2xl border border-dashed border-border-subtle">
-              <Zap className="w-6 h-6 text-text-dim/30 mx-auto mb-1" />
-              <p className="text-xs text-text-dim">{t("common.no_data")}</p>
+            <div className="flex flex-col items-center justify-center py-10 rounded-2xl border border-dashed border-border-subtle bg-gradient-to-b from-surface/50 to-transparent">
+              <div className="w-12 h-12 rounded-xl bg-warning/10 flex items-center justify-center mb-3">
+                <Zap className="w-6 h-6 text-warning/50" />
+              </div>
+              <p className="text-xs text-text-dim font-medium">{t("common.no_data")}</p>
             </div>
           ) : (
             <div className="space-y-1.5">
@@ -173,9 +175,11 @@ export function SchedulerPage() {
         <div>
           <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("scheduler.system_cron")}</h2>
           {cronJobs.length === 0 ? (
-            <div className="text-center py-8 rounded-2xl border border-dashed border-border-subtle">
-              <Clock className="w-6 h-6 text-text-dim/30 mx-auto mb-1" />
-              <p className="text-xs text-text-dim">{t("common.no_data")}</p>
+            <div className="flex flex-col items-center justify-center py-10 rounded-2xl border border-dashed border-border-subtle bg-gradient-to-b from-surface/50 to-transparent">
+              <div className="w-12 h-12 rounded-xl bg-brand/10 flex items-center justify-center mb-3">
+                <Clock className="w-6 h-6 text-brand/50" />
+              </div>
+              <p className="text-xs text-text-dim font-medium">{t("common.no_data")}</p>
             </div>
           ) : (
             <div className="space-y-1.5">
