@@ -701,6 +701,16 @@ impl LibreFangKernel {
         std::fs::create_dir_all(&config.data_dir)
             .map_err(|e| KernelError::BootFailed(format!("Failed to create data dir: {e}")))?;
 
+        // Ensure global shared workspace directory exists
+        let workspace_dir = config.effective_workspace_dir();
+        std::fs::create_dir_all(&workspace_dir).map_err(|e| {
+            KernelError::BootFailed(format!(
+                "Failed to create workspace dir {}: {e}",
+                workspace_dir.display()
+            ))
+        })?;
+        info!("Global workspace dir: {}", workspace_dir.display());
+
         // Initialize memory substrate
         let db_path = config
             .memory

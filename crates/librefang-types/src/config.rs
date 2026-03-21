@@ -1306,6 +1306,10 @@ pub struct KernelConfig {
     /// Root directory for agent workspaces. Default: `~/.librefang/workspaces`
     #[serde(default)]
     pub workspaces_dir: Option<PathBuf>,
+    /// Global shared workspace directory for cross-session file persistence.
+    /// Default: `~/.librefang/workspace`
+    #[serde(default)]
+    pub workspace_dir: Option<PathBuf>,
     /// Media understanding configuration.
     #[serde(default)]
     pub media: crate::media::MediaConfig,
@@ -2044,6 +2048,7 @@ impl Default for KernelConfig {
             extensions: ExtensionsConfig::default(),
             vault: VaultConfig::default(),
             workspaces_dir: None,
+            workspace_dir: None,
             media: crate::media::MediaConfig::default(),
             links: crate::media::LinkConfig::default(),
             reload: ReloadConfig::default(),
@@ -2090,6 +2095,13 @@ impl KernelConfig {
         self.workspaces_dir
             .clone()
             .unwrap_or_else(|| self.home_dir.join("workspaces"))
+    }
+
+    /// Resolved global shared workspace directory for cross-session persistence.
+    pub fn effective_workspace_dir(&self) -> PathBuf {
+        self.workspace_dir
+            .clone()
+            .unwrap_or_else(|| self.home_dir.join("workspace"))
     }
 
     /// Resolve the API key env var name for a provider.
@@ -2154,6 +2166,7 @@ impl std::fmt::Debug for KernelConfig {
             .field("extensions", &self.extensions)
             .field("vault", &format!("enabled={}", self.vault.enabled))
             .field("workspaces_dir", &self.workspaces_dir)
+            .field("workspace_dir", &self.workspace_dir)
             .field(
                 "media",
                 &format!(
