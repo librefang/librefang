@@ -3422,6 +3422,36 @@ system_prompt = "You are a helpful assistant."
         Ok(())
     }
 
+    /// Hard-reboot an agent's session — clears conversation history WITHOUT saving
+    /// a summary to memory.  Keeps agent config, system prompt, and tools intact.
+    /// More aggressive than `reset_session` (which auto-saves a summary) but less
+    /// destructive than `clear_agent_history` (which wipes ALL sessions).
+    pub fn reboot_session(&self, agent_id: AgentId) -> KernelResult<()> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        // Delete the old session WITHOUT saving a summary
+        let _ = self.memory.delete_session(entry.session_id);
+
+        // Create a fresh session
+        let new_session = self
+            .memory
+            .create_session(agent_id)
+            .map_err(KernelError::LibreFang)?;
+
+        // Update registry with new session ID
+        self.registry
+            .update_session_id(agent_id, new_session.id)
+            .map_err(KernelError::LibreFang)?;
+
+        // Reset quota tracking
+        self.scheduler.reset_usage(agent_id);
+
+        info!(agent_id = %agent_id, "Session rebooted (no summary saved)");
+        Ok(())
+    }
+
     /// Clear ALL conversation history for an agent (sessions + canonical).
     ///
     /// Creates a fresh empty session afterward so the agent is still usable.

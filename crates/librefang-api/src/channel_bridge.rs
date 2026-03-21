@@ -1078,6 +1078,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok("Session reset. Chat history cleared.".to_string())
     }
 
+    async fn reboot_session(&self, agent_id: AgentId) -> Result<String, String> {
+        self.kernel
+            .reboot_session(agent_id)
+            .map_err(|e| format!("{e}"))?;
+        Ok("Session rebooted. Context cleared.".to_string())
+    }
+
     async fn compact_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
             .compact_agent_session(agent_id)

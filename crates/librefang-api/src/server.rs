@@ -102,6 +102,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::post(routes::reset_session),
         )
         .route(
+            "/agents/{id}/session/reboot",
+            axum::routing::post(routes::reboot_session),
+        )
+        .route(
             "/agents/{id}/history",
             axum::routing::delete(routes::clear_agent_history),
         )
