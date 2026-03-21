@@ -12,7 +12,6 @@ jobs:
   deploy-worker:
     name: Deploy Main Worker
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || contains(join(github.event.commits.*.modified, ','), 'deploy/worker/')
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
@@ -28,7 +27,6 @@ jobs:
   deploy-github-stats:
     name: Deploy GitHub Stats Worker
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' || contains(join(github.event.commits.*.modified, ','), 'web/workers/github-stats-worker/')
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
