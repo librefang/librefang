@@ -5,7 +5,7 @@ import { listModels, type ModelItem } from "../api";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import {
-  Cpu, Search, RefreshCw, Check, X, Eye, Wrench, Zap, AlertCircle
+  Cpu, Search, RefreshCw, Check, X, Eye, Wrench, Zap, AlertCircle, Lock
 } from "lucide-react";
 
 // Dynamic tiers from data - fallback list
@@ -191,7 +191,13 @@ export function ModelsPage() {
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
                   <p className="text-sm font-bold truncate">{m.display_name || m.id}</p>
-                  {m.available && <span className="w-2 h-2 rounded-full bg-success shrink-0" />}
+                  {m.available ? (
+                    <span className="w-2 h-2 rounded-full bg-success shrink-0" />
+                  ) : (
+                    <span className="flex items-center gap-0.5 text-[9px] text-text-dim/60 shrink-0">
+                      <Lock className="w-3 h-3" /> {t("models.no_key")}
+                    </span>
+                  )}
                 </div>
                 {m.display_name && m.display_name !== m.id && (
                   <p className="text-[10px] text-text-dim/40 font-mono truncate">{m.id}</p>

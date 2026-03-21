@@ -247,6 +247,7 @@
     "search_placeholder": "Search models...", "all_providers": "All Providers", "all_tiers": "All",
     "available_only": "Available Only", "available": "available", "results": "models",
     "free": "Free", "no_results": "No models match your filters.", "no_models": "No models loaded. Is the daemon running?", "load_error": "Failed to load models. Check if the daemon is running.",
+    "no_key": "No Key",
     "tier_all": "All", "tier_frontier": "Frontier", "tier_smart": "Smart", "tier_balanced": "Balanced", "tier_fast": "Fast", "tier_local": "Local", "tier_basic": "Basic", "tier_standard": "Standard", "tier_advanced": "Advanced", "tier_enterprise": "Enterprise",
     "col_model": "Model", "col_provider": "Provider", "col_tier": "Tier", "col_context": "Context", "col_input": "Input $/M"
   },
