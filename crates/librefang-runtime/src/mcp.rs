@@ -900,7 +900,16 @@ pub fn is_mcp_tool(name: &str) -> bool {
     name.starts_with("mcp_")
 }
 
-/// Extract server name from an MCP tool name.
+/// Extract the normalized server name from an MCP tool name.
+///
+/// **Warning**: This heuristic splits on the first `_` after the `mcp_` prefix,
+/// so it only works for single-word server names (e.g. `"github"`). For server
+/// names that contain hyphens or underscores (e.g. `"my-server"` →
+/// `"mcp_my_server_tool"`), this returns only the first segment (`"my"`).
+///
+/// Prefer [`resolve_mcp_server_from_known`] when the list of configured server
+/// names is available — it correctly handles multi-segment server names by
+/// doing a longest-prefix match.
 pub fn extract_mcp_server(tool_name: &str) -> Option<&str> {
     if !tool_name.starts_with("mcp_") {
         return None;
@@ -1003,6 +1012,40 @@ mod tests {
             ["http", "http-tools", "http-tools-extra"],
         );
         assert_eq!(server, Some("http-tools"));
+    }
+
+    #[test]
+    fn test_resolve_mcp_server_hyphenated_name() {
+        // Server "bocha-test" normalizes to "bocha_test", producing tool
+        // names like "mcp_bocha_test_search".  resolve_mcp_server_from_known
+        // must return the original (hyphenated) name.
+        let server =
+            resolve_mcp_server_from_known("mcp_bocha_test_search", ["github", "bocha-test"]);
+        assert_eq!(server, Some("bocha-test"));
+
+        // Single-word server names should still work
+        let server =
+            resolve_mcp_server_from_known("mcp_github_create_issue", ["github", "bocha-test"]);
+        assert_eq!(server, Some("github"));
+    }
+
+    #[test]
+    fn test_hyphenated_server_tool_namespacing_roundtrip() {
+        // Verify that a hyphenated server name can round-trip through
+        // format_mcp_tool_name → resolve_mcp_server_from_known.
+        let servers = ["my-server", "another-mcp-server", "simple"];
+        let tool_name = format_mcp_tool_name("my-server", "do_thing");
+        assert_eq!(tool_name, "mcp_my_server_do_thing");
+
+        let resolved = resolve_mcp_server_from_known(&tool_name, servers);
+        assert_eq!(resolved, Some("my-server"));
+
+        // Multi-hyphen server name
+        let tool_name = format_mcp_tool_name("another-mcp-server", "action");
+        assert_eq!(tool_name, "mcp_another_mcp_server_action");
+
+        let resolved = resolve_mcp_server_from_known(&tool_name, servers);
+        assert_eq!(resolved, Some("another-mcp-server"));
     }
 
     #[test]
