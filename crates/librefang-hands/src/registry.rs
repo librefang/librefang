@@ -91,6 +91,7 @@ impl HandRegistry {
     /// Returns list of (hand_id, config, old_agent_id, status) that should be restored.
     /// The `old_agent_id` is the agent UUID from before the restart, used to
     /// reassign cron jobs to the newly spawned agent (issue #402).
+    #[allow(clippy::type_complexity)]
     pub fn load_state(
         path: &std::path::Path,
     ) -> Vec<(
