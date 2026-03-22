@@ -104,7 +104,7 @@ mod tests {
         conn.query_row(
             "SELECT COUNT(*) FROM memories WHERE deleted = 0",
             [],
-            |row| row.get::<_, usize>(0),
+            |row| row.get::<_, i64>(0).map(|v| v as usize),
         )
         .unwrap()
     }
