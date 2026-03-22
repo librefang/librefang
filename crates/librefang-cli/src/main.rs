@@ -5845,15 +5845,15 @@ fn cmd_hand_settings(id: &str) {
     }
     if let Some(config) = body.get("config").and_then(|c| c.as_object()) {
         if config.is_empty() {
-            ui::info(&format!("Hand '{id}' has no configurable settings."));
+            ui::step(&format!("Hand '{id}' has no configurable settings."));
         } else {
-            ui::header(&format!("Settings for '{id}'"));
+            ui::section(&format!("Settings for '{id}'"));
             for (k, v) in config {
                 println!("  {}: {}", k.bold(), v);
             }
         }
     } else {
-        ui::info(&format!("Hand '{id}' has no configurable settings."));
+        ui::step(&format!("Hand '{id}' has no configurable settings."));
     }
 }
 
