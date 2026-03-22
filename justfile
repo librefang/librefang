@@ -28,8 +28,9 @@ fmt-check:
 check:
     cargo check --workspace
 
-# Local CI simulation: fmt-check + lint + test
-ci: fmt-check lint test
+# Local CI simulation: build + test + clippy + web lint
+ci:
+    cargo xtask ci
 
 # Build and open workspace documentation
 doc:
@@ -37,7 +38,7 @@ doc:
 
 # Build the React dashboard assets used by librefang-api
 dashboard-build:
-    cd crates/librefang-api/dashboard && pnpm install && pnpm run build
+    cargo xtask build-web --dashboard
 
 # Start React dashboard in dev mode (requires API running on :4545)
 dash:
@@ -53,9 +54,17 @@ clean:
     cargo clean
 
 # Synchronize crate versions
-sync-versions:
-    ./scripts/sync-versions.sh
+sync-versions *ARGS:
+    cargo xtask sync-versions {{ARGS}}
 
 # Cut a release
-release:
-    ./scripts/release.sh
+release *ARGS:
+    cargo xtask release {{ARGS}}
+
+# Generate CHANGELOG from merged PRs
+changelog *ARGS:
+    cargo xtask changelog {{ARGS}}
+
+# Run live integration tests
+integration-test *ARGS:
+    cargo xtask integration-test {{ARGS}}
