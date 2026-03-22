@@ -54,12 +54,16 @@ pub struct MemoryUpdateBody {
 fn get_pm_store(
     state: &AppState,
 ) -> Result<Arc<librefang_memory::ProactiveMemoryStore>, (StatusCode, Json<serde_json::Value>)> {
-    state.kernel.proactive_memory.get().cloned().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "Proactive memory is not enabled"})),
-        )
-    })
+    state
+        .kernel
+        .proactive_memory_store()
+        .cloned()
+        .ok_or_else(|| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "Proactive memory is not enabled"})),
+            )
+        })
 }
 
 fn default_user_id() -> String {

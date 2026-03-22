@@ -268,7 +268,7 @@ pub async fn create_workflow(
     )
 )]
 pub async fn list_workflows(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let workflows = state.kernel.workflows.list_workflows().await;
+    let workflows = state.kernel.workflow_engine().list_workflows().await;
     let list: Vec<serde_json::Value> = workflows
         .iter()
         .map(|w| {
@@ -309,7 +309,12 @@ pub async fn get_workflow(
         }
     });
 
-    match state.kernel.workflows.get_workflow(workflow_id).await {
+    match state
+        .kernel
+        .workflow_engine()
+        .get_workflow(workflow_id)
+        .await
+    {
         Some(w) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -370,7 +375,12 @@ pub async fn update_workflow(
     });
 
     // Fetch existing workflow to preserve created_at
-    let existing = match state.kernel.workflows.get_workflow(workflow_id).await {
+    let existing = match state
+        .kernel
+        .workflow_engine()
+        .get_workflow(workflow_id)
+        .await
+    {
         Some(w) => w,
         None => {
             return (
@@ -447,7 +457,7 @@ pub async fn update_workflow(
 
     if !state
         .kernel
-        .workflows
+        .workflow_engine()
         .update_workflow(workflow_id, updated)
         .await
     {
@@ -491,7 +501,12 @@ pub async fn delete_workflow(
         }
     });
 
-    if state.kernel.workflows.remove_workflow(workflow_id).await {
+    if state
+        .kernel
+        .workflow_engine()
+        .remove_workflow(workflow_id)
+        .await
+    {
         (
             StatusCode::OK,
             Json(serde_json::json!({"status": "removed", "workflow_id": id})),
@@ -548,7 +563,7 @@ pub async fn list_workflow_runs(
     State(state): State<Arc<AppState>>,
     Path(_id): Path<String>,
 ) -> impl IntoResponse {
-    let runs = state.kernel.workflows.list_runs(None).await;
+    let runs = state.kernel.workflow_engine().list_runs(None).await;
     let list: Vec<serde_json::Value> = runs
         .iter()
         .map(|r| {
@@ -803,7 +818,11 @@ const SCHEDULES_KEY: &str = "__librefang_schedules";
 )]
 pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agent_id = schedule_shared_agent_id();
-    match state.kernel.memory.structured_get(agent_id, SCHEDULES_KEY) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_get(agent_id, SCHEDULES_KEY)
+    {
         Ok(Some(serde_json::Value::Array(arr))) => {
             let total = arr.len();
             Json(serde_json::json!({"schedules": arr, "total": total}))
@@ -823,7 +842,11 @@ pub async fn get_schedule(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id = schedule_shared_agent_id();
-    match state.kernel.memory.structured_get(agent_id, SCHEDULES_KEY) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_get(agent_id, SCHEDULES_KEY)
+    {
         Ok(Some(serde_json::Value::Array(arr))) => {
             if let Some(schedule) = arr.iter().find(|s| s["id"].as_str() == Some(&id)) {
                 (StatusCode::OK, Json(schedule.clone()))
@@ -903,11 +926,11 @@ pub async fn create_schedule(
     }
     // Validate agent exists (UUID or name lookup)
     let agent_exists = if let Ok(aid) = agent_id_str.parse::<AgentId>() {
-        state.kernel.registry.get(aid).is_some()
+        state.kernel.agent_registry().get(aid).is_some()
     } else {
         state
             .kernel
-            .registry
+            .agent_registry()
             .list()
             .iter()
             .any(|a| a.name == agent_id_str)
@@ -935,14 +958,17 @@ pub async fn create_schedule(
     });
 
     let shared_id = schedule_shared_agent_id();
-    let mut schedules: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, SCHEDULES_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let mut schedules: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, SCHEDULES_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
 
     schedules.push(entry.clone());
-    if let Err(e) = state.kernel.memory.structured_set(
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules),
@@ -965,11 +991,14 @@ pub async fn update_schedule(
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let shared_id = schedule_shared_agent_id();
-    let mut schedules: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, SCHEDULES_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let mut schedules: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, SCHEDULES_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
 
     let mut found = false;
     for s in schedules.iter_mut() {
@@ -1008,7 +1037,7 @@ pub async fn update_schedule(
         );
     }
 
-    if let Err(e) = state.kernel.memory.structured_set(
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules),
@@ -1032,11 +1061,14 @@ pub async fn delete_schedule(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let shared_id = schedule_shared_agent_id();
-    let mut schedules: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, SCHEDULES_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let mut schedules: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, SCHEDULES_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
 
     let before = schedules.len();
     schedules.retain(|s| s["id"].as_str() != Some(&id));
@@ -1048,7 +1080,7 @@ pub async fn delete_schedule(
         );
     }
 
-    if let Err(e) = state.kernel.memory.structured_set(
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules),
@@ -1072,11 +1104,14 @@ pub async fn run_schedule(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let shared_id = schedule_shared_agent_id();
-    let schedules: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, SCHEDULES_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let schedules: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, SCHEDULES_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
 
     let schedule = match schedules.iter().find(|s| s["id"].as_str() == Some(&id)) {
         Some(s) => s.clone(),
@@ -1097,7 +1132,7 @@ pub async fn run_schedule(
     // Find the target agent — require explicit agent_id, no silent fallback
     let target_agent = if !agent_id_str.is_empty() {
         if let Ok(aid) = agent_id_str.parse::<AgentId>() {
-            if state.kernel.registry.get(aid).is_some() {
+            if state.kernel.agent_registry().get(aid).is_some() {
                 Some(aid)
             } else {
                 None
@@ -1105,7 +1140,7 @@ pub async fn run_schedule(
         } else {
             state
                 .kernel
-                .registry
+                .agent_registry()
                 .list()
                 .iter()
                 .find(|a| a.name == agent_id_str)
@@ -1134,11 +1169,14 @@ pub async fn run_schedule(
     };
 
     // Update last_run and run_count
-    let mut schedules_updated: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, SCHEDULES_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let mut schedules_updated: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, SCHEDULES_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
     for s in schedules_updated.iter_mut() {
         if s["id"].as_str() == Some(&id) {
             s["last_run"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
@@ -1147,7 +1185,7 @@ pub async fn run_schedule(
             break;
         }
     }
-    if let Err(e) = state.kernel.memory.structured_set(
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules_updated),
@@ -1195,7 +1233,7 @@ pub async fn list_cron_jobs(
         match uuid::Uuid::parse_str(agent_id_str) {
             Ok(uuid) => {
                 let aid = AgentId(uuid);
-                state.kernel.cron_scheduler.list_jobs(aid)
+                state.kernel.cron().list_jobs(aid)
             }
             Err(_) => {
                 return (
@@ -1205,7 +1243,7 @@ pub async fn list_cron_jobs(
             }
         }
     } else {
-        state.kernel.cron_scheduler.list_all_jobs()
+        state.kernel.cron().list_all_jobs()
     };
     let total = jobs.len();
     let jobs_json: Vec<serde_json::Value> = jobs
@@ -1249,9 +1287,9 @@ pub async fn delete_cron_job(
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron_scheduler.remove_job(job_id) {
+            match state.kernel.cron().remove_job(job_id) {
                 Ok(_) => {
-                    if let Err(e) = state.kernel.cron_scheduler.persist() {
+                    if let Err(e) = state.kernel.cron().persist() {
                         tracing::warn!("Failed to persist cron scheduler state: {e}");
                     }
                     (
@@ -1282,9 +1320,9 @@ pub async fn update_cron_job(
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron_scheduler.update_job(job_id, &body) {
+            match state.kernel.cron().update_job(job_id, &body) {
                 Ok(job) => {
-                    let _ = state.kernel.cron_scheduler.persist();
+                    let _ = state.kernel.cron().persist();
                     (
                         StatusCode::OK,
                         Json(serde_json::to_value(&job).unwrap_or_default()),
@@ -1314,9 +1352,9 @@ pub async fn toggle_cron_job(
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron_scheduler.set_enabled(job_id, enabled) {
+            match state.kernel.cron().set_enabled(job_id, enabled) {
                 Ok(()) => {
-                    if let Err(e) = state.kernel.cron_scheduler.persist() {
+                    if let Err(e) = state.kernel.cron().persist() {
                         tracing::warn!("Failed to persist cron scheduler state: {e}");
                     }
                     (
@@ -1346,7 +1384,7 @@ pub async fn get_cron_job(
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron_scheduler.get_meta(job_id) {
+            match state.kernel.cron().get_meta(job_id) {
                 Some(meta) => (
                     StatusCode::OK,
                     Json(serde_json::to_value(&meta).unwrap_or_default()),
@@ -1373,7 +1411,7 @@ pub async fn cron_job_status(
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron_scheduler.get_meta(job_id) {
+            match state.kernel.cron().get_meta(job_id) {
                 Some(meta) => (
                     StatusCode::OK,
                     Json(serde_json::to_value(&meta).unwrap_or_default()),
@@ -1421,7 +1459,7 @@ pub async fn list_templates(
     State(state): State<Arc<AppState>>,
     Query(params): Query<TemplateListParams>,
 ) -> impl IntoResponse {
-    let all = state.kernel.template_registry.list().await;
+    let all = state.kernel.templates().list().await;
 
     let filtered: Vec<_> = all
         .into_iter()
@@ -1473,7 +1511,7 @@ pub async fn get_template(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    match state.kernel.template_registry.get(&id).await {
+    match state.kernel.templates().get(&id).await {
         Some(t) => (
             StatusCode::OK,
             Json(serde_json::to_value(&t).unwrap_or_default()),
@@ -1503,7 +1541,7 @@ pub async fn instantiate_template(
     Path(id): Path<String>,
     Json(params): Json<HashMap<String, serde_json::Value>>,
 ) -> impl IntoResponse {
-    let template = match state.kernel.template_registry.get(&id).await {
+    let template = match state.kernel.templates().get(&id).await {
         Some(t) => t,
         None => {
             return (
@@ -1513,11 +1551,7 @@ pub async fn instantiate_template(
         }
     };
 
-    let workflow = match state
-        .kernel
-        .template_registry
-        .instantiate(&template, &params)
-    {
+    let workflow = match state.kernel.templates().instantiate(&template, &params) {
         Ok(w) => w,
         Err(e) => {
             return (

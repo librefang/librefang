@@ -19,7 +19,7 @@ use std::sync::Arc;
 pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents: Vec<serde_json::Value> = state
         .kernel
-        .registry
+        .agent_registry()
         .list()
         .into_iter()
         .map(|e| {
@@ -43,13 +43,13 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
         "agent_count": agent_count,
-        "default_provider": state.kernel.config.default_model.provider,
-        "default_model": state.kernel.config.default_model.model,
+        "default_provider": state.kernel.config_ref().default_model.provider,
+        "default_model": state.kernel.config_ref().default_model.model,
         "uptime_seconds": uptime,
-        "api_listen": state.kernel.config.api_listen,
-        "home_dir": state.kernel.config.home_dir.display().to_string(),
-        "log_level": state.kernel.config.log_level,
-        "network_enabled": state.kernel.config.network_enabled,
+        "api_listen": state.kernel.config_ref().api_listen,
+        "home_dir": state.kernel.home_dir().display().to_string(),
+        "log_level": state.kernel.config_ref().log_level,
+        "network_enabled": state.kernel.config_ref().network_enabled,
         "agents": agents,
     }))
 }
@@ -66,7 +66,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     tracing::info!("Shutdown requested via API");
     // SECURITY: Record shutdown in audit trail
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         "shutdown requested via API",
@@ -126,7 +126,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ]));
     let db_ok = state
         .kernel
-        .memory
+        .memory_substrate()
         .structured_get(shared_id, "__health_check__")
         .is_ok();
 
@@ -148,18 +148,18 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     )
 )]
 pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let health = state.kernel.supervisor.health();
+    let health = state.kernel.supervisor_ref().health();
 
     let shared_id = librefang_types::agent::AgentId(uuid::Uuid::from_bytes([
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
     ]));
     let db_ok = state
         .kernel
-        .memory
+        .memory_substrate()
         .structured_get(shared_id, "__health_check__")
         .is_ok();
 
-    let config_warnings = state.kernel.config.validate();
+    let config_warnings = state.kernel.config_ref().validate();
     let status = if db_ok { "ok" } else { "degraded" };
 
     Json(serde_json::json!({
@@ -168,7 +168,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "uptime_seconds": state.started_at.elapsed().as_secs(),
         "panic_count": health.panic_count,
         "restart_count": health.restart_count,
-        "agent_count": state.kernel.registry.count(),
+        "agent_count": state.kernel.agent_registry().count(),
         "database": if db_ok { "connected" } else { "error" },
         "config_warnings": config_warnings,
     }))
@@ -205,7 +205,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push_str(&format!("librefang_uptime_seconds {uptime}\n\n"));
 
     // Active agents
-    let agents = state.kernel.registry.list();
+    let agents = state.kernel.agent_registry().list();
     let active = agents
         .iter()
         .filter(|a| matches!(a.state, librefang_types::agent::AgentState::Running))
@@ -226,7 +226,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
         let name = &agent.name;
         let provider = &agent.manifest.model.provider;
         let model = &agent.manifest.model.model;
-        if let Some((tokens, tools)) = state.kernel.scheduler.get_usage(agent.id) {
+        if let Some((tokens, tools)) = state.kernel.scheduler_ref().get_usage(agent.id) {
             out.push_str(&format!(
                 "librefang_tokens_total{{agent=\"{name}\",provider=\"{provider}\",model=\"{model}\"}} {tokens}\n"
             ));
@@ -238,7 +238,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push('\n');
 
     // Supervisor health
-    let health = state.kernel.supervisor.health();
+    let health = state.kernel.supervisor_ref().health();
     out.push_str("# HELP librefang_panics_total Total supervisor panics since start.\n");
     out.push_str("# TYPE librefang_panics_total counter\n");
     out.push_str(&format!("librefang_panics_total {}\n", health.panic_count));
@@ -282,7 +282,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
 )]
 pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Return a redacted view of the kernel config
-    let config = &state.kernel.config;
+    let config = &state.kernel.config_ref();
 
     // -- channels: show which platforms are configured (instance counts), no tokens --
     let channels = {
@@ -895,13 +895,13 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     )
 )]
 pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let auth_mode = if state.kernel.config.api_key.is_empty() {
+    let auth_mode = if state.kernel.config_ref().api_key.is_empty() {
         "localhost_only"
     } else {
         "bearer_token"
     };
 
-    let audit_count = state.kernel.audit_log.len();
+    let audit_count = state.kernel.audit().len();
 
     Json(serde_json::json!({
         "core_protections": {
@@ -934,7 +934,7 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
             },
             "auth": {
                 "mode": auth_mode,
-                "api_key_set": !state.kernel.config.api_key.is_empty()
+                "api_key_set": !state.kernel.config_ref().api_key.is_empty()
             }
         },
         "monitoring": {
@@ -1063,7 +1063,7 @@ pub async fn run_migrate(
     };
 
     let target_dir = if req.target_dir.trim().is_empty() {
-        state.kernel.config.home_dir.clone()
+        state.kernel.home_dir().to_path_buf()
     } else {
         std::path::PathBuf::from(req.target_dir.trim())
     };
@@ -1143,7 +1143,7 @@ pub async fn run_migrate(
 )]
 pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // SECURITY: Record config reload in audit trail
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         "config reload requested via API",
@@ -1194,7 +1194,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     // Build provider/model options from model catalog for dropdowns
     let catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .read()
         .unwrap_or_else(|e| e.into_inner());
     let provider_options: Vec<String> = catalog
@@ -1402,7 +1402,7 @@ pub async fn config_set(
         }
     };
 
-    let config_path = state.kernel.config.home_dir.join("config.toml");
+    let config_path = state.kernel.home_dir().join("config.toml");
     if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
         || config_path.components().any(|c| {
             matches!(
@@ -1498,7 +1498,7 @@ pub async fn config_set(
         Err(_) => "saved_reload_failed",
     };
 
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("config set: {path}"),

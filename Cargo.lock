@@ -4031,6 +4031,7 @@ dependencies = [
  "dirs 6.0.0",
  "futures",
  "hex",
+ "librefang-channels",
  "librefang-memory",
  "librefang-skills",
  "librefang-types",

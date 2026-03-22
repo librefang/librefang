@@ -58,7 +58,7 @@ async fn resolve_manifest(
             }
             let tmpl_path = state
                 .kernel
-                .config
+                .config_ref()
                 .home_dir
                 .join("agents")
                 .join(&safe_name)
@@ -105,7 +105,7 @@ async fn resolve_manifest(
             }
             Err(e) => {
                 tracing::warn!("Manifest signature verification failed: {e}");
-                state.kernel.audit_log.record(
+                state.kernel.audit().record(
                     "system",
                     librefang_runtime::audit::AuditAction::AuthAttempt,
                     "manifest signature verification failed",
@@ -412,7 +412,11 @@ pub async fn bulk_start_agents(
                 continue;
             }
         };
-        match state.kernel.registry.set_mode(agent_id, AgentMode::Full) {
+        match state
+            .kernel
+            .agent_registry()
+            .set_mode(agent_id, AgentMode::Full)
+        {
             Ok(()) => {
                 results.push(BulkActionResult {
                     agent_id: id_str.clone(),
@@ -609,10 +613,10 @@ pub async fn list_agents(
     lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<AgentListQuery>,
 ) -> impl IntoResponse {
-    let catalog = state.kernel.model_catalog.read().ok();
-    let dm = &state.kernel.config.default_model;
+    let catalog = state.kernel.model_catalog_ref().read().ok();
+    let dm = &state.kernel.config_ref().default_model;
 
-    let mut agents: Vec<librefang_types::agent::AgentEntry> = state.kernel.registry.list();
+    let mut agents: Vec<librefang_types::agent::AgentEntry> = state.kernel.agent_registry().list();
 
     // -- Filtering --
     if let Some(ref q) = params.q {
@@ -755,12 +759,12 @@ pub fn inject_attachments_into_session(
 ) {
     use librefang_types::message::{Message, MessageContent, Role};
 
-    let entry = match kernel.registry.get(agent_id) {
+    let entry = match kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => return,
     };
 
-    let mut session = match kernel.memory.get_session(entry.session_id) {
+    let mut session = match kernel.memory_substrate().get_session(entry.session_id) {
         Ok(Some(s)) => s,
         _ => librefang_memory::session::Session {
             id: entry.session_id,
@@ -777,7 +781,7 @@ pub fn inject_attachments_into_session(
         pinned: false,
     });
 
-    if let Err(e) = kernel.memory.save_session(&session) {
+    if let Err(e) = kernel.memory_substrate().save_session(&session) {
         tracing::warn!(error = %e, "Failed to save session with image attachments");
     }
 }
@@ -909,7 +913,7 @@ pub async fn send_message(
     }
 
     // Check agent exists before processing
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": err_not_found})),
@@ -1064,7 +1068,7 @@ pub async fn get_agent_session(
         }
     };
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -1074,7 +1078,11 @@ pub async fn get_agent_session(
         }
     };
 
-    match state.kernel.memory.get_session(entry.session_id) {
+    match state
+        .kernel
+        .memory_substrate()
+        .get_session(entry.session_id)
+    {
         Ok(Some(session)) => {
             // Two-pass approach: ToolUse blocks live in Assistant messages while
             // ToolResult blocks arrive in subsequent User messages.  Pass 1
@@ -1370,7 +1378,7 @@ pub async fn set_agent_mode(
         }
     };
 
-    match state.kernel.registry.set_mode(agent_id, body.mode) {
+    match state.kernel.agent_registry().set_mode(agent_id, body.mode) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1417,7 +1425,7 @@ pub async fn get_agent(
         }
     };
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -1517,7 +1525,7 @@ pub async fn send_message_stream(
         }
     };
 
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": err_not_found})),
@@ -1928,7 +1936,7 @@ pub async fn clear_agent_history(
             )
         }
     };
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -2083,7 +2091,7 @@ pub async fn set_model(
             // so we read it back from the registry instead of echoing the raw input.
             let (resolved_model, resolved_provider) = state
                 .kernel
-                .registry
+                .agent_registry()
                 .get(agent_id)
                 .map(|e| {
                     (
@@ -2138,7 +2146,7 @@ pub async fn get_agent_traces(
     };
 
     // Check agent exists
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -2147,7 +2155,7 @@ pub async fn get_agent_traces(
 
     let traces = state
         .kernel
-        .decision_traces
+        .traces()
         .get(&agent_id)
         .map(|entry| entry.value().clone())
         .unwrap_or_default();
@@ -2183,7 +2191,7 @@ pub async fn get_agent_tools(
             )
         }
     };
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -2294,7 +2302,7 @@ pub async fn get_agent_skills(
             )
         }
     };
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -2305,7 +2313,7 @@ pub async fn get_agent_skills(
     };
     let available = state
         .kernel
-        .skill_registry
+        .skill_registry_ref()
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .skill_names();
@@ -2394,7 +2402,7 @@ pub async fn get_agent_mcp_servers(
             )
         }
     };
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -2405,10 +2413,10 @@ pub async fn get_agent_mcp_servers(
     };
     // Collect known MCP server names from connected tools
     let mut available: Vec<String> = Vec::new();
-    if let Ok(mcp_tools) = state.kernel.mcp_tools.lock() {
+    if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
         let configured_servers: Vec<String> = state
             .kernel
-            .effective_mcp_servers
+            .effective_mcp_servers_ref()
             .read()
             .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
             .unwrap_or_default();
@@ -2523,7 +2531,7 @@ pub async fn update_agent(
         }
     };
 
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -2581,7 +2589,7 @@ pub async fn patch_agent(
         }
     };
 
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -2592,7 +2600,7 @@ pub async fn patch_agent(
     if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
         if let Err(e) = state
             .kernel
-            .registry
+            .agent_registry()
             .update_name(agent_id, name.to_string())
         {
             return (
@@ -2606,7 +2614,7 @@ pub async fn patch_agent(
     if let Some(desc) = body.get("description").and_then(|v| v.as_str()) {
         if let Err(e) = state
             .kernel
-            .registry
+            .agent_registry()
             .update_description(agent_id, desc.to_string())
         {
             return (
@@ -2634,7 +2642,7 @@ pub async fn patch_agent(
     if let Some(system_prompt) = body.get("system_prompt").and_then(|v| v.as_str()) {
         if let Err(e) = state
             .kernel
-            .registry
+            .agent_registry()
             .update_system_prompt(agent_id, system_prompt.to_string())
         {
             return (
@@ -2647,8 +2655,8 @@ pub async fn patch_agent(
     }
 
     // Persist updated entry to SQLite
-    if let Some(entry) = state.kernel.registry.get(agent_id) {
-        if let Err(e) = state.kernel.memory.save_agent(&entry) {
+    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+        if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
             tracing::warn!("Failed to persist agent state: {e}");
         }
         (
@@ -2744,11 +2752,15 @@ pub async fn update_agent_identity(
         greeting_style: req.greeting_style,
     };
 
-    match state.kernel.registry.update_identity(agent_id, identity) {
+    match state
+        .kernel
+        .agent_registry()
+        .update_identity(agent_id, identity)
+    {
         Ok(()) => {
             // Persist identity to SQLite
-            if let Some(entry) = state.kernel.registry.get(agent_id) {
-                if let Err(e) = state.kernel.memory.save_agent(&entry) {
+            if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+                if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
                     tracing::warn!("Failed to persist agent state: {e}");
                 }
             }
@@ -2881,7 +2893,7 @@ pub async fn patch_agent_config(
         if !new_name.is_empty() {
             if let Err(e) = state
                 .kernel
-                .registry
+                .agent_registry()
                 .update_name(agent_id, new_name.clone())
             {
                 return (
@@ -2898,7 +2910,7 @@ pub async fn patch_agent_config(
     if let Some(ref new_desc) = req.description {
         if state
             .kernel
-            .registry
+            .agent_registry()
             .update_description(agent_id, new_desc.clone())
             .is_err()
         {
@@ -2913,7 +2925,7 @@ pub async fn patch_agent_config(
     if let Some(ref new_prompt) = req.system_prompt {
         if state
             .kernel
-            .registry
+            .agent_registry()
             .update_system_prompt(agent_id, new_prompt.clone())
             .is_err()
         {
@@ -2936,7 +2948,7 @@ pub async fn patch_agent_config(
         // Read current identity, merge with provided fields
         let current = state
             .kernel
-            .registry
+            .agent_registry()
             .get(agent_id)
             .map(|e| e.identity)
             .unwrap_or_default();
@@ -2950,7 +2962,7 @@ pub async fn patch_agent_config(
         };
         if state
             .kernel
-            .registry
+            .agent_registry()
             .update_identity(agent_id, merged)
             .is_err()
         {
@@ -2972,7 +2984,7 @@ pub async fn patch_agent_config(
                     // Explicit provider given — use it directly
                     if state
                         .kernel
-                        .registry
+                        .agent_registry()
                         .update_model_and_provider(
                             agent_id,
                             new_model.clone(),
@@ -3014,7 +3026,7 @@ pub async fn patch_agent_config(
     if let Some(fallbacks) = req.fallback_models {
         if state
             .kernel
-            .registry
+            .agent_registry()
             .update_fallback_models(agent_id, fallbacks)
             .is_err()
         {
@@ -3026,8 +3038,8 @@ pub async fn patch_agent_config(
     }
 
     // Persist updated manifest to database so changes survive restart
-    if let Some(entry) = state.kernel.registry.get(agent_id) {
-        if let Err(e) = state.kernel.memory.save_agent(&entry) {
+    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+        if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
             tracing::warn!("Failed to persist agent config update: {e}");
         }
     }
@@ -3128,7 +3140,7 @@ pub async fn clone_agent(
         );
     }
 
-    let source = match state.kernel.registry.get(agent_id) {
+    let source = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -3160,7 +3172,7 @@ pub async fn clone_agent(
     };
 
     // Copy workspace files from source to destination
-    let new_entry = state.kernel.registry.get(new_id);
+    let new_entry = state.kernel.agent_registry().get(new_id);
     if let (Some(ref src_ws), Some(ref new_entry)) = (source.manifest.workspace, new_entry) {
         if let Some(ref dst_ws) = new_entry.manifest.workspace {
             // Security: canonicalize both paths
@@ -3181,7 +3193,7 @@ pub async fn clone_agent(
     // Copy identity from source
     if let Err(e) = state
         .kernel
-        .registry
+        .agent_registry()
         .update_identity(new_id, source.identity.clone())
     {
         tracing::warn!("Failed to copy agent identity: {e}");
@@ -3238,7 +3250,7 @@ pub async fn list_agent_files(
         }
     };
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -3314,7 +3326,7 @@ pub async fn get_agent_file(
         );
     }
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -3436,7 +3448,7 @@ pub async fn set_agent_file(
         );
     }
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -3559,7 +3571,7 @@ pub async fn delete_agent_file(
         );
     }
 
-    let workspace = match state.kernel.registry.get(agent_id) {
+    let workspace = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => match e.manifest.workspace {
             Some(ref ws) => ws.clone(),
             None => {
@@ -3787,12 +3799,7 @@ pub async fn upload_file(
             },
             size_bytes: size as u64,
         };
-        match state
-            .kernel
-            .media_engine
-            .transcribe_audio(&attachment)
-            .await
-        {
+        match state.kernel.media().transcribe_audio(&attachment).await {
             Ok(result) => {
                 tracing::info!(chars = result.description.len(), provider = %result.provider, "Audio transcribed");
                 Some(result.description)
@@ -3907,7 +3914,7 @@ pub async fn get_agent_deliveries(
         Ok(id) => id,
         Err(_) => {
             // Try name lookup
-            match state.kernel.registry.find_by_name(&id) {
+            match state.kernel.agent_registry().find_by_name(&id) {
                 Some(entry) => entry.id,
                 None => {
                     return (
@@ -3925,7 +3932,7 @@ pub async fn get_agent_deliveries(
         .unwrap_or(50)
         .min(500);
 
-    let receipts = state.kernel.delivery_tracker.get_receipts(agent_id, limit);
+    let receipts = state.kernel.delivery().get_receipts(agent_id, limit);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -4154,7 +4161,7 @@ pub async fn agent_metrics(
         }
     };
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -4165,13 +4172,16 @@ pub async fn agent_metrics(
     };
 
     // Session-level token/tool stats from the scheduler (in-memory, windowed).
-    let (sched_tokens, sched_tool_calls) =
-        state.kernel.scheduler.get_usage(agent_id).unwrap_or((0, 0));
+    let (sched_tokens, sched_tool_calls) = state
+        .kernel
+        .scheduler_ref()
+        .get_usage(agent_id)
+        .unwrap_or((0, 0));
 
     // Persistent usage summary from the UsageStore (SQLite).
     let usage_summary = state
         .kernel
-        .memory
+        .memory_substrate()
         .usage()
         .query_summary(Some(agent_id))
         .ok();
@@ -4179,7 +4189,7 @@ pub async fn agent_metrics(
     // Message count from the active session.
     let message_count: u64 = state
         .kernel
-        .memory
+        .memory_substrate()
         .get_session(entry.session_id)
         .ok()
         .flatten()
@@ -4193,7 +4203,7 @@ pub async fn agent_metrics(
     let agent_id_str = agent_id.to_string();
     let error_count: u64 = state
         .kernel
-        .audit_log
+        .audit()
         .recent(100_000)
         .iter()
         .filter(|e| e.agent_id == agent_id_str && e.outcome != "ok" && e.outcome != "success")
@@ -4269,7 +4279,7 @@ pub async fn agent_logs(
     };
 
     // Verify the agent exists.
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -4298,7 +4308,7 @@ pub async fn agent_logs(
     // Filter audit log entries belonging to this agent.
     let entries: Vec<serde_json::Value> = state
         .kernel
-        .audit_log
+        .audit()
         .recent(100_000)
         .iter()
         .filter(|e| e.agent_id == agent_id_str)
@@ -4420,13 +4430,13 @@ mod monitoring_tests {
         let agent_id = spawn_monitoring_test_agent(&state, "logs-filter");
         let agent_id_str = agent_id.to_string();
 
-        state.kernel.audit_log.record(
+        state.kernel.audit().record(
             agent_id_str.clone(),
             AuditAction::AgentMessage,
             "exact match target",
             "custom_error",
         );
-        state.kernel.audit_log.record(
+        state.kernel.audit().record(
             agent_id_str.clone(),
             AuditAction::AgentMessage,
             "should not match substring filter",

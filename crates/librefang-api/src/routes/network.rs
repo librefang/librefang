@@ -111,11 +111,11 @@ pub async fn get_peer(
     )
 )]
 pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let enabled = state.kernel.config.network_enabled
-        && !state.kernel.config.network.shared_secret.is_empty();
+    let enabled = state.kernel.config_ref().network_enabled
+        && !state.kernel.config_ref().network.shared_secret.is_empty();
 
     let (node_id, listen_address, connected_peers, total_peers) =
-        if let Some(peer_node) = state.kernel.peer_node.get() {
+        if let Some(peer_node) = state.kernel.peer_node_ref() {
             let registry = peer_node.registry();
             (
                 peer_node.node_id().to_string(),
@@ -145,20 +145,21 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 )]
 pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.registry.list();
-    let base_url = format!("http://{}", state.kernel.config.api_listen);
+    let agents = state.kernel.agent_registry().list();
+    let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
 
     // Use service-level A2A config for the well-known card when available.
-    let (service_name, service_description) = if let Some(ref a2a_cfg) = state.kernel.config.a2a {
-        let name = if a2a_cfg.name.is_empty() {
-            "LibreFang Agent OS".to_string()
+    let (service_name, service_description) =
+        if let Some(ref a2a_cfg) = state.kernel.config_ref().a2a {
+            let name = if a2a_cfg.name.is_empty() {
+                "LibreFang Agent OS".to_string()
+            } else {
+                a2a_cfg.name.clone()
+            };
+            (name, a2a_cfg.description.clone())
         } else {
-            a2a_cfg.name.clone()
+            ("LibreFang Agent OS".to_string(), String::new())
         };
-        (name, a2a_cfg.description.clone())
-    } else {
-        ("LibreFang Agent OS".to_string(), String::new())
-    };
 
     // Aggregate skills from ALL agents.
     let skills: Vec<librefang_runtime::a2a::AgentSkill> = agents
@@ -199,8 +200,8 @@ pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 )]
 pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.registry.list();
-    let base_url = format!("http://{}", state.kernel.config.api_listen);
+    let agents = state.kernel.agent_registry().list();
+    let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
 
     let cards: Vec<serde_json::Value> = agents
         .iter()
@@ -249,7 +250,7 @@ pub async fn a2a_send_task(
         .unwrap_or_else(|| "No message provided".to_string());
 
     // Find target agent (use first available or specified)
-    let agents = state.kernel.registry.list();
+    let agents = state.kernel.agent_registry().list();
     if agents.is_empty() {
         return (
             StatusCode::NOT_FOUND,
@@ -274,7 +275,7 @@ pub async fn a2a_send_task(
         }],
         artifacts: vec![],
     };
-    state.kernel.a2a_task_store.insert(task);
+    state.kernel.a2a_tasks().insert(task);
 
     // Send message to agent
     match state.kernel.send_message(agent.id, &message_text).await {
@@ -287,9 +288,9 @@ pub async fn a2a_send_task(
             };
             state
                 .kernel
-                .a2a_task_store
+                .a2a_tasks()
                 .complete(&task_id, response_msg, vec![]);
-            match state.kernel.a2a_task_store.get(&task_id) {
+            match state.kernel.a2a_tasks().get(&task_id) {
                 Some(completed_task) => (
                     StatusCode::OK,
                     Json(serde_json::to_value(&completed_task).unwrap_or_default()),
@@ -307,8 +308,8 @@ pub async fn a2a_send_task(
                     text: format!("Error: {e}"),
                 }],
             };
-            state.kernel.a2a_task_store.fail(&task_id, error_msg);
-            match state.kernel.a2a_task_store.get(&task_id) {
+            state.kernel.a2a_tasks().fail(&task_id, error_msg);
+            match state.kernel.a2a_tasks().get(&task_id) {
                 Some(failed_task) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::to_value(&failed_task).unwrap_or_default()),
@@ -338,7 +339,7 @@ pub async fn a2a_get_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.kernel.a2a_task_store.get(&task_id) {
+    match state.kernel.a2a_tasks().get(&task_id) {
         Some(task) => (
             StatusCode::OK,
             Json(serde_json::to_value(&task).unwrap_or_default()),
@@ -366,8 +367,8 @@ pub async fn a2a_cancel_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
-    if state.kernel.a2a_task_store.cancel(&task_id) {
-        match state.kernel.a2a_task_store.get(&task_id) {
+    if state.kernel.a2a_tasks().cancel(&task_id) {
+        match state.kernel.a2a_tasks().get(&task_id) {
             Some(task) => (
                 StatusCode::OK,
                 Json(serde_json::to_value(&task).unwrap_or_default()),
@@ -399,7 +400,7 @@ pub async fn a2a_cancel_task(
 pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents = state
         .kernel
-        .a2a_external_agents
+        .a2a_agents()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let items: Vec<serde_json::Value> = agents
@@ -502,7 +503,7 @@ pub async fn a2a_get_external_agent(
 ) -> impl IntoResponse {
     let agents = state
         .kernel
-        .a2a_external_agents
+        .a2a_agents()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -579,7 +580,7 @@ pub async fn a2a_discover_external(
             {
                 let mut agents = state
                     .kernel
-                    .a2a_external_agents
+                    .a2a_agents()
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 // Update or add
@@ -716,7 +717,7 @@ pub async fn mcp_http(
     {
         let registry = state
             .kernel
-            .skill_registry
+            .skill_registry_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         for skill_tool in registry.all_tool_definitions() {
@@ -727,7 +728,7 @@ pub async fn mcp_http(
             });
         }
     }
-    if let Ok(mcp_tools) = state.kernel.mcp_tools.lock() {
+    if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
         tools.extend(mcp_tools.iter().cloned());
     }
 
@@ -752,7 +753,7 @@ pub async fn mcp_http(
         // Snapshot skill registry before async call (RwLockReadGuard is !Send)
         let skill_snapshot = state
             .kernel
-            .skill_registry
+            .skill_registry_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .snapshot();
@@ -768,24 +769,24 @@ pub async fn mcp_http(
             None,
             None,
             Some(&skill_snapshot),
-            Some(&state.kernel.mcp_connections),
-            Some(&state.kernel.web_ctx),
-            Some(&state.kernel.browser_ctx),
+            Some(state.kernel.mcp_connections_ref()),
+            Some(state.kernel.web_tools()),
+            Some(state.kernel.browser()),
             None,
             None,
-            Some(&state.kernel.media_engine),
+            Some(state.kernel.media()),
             None, // exec_policy
-            if state.kernel.config.tts.enabled {
-                Some(&state.kernel.tts_engine)
+            if state.kernel.config_ref().tts.enabled {
+                Some(state.kernel.tts())
             } else {
                 None
             },
-            if state.kernel.config.docker.enabled {
-                Some(&state.kernel.config.docker)
+            if state.kernel.config_ref().docker.enabled {
+                Some(&state.kernel.config_ref().docker)
             } else {
                 None
             },
-            Some(&*state.kernel.process_manager),
+            Some(state.kernel.processes()),
         )
         .await;
 
@@ -822,7 +823,7 @@ pub async fn mcp_http(
 pub async fn comms_topology(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use librefang_types::comms::{EdgeKind, TopoEdge, TopoNode, Topology};
 
-    let agents = state.kernel.registry.list();
+    let agents = state.kernel.agent_registry().list();
 
     let nodes: Vec<TopoNode> = agents
         .iter()
@@ -848,7 +849,7 @@ pub async fn comms_topology(State(state): State<Arc<AppState>>) -> impl IntoResp
     }
 
     // Peer message edges from event bus history
-    let events = state.kernel.event_bus.history(500).await;
+    let events = state.kernel.event_bus_ref().history(500).await;
     let mut peer_pairs = std::collections::HashSet::new();
     for event in &events {
         if let librefang_types::event::EventPayload::Message(_) = &event.payload {
@@ -1057,17 +1058,17 @@ pub async fn comms_events(
         .unwrap_or(100)
         .min(500);
 
-    let agents = state.kernel.registry.list();
+    let agents = state.kernel.agent_registry().list();
 
     // Primary source: event bus (has full source/target context)
-    let bus_events = state.kernel.event_bus.history(500).await;
+    let bus_events = state.kernel.event_bus_ref().history(500).await;
     let mut comms_events: Vec<librefang_types::comms::CommsEvent> = bus_events
         .iter()
         .filter_map(|e| filter_to_comms_event(e, &agents))
         .collect();
 
     // Secondary source: audit log (always populated, wider coverage)
-    let audit_entries = state.kernel.audit_log.recent(500);
+    let audit_entries = state.kernel.audit().recent(500);
     let seen_ids: std::collections::HashSet<String> =
         comms_events.iter().map(|e| e.id.clone()).collect();
 
@@ -1106,15 +1107,15 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
 
     tokio::spawn(async move {
         let mut last_seq: u64 = {
-            let entries = state.kernel.audit_log.recent(1);
+            let entries = state.kernel.audit().recent(1);
             entries.last().map(|e| e.seq).unwrap_or(0)
         };
 
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-            let agents = state.kernel.registry.list();
-            let entries = state.kernel.audit_log.recent(50);
+            let agents = state.kernel.agent_registry().list();
+            let entries = state.kernel.audit().recent(50);
 
             for entry in &entries {
                 if entry.seq <= last_seq {
@@ -1168,7 +1169,7 @@ pub async fn comms_send(
             )
         }
     };
-    if state.kernel.registry.get(from_id).is_none() {
+    if state.kernel.agent_registry().get(from_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Source agent not found"})),
@@ -1185,7 +1186,7 @@ pub async fn comms_send(
             )
         }
     };
-    if state.kernel.registry.get(to_id).is_none() {
+    if state.kernel.agent_registry().get(to_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Target agent not found"})),
@@ -1265,7 +1266,7 @@ pub async fn comms_task(
 
     match state
         .kernel
-        .memory
+        .memory_substrate()
         .task_post(
             &req.title,
             &req.description,

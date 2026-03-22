@@ -26,7 +26,7 @@ pub async fn list_models(
 ) -> impl IntoResponse {
     let catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .read()
         .unwrap_or_else(|e| e.into_inner());
     let provider_filter = params.get("provider").map(|s| s.to_lowercase());
@@ -100,7 +100,7 @@ pub async fn list_models(
 pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let aliases = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .list_aliases()
@@ -158,7 +158,7 @@ pub async fn create_alias(
 
     let mut catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -187,7 +187,7 @@ pub async fn delete_alias(
 ) -> impl IntoResponse {
     let mut catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -211,7 +211,7 @@ pub async fn get_model(
 ) -> impl IntoResponse {
     let catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .read()
         .unwrap_or_else(|e| e.into_inner());
     match catalog.find_model(&id) {
@@ -291,7 +291,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
         let catalog = state
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         catalog.list_providers().to_vec()
@@ -355,14 +355,14 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             entry["regions"] = serde_json::Value::Object(regions);
 
             // Mark which region is active (if configured via [provider_regions])
-            if let Some(active) = state.kernel.config.provider_regions.get(&p.id) {
+            if let Some(active) = state.kernel.config_ref().provider_regions.get(&p.id) {
                 entry["active_region"] = serde_json::json!(active);
             }
         }
 
         // For local providers, attach the probe result
         if let Some(probe) = probe_map.remove(&i) {
-            attach_probe_result(&mut entry, &probe, &p.id, &state.kernel.model_catalog);
+            attach_probe_result(&mut entry, &probe, &p.id, state.kernel.model_catalog_ref());
         } else if librefang_runtime::provider_health::is_local_provider(&p.id) {
             // Local HTTP provider with no probe result yet — still label it local.
             entry["is_local"] = serde_json::json!(true);
@@ -399,7 +399,7 @@ pub async fn get_provider(
     let (provider, models) = {
         let catalog = state
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         match catalog.get_provider(&name) {
@@ -460,7 +460,7 @@ pub async fn get_provider(
             &mut entry,
             &probe,
             &provider.id,
-            &state.kernel.model_catalog,
+            state.kernel.model_catalog_ref(),
         );
     } else if librefang_runtime::provider_health::is_local_provider(&provider.id) {
         entry["is_local"] = serde_json::json!(true);
@@ -542,7 +542,7 @@ pub async fn add_custom_model(
 
     let mut catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -556,7 +556,7 @@ pub async fn add_custom_model(
     }
 
     // Persist to disk
-    let custom_path = state.kernel.config.home_dir.join("custom_models.json");
+    let custom_path = state.kernel.home_dir().join("custom_models.json");
     if let Err(e) = catalog.save_custom_models(&custom_path) {
         tracing::warn!("Failed to persist custom models: {e}");
     }
@@ -579,7 +579,7 @@ pub async fn remove_custom_model(
 ) -> impl IntoResponse {
     let mut catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -590,7 +590,7 @@ pub async fn remove_custom_model(
         );
     }
 
-    let custom_path = state.kernel.config.home_dir.join("custom_models.json");
+    let custom_path = state.kernel.home_dir().join("custom_models.json");
     if let Err(e) = catalog.save_custom_models(&custom_path) {
         tracing::warn!("Failed to persist custom models: {e}");
     }
@@ -623,7 +623,7 @@ pub async fn set_provider_key(
     let env_var = {
         let catalog = state
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         catalog
@@ -636,7 +636,7 @@ pub async fn set_provider_key(
     };
 
     // Write to secrets.env file
-    let secrets_path = state.kernel.config.home_dir.join("secrets.env");
+    let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_var, &key) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -650,7 +650,7 @@ pub async fn set_provider_key(
     // Refresh auth detection
     state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .detect_auth();
@@ -665,14 +665,14 @@ pub async fn set_provider_key(
     let (current_provider, current_key_env) = {
         let guard = state
             .kernel
-            .default_model_override
+            .default_model_override_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
             Some(dm) => (dm.provider.clone(), dm.api_key_env.clone()),
             None => (
-                state.kernel.config.default_model.provider.clone(),
-                state.kernel.config.default_model.api_key_env.clone(),
+                state.kernel.config_ref().default_model.provider.clone(),
+                state.kernel.config_ref().default_model.api_key_env.clone(),
             ),
         }
     };
@@ -689,14 +689,14 @@ pub async fn set_provider_key(
         let default_model = {
             let catalog = state
                 .kernel
-                .model_catalog
+                .model_catalog_ref()
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
             catalog.default_model_for_provider(&name)
         };
         if let Some(model_id) = default_model {
             // Update config.toml to persist the switch
-            let config_path = state.kernel.config.home_dir.join("config.toml");
+            let config_path = state.kernel.home_dir().join("config.toml");
             let update_toml = format!(
                 "\n[default_model]\nprovider = \"{}\"\nmodel = \"{}\"\napi_key_env = \"{}\"\n",
                 name, model_id, env_var
@@ -724,7 +724,7 @@ pub async fn set_provider_key(
                 };
                 let mut guard = state
                     .kernel
-                    .default_model_override
+                    .default_model_override_ref()
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
                 *guard = Some(new_dm);
@@ -740,23 +740,23 @@ pub async fn set_provider_key(
         let needs_update = {
             let guard = state
                 .kernel
-                .default_model_override
+                .default_model_override_ref()
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
                 Some(dm) => dm.api_key_env != env_var,
-                None => state.kernel.config.default_model.api_key_env != env_var,
+                None => state.kernel.config_ref().default_model.api_key_env != env_var,
             }
         };
         if needs_update {
             let mut guard = state
                 .kernel
-                .default_model_override
+                .default_model_override_ref()
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             let base = guard
                 .clone()
-                .unwrap_or_else(|| state.kernel.config.default_model.clone());
+                .unwrap_or_else(|| state.kernel.config_ref().default_model.clone());
             *guard = Some(librefang_types::config::DefaultModelConfig {
                 api_key_env: env_var.clone(),
                 ..base
@@ -770,7 +770,7 @@ pub async fn set_provider_key(
     // Reset log-once flag so future provider removal gets logged again
     state
         .kernel
-        .provider_unconfigured_logged
+        .provider_unconfigured_flag()
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
     // Trigger all active hands so they resume immediately
@@ -797,7 +797,7 @@ pub async fn delete_provider_key(
     let env_var = {
         let catalog = state
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         catalog
@@ -817,7 +817,7 @@ pub async fn delete_provider_key(
     }
 
     // Remove from secrets.env
-    let secrets_path = state.kernel.config.home_dir.join("secrets.env");
+    let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = remove_secret_env(&secrets_path, &env_var) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -831,7 +831,7 @@ pub async fn delete_provider_key(
     // Refresh auth detection
     state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .detect_auth();
@@ -851,7 +851,7 @@ pub async fn test_provider(
     let (env_var, base_url, key_required) = {
         let catalog = state
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         match catalog.get_provider(&name) {
@@ -1054,14 +1054,14 @@ pub async fn set_provider_url(
     {
         let mut catalog = state
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .write()
             .unwrap_or_else(|e| e.into_inner());
         catalog.set_provider_url(&name, &base_url);
     }
 
     // Persist to config.toml [provider_urls] section
-    let config_path = state.kernel.config.home_dir.join("config.toml");
+    let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_provider_url(&config_path, &name, &base_url) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1074,7 +1074,7 @@ pub async fn set_provider_url(
 
     // Merge discovered models into catalog
     if !probe.discovered_models.is_empty() {
-        if let Ok(mut catalog) = state.kernel.model_catalog.write() {
+        if let Ok(mut catalog) = state.kernel.model_catalog_ref().write() {
             catalog.merge_discovered_models(&name, &probe.discovered_models);
         }
     }
@@ -1250,7 +1250,7 @@ pub async fn copilot_oauth_poll(
         ),
         librefang_runtime::copilot_oauth::DeviceFlowStatus::Complete { access_token } => {
             // Save to secrets.env
-            let secrets_path = state.kernel.config.home_dir.join("secrets.env");
+            let secrets_path = state.kernel.home_dir().join("secrets.env");
             if let Err(e) = write_secret_env(&secrets_path, "GITHUB_TOKEN", &access_token) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1266,7 +1266,7 @@ pub async fn copilot_oauth_poll(
             // Refresh auth detection
             state
                 .kernel
-                .model_catalog
+                .model_catalog_ref()
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .detect_auth();
@@ -1320,16 +1320,16 @@ pub async fn copilot_oauth_poll(
 /// After syncing, the kernel's in-memory catalog is refreshed.
 #[utoipa::path(post, path = "/api/catalog/update", tag = "models", responses((status = 200, description = "Catalog updated", body = serde_json::Value)))]
 pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match librefang_runtime::catalog_sync::sync_catalog_to(&state.kernel.config.home_dir).await {
+    match librefang_runtime::catalog_sync::sync_catalog_to(state.kernel.home_dir()).await {
         Ok(result) => {
             // Refresh the in-memory catalog so the new models are available immediately
             {
                 let mut catalog = state
                     .kernel
-                    .model_catalog
+                    .model_catalog_ref()
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
-                catalog.load_cached_catalog_for(&state.kernel.config.home_dir);
+                catalog.load_cached_catalog_for(state.kernel.home_dir());
                 catalog.detect_auth();
             }
             (
@@ -1357,8 +1357,7 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// GET /api/catalog/status — Check last catalog sync time.
 #[utoipa::path(get, path = "/api/catalog/status", tag = "models", responses((status = 200, description = "Catalog sync status", body = serde_json::Value)))]
 pub async fn catalog_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let last_sync =
-        librefang_runtime::catalog_sync::last_sync_time_for(&state.kernel.config.home_dir);
+    let last_sync = librefang_runtime::catalog_sync::last_sync_time_for(state.kernel.home_dir());
     Json(serde_json::json!({
         "last_sync": last_sync,
     }))

@@ -1310,6 +1310,7 @@ impl WorkflowTemplateRegistry {
                     error_mode: ErrorMode::Fail,
                     // Use step name as output_var so subsequent steps can reference via {{step_name}}
                     output_var: Some(ts.name.clone()),
+                    inherit_context: None,
                 }
             })
             .collect();

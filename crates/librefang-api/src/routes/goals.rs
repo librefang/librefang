@@ -27,7 +27,11 @@ fn goals_shared_agent_id() -> AgentId {
 /// GET /api/goals — List all goals.
 pub async fn list_goals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agent_id = goals_shared_agent_id();
-    match state.kernel.memory.structured_get(agent_id, GOALS_KEY) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_get(agent_id, GOALS_KEY)
+    {
         Ok(Some(serde_json::Value::Array(arr))) => {
             let total = arr.len();
             Json(serde_json::json!({"goals": arr, "total": total}))
@@ -46,7 +50,11 @@ pub async fn get_goal(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id = goals_shared_agent_id();
-    match state.kernel.memory.structured_get(agent_id, GOALS_KEY) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_get(agent_id, GOALS_KEY)
+    {
         Ok(Some(serde_json::Value::Array(arr))) => {
             if let Some(goal) = arr.iter().find(|g| g["id"].as_str() == Some(&id)) {
                 (StatusCode::OK, Json(goal.clone()))
@@ -77,7 +85,11 @@ pub async fn get_goal_children(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id = goals_shared_agent_id();
-    match state.kernel.memory.structured_get(agent_id, GOALS_KEY) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_get(agent_id, GOALS_KEY)
+    {
         Ok(Some(serde_json::Value::Array(arr))) => {
             let children: Vec<&serde_json::Value> = arr
                 .iter()
@@ -167,11 +179,14 @@ pub async fn create_goal(
 
     // Single read-then-write to reduce TOCTOU window between parent validation and list append
     let shared_id = goals_shared_agent_id();
-    let mut goals: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, GOALS_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let mut goals: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, GOALS_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
 
     // Validate parent_id exists within the same snapshot
     if let Some(ref pid) = parent_id {
@@ -185,12 +200,11 @@ pub async fn create_goal(
     }
 
     goals.push(entry.clone());
-    if let Err(e) =
-        state
-            .kernel
-            .memory
-            .structured_set(shared_id, GOALS_KEY, serde_json::Value::Array(goals))
-    {
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
+        shared_id,
+        GOALS_KEY,
+        serde_json::Value::Array(goals),
+    ) {
         tracing::warn!("Failed to save goal: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -208,11 +222,14 @@ pub async fn update_goal_by_id(
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let shared_id = goals_shared_agent_id();
-    let mut goals: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, GOALS_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let mut goals: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, GOALS_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
 
     // --- Validate inputs before mutating ---
 
@@ -354,12 +371,11 @@ pub async fn update_goal_by_id(
         );
     }
 
-    if let Err(e) =
-        state
-            .kernel
-            .memory
-            .structured_set(shared_id, GOALS_KEY, serde_json::Value::Array(goals))
-    {
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
+        shared_id,
+        GOALS_KEY,
+        serde_json::Value::Array(goals),
+    ) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Failed to update goal: {e}")})),
@@ -378,11 +394,14 @@ pub async fn delete_goal(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let shared_id = goals_shared_agent_id();
-    let mut goals: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, GOALS_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let mut goals: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, GOALS_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
 
     let before = goals.len();
 
@@ -418,12 +437,11 @@ pub async fn delete_goal(
 
     let removed = before - goals.len();
 
-    if let Err(e) =
-        state
-            .kernel
-            .memory
-            .structured_set(shared_id, GOALS_KEY, serde_json::Value::Array(goals))
-    {
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
+        shared_id,
+        GOALS_KEY,
+        serde_json::Value::Array(goals),
+    ) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Failed to delete goal: {e}")})),

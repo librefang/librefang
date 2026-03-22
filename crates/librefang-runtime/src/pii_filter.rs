@@ -11,7 +11,7 @@
 //!
 //! Additional patterns can be configured via `PrivacyConfig::redact_patterns`.
 
-use librefang_channels::SenderContext;
+use librefang_channels::types::SenderContext;
 use librefang_types::config::PrivacyMode;
 use regex_lite::Regex;
 use std::collections::HashMap;
