@@ -2467,6 +2467,31 @@ pub struct MemoryConfig {
     /// Time-based memory decay configuration.
     #[serde(default)]
     pub decay: MemoryDecayConfig,
+    /// Chunking configuration for long documents.
+    #[serde(default)]
+    pub chunking: ChunkConfig,
+}
+
+/// Configuration for splitting long documents into overlapping chunks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChunkConfig {
+    /// Whether chunking is enabled. When false, text is stored as a single blob.
+    pub enabled: bool,
+    /// Maximum chunk size in characters.
+    pub max_chunk_size: usize,
+    /// Overlap between consecutive chunks in characters.
+    pub overlap: usize,
+}
+
+impl Default for ChunkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_chunk_size: 1500,
+            overlap: 200,
+        }
+    }
 }
 
 fn default_consolidation_interval() -> u64 {
@@ -2486,6 +2511,7 @@ impl Default for MemoryConfig {
             consolidation_interval_hours: default_consolidation_interval(),
             fts_only: None,
             decay: MemoryDecayConfig::default(),
+            chunking: ChunkConfig::default(),
         }
     }
 }
