@@ -77,6 +77,10 @@ pub struct Trigger {
     pub fire_count: u64,
     /// Maximum number of times this trigger can fire (0 = unlimited).
     pub max_fires: u64,
+    /// If set, route the triggered message to this agent instead of the owner.
+    /// Enables cross-session wake: one agent's trigger can wake a different agent.
+    #[serde(default)]
+    pub target_agent: Option<AgentId>,
 }
 
 /// The trigger engine manages event-to-agent routing.
@@ -104,6 +108,22 @@ impl TriggerEngine {
         prompt_template: String,
         max_fires: u64,
     ) -> TriggerId {
+        self.register_with_target(agent_id, pattern, prompt_template, max_fires, None)
+    }
+
+    /// Register a trigger with an optional target agent for cross-session wake.
+    ///
+    /// When `target_agent` is `Some`, the triggered message is routed to that
+    /// agent instead of the owner (`agent_id`). The owner still "owns" the
+    /// trigger for management purposes (list, remove, etc.).
+    pub fn register_with_target(
+        &self,
+        agent_id: AgentId,
+        pattern: TriggerPattern,
+        prompt_template: String,
+        max_fires: u64,
+        target_agent: Option<AgentId>,
+    ) -> TriggerId {
         let trigger = Trigger {
             id: TriggerId::new(),
             agent_id,
@@ -113,13 +133,26 @@ impl TriggerEngine {
             created_at: Utc::now(),
             fire_count: 0,
             max_fires,
+            target_agent,
         };
         let id = trigger.id;
         self.triggers.insert(id, trigger);
         self.agent_triggers.entry(agent_id).or_default().push(id);
 
-        info!(trigger_id = %id, agent_id = %agent_id, "Trigger registered");
+        info!(trigger_id = %id, agent_id = %agent_id, ?target_agent, "Trigger registered");
         id
+    }
+
+    /// Convenience: register a cross-agent trigger where the owner's trigger
+    /// wakes a different target agent.
+    pub fn register_cross_agent_trigger(
+        &self,
+        owner: AgentId,
+        target: AgentId,
+        pattern: TriggerPattern,
+        prompt_template: String,
+    ) -> TriggerId {
+        self.register_with_target(owner, pattern, prompt_template, 0, Some(target))
     }
 
     /// Remove a trigger.
@@ -191,6 +224,7 @@ impl TriggerEngine {
                 created_at: old.created_at,
                 fire_count: old.fire_count,
                 max_fires: old.max_fires,
+                target_agent: old.target_agent,
             };
             self.triggers.insert(new_id, trigger);
             self.agent_triggers
@@ -292,12 +326,15 @@ impl TriggerEngine {
                 let message = trigger
                     .prompt_template
                     .replace("{{event}}", &event_description);
-                matches.push((trigger.agent_id, message));
+                // Route to target_agent if set (cross-session wake), else owner.
+                let recipient = trigger.target_agent.unwrap_or(trigger.agent_id);
+                matches.push((recipient, message));
                 trigger.fire_count += 1;
 
                 debug!(
                     trigger_id = %trigger.id,
-                    agent_id = %trigger.agent_id,
+                    owner = %trigger.agent_id,
+                    recipient = %recipient,
                     fire_count = trigger.fire_count,
                     "Trigger fired"
                 );
@@ -729,6 +766,125 @@ mod tests {
         assert!(
             !restored[0].enabled,
             "Disabled state should survive take/restore"
+        );
+    }
+
+    // -- cross-session wake / target_agent (#967) -----------------------------
+
+    #[test]
+    fn test_evaluate_no_target_wakes_owner() {
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+        engine.register(
+            owner,
+            TriggerPattern::All,
+            "Event: {{event}}".to_string(),
+            0,
+        );
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+        let matches = engine.evaluate(&event);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].0, owner,
+            "Without target_agent, owner should be woken"
+        );
+    }
+
+    #[test]
+    fn test_evaluate_with_target_wakes_target() {
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+        let target = AgentId::new();
+        engine.register_with_target(
+            owner,
+            TriggerPattern::All,
+            "Cross-wake: {{event}}".to_string(),
+            0,
+            Some(target),
+        );
+
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::System(SystemEvent::HealthCheck {
+                status: "ok".to_string(),
+            }),
+        );
+        let matches = engine.evaluate(&event);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].0, target,
+            "With target_agent set, target should be woken"
+        );
+        assert!(matches[0].1.contains("Cross-wake"));
+    }
+
+    #[test]
+    fn test_register_cross_agent_trigger() {
+        let engine = TriggerEngine::new();
+        let owner = AgentId::new();
+        let target = AgentId::new();
+        let tid = engine.register_cross_agent_trigger(
+            owner,
+            target,
+            TriggerPattern::AgentSpawned {
+                name_pattern: "worker".to_string(),
+            },
+            "Worker spawned: {{event}}".to_string(),
+        );
+
+        let trigger = engine.get(tid).unwrap();
+        assert_eq!(trigger.agent_id, owner);
+        assert_eq!(trigger.target_agent, Some(target));
+        assert_eq!(trigger.max_fires, 0); // unlimited by default
+
+        // Verify it fires to the target agent
+        let event = Event::new(
+            AgentId::new(),
+            EventTarget::Broadcast,
+            EventPayload::Lifecycle(LifecycleEvent::Spawned {
+                agent_id: AgentId::new(),
+                name: "worker-1".to_string(),
+            }),
+        );
+        let matches = engine.evaluate(&event);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].0, target);
+    }
+
+    #[test]
+    fn test_take_restore_preserves_target_agent() {
+        let engine = TriggerEngine::new();
+        let old_owner = AgentId::new();
+        let target = AgentId::new();
+        let new_owner = AgentId::new();
+
+        engine.register_with_target(
+            old_owner,
+            TriggerPattern::System,
+            "sys: {{event}}".to_string(),
+            0,
+            Some(target),
+        );
+
+        let taken = engine.take_agent_triggers(old_owner);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].target_agent, Some(target));
+
+        engine.restore_triggers(new_owner, taken);
+        let restored = engine.list_agent_triggers(new_owner);
+        assert_eq!(restored.len(), 1);
+        assert_eq!(
+            restored[0].target_agent,
+            Some(target),
+            "target_agent should survive take/restore"
         );
     }
 }

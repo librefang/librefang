@@ -12,6 +12,7 @@
 
 use chrono::{DateTime, Utc};
 use librefang_types::agent::AgentId;
+use librefang_types::subagent::SubagentContext;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -105,6 +106,12 @@ pub struct WorkflowStep {
     /// Optional variable name to store this step's output in.
     #[serde(default)]
     pub output_var: Option<String>,
+    /// Whether to inject parent workflow context into this step's prompt.
+    /// Default is `None`, which defers to the agent's `inherit_parent_context`
+    /// setting. Set to `Some(false)` to force disable context injection for
+    /// this step regardless of agent config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit_context: Option<bool>,
 }
 
 fn default_timeout() -> u64 {
@@ -454,6 +461,48 @@ impl WorkflowEngine {
             .collect()
     }
 
+    /// Build a `SubagentContext` from the current workflow state and format the
+    /// prompt with context preamble prepended (if applicable).
+    ///
+    /// Returns the (possibly enriched) prompt. Context is injected only when:
+    /// 1. The step's `inherit_context` is not explicitly `Some(false)`, AND
+    /// 2. The agent's `inherit_parent_context` manifest field is true.
+    fn build_context_prompt(
+        prompt: &str,
+        step: &WorkflowStep,
+        step_index: usize,
+        workflow_name: &str,
+        step_results: &[StepResult],
+        agent_inherit: bool,
+    ) -> String {
+        // Check whether context injection is enabled for this step
+        let inherit = step.inherit_context.unwrap_or(agent_inherit);
+        if !inherit {
+            return prompt.to_string();
+        }
+
+        let ctx = SubagentContext {
+            parent_agent_name: None,
+            parent_session_summary: None,
+            workflow_name: Some(workflow_name.to_string()),
+            step_index,
+            previous_outputs: step_results
+                .iter()
+                .map(|r| {
+                    (
+                        r.step_name.clone(),
+                        SubagentContext::truncate_output_preview(&r.output),
+                    )
+                })
+                .collect(),
+        };
+
+        match ctx.format_preamble() {
+            Some(preamble) => format!("{preamble}{prompt}"),
+            None => prompt.to_string(),
+        }
+    }
+
     /// Replace `{{var_name}}` references in a template with stored variable values.
     fn expand_variables(template: &str, input: &str, vars: &HashMap<String, String>) -> String {
         let mut result = template.replace("{{input}}", input);
@@ -546,10 +595,14 @@ impl WorkflowEngine {
     ///
     /// This method takes a closure that sends messages to agents,
     /// so the workflow engine remains decoupled from the kernel.
+    ///
+    /// The `agent_resolver` returns `(AgentId, agent_name, inherit_parent_context)`.
+    /// When `inherit_parent_context` is true and the step doesn't override it,
+    /// previous step outputs are prepended to the prompt as context.
     pub async fn execute_run<F, Fut>(
         &self,
         run_id: WorkflowRunId,
-        agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String)>,
+        agent_resolver: impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
         send_message: F,
     ) -> Result<String, String>
     where
@@ -596,11 +649,28 @@ impl WorkflowEngine {
 
             match &step.mode {
                 StepMode::Sequential => {
-                    let (agent_id, agent_name) = agent_resolver(&step.agent)
+                    let (agent_id, agent_name, agent_inherit) = agent_resolver(&step.agent)
                         .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
 
-                    let prompt =
+                    let raw_prompt =
                         Self::expand_variables(&step.prompt_template, &current_input, &variables);
+
+                    // Snapshot step results for context injection
+                    let prev_results: Vec<StepResult> = self
+                        .runs
+                        .read()
+                        .await
+                        .get(&run_id)
+                        .map(|r| r.step_results.clone())
+                        .unwrap_or_default();
+                    let prompt = Self::build_context_prompt(
+                        &raw_prompt,
+                        step,
+                        i,
+                        &workflow.name,
+                        &prev_results,
+                        agent_inherit,
+                    );
 
                     let start = std::time::Instant::now();
                     let result =
@@ -663,15 +733,32 @@ impl WorkflowEngine {
                     let mut futures = Vec::new();
                     let mut step_infos = Vec::new();
 
+                    // Snapshot step results once for all fan-out steps
+                    let prev_results: Vec<StepResult> = self
+                        .runs
+                        .read()
+                        .await
+                        .get(&run_id)
+                        .map(|r| r.step_results.clone())
+                        .unwrap_or_default();
+
                     for (idx, fan_step) in &fan_out_steps {
-                        let (agent_id, agent_name) =
-                            agent_resolver(&fan_step.agent).ok_or_else(|| {
+                        let (agent_id, agent_name, agent_inherit) = agent_resolver(&fan_step.agent)
+                            .ok_or_else(|| {
                                 format!("Agent not found for step '{}'", fan_step.name)
                             })?;
-                        let prompt = Self::expand_variables(
+                        let raw_prompt = Self::expand_variables(
                             &fan_step.prompt_template,
                             &current_input,
                             &variables,
+                        );
+                        let prompt = Self::build_context_prompt(
+                            &raw_prompt,
+                            fan_step,
+                            *idx,
+                            &workflow.name,
+                            &prev_results,
+                            agent_inherit,
                         );
                         let timeout_dur = std::time::Duration::from_secs(fan_step.timeout_secs);
 
@@ -772,11 +859,26 @@ impl WorkflowEngine {
                     }
 
                     // Condition met — execute like sequential
-                    let (agent_id, agent_name) = agent_resolver(&step.agent)
+                    let (agent_id, agent_name, agent_inherit) = agent_resolver(&step.agent)
                         .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
 
-                    let prompt =
+                    let raw_prompt =
                         Self::expand_variables(&step.prompt_template, &current_input, &variables);
+                    let prev_results: Vec<StepResult> = self
+                        .runs
+                        .read()
+                        .await
+                        .get(&run_id)
+                        .map(|r| r.step_results.clone())
+                        .unwrap_or_default();
+                    let prompt = Self::build_context_prompt(
+                        &raw_prompt,
+                        step,
+                        i,
+                        &workflow.name,
+                        &prev_results,
+                        agent_inherit,
+                    );
 
                     let start = std::time::Instant::now();
                     let result =
@@ -820,16 +922,32 @@ impl WorkflowEngine {
                     max_iterations,
                     until,
                 } => {
-                    let (agent_id, agent_name) = agent_resolver(&step.agent)
+                    let (agent_id, agent_name, agent_inherit) = agent_resolver(&step.agent)
                         .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
 
                     let until_lower = until.to_lowercase();
 
                     for loop_iter in 0..*max_iterations {
-                        let prompt = Self::expand_variables(
+                        let raw_prompt = Self::expand_variables(
                             &step.prompt_template,
                             &current_input,
                             &variables,
+                        );
+                        // Re-snapshot step results each iteration (accumulates loop outputs)
+                        let prev_results: Vec<StepResult> = self
+                            .runs
+                            .read()
+                            .await
+                            .get(&run_id)
+                            .map(|r| r.step_results.clone())
+                            .unwrap_or_default();
+                        let prompt = Self::build_context_prompt(
+                            &raw_prompt,
+                            step,
+                            i,
+                            &workflow.name,
+                            &prev_results,
+                            agent_inherit,
                         );
 
                         let start = std::time::Instant::now();
@@ -1233,6 +1351,7 @@ mod tests {
                     timeout_secs: 30,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                 },
                 WorkflowStep {
                     name: "summarize".to_string(),
@@ -1244,6 +1363,7 @@ mod tests {
                     timeout_secs: 30,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                 },
             ],
             created_at: Utc::now(),
@@ -1251,9 +1371,14 @@ mod tests {
         }
     }
 
-    fn mock_resolver(agent: &StepAgent) -> Option<(AgentId, String)> {
+    fn mock_resolver(agent: &StepAgent) -> Option<(AgentId, String, bool)> {
         let _ = agent;
-        Some((AgentId::new(), "mock-agent".to_string()))
+        Some((AgentId::new(), "mock-agent".to_string(), true))
+    }
+
+    fn mock_resolver_no_inherit(agent: &StepAgent) -> Option<(AgentId, String, bool)> {
+        let _ = agent;
+        Some((AgentId::new(), "mock-agent".to_string(), false))
     }
 
     #[tokio::test]
@@ -1346,6 +1471,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                 },
                 WorkflowStep {
                     name: "only-if-error".to_string(),
@@ -1359,6 +1485,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                 },
             ],
             created_at: Utc::now(),
@@ -1399,6 +1526,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                 },
                 WorkflowStep {
                     name: "only-if-error".to_string(),
@@ -1412,6 +1540,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                 },
             ],
             created_at: Utc::now(),
@@ -1453,6 +1582,7 @@ mod tests {
                 timeout_secs: 10,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                inherit_context: None,
             }],
             created_at: Utc::now(),
             layout: None,
@@ -1500,6 +1630,7 @@ mod tests {
                 timeout_secs: 10,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                inherit_context: None,
             }],
             created_at: Utc::now(),
             layout: None,
@@ -1536,6 +1667,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Skip,
                     output_var: None,
+                    inherit_context: None,
                 },
                 WorkflowStep {
                     name: "succeeds".to_string(),
@@ -1547,6 +1679,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                 },
             ],
             created_at: Utc::now(),
@@ -1595,6 +1728,7 @@ mod tests {
                 timeout_secs: 10,
                 error_mode: ErrorMode::Retry { max_retries: 2 },
                 output_var: None,
+                inherit_context: None,
             }],
             created_at: Utc::now(),
             layout: None,
@@ -1640,6 +1774,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: Some("first_result".to_string()),
+                    inherit_context: None,
                 },
                 WorkflowStep {
                     name: "transform".to_string(),
@@ -1651,6 +1786,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: Some("second_result".to_string()),
+                    inherit_context: None,
                 },
                 WorkflowStep {
                     name: "combine".to_string(),
@@ -1663,6 +1799,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                 },
             ],
             created_at: Utc::now(),
@@ -1711,6 +1848,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                 },
                 WorkflowStep {
                     name: "task-b".to_string(),
@@ -1722,6 +1860,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                 },
                 WorkflowStep {
                     name: "collect".to_string(),
@@ -1733,6 +1872,7 @@ mod tests {
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                 },
             ],
             created_at: Utc::now(),
@@ -2062,5 +2202,239 @@ id = "{id}"
 
         assert!(reg.get("r1").await.is_none());
         assert!(reg.remove("r1").await.is_none());
+    }
+
+    // ---- Subagent context inheritance tests ----
+
+    #[tokio::test]
+    async fn test_context_injected_in_second_step() {
+        let engine = WorkflowEngine::new();
+        let wf = test_workflow();
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "raw data".to_string())
+            .await
+            .unwrap();
+
+        let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rp = received_prompts.clone();
+        let sender = move |_id: AgentId, msg: String| {
+            let rp = rp.clone();
+            async move {
+                rp.lock().unwrap().push(msg.clone());
+                Ok((format!("Output for step"), 10u64, 5u64))
+            }
+        };
+
+        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        assert!(result.is_ok());
+
+        let prompts = received_prompts.lock().unwrap();
+        // First step: no previous outputs, so no context preamble
+        assert!(!prompts[0].contains("[Parent workflow context]"));
+        // Second step: should contain context from first step
+        assert!(prompts[1].contains("[Parent workflow context]"));
+        assert!(prompts[1].contains("Previous steps completed:"));
+        assert!(prompts[1].contains("analyze:"));
+    }
+
+    #[tokio::test]
+    async fn test_context_disabled_via_agent_manifest() {
+        let engine = WorkflowEngine::new();
+        let wf = test_workflow();
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "raw data".to_string())
+            .await
+            .unwrap();
+
+        let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rp = received_prompts.clone();
+        let sender = move |_id: AgentId, msg: String| {
+            let rp = rp.clone();
+            async move {
+                rp.lock().unwrap().push(msg.clone());
+                Ok((format!("Output"), 10u64, 5u64))
+            }
+        };
+
+        // Use resolver that returns inherit_parent_context=false
+        let result = engine
+            .execute_run(run_id, mock_resolver_no_inherit, sender)
+            .await;
+        assert!(result.is_ok());
+
+        let prompts = received_prompts.lock().unwrap();
+        // Neither step should have context injected
+        assert!(!prompts[0].contains("[Parent workflow context]"));
+        assert!(!prompts[1].contains("[Parent workflow context]"));
+    }
+
+    #[tokio::test]
+    async fn test_context_disabled_via_step_override() {
+        let engine = WorkflowEngine::new();
+        let wf = Workflow {
+            id: WorkflowId::new(),
+            name: "override-test".to_string(),
+            description: "".to_string(),
+            steps: vec![
+                WorkflowStep {
+                    name: "first".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
+                    prompt_template: "{{input}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 10,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                },
+                WorkflowStep {
+                    name: "second".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
+                    prompt_template: "Do: {{input}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 10,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    // Explicitly disable context for this step
+                    inherit_context: Some(false),
+                },
+            ],
+            created_at: Utc::now(),
+            layout: None,
+        };
+        let wf_id = engine.register(wf).await;
+        let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
+
+        let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rp = received_prompts.clone();
+        let sender = move |_id: AgentId, msg: String| {
+            let rp = rp.clone();
+            async move {
+                rp.lock().unwrap().push(msg.clone());
+                Ok(("done".to_string(), 10u64, 5u64))
+            }
+        };
+
+        // Agent says inherit=true, but step overrides to false
+        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        assert!(result.is_ok());
+
+        let prompts = received_prompts.lock().unwrap();
+        // Second step should NOT have context despite agent allowing it
+        assert!(!prompts[1].contains("[Parent workflow context]"));
+    }
+
+    #[test]
+    fn test_build_context_prompt_no_results() {
+        let step = WorkflowStep {
+            name: "s".to_string(),
+            agent: StepAgent::ByName {
+                name: "a".to_string(),
+            },
+            prompt_template: "do it".to_string(),
+            mode: StepMode::Sequential,
+            timeout_secs: 10,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+        };
+        let result = WorkflowEngine::build_context_prompt("hello", &step, 0, "wf", &[], true);
+        // No previous results => no preamble
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_build_context_prompt_with_results() {
+        let step = WorkflowStep {
+            name: "s2".to_string(),
+            agent: StepAgent::ByName {
+                name: "a".to_string(),
+            },
+            prompt_template: "do it".to_string(),
+            mode: StepMode::Sequential,
+            timeout_secs: 10,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+        };
+        let results = vec![StepResult {
+            step_name: "s1".to_string(),
+            agent_id: "id-1".to_string(),
+            agent_name: "agent-1".to_string(),
+            output: "analysis complete".to_string(),
+            input_tokens: 10,
+            output_tokens: 5,
+            duration_ms: 100,
+        }];
+        let prompt = WorkflowEngine::build_context_prompt(
+            "summarize",
+            &step,
+            1,
+            "my-pipeline",
+            &results,
+            true,
+        );
+        assert!(prompt.contains("[Parent workflow context]"));
+        assert!(prompt.contains("Workflow: my-pipeline"));
+        assert!(prompt.contains("- s1: analysis complete"));
+        assert!(prompt.ends_with("summarize"));
+    }
+
+    #[test]
+    fn test_build_context_prompt_truncates_long_output() {
+        let step = WorkflowStep {
+            name: "s2".to_string(),
+            agent: StepAgent::ByName {
+                name: "a".to_string(),
+            },
+            prompt_template: "do it".to_string(),
+            mode: StepMode::Sequential,
+            timeout_secs: 10,
+            error_mode: ErrorMode::Fail,
+            output_var: None,
+            inherit_context: None,
+        };
+        let results = vec![StepResult {
+            step_name: "s1".to_string(),
+            agent_id: "id-1".to_string(),
+            agent_name: "agent-1".to_string(),
+            output: "x".repeat(2000),
+            input_tokens: 10,
+            output_tokens: 5,
+            duration_ms: 100,
+        }];
+        let prompt = WorkflowEngine::build_context_prompt("next", &step, 1, "wf", &results, true);
+        assert!(prompt.contains("..."));
+        // The full 2000-char output should NOT appear
+        assert!(!prompt.contains(&"x".repeat(2000)));
+    }
+
+    #[test]
+    fn test_inherit_context_step_field_serde_default() {
+        // When inherit_context is omitted from JSON, it should default to None
+        let json = r#"{
+            "name": "s1",
+            "agent": { "name": "a" },
+            "prompt_template": "{{input}}"
+        }"#;
+        let step: WorkflowStep = serde_json::from_str(json).unwrap();
+        assert!(step.inherit_context.is_none());
+    }
+
+    #[test]
+    fn test_inherit_context_step_field_explicit_false() {
+        let json = r#"{
+            "name": "s1",
+            "agent": { "name": "a" },
+            "prompt_template": "{{input}}",
+            "inherit_context": false
+        }"#;
+        let step: WorkflowStep = serde_json::from_str(json).unwrap();
+        assert_eq!(step.inherit_context, Some(false));
     }
 }

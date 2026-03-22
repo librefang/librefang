@@ -91,6 +91,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::post(routes::send_message),
         )
         .route(
+            "/agents/{id}/inject",
+            axum::routing::post(routes::inject_message),
+        )
+        .route(
             "/agents/{id}/message/stream",
             axum::routing::post(routes::send_message_stream),
         )

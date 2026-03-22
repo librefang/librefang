@@ -236,6 +236,7 @@ pub async fn create_workflow(
             timeout_secs: s["timeout_secs"].as_u64().unwrap_or(120),
             error_mode,
             output_var: s["output_var"].as_str().map(String::from),
+            inherit_context: s["inherit_context"].as_bool(),
         });
     }
 
@@ -421,6 +422,7 @@ pub async fn update_workflow(
                 timeout_secs: s["timeout_secs"].as_u64().unwrap_or(120),
                 error_mode,
                 output_var: s["output_var"].as_str().map(String::from),
+                inherit_context: s["inherit_context"].as_bool(),
             });
         }
         parsed_steps
@@ -627,17 +629,29 @@ pub async fn create_trigger(
         .to_string();
     let max_fires = req["max_fires"].as_u64().unwrap_or(0);
 
-    match state
-        .kernel
-        .register_trigger(agent_id, pattern, prompt_template, max_fires)
-    {
-        Ok(trigger_id) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({
+    // Optional cross-session target: route triggered message to a different agent.
+    let target_agent: Option<AgentId> = req
+        .get("target_agent_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok());
+
+    match state.kernel.register_trigger_with_target(
+        agent_id,
+        pattern,
+        prompt_template,
+        max_fires,
+        target_agent,
+    ) {
+        Ok(trigger_id) => {
+            let mut resp = serde_json::json!({
                 "trigger_id": trigger_id.to_string(),
                 "agent_id": agent_id.to_string(),
-            })),
-        ),
+            });
+            if let Some(target) = target_agent {
+                resp["target_agent_id"] = serde_json::json!(target.to_string());
+            }
+            (StatusCode::CREATED, Json(resp))
+        }
         Err(e) => {
             tracing::warn!("Trigger registration failed: {e}");
             (
@@ -671,7 +685,7 @@ pub async fn list_triggers(
     let list: Vec<serde_json::Value> = triggers
         .iter()
         .map(|t| {
-            serde_json::json!({
+            let mut v = serde_json::json!({
                 "id": t.id.to_string(),
                 "agent_id": t.agent_id.to_string(),
                 "pattern": serde_json::to_value(&t.pattern).unwrap_or_default(),
@@ -680,7 +694,11 @@ pub async fn list_triggers(
                 "fire_count": t.fire_count,
                 "max_fires": t.max_fires,
                 "created_at": t.created_at.to_rfc3339(),
-            })
+            });
+            if let Some(target) = &t.target_agent {
+                v["target_agent_id"] = serde_json::json!(target.to_string());
+            }
+            v
         })
         .collect();
     let total = list.len();
