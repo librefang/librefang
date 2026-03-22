@@ -2516,8 +2516,8 @@ mod tests {
         assert!(STREAMING_EDIT_INTERVAL <= Duration::from_secs(5));
     }
 
-    #[test]
-    fn test_parse_telegram_callback_query_basic() {
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_basic() {
         let client = crate::http_client::new_client();
         let callback = serde_json::json!({
             "id": "cb_12345",
@@ -2561,8 +2561,8 @@ mod tests {
         assert!(msg.metadata.contains_key("callback_query_id"));
     }
 
-    #[test]
-    fn test_parse_telegram_callback_query_filtered_user() {
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_filtered_user() {
         let client = crate::http_client::new_client();
         let callback = serde_json::json!({
             "id": "cb_99",
@@ -2587,8 +2587,8 @@ mod tests {
         assert!(msg.is_none());
     }
 
-    #[test]
-    fn test_parse_telegram_callback_query_empty_data() {
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_empty_data() {
         let client = crate::http_client::new_client();
         let callback = serde_json::json!({
             "id": "cb_1",
@@ -2611,8 +2611,8 @@ mod tests {
         assert!(msg.is_none());
     }
 
-    #[test]
-    fn test_parse_telegram_callback_query_dm() {
+    #[tokio::test]
+    async fn test_parse_telegram_callback_query_dm() {
         let client = crate::http_client::new_client();
         let callback = serde_json::json!({
             "id": "cb_dm",
