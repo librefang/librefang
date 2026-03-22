@@ -187,6 +187,7 @@ impl SetupWizard {
             enabled: true,
             allowed_plugins: vec![],
             thinking: None,
+            context_injection: vec![],
         };
 
         let skills_to_install: Vec<String> = intent
