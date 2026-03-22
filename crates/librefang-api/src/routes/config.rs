@@ -245,7 +245,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
         let name = &agent.name;
         let provider = &agent.manifest.model.provider;
         let model = &agent.manifest.model.model;
-        if let Some((tokens, tools)) = state.kernel.scheduler.get_usage(agent.id) {
+        if let Some((tokens, tools)) = state.kernel.scheduler_ref().get_usage(agent.id) {
             out.push_str(&format!(
                 "librefang_tokens_total{{agent=\"{name}\",provider=\"{provider}\",model=\"{model}\"}} {tokens}\n"
             ));
