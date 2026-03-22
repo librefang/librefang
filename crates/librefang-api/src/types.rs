@@ -51,6 +51,11 @@ pub struct MessageRequest {
     /// Optional channel type (e.g. "whatsapp", "telegram").
     #[serde(default)]
     pub channel_type: Option<String>,
+    /// If true, this is an ephemeral "side question" (`/btw`).
+    /// The message is answered using the agent's system prompt but WITHOUT
+    /// loading or saving session history — the real conversation is untouched.
+    #[serde(default)]
+    pub ephemeral: bool,
 }
 
 /// Response from sending a message.
@@ -293,6 +298,34 @@ mod tests {
         assert_eq!(req.sender_id.as_deref(), Some("user-123"));
         assert_eq!(req.sender_name.as_deref(), Some("Alice"));
         assert_eq!(req.channel_type.as_deref(), Some("whatsapp"));
+    }
+
+    #[test]
+    fn message_request_ephemeral_defaults_to_false() {
+        let json = r#"{"message":"hello"}"#;
+        let req: MessageRequest = serde_json::from_str(json).unwrap();
+        assert!(!req.ephemeral);
+    }
+
+    #[test]
+    fn message_request_ephemeral_true() {
+        let json = r#"{"message":"what is rust?","ephemeral":true}"#;
+        let req: MessageRequest = serde_json::from_str(json).unwrap();
+        assert!(req.ephemeral);
+        assert_eq!(req.message, "what is rust?");
+    }
+
+    #[test]
+    fn message_request_btw_prefix_detection() {
+        // The /btw prefix is handled at the route layer, not deserialization,
+        // but verify the message text round-trips correctly.
+        let json = r#"{"message":"/btw what is rust?"}"#;
+        let req: MessageRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.message, "/btw what is rust?");
+        assert!(!req.ephemeral); // ephemeral is detected at route level, not here
+                                 // Route-level stripping:
+        let stripped = req.message.strip_prefix("/btw ").unwrap();
+        assert_eq!(stripped, "what is rust?");
     }
 
     // Bulk operation type tests
