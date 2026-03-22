@@ -5075,88 +5075,59 @@ system_prompt = "You are a helpful assistant."
                 other => KernelError::LibreFang(LibreFangError::Internal(other.to_string())),
             })?;
 
-        // Build an agent manifest from the hand definition.
-        // If the hand declares provider/model as "default", inherit the kernel's configured LLM.
-        let hand_provider = if def.agent.provider == "default" {
-            self.config.default_model.provider.clone()
-        } else {
-            def.agent.provider.clone()
-        };
-        let hand_model = if def.agent.model == "default" {
-            self.config.default_model.model.clone()
-        } else {
-            def.agent.model.clone()
-        };
-        // When using default provider, also inherit the default api_key_env and base_url
-        let hand_api_key_env = if def.agent.provider == "default" && def.agent.api_key_env.is_none()
-        {
-            Some(self.config.default_model.api_key_env.clone())
-        } else {
-            def.agent.api_key_env.clone()
-        };
-        let hand_base_url = if def.agent.provider == "default" && def.agent.base_url.is_none() {
-            self.config.default_model.base_url.clone()
-        } else {
-            def.agent.base_url.clone()
-        };
+        // Start from the embedded AgentManifest (auto-converted from legacy format
+        // at TOML parse time) and apply Hand-specific overrides.
+        let mut manifest = def.agent.clone();
 
-        let mut manifest = AgentManifest {
-            name: def.agent.name.clone(),
-            description: def.agent.description.clone(),
-            module: def.agent.module.clone(),
-            model: ModelConfig {
-                provider: hand_provider,
-                model: hand_model,
-                max_tokens: def.agent.max_tokens,
-                temperature: def.agent.temperature,
-                system_prompt: def.agent.system_prompt.clone(),
-                api_key_env: hand_api_key_env,
-                base_url: hand_base_url,
-            },
-            capabilities: ManifestCapabilities {
-                tools: def.tools.clone(),
-                ..Default::default()
-            },
-            tags: vec![
-                format!("hand:{hand_id}"),
-                format!("hand_instance:{}", instance.instance_id),
-            ],
-            autonomous: def.agent.max_iterations.map(|max_iter| AutonomousConfig {
-                max_iterations: max_iter,
-                ..Default::default()
-            }),
-            // Autonomous hands must run in Continuous mode so the background loop picks them up.
-            // Reactive (default) only fires on incoming messages, so autonomous hands would be inert.
-            schedule: if def.agent.max_iterations.is_some() {
-                ScheduleMode::Continuous {
-                    check_interval_secs: 60,
-                }
-            } else {
-                ScheduleMode::default()
-            },
-            skills: def.skills.clone(),
-            mcp_servers: def.mcp_servers.clone(),
-            // Hands are curated packages — if they declare shell_exec, grant full exec access
-            exec_policy: if def.tools.iter().any(|t| t == "shell_exec") {
-                Some(librefang_types::config::ExecPolicy {
-                    mode: librefang_types::config::ExecSecurityMode::Full,
-                    timeout_secs: 300, // hands may run long commands (ffmpeg, yt-dlp)
-                    no_output_timeout_secs: 120,
-                    ..Default::default()
-                })
-            } else {
-                None
-            },
-            tool_blocklist: Vec::new(),
-            // Custom profile avoids ToolProfile-based expansion overriding the
-            // explicit tool list.
-            profile: if !def.tools.is_empty() {
-                Some(ToolProfile::Custom)
-            } else {
-                None
-            },
+        // Inherit kernel defaults when hand declares "default" provider/model.
+        if manifest.model.provider == "default" {
+            manifest.model.provider = self.config.default_model.provider.clone();
+            if manifest.model.api_key_env.is_none() {
+                manifest.model.api_key_env = Some(self.config.default_model.api_key_env.clone());
+            }
+            if manifest.model.base_url.is_none() {
+                manifest.model.base_url = self.config.default_model.base_url.clone();
+            }
+        }
+        if manifest.model.model == "default" {
+            manifest.model.model = self.config.default_model.model.clone();
+        }
+
+        // Hand-specific capability, tagging, and scheduling overrides.
+        manifest.capabilities = ManifestCapabilities {
+            tools: def.tools.clone(),
             ..Default::default()
         };
+        manifest.tags = vec![
+            format!("hand:{hand_id}"),
+            format!("hand_instance:{}", instance.instance_id),
+        ];
+        manifest.skills = def.skills.clone();
+        manifest.mcp_servers = def.mcp_servers.clone();
+
+        // Autonomous hands must run in Continuous mode so the background loop
+        // picks them up. Reactive (default) only fires on incoming messages.
+        if manifest.autonomous.is_some() {
+            manifest.schedule = ScheduleMode::Continuous {
+                check_interval_secs: 60,
+            };
+        }
+
+        // Hands are curated packages — if they declare shell_exec, grant full exec access.
+        if def.tools.iter().any(|t| t == "shell_exec") {
+            manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
+                mode: librefang_types::config::ExecSecurityMode::Full,
+                timeout_secs: 300,
+                no_output_timeout_secs: 120,
+                ..Default::default()
+            });
+        }
+
+        // Custom profile avoids ToolProfile-based expansion overriding the
+        // explicit tool list.
+        if !def.tools.is_empty() {
+            manifest.profile = Some(ToolProfile::Custom);
+        }
 
         // Resolve hand settings → prompt block + env vars
         let resolved = librefang_hands::resolve_settings(&def.settings, &instance.config);
@@ -9106,13 +9077,13 @@ mod tests {
 
         let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
         let instance = kernel
-            .activate_hand("browser", HashMap::new())
-            .expect("browser hand should activate");
-        let agent_id = instance.agent_id.expect("browser hand agent id");
+            .activate_hand("apitester", HashMap::new())
+            .expect("apitester hand should activate");
+        let agent_id = instance.agent_id.expect("apitester hand agent id");
         let entry = kernel
             .registry
             .get(agent_id)
-            .expect("browser hand agent entry");
+            .expect("apitester hand agent entry");
 
         assert!(
             entry.manifest.tool_allowlist.is_empty(),
@@ -9141,27 +9112,27 @@ mod tests {
         let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
         let first_instance = kernel
-            .activate_hand("browser", HashMap::new())
-            .expect("browser hand should activate the first time");
-        let first_agent_id = first_instance.agent_id.expect("first browser agent id");
+            .activate_hand("apitester", HashMap::new())
+            .expect("apitester hand should activate the first time");
+        let first_agent_id = first_instance.agent_id.expect("first apitester agent id");
         let first_entry = kernel
             .registry
             .get(first_agent_id)
-            .expect("first browser hand agent entry");
+            .expect("first apitester hand agent entry");
         let first_manifest = first_entry.manifest.clone();
 
         kernel
             .deactivate_hand(first_instance.instance_id)
-            .expect("browser hand should deactivate cleanly");
+            .expect("apitester hand should deactivate cleanly");
 
         let second_instance = kernel
-            .activate_hand("browser", HashMap::new())
-            .expect("browser hand should activate the second time");
-        let second_agent_id = second_instance.agent_id.expect("second browser agent id");
+            .activate_hand("apitester", HashMap::new())
+            .expect("apitester hand should activate the second time");
+        let second_agent_id = second_instance.agent_id.expect("second apitester agent id");
         let second_entry = kernel
             .registry
             .get(second_agent_id)
-            .expect("second browser hand agent entry");
+            .expect("second apitester hand agent entry");
         let second_manifest = second_entry.manifest.clone();
 
         assert_eq!(

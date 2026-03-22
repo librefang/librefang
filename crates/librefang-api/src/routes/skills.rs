@@ -1169,12 +1169,12 @@ pub async fn get_hand(
                     "agent": {
                         "name": def.agent.name,
                         "description": def.agent.description,
-                        "provider": if def.agent.provider == "default" {
+                        "provider": if def.agent.model.provider == "default" {
                             &state.kernel.config_ref().default_model.provider
-                        } else { &def.agent.provider },
-                        "model": if def.agent.model == "default" {
+                        } else { &def.agent.model.provider },
+                        "model": if def.agent.model.model == "default" {
                             &state.kernel.config_ref().default_model.model
-                        } else { &def.agent.model },
+                        } else { &def.agent.model.model },
                     },
                     "dashboard": def.dashboard.metrics.iter().map(|m| serde_json::json!({
                         "label": m.label,
