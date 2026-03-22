@@ -1,4 +1,5 @@
 use clap::Parser;
+use regex::Regex;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -231,6 +232,16 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     };
+
+    // Validate CalVer early, before using version in git tags/branches
+    let calver_re = Regex::new(r"^[0-9]{4}\.[0-9]{1,2}\.[0-9]{2,4}(-(beta|rc)[0-9]+)?$").unwrap();
+    if !calver_re.is_match(&version) {
+        return Err(format!(
+            "'{}' is not a valid CalVer (expected: YYYY.M.DDHH e.g. 2026.3.2114)",
+            version
+        )
+        .into());
+    }
 
     let tag = format!("v{}", version);
     let is_prerelease = version.contains("-beta") || version.contains("-rc");
