@@ -45,6 +45,8 @@ pub struct HandRegistry {
     /// Serializes activate/deactivate to prevent race conditions where two
     /// concurrent requests both pass the "already active" check.
     activate_lock: Mutex<()>,
+    /// Guards concurrent writes to hand_state.json.
+    persist_lock: Mutex<()>,
 }
 
 impl HandRegistry {
@@ -54,6 +56,7 @@ impl HandRegistry {
             definitions: DashMap::new(),
             instances: DashMap::new(),
             activate_lock: Mutex::new(()),
+            persist_lock: Mutex::new(()),
         }
     }
 
@@ -63,6 +66,10 @@ impl HandRegistry {
     /// across daemon restarts. Error-state instances are also persisted so
     /// the user can see what went wrong after a restart.
     pub fn persist_state(&self, path: &std::path::Path) -> HandResult<()> {
+        let _guard = self
+            .persist_lock
+            .lock()
+            .map_err(|e| HandError::Config(format!("persist lock poisoned: {e}")))?;
         let entries: Vec<serde_json::Value> = self
             .instances
             .iter()
@@ -182,6 +189,32 @@ impl HandRegistry {
             }
         }
         count
+    }
+
+    /// Reload hand definitions from disk without restarting.
+    ///
+    /// Unlike `load_bundled` which uses the `OnceLock` cache, this reads
+    /// directly from disk so newly added or modified hands are picked up.
+    pub fn reload_from_disk(&self, home_dir: &std::path::Path) -> (usize, usize) {
+        let fresh = bundled::disk_hands(home_dir);
+        let mut added = 0usize;
+        let mut updated = 0usize;
+        for (id, toml_content, skill_content) in fresh {
+            match bundled::parse_bundled(&id, &toml_content, &skill_content) {
+                Ok(def) => {
+                    if self.definitions.contains_key(&def.id) {
+                        updated += 1;
+                    } else {
+                        added += 1;
+                    }
+                    self.definitions.insert(def.id.clone(), def);
+                }
+                Err(e) => {
+                    warn!(hand = %id, error = %e, "Failed to parse hand during reload");
+                }
+            }
+        }
+        (added, updated)
     }
 
     /// Install a hand from a directory containing HAND.toml (and optional SKILL.md).

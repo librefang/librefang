@@ -1191,6 +1191,37 @@ export async function getHandStats(instanceId: string): Promise<HandStatsRespons
   return get<HandStatsResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/stats`);
 }
 
+export interface HandSettingOptionStatus {
+  value?: string;
+  label?: string;
+  provider_env?: string | null;
+  binary?: string | null;
+  available?: boolean;
+}
+
+export interface HandSettingStatus {
+  key?: string;
+  label?: string;
+  description?: string;
+  setting_type?: string;
+  default?: string;
+  options?: HandSettingOptionStatus[];
+}
+
+export interface HandSettingsResponse {
+  hand_id?: string;
+  settings?: HandSettingStatus[];
+  current_values?: Record<string, unknown>;
+}
+
+export async function getHandDetail(handId: string): Promise<HandDefinitionItem> {
+  return get<HandDefinitionItem>(`/api/hands/${encodeURIComponent(handId)}`);
+}
+
+export async function getHandSettings(handId: string): Promise<HandSettingsResponse> {
+  return get<HandSettingsResponse>(`/api/hands/${encodeURIComponent(handId)}/settings`);
+}
+
 export async function listGoals(): Promise<GoalItem[]> {
   const data = await get<{ goals?: GoalItem[]; total?: number }>("/api/goals");
   return data.goals ?? [];
