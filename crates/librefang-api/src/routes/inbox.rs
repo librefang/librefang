@@ -22,8 +22,8 @@ pub fn router() -> axum::Router<Arc<AppState>> {
 )]
 pub async fn inbox_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let status = librefang_kernel::inbox::inbox_status(
-        &state.kernel.config.inbox,
-        &state.kernel.config.home_dir,
+        &state.kernel.config_ref().inbox,
+        &state.kernel.config_ref().home_dir,
     );
     Json(serde_json::json!(status))
 }
