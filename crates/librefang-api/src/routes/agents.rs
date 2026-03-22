@@ -562,7 +562,11 @@ pub async fn bulk_start_agents(
                 continue;
             }
         };
-        match state.kernel.registry.set_mode(agent_id, AgentMode::Full) {
+        match state
+            .kernel
+            .agent_registry()
+            .set_mode(agent_id, AgentMode::Full)
+        {
             Ok(()) => {
                 results.push(BulkActionResult {
                     agent_id: id_str.clone(),
@@ -760,9 +764,9 @@ pub async fn list_agents(
     Query(params): Query<AgentListQuery>,
 ) -> impl IntoResponse {
     let catalog = state.kernel.model_catalog.read().ok();
-    let dm = &state.kernel.config.default_model;
+    let dm = &state.kernel.config_ref().default_model;
 
-    let mut agents: Vec<librefang_types::agent::AgentEntry> = state.kernel.registry.list();
+    let mut agents: Vec<librefang_types::agent::AgentEntry> = state.kernel.agent_registry().list();
 
     // -- Filtering --
     if let Some(ref q) = params.q {
@@ -1059,7 +1063,7 @@ pub async fn send_message(
     }
 
     // Check agent exists before processing
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": err_not_found})),
@@ -1214,7 +1218,7 @@ pub async fn get_agent_session(
         }
     };
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -1224,7 +1228,11 @@ pub async fn get_agent_session(
         }
     };
 
-    match state.kernel.memory.get_session(entry.session_id) {
+    match state
+        .kernel
+        .memory_substrate()
+        .get_session(entry.session_id)
+    {
         Ok(Some(session)) => {
             // Two-pass approach: ToolUse blocks live in Assistant messages while
             // ToolResult blocks arrive in subsequent User messages.  Pass 1
@@ -1520,7 +1528,7 @@ pub async fn set_agent_mode(
         }
     };
 
-    match state.kernel.registry.set_mode(agent_id, body.mode) {
+    match state.kernel.agent_registry().set_mode(agent_id, body.mode) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1567,7 +1575,7 @@ pub async fn get_agent(
         }
     };
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -1667,7 +1675,7 @@ pub async fn send_message_stream(
         }
     };
 
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": err_not_found})),
@@ -2078,7 +2086,7 @@ pub async fn clear_agent_history(
             )
         }
     };
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -2288,7 +2296,7 @@ pub async fn get_agent_traces(
     };
 
     // Check agent exists
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -2333,7 +2341,7 @@ pub async fn get_agent_tools(
             )
         }
     };
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -2444,7 +2452,7 @@ pub async fn get_agent_skills(
             )
         }
     };
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -2544,7 +2552,7 @@ pub async fn get_agent_mcp_servers(
             )
         }
     };
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -2673,7 +2681,7 @@ pub async fn update_agent(
         }
     };
 
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -2731,7 +2739,7 @@ pub async fn patch_agent(
         }
     };
 
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -2797,8 +2805,8 @@ pub async fn patch_agent(
     }
 
     // Persist updated entry to SQLite
-    if let Some(entry) = state.kernel.registry.get(agent_id) {
-        if let Err(e) = state.kernel.memory.save_agent(&entry) {
+    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+        if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
             tracing::warn!("Failed to persist agent state: {e}");
         }
         (
@@ -2894,11 +2902,15 @@ pub async fn update_agent_identity(
         greeting_style: req.greeting_style,
     };
 
-    match state.kernel.registry.update_identity(agent_id, identity) {
+    match state
+        .kernel
+        .agent_registry()
+        .update_identity(agent_id, identity)
+    {
         Ok(()) => {
             // Persist identity to SQLite
-            if let Some(entry) = state.kernel.registry.get(agent_id) {
-                if let Err(e) = state.kernel.memory.save_agent(&entry) {
+            if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+                if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
                     tracing::warn!("Failed to persist agent state: {e}");
                 }
             }
@@ -3176,8 +3188,8 @@ pub async fn patch_agent_config(
     }
 
     // Persist updated manifest to database so changes survive restart
-    if let Some(entry) = state.kernel.registry.get(agent_id) {
-        if let Err(e) = state.kernel.memory.save_agent(&entry) {
+    if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+        if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
             tracing::warn!("Failed to persist agent config update: {e}");
         }
     }
@@ -3278,7 +3290,7 @@ pub async fn clone_agent(
         );
     }
 
-    let source = match state.kernel.registry.get(agent_id) {
+    let source = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -3310,7 +3322,7 @@ pub async fn clone_agent(
     };
 
     // Copy workspace files from source to destination
-    let new_entry = state.kernel.registry.get(new_id);
+    let new_entry = state.kernel.agent_registry().get(new_id);
     if let (Some(ref src_ws), Some(ref new_entry)) = (source.manifest.workspace, new_entry) {
         if let Some(ref dst_ws) = new_entry.manifest.workspace {
             // Security: canonicalize both paths
@@ -3388,7 +3400,7 @@ pub async fn list_agent_files(
         }
     };
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -3464,7 +3476,7 @@ pub async fn get_agent_file(
         );
     }
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -3586,7 +3598,7 @@ pub async fn set_agent_file(
         );
     }
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -3709,7 +3721,7 @@ pub async fn delete_agent_file(
         );
     }
 
-    let workspace = match state.kernel.registry.get(agent_id) {
+    let workspace = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => match e.manifest.workspace {
             Some(ref ws) => ws.clone(),
             None => {
@@ -4057,7 +4069,7 @@ pub async fn get_agent_deliveries(
         Ok(id) => id,
         Err(_) => {
             // Try name lookup
-            match state.kernel.registry.find_by_name(&id) {
+            match state.kernel.agent_registry().find_by_name(&id) {
                 Some(entry) => entry.id,
                 None => {
                     return (
@@ -4306,7 +4318,7 @@ pub async fn agent_metrics(
         }
     };
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -4421,7 +4433,7 @@ pub async fn agent_logs(
     };
 
     // Verify the agent exists.
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),

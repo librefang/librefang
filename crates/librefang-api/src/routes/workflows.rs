@@ -904,7 +904,11 @@ const SCHEDULES_KEY: &str = "__librefang_schedules";
 )]
 pub async fn list_schedules(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agent_id = schedule_shared_agent_id();
-    match state.kernel.memory.structured_get(agent_id, SCHEDULES_KEY) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_get(agent_id, SCHEDULES_KEY)
+    {
         Ok(Some(serde_json::Value::Array(arr))) => {
             let total = arr.len();
             Json(serde_json::json!({"schedules": arr, "total": total}))
@@ -924,7 +928,11 @@ pub async fn get_schedule(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let agent_id = schedule_shared_agent_id();
-    match state.kernel.memory.structured_get(agent_id, SCHEDULES_KEY) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_get(agent_id, SCHEDULES_KEY)
+    {
         Ok(Some(serde_json::Value::Array(arr))) => {
             if let Some(schedule) = arr.iter().find(|s| s["id"].as_str() == Some(&id)) {
                 (StatusCode::OK, Json(schedule.clone()))
@@ -1004,7 +1012,7 @@ pub async fn create_schedule(
     }
     // Validate agent exists (UUID or name lookup)
     let agent_exists = if let Ok(aid) = agent_id_str.parse::<AgentId>() {
-        state.kernel.registry.get(aid).is_some()
+        state.kernel.agent_registry().get(aid).is_some()
     } else {
         state
             .kernel
@@ -1036,14 +1044,17 @@ pub async fn create_schedule(
     });
 
     let shared_id = schedule_shared_agent_id();
-    let mut schedules: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, SCHEDULES_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let mut schedules: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, SCHEDULES_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
 
     schedules.push(entry.clone());
-    if let Err(e) = state.kernel.memory.structured_set(
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules),
@@ -1066,11 +1077,14 @@ pub async fn update_schedule(
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let shared_id = schedule_shared_agent_id();
-    let mut schedules: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, SCHEDULES_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let mut schedules: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, SCHEDULES_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
 
     let mut found = false;
     for s in schedules.iter_mut() {
@@ -1109,7 +1123,7 @@ pub async fn update_schedule(
         );
     }
 
-    if let Err(e) = state.kernel.memory.structured_set(
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules),
@@ -1133,11 +1147,14 @@ pub async fn delete_schedule(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let shared_id = schedule_shared_agent_id();
-    let mut schedules: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, SCHEDULES_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let mut schedules: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, SCHEDULES_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
 
     let before = schedules.len();
     schedules.retain(|s| s["id"].as_str() != Some(&id));
@@ -1149,7 +1166,7 @@ pub async fn delete_schedule(
         );
     }
 
-    if let Err(e) = state.kernel.memory.structured_set(
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules),
@@ -1173,11 +1190,14 @@ pub async fn run_schedule(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let shared_id = schedule_shared_agent_id();
-    let schedules: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, SCHEDULES_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let schedules: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, SCHEDULES_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
 
     let schedule = match schedules.iter().find(|s| s["id"].as_str() == Some(&id)) {
         Some(s) => s.clone(),
@@ -1198,7 +1218,7 @@ pub async fn run_schedule(
     // Find the target agent — require explicit agent_id, no silent fallback
     let target_agent = if !agent_id_str.is_empty() {
         if let Ok(aid) = agent_id_str.parse::<AgentId>() {
-            if state.kernel.registry.get(aid).is_some() {
+            if state.kernel.agent_registry().get(aid).is_some() {
                 Some(aid)
             } else {
                 None
@@ -1235,11 +1255,14 @@ pub async fn run_schedule(
     };
 
     // Update last_run and run_count
-    let mut schedules_updated: Vec<serde_json::Value> =
-        match state.kernel.memory.structured_get(shared_id, SCHEDULES_KEY) {
-            Ok(Some(serde_json::Value::Array(arr))) => arr,
-            _ => Vec::new(),
-        };
+    let mut schedules_updated: Vec<serde_json::Value> = match state
+        .kernel
+        .memory_substrate()
+        .structured_get(shared_id, SCHEDULES_KEY)
+    {
+        Ok(Some(serde_json::Value::Array(arr))) => arr,
+        _ => Vec::new(),
+    };
     for s in schedules_updated.iter_mut() {
         if s["id"].as_str() == Some(&id) {
             s["last_run"] = serde_json::Value::String(chrono::Utc::now().to_rfc3339());
@@ -1248,7 +1271,7 @@ pub async fn run_schedule(
             break;
         }
     }
-    if let Err(e) = state.kernel.memory.structured_set(
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
         shared_id,
         SCHEDULES_KEY,
         serde_json::Value::Array(schedules_updated),

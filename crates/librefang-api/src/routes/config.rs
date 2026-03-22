@@ -62,13 +62,13 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "status": "running",
         "version": env!("CARGO_PKG_VERSION"),
         "agent_count": agent_count,
-        "default_provider": state.kernel.config.default_model.provider,
-        "default_model": state.kernel.config.default_model.model,
+        "default_provider": state.kernel.config_ref().default_model.provider,
+        "default_model": state.kernel.config_ref().default_model.model,
         "uptime_seconds": uptime,
-        "api_listen": state.kernel.config.api_listen,
+        "api_listen": state.kernel.config_ref().api_listen,
         "home_dir": state.kernel.home_dir().display().to_string(),
-        "log_level": state.kernel.config.log_level,
-        "network_enabled": state.kernel.config.network_enabled,
+        "log_level": state.kernel.config_ref().log_level,
+        "network_enabled": state.kernel.config_ref().network_enabled,
         "agents": agents,
     }))
 }
@@ -178,7 +178,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         .structured_get(shared_id, "__health_check__")
         .is_ok();
 
-    let config_warnings = state.kernel.config.validate();
+    let config_warnings = state.kernel.config_ref().validate();
     let status = if db_ok { "ok" } else { "degraded" };
 
     Json(serde_json::json!({
@@ -187,7 +187,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
         "uptime_seconds": state.started_at.elapsed().as_secs(),
         "panic_count": health.panic_count,
         "restart_count": health.restart_count,
-        "agent_count": state.kernel.registry.count(),
+        "agent_count": state.kernel.agent_registry().count(),
         "database": if db_ok { "connected" } else { "error" },
         "config_warnings": config_warnings,
     }))
@@ -224,7 +224,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
     out.push_str(&format!("librefang_uptime_seconds {uptime}\n\n"));
 
     // Active agents
-    let agents = state.kernel.registry.list();
+    let agents = state.kernel.agent_registry().list();
     let active = agents
         .iter()
         .filter(|a| matches!(a.state, librefang_types::agent::AgentState::Running))
@@ -301,7 +301,7 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
 )]
 pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // Return a redacted view of the kernel config
-    let config = &state.kernel.config;
+    let config = &state.kernel.config_ref();
 
     // -- channels: show which platforms are configured (instance counts), no tokens --
     let channels = {
@@ -914,7 +914,7 @@ pub async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse
     )
 )]
 pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let auth_mode = if state.kernel.config.api_key.is_empty() {
+    let auth_mode = if state.kernel.config_ref().api_key.is_empty() {
         "localhost_only"
     } else {
         "bearer_token"
@@ -953,7 +953,7 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
             },
             "auth": {
                 "mode": auth_mode,
-                "api_key_set": !state.kernel.config.api_key.is_empty()
+                "api_key_set": !state.kernel.config_ref().api_key.is_empty()
             }
         },
         "monitoring": {

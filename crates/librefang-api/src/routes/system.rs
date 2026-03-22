@@ -350,7 +350,7 @@ pub async fn get_agent_kv(
             );
         }
     };
-    match state.kernel.memory.list_kv(agent_id) {
+    match state.kernel.memory_substrate().list_kv(agent_id) {
         Ok(pairs) => {
             let kv: Vec<serde_json::Value> = pairs
                 .into_iter()
@@ -385,7 +385,11 @@ pub async fn get_agent_kv_key(
             );
         }
     };
-    match state.kernel.memory.structured_get(agent_id, &key) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_get(agent_id, &key)
+    {
         Ok(Some(val)) => (
             StatusCode::OK,
             Json(serde_json::json!({"key": key, "value": val})),
@@ -424,7 +428,11 @@ pub async fn set_agent_kv_key(
     };
     let value = body.get("value").cloned().unwrap_or(body);
 
-    match state.kernel.memory.structured_set(agent_id, &key, value) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_set(agent_id, &key, value)
+    {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "stored", "key": key})),
@@ -456,7 +464,11 @@ pub async fn delete_agent_kv_key(
             );
         }
     };
-    match state.kernel.memory.structured_delete(agent_id, &key) {
+    match state
+        .kernel
+        .memory_substrate()
+        .structured_delete(agent_id, &key)
+    {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "deleted", "key": key})),
@@ -490,14 +502,14 @@ pub async fn export_agent_memory(
     };
 
     // Verify agent exists
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
         );
     }
 
-    match state.kernel.memory.list_kv(agent_id) {
+    match state.kernel.memory_substrate().list_kv(agent_id) {
         Ok(pairs) => {
             let kv_map: serde_json::Map<String, serde_json::Value> = pairs.into_iter().collect();
             (
@@ -542,7 +554,7 @@ pub async fn import_agent_memory(
     };
 
     // Verify agent exists
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-agent-not-found")})),
@@ -566,10 +578,14 @@ pub async fn import_agent_memory(
 
     // Clear existing memory if requested
     if clear_existing {
-        match state.kernel.memory.list_kv(agent_id) {
+        match state.kernel.memory_substrate().list_kv(agent_id) {
             Ok(existing) => {
                 for (key, _) in existing {
-                    if let Err(e) = state.kernel.memory.structured_delete(agent_id, &key) {
+                    if let Err(e) = state
+                        .kernel
+                        .memory_substrate()
+                        .structured_delete(agent_id, &key)
+                    {
                         tracing::warn!("Failed to delete key '{key}' during import clear: {e}");
                     }
                 }
@@ -903,7 +919,7 @@ pub async fn get_tool(
     )
 )]
 pub async fn list_sessions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.kernel.memory.list_sessions() {
+    match state.kernel.memory_substrate().list_sessions() {
         Ok(sessions) => Json(serde_json::json!({"sessions": sessions})),
         Err(_) => Json(serde_json::json!({"sessions": []})),
     }
@@ -927,7 +943,11 @@ pub async fn get_session(
         }
     };
 
-    match state.kernel.memory.get_session_with_created_at(session_id) {
+    match state
+        .kernel
+        .memory_substrate()
+        .get_session_with_created_at(session_id)
+    {
         Ok(Some((session, created_at))) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -971,7 +991,7 @@ pub async fn delete_session(
         }
     };
 
-    match state.kernel.memory.delete_session(session_id) {
+    match state.kernel.memory_substrate().delete_session(session_id) {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({"status": "deleted", "session_id": id})),
@@ -1018,7 +1038,11 @@ pub async fn set_session_label(
         }
     }
 
-    match state.kernel.memory.set_session_label(session_id, label) {
+    match state
+        .kernel
+        .memory_substrate()
+        .set_session_label(session_id, label)
+    {
         Ok(()) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1048,7 +1072,7 @@ pub async fn find_session_by_label(
         Ok(u) => librefang_types::agent::AgentId(u),
         Err(_) => {
             // Try name lookup
-            match state.kernel.registry.find_by_name(&agent_id_str) {
+            match state.kernel.agent_registry().find_by_name(&agent_id_str) {
                 Some(entry) => entry.id,
                 None => {
                     return (
@@ -1060,7 +1084,11 @@ pub async fn find_session_by_label(
         }
     };
 
-    match state.kernel.memory.find_session_by_label(agent_id, &label) {
+    match state
+        .kernel
+        .memory_substrate()
+        .find_session_by_label(agent_id, &label)
+    {
         Ok(Some(session)) => (
             StatusCode::OK,
             Json(serde_json::json!({
@@ -1097,7 +1125,7 @@ pub async fn session_cleanup(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let cfg = &state.kernel.config.session;
+    let cfg = &state.kernel.config_ref().session;
     let mut total: u64 = 0;
 
     if cfg.retention_days > 0 {
@@ -1233,7 +1261,7 @@ pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResp
     let pending = state.kernel.approvals().list_pending();
     let recent = state.kernel.approvals().list_recent(50);
 
-    let registry_agents = state.kernel.registry.list();
+    let registry_agents = state.kernel.agent_registry().list();
     let agent_name_for = |agent_id: &str| {
         registry_agents
             .iter()
@@ -1306,7 +1334,7 @@ pub async fn get_approval(
 
     match state.kernel.approvals().get_pending(uuid) {
         Some(a) => {
-            let registry_agents = state.kernel.registry.list();
+            let registry_agents = state.kernel.agent_registry().list();
             (StatusCode::OK, Json(approval_to_json(&a, &registry_agents)))
         }
         None => (
@@ -1462,7 +1490,7 @@ pub async fn webhook_wake(
         )
     };
     // Check if webhook triggers are enabled
-    let wh_config = match &state.kernel.config.webhook_triggers {
+    let wh_config = match &state.kernel.config_ref().webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
             return (
@@ -1538,7 +1566,7 @@ pub async fn webhook_agent(
         )
     };
     // Check if webhook triggers are enabled
-    let wh_config = match &state.kernel.config.webhook_triggers {
+    let wh_config = match &state.kernel.config_ref().webhook_triggers {
         Some(c) if c.enabled => c,
         _ => {
             return (
@@ -1570,7 +1598,7 @@ pub async fn webhook_agent(
             Ok(id) => id,
             Err(_) => {
                 // Try name lookup
-                match state.kernel.registry.find_by_name(agent_ref) {
+                match state.kernel.agent_registry().find_by_name(agent_ref) {
                     Some(entry) => entry.id,
                     None => {
                         let err_msg = {
@@ -1587,7 +1615,7 @@ pub async fn webhook_agent(
         },
         None => {
             // No agent specified — use the first available agent
-            match state.kernel.registry.list().first() {
+            match state.kernel.agent_registry().list().first() {
                 Some(entry) => entry.id,
                 None => {
                     return (
@@ -1646,7 +1674,7 @@ pub async fn add_binding(
     Json(binding): Json<librefang_types::config::AgentBinding>,
 ) -> impl IntoResponse {
     // Validate agent exists
-    let agents = state.kernel.registry.list();
+    let agents = state.kernel.agent_registry().list();
     let agent_exists = agents.iter().any(|e| e.name == binding.agent)
         || binding.agent.parse::<uuid::Uuid>().is_ok();
     if !agent_exists {
@@ -1689,7 +1717,7 @@ pub async fn pairing_request(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    if !state.kernel.config.pairing.enabled {
+    if !state.kernel.config_ref().pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
@@ -1722,7 +1750,7 @@ pub async fn pairing_complete(
     Json(body): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    if !state.kernel.config.pairing.enabled {
+    if !state.kernel.config_ref().pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
@@ -1773,7 +1801,7 @@ pub async fn pairing_devices(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    if !state.kernel.config.pairing.enabled {
+    if !state.kernel.config_ref().pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
@@ -1806,7 +1834,7 @@ pub async fn pairing_remove_device(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    if !state.kernel.config.pairing.enabled {
+    if !state.kernel.config_ref().pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": t.t("api-error-pairing-not-enabled")})),
@@ -1833,7 +1861,7 @@ pub async fn pairing_notify(
             t.t("api-error-pairing-message-required"),
         )
     };
-    if !state.kernel.config.pairing.enabled {
+    if !state.kernel.config_ref().pairing.enabled {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": err_pairing_not_enabled})),
@@ -2567,7 +2595,7 @@ pub async fn queue_status(State(state): State<Arc<AppState>>) -> impl IntoRespon
         })
         .collect();
 
-    let queue_cfg = &state.kernel.config.queue;
+    let queue_cfg = &state.kernel.config_ref().queue;
     Json(serde_json::json!({
         "lanes": lanes,
         "config": {

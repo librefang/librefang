@@ -868,10 +868,10 @@ pub async fn get_hand(
                         "name": def.agent.name,
                         "description": def.agent.description,
                         "provider": if def.agent.provider == "default" {
-                            &state.kernel.config.default_model.provider
+                            &state.kernel.config_ref().default_model.provider
                         } else { &def.agent.provider },
                         "model": if def.agent.model == "default" {
-                            &state.kernel.config.default_model.model
+                            &state.kernel.config_ref().default_model.model
                         } else { &def.agent.model },
                     },
                     "dashboard": def.dashboard.metrics.iter().map(|m| serde_json::json!({
