@@ -61,6 +61,7 @@ struct ResponsesApiRequest {
 
 /// A single output item in the Responses API response.
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ResponsesOutputItem {
     #[serde(rename = "type")]
