@@ -5,7 +5,7 @@
 use rusqlite::Connection;
 
 /// Current schema version.
-const SCHEMA_VERSION: u32 = 11;
+const SCHEMA_VERSION: u32 = 12;
 
 /// Run all migrations to bring the database up to date.
 pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
@@ -53,6 +53,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
 
     if current_version < 11 {
         migrate_v11(conn)?;
+    }
+
+    if current_version < 12 {
+        migrate_v12(conn)?;
     }
 
     set_schema_version(conn, SCHEMA_VERSION)?;
@@ -387,6 +391,23 @@ fn migrate_v11(conn: &Connection) -> Result<(), rusqlite::Error> {
 
         INSERT OR IGNORE INTO migrations (version, applied_at, description)
         VALUES (11, datetime('now'), 'Add index on entities.name for knowledge graph queries');
+        ",
+    )?;
+    Ok(())
+}
+
+/// Version 12: Add FTS5 virtual table for full-text session search.
+fn migrate_v12(conn: &Connection) -> Result<(), rusqlite::Error> {
+    conn.execute_batch(
+        "
+        CREATE VIRTUAL TABLE IF NOT EXISTS sessions_fts USING fts5(
+            session_id UNINDEXED,
+            agent_id UNINDEXED,
+            content
+        );
+
+        INSERT OR IGNORE INTO migrations (version, applied_at, description)
+        VALUES (12, datetime('now'), 'Add FTS5 virtual table for full-text session search');
         ",
     )?;
     Ok(())
