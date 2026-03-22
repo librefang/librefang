@@ -363,6 +363,20 @@ fn default_temperature() -> f32 {
     0.7
 }
 
+/// Localized strings for a Hand definition.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HandI18n {
+    /// Localized name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Localized description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Localized category display name.
+    #[serde(default)]
+    pub category: Option<String>,
+}
+
 /// Complete Hand definition — parsed from HAND.toml.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandDefinition {
@@ -407,6 +421,9 @@ pub struct HandDefinition {
     /// Token consumption and activation metadata.
     #[serde(default)]
     pub metadata: Option<HandMetadata>,
+    /// Localized strings keyed by language code (e.g. "zh", "ja").
+    #[serde(default)]
+    pub i18n: HashMap<String, HandI18n>,
 }
 
 /// Token consumption and activation metadata for user awareness.
