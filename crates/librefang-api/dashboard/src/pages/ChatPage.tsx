@@ -7,6 +7,7 @@ import { useSearch } from "@tanstack/react-router";
 import { listAgents, sendAgentMessage, loadAgentSession } from "../api";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
+import { normalizeToolOutput, type ToolOutputEntry } from "../lib/chat";
 
 interface ChatMessage {
   id: string;
@@ -127,12 +128,14 @@ function useWebSocket(agentId: string | null) {
 // 聊天消息管理 - 包含历史加载和发送 (with WS streaming)
 function useChatMessages(agentId: string | null, agents: any[] = []) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [toolOutputs, setToolOutputs] = useState<ToolOutputEntry[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const { ws, wsConnected } = useWebSocket(agentId);
 
   // 加载历史记录
   useEffect(() => {
     if (!agentId) return;
+    setToolOutputs([]);
     loadAgentSession(agentId)
       .then(session => {
         if (session.messages?.length) {
@@ -232,6 +235,11 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
               ));
               setIsLoading(false);
               ws.current?.removeEventListener("message", handleMessage);
+            } else if (data.type === "tool_result") {
+              const output = normalizeToolOutput(data);
+              if (output) {
+                setToolOutputs(prev => [...prev, output]);
+              }
             } else if (data.response) {
               // Full response (non-streaming WS)
               setMessages(prev => prev.map(m =>
@@ -316,8 +324,21 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
   }, [agentId, agents, wsConnected, ws]);
 
   const clearHistory = useCallback(() => setMessages([]), []);
+  const clearToolOutputs = useCallback(() => setToolOutputs([]), []);
+  const dismissToolOutput = useCallback((id: string) => {
+    setToolOutputs(prev => prev.filter(output => output.id !== id));
+  }, []);
 
-  return { messages, isLoading, sendMessage, clearHistory, wsConnected };
+  return {
+    messages,
+    toolOutputs,
+    isLoading,
+    sendMessage,
+    clearHistory,
+    clearToolOutputs,
+    dismissToolOutput,
+    wsConnected,
+  };
 }
 
 // 消息气泡组件
@@ -511,6 +532,64 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
   );
 }
 
+function ToolOutputPanel({
+  outputs,
+  onClear,
+  onDismiss,
+}: {
+  outputs: ToolOutputEntry[];
+  onClear: () => void;
+  onDismiss: (id: string) => void;
+}) {
+  if (outputs.length === 0) return null;
+
+  return (
+    <div className="border-b border-border-subtle bg-surface/70 px-4 py-3 backdrop-blur-md">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">Skill output</p>
+          <p className="mt-1 text-xs text-text-dim">I keep recent tool results here until I clear them.</p>
+        </div>
+        <button
+          onClick={onClear}
+          className="rounded-lg px-3 py-1.5 text-[11px] font-semibold text-text-dim hover:bg-main hover:text-text transition-colors"
+        >
+          Clear
+        </button>
+      </div>
+      <div className="space-y-2">
+        {outputs.map((output) => (
+          <div
+            key={output.id}
+            className={`rounded-2xl border px-4 py-3 shadow-sm ${
+              output.isError
+                ? "border-error/20 bg-error/5"
+                : "border-brand/15 bg-brand/5"
+            }`}
+          >
+            <div className="mb-2 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs font-bold text-text">{output.tool}</p>
+                <p className="text-[10px] text-text-dim">
+                  {output.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </p>
+              </div>
+              <button
+                onClick={() => onDismiss(output.id)}
+                className="rounded-lg p-1 text-text-dim hover:bg-surface hover:text-text transition-colors"
+                aria-label="Dismiss tool output"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+            <pre className="whitespace-pre-wrap break-words text-xs leading-relaxed text-text-dim">{output.content}</pre>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function ChatPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -531,7 +610,16 @@ export function ChatPage() {
     if (aHand !== bHand) return aHand - bHand;
     return a.name.localeCompare(b.name);
   });
-  const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents);
+  const {
+    messages,
+    toolOutputs,
+    isLoading,
+    sendMessage,
+    clearHistory,
+    clearToolOutputs,
+    dismissToolOutput,
+    wsConnected,
+  } = useChatMessages(selectedAgentId || null, agents);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
   useEffect(() => {
@@ -636,6 +724,12 @@ export function ChatPage() {
               wsConnected={wsConnected}
             />
           )}
+
+          <ToolOutputPanel
+            outputs={toolOutputs}
+            onClear={clearToolOutputs}
+            onDismiss={dismissToolOutput}
+          />
 
           {/* 消息区域 */}
           <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
