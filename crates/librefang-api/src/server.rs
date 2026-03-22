@@ -992,6 +992,7 @@ pub async fn build_router(
             api_key = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
         }
     }
+    let api_key_lock = Arc::new(tokio::sync::RwLock::new(api_key));
     let gcra_limiter = rate_limiter::create_rate_limiter();
 
     // Build the versioned API routes. All /api/* endpoints are defined once
@@ -1054,7 +1055,7 @@ pub async fn build_router(
             axum::routing::get(crate::openai_compat::list_models),
         )
         .layer(axum::middleware::from_fn_with_state(
-            api_key,
+            api_key_lock,
             middleware::auth,
         ))
         .layer(axum::middleware::from_fn(middleware::accept_language))

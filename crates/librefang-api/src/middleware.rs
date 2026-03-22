@@ -155,10 +155,11 @@ pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response
 /// If the key is empty or whitespace-only, auth is disabled entirely
 /// (public/local development mode).
 pub async fn auth(
-    axum::extract::State(api_key): axum::extract::State<String>,
+    axum::extract::State(api_key_lock): axum::extract::State<std::sync::Arc<tokio::sync::RwLock<String>>>,
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
+    let api_key = api_key_lock.read().await.clone();
     // SECURITY: Capture method early for method-aware public endpoint checks.
     let method = request.method().clone();
 
