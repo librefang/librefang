@@ -370,7 +370,7 @@ impl EmbeddingDriver for BedrockEmbeddingDriver {
             let (auth, amz_date, payload_hash) = sigv4_auth_header(
                 &self.access_key,
                 &self.secret_key,
-                self.session_token.as_ref().map(|t| t.as_str()),
+                self.session_token.as_deref(),
                 &self.region,
                 "bedrock",
                 &host,
