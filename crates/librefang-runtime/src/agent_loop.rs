@@ -551,13 +551,42 @@ pub async fn run_agent_loop(
     // Mutable collector for memory conflicts detected during this turn.
     let mut memory_conflicts: Vec<librefang_types::memory::MemoryConflict> = Vec::new();
 
+    // PII privacy filtering: extract config from manifest metadata.
+    let privacy_config: librefang_types::config::PrivacyConfig = manifest
+        .metadata
+        .get("privacy")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let pii_filter = crate::pii_filter::PiiFilter::new(&privacy_config.redact_patterns);
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
+    // PII filter is applied to text content before adding to session.
     if let Some(blocks) = user_content_blocks {
-        session.messages.push(Message::user_with_blocks(blocks));
+        let filtered_blocks = if privacy_config.mode != librefang_types::config::PrivacyMode::Off {
+            blocks
+                .into_iter()
+                .map(|block| match block {
+                    ContentBlock::Text {
+                        text,
+                        provider_metadata,
+                    } => ContentBlock::Text {
+                        text: pii_filter.filter_message(&text, &privacy_config.mode),
+                        provider_metadata,
+                    },
+                    other => other,
+                })
+                .collect()
+        } else {
+            blocks
+        };
+        session
+            .messages
+            .push(Message::user_with_blocks(filtered_blocks));
     } else {
-        session.messages.push(Message::user(user_message));
+        let filtered_message = pii_filter.filter_message(user_message, &privacy_config.mode);
+        session.messages.push(Message::user(&filtered_message));
     }
 
     // Build the messages for the LLM, filtering system messages
@@ -1846,13 +1875,42 @@ pub async fn run_agent_loop_streaming(
     // Mutable collector for memory conflicts detected during this turn.
     let mut memory_conflicts: Vec<librefang_types::memory::MemoryConflict> = Vec::new();
 
+    // PII privacy filtering: extract config from manifest metadata.
+    let privacy_config: librefang_types::config::PrivacyConfig = manifest
+        .metadata
+        .get("privacy")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let pii_filter = crate::pii_filter::PiiFilter::new(&privacy_config.redact_patterns);
+
     // Add the user message to session history.
     // When content blocks are provided (e.g. text + image from a channel),
     // use multimodal message format so the LLM receives the image for vision.
+    // PII filter is applied to text content before adding to session.
     if let Some(blocks) = user_content_blocks {
-        session.messages.push(Message::user_with_blocks(blocks));
+        let filtered_blocks = if privacy_config.mode != librefang_types::config::PrivacyMode::Off {
+            blocks
+                .into_iter()
+                .map(|block| match block {
+                    ContentBlock::Text {
+                        text,
+                        provider_metadata,
+                    } => ContentBlock::Text {
+                        text: pii_filter.filter_message(&text, &privacy_config.mode),
+                        provider_metadata,
+                    },
+                    other => other,
+                })
+                .collect()
+        } else {
+            blocks
+        };
+        session
+            .messages
+            .push(Message::user_with_blocks(filtered_blocks));
     } else {
-        session.messages.push(Message::user(user_message));
+        let filtered_message = pii_filter.filter_message(user_message, &privacy_config.mode);
+        session.messages.push(Message::user(&filtered_message));
     }
 
     let llm_messages: Vec<Message> = session
