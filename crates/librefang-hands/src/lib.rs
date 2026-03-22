@@ -365,12 +365,28 @@ pub struct HandAgentManifest {
 
 /// Parse a single `[agent]` section (toml::Value) into an AgentManifest.
 fn parse_single_agent_section(value: &toml::Value) -> Result<AgentManifest, String> {
-    // Try full AgentManifest first, then legacy flat format
-    toml::from_str::<AgentManifest>(&value.to_string())
-        .or_else(|_| {
-            toml::from_str::<LegacyHandAgentConfig>(&value.to_string()).map(AgentManifest::from)
-        })
-        .map_err(|e| format!("Failed to parse [agent] section: {e}"))
+    // Deserialize directly from toml::Value (avoid to_string() which produces
+    // inline table format that toml::from_str cannot parse).
+    //
+    // Heuristic: if [agent] contains a `model` sub-table (nested ModelConfig),
+    // parse as full AgentManifest. Otherwise parse as legacy flat format where
+    // `provider`, `model`, `system_prompt` etc. are top-level fields.
+    let has_model_table = value
+        .as_table()
+        .and_then(|t| t.get("model"))
+        .map(|v| v.is_table())
+        .unwrap_or(false);
+
+    if has_model_table {
+        AgentManifest::deserialize(value.clone())
+            .or_else(|_| LegacyHandAgentConfig::deserialize(value.clone()).map(AgentManifest::from))
+            .map_err(|e| format!("Failed to parse [agent] section: {e}"))
+    } else {
+        LegacyHandAgentConfig::deserialize(value.clone())
+            .map(AgentManifest::from)
+            .or_else(|_| AgentManifest::deserialize(value.clone()))
+            .map_err(|e| format!("Failed to parse [agent] section: {e}"))
+    }
 }
 
 fn default_module() -> String {

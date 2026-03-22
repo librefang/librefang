@@ -49,7 +49,7 @@ pub fn init_otel_tracing(
     sample_rate: f64,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use opentelemetry::trace::TracerProvider;
-    use opentelemetry_otlp::SpanExporter;
+    use opentelemetry_otlp::{SpanExporter, WithExportConfig};
     use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;

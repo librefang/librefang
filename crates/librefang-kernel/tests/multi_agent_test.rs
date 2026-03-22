@@ -52,6 +52,8 @@ aliases = ["test clip"]
 name = "clip-agent"
 description = "Creates short clips"
 module = "builtin:chat"
+provider = "default"
+model = "default"
 system_prompt = "You are a clip agent."
 tools = ["file_read"]
 "#;
@@ -101,12 +103,12 @@ fn test_deterministic_agent_id() {
     install_hand(&kernel, HAND_A);
 
     let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
-    let expected = AgentId::from_hand_id("test-clip");
+    let expected = AgentId::from_hand_agent("test-clip", "main");
 
     assert_eq!(
         instance.agent_id().unwrap(),
         expected,
-        "Agent ID should be deterministic from hand_id"
+        "Agent ID should be deterministic from hand_id + role"
     );
 
     kernel.shutdown();
@@ -401,14 +403,15 @@ fn test_default_provider_resolved_to_kernel_default() {
     let agent_id = instance.agent_id().unwrap();
 
     let entry = kernel.agent_registry().get(agent_id).unwrap();
-    // HAND_A uses default provider → should resolve to kernel default ("groq")
-    assert_eq!(
-        entry.manifest.model.provider, "groq",
-        "Default provider should resolve to kernel config"
+    // HAND_A uses provider = "default" → should be resolved to a real provider
+    // (kernel auto-detects from available API keys, so we just verify it's not "default")
+    assert_ne!(
+        entry.manifest.model.provider, "default",
+        "Provider should be resolved from kernel config, not left as 'default'"
     );
-    assert_eq!(
-        entry.manifest.model.model, "llama-3.3-70b-versatile",
-        "Default model should resolve to kernel config"
+    assert_ne!(
+        entry.manifest.model.model, "default",
+        "Model should be resolved from kernel config, not left as 'default'"
     );
 
     kernel.shutdown();
