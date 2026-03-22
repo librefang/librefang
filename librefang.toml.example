@@ -5,6 +5,10 @@
 # api_key = ""                               # Set to enable Bearer auth (recommended)
 # api_listen = "127.0.0.1:4545"              # HTTP API bind address (use 0.0.0.0 for public)
 
+# Dashboard login (optional — when set, dashboard requires username/password)
+# dashboard_user = "admin"
+# dashboard_pass = "vault:dashboard_password" # Supports: literal, vault:KEY, or env LIBREFANG_DASHBOARD_PASS
+
 [default_model]
 provider = "anthropic"                    # "anthropic", "gemini", "openai", "groq", "z.ai", "kimi2", "ollama", etc.
 model = "claude-sonnet-4-20250514"        # Model identifier
