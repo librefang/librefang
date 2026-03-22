@@ -11,7 +11,7 @@ import { Input } from "../components/ui/Input";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
 import { Avatar } from "../components/ui/Avatar";
-import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock } from "lucide-react";
+import { Search, Users, MessageCircle, X, Cpu, Wrench, Shield, Plus, Loader2, Pause, Play, Clock, Brain, Zap } from "lucide-react";
 
 const REFRESH_MS = 30000;
 
@@ -317,6 +317,38 @@ export function AgentsPage() {
                 </div>
               )}
 
+              {/* Thinking / Extended Reasoning */}
+              {detailAgent.thinking && (
+                <div>
+                  <h4 className="text-[10px] font-black text-text-dim uppercase tracking-widest mb-3 flex items-center gap-2">
+                    <div className="w-5 h-5 rounded bg-purple-500/10 flex items-center justify-center"><Brain className="w-3 h-3 text-purple-500" /></div>
+                    {t("agents.thinking")}
+                  </h4>
+                  <div className="p-4 rounded-xl bg-main/50 border border-border-subtle/50 space-y-2.5 text-xs">
+                    <div className="flex justify-between items-center">
+                      <span className="text-text-dim">{t("agents.thinking_enabled")}</span>
+                      <Badge variant={detailAgent.thinking.budget_tokens > 0 ? "success" : "default"}>
+                        {detailAgent.thinking.budget_tokens > 0 ? t("common.yes") : t("common.no")}
+                      </Badge>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-text-dim">{t("agents.budget_tokens")}</span>
+                      <span className="font-black text-sm">{detailAgent.thinking.budget_tokens?.toLocaleString() ?? 0}</span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-text-dim">{t("agents.stream_thinking")}</span>
+                      <Badge variant={detailAgent.thinking.stream_thinking ? "brand" : "default"}>
+                        {detailAgent.thinking.stream_thinking ? t("common.yes") : t("common.no")}
+                      </Badge>
+                    </div>
+                    <p className="text-[10px] text-text-dim/50 flex items-center gap-1 pt-1">
+                      <Zap className="w-3 h-3" />
+                      {t("agents.thinking_hint")}
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* Actions */}
               <div className="flex gap-2 pt-2 border-t border-border-subtle">
                 <Button variant="primary" size="sm" className="flex-1" onClick={() => { setDetailAgent(null); navigate({ to: "/chat", search: { agentId: detailAgent.id } }); }}>
@@ -362,9 +394,13 @@ export function AgentsPage() {
                 <div>
                   <label className="text-[10px] font-bold text-text-dim uppercase">{t("agents.manifest_toml")}</label>
                   <textarea value={manifestToml} onChange={e => setManifestToml(e.target.value)}
-                    placeholder={'[agent]\nname = "my-agent"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"'}
-                    rows={10}
+                    placeholder={'[agent]\nname = "my-agent"\n\n[model]\nprovider = "openai"\nmodel = "gpt-4o"\n\n[thinking]\nbudget_tokens = 10000\nstream_thinking = false'}
+                    rows={12}
                     className="mt-1 w-full rounded-xl border border-border-subtle bg-main px-3 py-2 text-xs font-mono outline-none focus:border-brand resize-none" />
+                  <p className="text-[9px] text-text-dim/50 mt-1 flex items-center gap-1">
+                    <Brain className="w-3 h-3" />
+                    {t("agents.thinking_toml_hint")}
+                  </p>
                 </div>
               )}
 

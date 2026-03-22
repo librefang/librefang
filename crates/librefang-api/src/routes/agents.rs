@@ -924,18 +924,36 @@ pub async fn send_message(
         }
     }
 
-    let sender_context = request_sender_context(&req);
-    let result = if let Some(sender) = sender_context.as_ref() {
+    // Detect ephemeral mode: explicit flag OR `/btw ` prefix in the message text
+    let (effective_message, is_ephemeral) = if req.ephemeral {
+        (req.message.clone(), true)
+    } else if let Some(stripped) = req.message.strip_prefix("/btw ") {
+        (stripped.to_string(), true)
+    } else {
+        (req.message.clone(), false)
+    };
+
+    let result = if is_ephemeral {
+        // Ephemeral "side question" — use a temp session, no persistence
         state
             .kernel
-            .send_message_with_sender_context(agent_id, &req.message, sender)
+            .send_message_ephemeral(agent_id, &effective_message)
             .await
     } else {
-        let kernel_handle: Arc<dyn KernelHandle> = state.kernel.clone() as Arc<dyn KernelHandle>;
-        state
-            .kernel
-            .send_message_with_handle(agent_id, &req.message, Some(kernel_handle))
-            .await
+        let sender_context = request_sender_context(&req);
+        if let Some(sender) = sender_context.as_ref() {
+            state
+                .kernel
+                .send_message_with_sender_context(agent_id, &effective_message, sender)
+                .await
+        } else {
+            let kernel_handle: Arc<dyn KernelHandle> =
+                state.kernel.clone() as Arc<dyn KernelHandle>;
+            state
+                .kernel
+                .send_message_with_handle(agent_id, &effective_message, Some(kernel_handle))
+                .await
+        }
     };
 
     match result {

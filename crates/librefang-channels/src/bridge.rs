@@ -100,6 +100,16 @@ pub trait ChannelBridgeHandle: Send + Sync {
         "Provider listing not available.".to_string()
     }
 
+    /// Send an ephemeral "side question" (`/btw`) — answered with the agent's system
+    /// prompt but without loading or saving session history.
+    async fn send_message_ephemeral(
+        &self,
+        _agent_id: AgentId,
+        _message: &str,
+    ) -> Result<String, String> {
+        Err("Not implemented".to_string())
+    }
+
     /// Reset an agent's session (clear messages, fresh session ID).
     async fn reset_session(&self, _agent_id: AgentId) -> Result<String, String> {
         Err("Not implemented".to_string())
@@ -850,6 +860,7 @@ async fn dispatch_message(
                 | "think"
                 | "skills"
                 | "hands"
+                | "btw"
                 | "workflows"
                 | "workflow"
                 | "triggers"
@@ -1608,6 +1619,8 @@ async fn handle_command(
              /peers - show OFP peer network status\n\
              /a2a - list discovered external A2A agents\n\
              \n\
+             /btw <question> - ask a side question (ephemeral, not saved to session)\n\
+             \n\
              /start - show welcome message\n\
              /help - show this help"
             .to_string(),
@@ -1647,6 +1660,24 @@ async fn handle_command(
                     }
                 }
                 Err(e) => format!("Error finding agent: {e}"),
+            }
+        }
+        "btw" => {
+            if args.is_empty() {
+                return "Usage: /btw <question> — ask a side question without affecting session history".to_string();
+            }
+            let question = args.join(" ");
+            let agent_id = router.resolve(
+                &crate::types::ChannelType::CLI,
+                &sender.platform_id,
+                sender.librefang_user.as_deref(),
+            );
+            match agent_id {
+                Some(aid) => handle
+                    .send_message_ephemeral(aid, &question)
+                    .await
+                    .unwrap_or_else(|e| format!("Error: {e}")),
+                None => "No agent selected. Use /agent <name> first.".to_string(),
             }
         }
         "new" => {
@@ -2152,6 +2183,63 @@ mod tests {
     #[test]
     fn test_detect_image_magic_empty() {
         assert_eq!(detect_image_magic(&[]), None);
+    }
+
+    #[tokio::test]
+    async fn test_handle_command_btw_no_args() {
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![]),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let sender = ChannelUser {
+            platform_id: "user1".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        let result = handle_command("btw", &[], &handle, &router, &sender).await;
+        assert!(result.contains("Usage:"));
+    }
+
+    #[tokio::test]
+    async fn test_handle_command_btw_no_agent_selected() {
+        let agent_id = AgentId::new();
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![(agent_id, "coder".to_string())]),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let sender = ChannelUser {
+            platform_id: "user1".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        // No agent selected for this user
+        let result = handle_command(
+            "btw",
+            &["what is rust?".to_string()],
+            &handle,
+            &router,
+            &sender,
+        )
+        .await;
+        assert!(result.contains("No agent selected"));
+    }
+
+    #[tokio::test]
+    async fn test_help_includes_btw_command() {
+        let handle: Arc<dyn ChannelBridgeHandle> = Arc::new(MockHandle {
+            agents: Mutex::new(vec![]),
+        });
+        let router = Arc::new(AgentRouter::new());
+        let sender = ChannelUser {
+            platform_id: "user1".to_string(),
+            display_name: "Test".to_string(),
+            librefang_user: None,
+        };
+
+        let result = handle_command("help", &[], &handle, &router, &sender).await;
+        assert!(result.contains("/btw"));
     }
 
     #[test]
