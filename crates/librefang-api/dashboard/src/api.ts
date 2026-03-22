@@ -83,6 +83,11 @@ export interface SkillItem {
   author?: string;
   tools_count?: number;
   tags?: string[];
+  source?: {
+    type?: string;
+    slug?: string;
+    version?: string;
+  };
 }
 
 export interface SkillsResponse {
@@ -729,6 +734,7 @@ export interface ClawHubSkillDetail {
   readme: string;
   icon_url?: string;
   is_installed?: boolean;
+  installed?: boolean;
 }
 
 // ClawHub API

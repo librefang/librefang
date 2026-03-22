@@ -349,10 +349,18 @@ export function SkillsPage() {
 
   // Merge detail data with skill
   const skillWithDetails = detailQuery.data && detailsSkill
-    ? { ...detailsSkill, ...detailQuery.data, is_installed: detailQuery.data.is_installed } as ClawHubSkillWithStatus
+    ? {
+        ...detailsSkill,
+        ...detailQuery.data,
+        is_installed: detailQuery.data.is_installed ?? detailQuery.data.installed,
+      } as ClawHubSkillWithStatus
     : detailsSkill;
 
   const installedSkills = skillsQuery.data ?? [];
+  const isInstalledFromMarketplace = (slug: string, source: MarketplaceSource) =>
+    installedSkills.some(
+      (skill) => skill.source?.type === source && skill.source?.slug === slug,
+    );
   const marketplaceSkills = searchQuery.data?.items ?? [];
   const isMarketplaceLoading = searchQuery.isLoading;
   const marketplaceError = searchQuery.error as any;
@@ -368,7 +376,7 @@ export function SkillsPage() {
   const filteredMarketplace = marketplaceSkills
     .map(s => ({
       ...s,
-      is_installed: installedSkills.some(i => i.name === s.slug)
+      is_installed: isInstalledFromMarketplace(s.slug, "clawhub")
     }))
     .filter(s => !search || s.name.toLowerCase().includes(search.toLowerCase()) || s.description?.toLowerCase().includes(search.toLowerCase()));
 
@@ -378,7 +386,7 @@ export function SkillsPage() {
   // Filter & paginate Skillhub
   const filteredSkillhub = skillhubSkills.map(s => ({
     ...s,
-    is_installed: installedSkills.some(i => i.name === s.slug)
+    is_installed: isInstalledFromMarketplace(s.slug, "skillhub")
   }));
 
   const skillhubTotalPages = Math.ceil(filteredSkillhub.length / ITEMS_PER_PAGE);
