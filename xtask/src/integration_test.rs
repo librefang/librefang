@@ -234,7 +234,7 @@ pub fn run(args: IntegrationTestArgs) -> Result<(), Box<dyn std::error::Error>> 
 
     // GET /api/health
     match http_get(port, "/api/health") {
-        Ok((code, _)) if code == 200 => results.pass("GET /api/health"),
+        Ok((200, _)) => results.pass("GET /api/health"),
         Ok((code, body)) => results.fail(
             "GET /api/health",
             &format!("status={}, body={}", code, body),
@@ -245,7 +245,7 @@ pub fn run(args: IntegrationTestArgs) -> Result<(), Box<dyn std::error::Error>> 
     // GET /api/agents
     let mut first_agent_id: Option<String> = None;
     match http_get(port, "/api/agents") {
-        Ok((code, body)) if code == 200 => {
+        Ok((200, body)) => {
             results.pass("GET /api/agents");
             if let Ok(agents) = serde_json::from_str::<serde_json::Value>(&body) {
                 if let Some(arr) = agents.as_array() {
@@ -266,7 +266,7 @@ pub fn run(args: IntegrationTestArgs) -> Result<(), Box<dyn std::error::Error>> 
 
     // GET /api/budget
     match http_get(port, "/api/budget") {
-        Ok((code, _)) if code == 200 => results.pass("GET /api/budget"),
+        Ok((200, _)) => results.pass("GET /api/budget"),
         Ok((code, body)) => results.fail(
             "GET /api/budget",
             &format!("status={}, body={}", code, body),
@@ -276,7 +276,7 @@ pub fn run(args: IntegrationTestArgs) -> Result<(), Box<dyn std::error::Error>> 
 
     // GET /api/network/status
     match http_get(port, "/api/network/status") {
-        Ok((code, _)) if code == 200 => results.pass("GET /api/network/status"),
+        Ok((200, _)) => results.pass("GET /api/network/status"),
         Ok((code, body)) => results.fail(
             "GET /api/network/status",
             &format!("status={}, body={}", code, body),
@@ -294,7 +294,7 @@ pub fn run(args: IntegrationTestArgs) -> Result<(), Box<dyn std::error::Error>> 
         } else if let Some(ref agent_id) = first_agent_id {
             let payload = r#"{"message": "Say hello in 5 words."}"#;
             match http_post(port, &format!("/api/agents/{}/message", agent_id), payload) {
-                Ok((code, _)) if code == 200 => {
+                Ok((200, _)) => {
                     results.pass("POST /api/agents/{id}/message");
 
                     // Verify budget updated

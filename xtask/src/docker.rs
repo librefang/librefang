@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -40,7 +40,7 @@ fn repo_root() -> PathBuf {
     }
 }
 
-fn read_workspace_version(root: &PathBuf) -> String {
+fn read_workspace_version(root: &Path) -> String {
     let content = fs::read_to_string(root.join("Cargo.toml")).unwrap_or_default();
     let doc = content.parse::<toml_edit::DocumentMut>().ok();
     doc.and_then(|d| {

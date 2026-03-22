@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -51,7 +51,7 @@ fn check_tool(name: &str, install_hint: &str) -> bool {
     ok
 }
 
-fn install_git_hooks(root: &PathBuf) {
+fn install_git_hooks(root: &Path) {
     let hooks_src = root.join("scripts/hooks");
     let hooks_dst = root.join(".git/hooks");
 
