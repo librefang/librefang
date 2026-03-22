@@ -268,14 +268,19 @@ pub async fn auth(
             .and_then(|v| v.to_str().ok())
     });
 
-    // SECURITY: Use constant-time comparison to prevent timing attacks.
-    let header_auth = api_token.map(|token| {
+    // Split composite key (supports multiple valid tokens separated by \n).
+    let valid_keys: Vec<&str> = api_key.split('\n').filter(|k| !k.is_empty()).collect();
+
+    // Helper: constant-time check against any valid key
+    let matches_any = |token: &str| -> bool {
         use subtle::ConstantTimeEq;
-        if token.len() != api_key.len() {
-            return false;
-        }
-        token.as_bytes().ct_eq(api_key.as_bytes()).into()
-    });
+        valid_keys.iter().any(|key| {
+            key.len() == token.len() && token.as_bytes().ct_eq(key.as_bytes()).into()
+        })
+    };
+
+    // SECURITY: Use constant-time comparison to prevent timing attacks.
+    let header_auth = api_token.map(|token| matches_any(token));
 
     // Also check ?token= query parameter (for EventSource/SSE clients that
     // cannot set custom headers, same approach as WebSocket auth).
@@ -285,13 +290,7 @@ pub async fn auth(
         .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")));
 
     // SECURITY: Use constant-time comparison to prevent timing attacks.
-    let query_auth = query_token.map(|token| {
-        use subtle::ConstantTimeEq;
-        if token.len() != api_key.len() {
-            return false;
-        }
-        token.as_bytes().ct_eq(api_key.as_bytes()).into()
-    });
+    let query_auth = query_token.map(|token| matches_any(token));
 
     // Accept if either auth method matches
     if header_auth == Some(true) || query_auth == Some(true) {

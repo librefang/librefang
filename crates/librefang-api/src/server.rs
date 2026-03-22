@@ -966,32 +966,41 @@ pub async fn build_router(
     };
 
     // Trim whitespace so `api_key = ""` or `api_key = "  "` both disable auth.
-    let mut api_key = state.kernel.config.api_key.trim().to_string();
+    let explicit_api_key = state.kernel.config.api_key.trim().to_string();
 
-    // If dashboard credentials are configured but no api_key, derive one from credentials.
-    // This ensures the auth middleware protects write endpoints when credentials are set.
-    if api_key.is_empty() {
-        let du_val = resolve_dashboard_credential(
-            &state.kernel.config.dashboard_user,
-            "LIBREFANG_DASHBOARD_USER",
-            &state.kernel.config.home_dir,
-        );
-        let dp_val = resolve_dashboard_credential(
-            &state.kernel.config.dashboard_pass,
-            "LIBREFANG_DASHBOARD_PASS",
-            &state.kernel.config.home_dir,
-        );
-        let du = du_val.trim();
-        let dp = dp_val.trim();
-        if !du.is_empty() && !dp.is_empty() {
-            use hmac::{Hmac, Mac};
-            use sha2::Sha256;
-            let mut mac = Hmac::<Sha256>::new_from_slice(dp.as_bytes()).expect("HMAC key");
-            mac.update(du.as_bytes());
-            mac.update(b"librefang-dashboard-session");
-            api_key = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
-        }
-    }
+    // Derive dashboard session token from credentials (if configured).
+    let du_val = resolve_dashboard_credential(
+        &state.kernel.config.dashboard_user,
+        "LIBREFANG_DASHBOARD_USER",
+        &state.kernel.config.home_dir,
+    );
+    let dp_val = resolve_dashboard_credential(
+        &state.kernel.config.dashboard_pass,
+        "LIBREFANG_DASHBOARD_PASS",
+        &state.kernel.config.home_dir,
+    );
+    let du = du_val.trim();
+    let dp = dp_val.trim();
+    let dashboard_token = if !du.is_empty() && !dp.is_empty() {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = Hmac::<Sha256>::new_from_slice(dp.as_bytes()).expect("HMAC key");
+        mac.update(du.as_bytes());
+        mac.update(b"librefang-dashboard-session");
+        mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>()
+    } else {
+        String::new()
+    };
+
+    // Build composite key: both explicit api_key AND dashboard token are valid.
+    // Middleware accepts any token matching either one.
+    // Format: "key1\nkey2" — middleware splits and checks each.
+    let api_key = match (explicit_api_key.is_empty(), dashboard_token.is_empty()) {
+        (false, false) => format!("{explicit_api_key}\n{dashboard_token}"),
+        (false, true) => explicit_api_key,
+        (true, false) => dashboard_token,
+        (true, true) => String::new(),
+    };
     let api_key_lock = Arc::new(tokio::sync::RwLock::new(api_key));
     let gcra_limiter = rate_limiter::create_rate_limiter();
 

@@ -472,8 +472,10 @@ type Json = Record<string, unknown>;
 
 // Global 401 handler — set by App.tsx to trigger login screen
 let _onUnauthorized: (() => void) | null = null;
+let _unauthorizedFired = false;
 export function setOnUnauthorized(fn: (() => void) | null) {
   _onUnauthorized = fn;
+  _unauthorizedFired = false;
 }
 
 function authHeader(): HeadersInit {
@@ -482,8 +484,9 @@ function authHeader(): HeadersInit {
 }
 
 async function parseError(response: Response): Promise<Error> {
-  // If 401, trigger global logout
-  if (response.status === 401 && _onUnauthorized) {
+  // If 401, trigger global logout (only once to prevent infinite loop)
+  if (response.status === 401 && _onUnauthorized && !_unauthorizedFired) {
+    _unauthorizedFired = true;
     clearApiKey();
     _onUnauthorized();
   }
@@ -1232,7 +1235,8 @@ export function clearApiKey() {
 }
 
 export function hasApiKey(): boolean {
-  return !!localStorage.getItem("librefang-api-key");
+  const key = localStorage.getItem("librefang-api-key");
+  return !!key && key.length > 0;
 }
 
 export type AuthMode = "credentials" | "api_key" | "none";
