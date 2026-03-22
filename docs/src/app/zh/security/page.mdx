@@ -69,6 +69,18 @@ chain.append(operation_hash);
 api_key = "your-bearer-token"
 ```
 
+### Dashboard 登录认证
+
+```toml
+dashboard_user = "admin"
+dashboard_pass = "vault:dashboard_password"  # 推荐使用 vault 存储
+```
+
+密码来源优先级：
+1. 环境变量：`LIBREFANG_DASHBOARD_PASS`
+2. 加密 Vault：`vault:KEY_NAME`（通过 `librefang vault set KEY_NAME` 存储）
+3. 配置文件明文（不推荐）
+
 ### 网络配置
 
 ```toml
