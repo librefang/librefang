@@ -58,6 +58,8 @@ pub enum SkillRuntime {
     Wasm,
     /// Node.js module (OpenClaw compatibility).
     Node,
+    /// Shell/Bash script executed in subprocess.
+    Shell,
     /// Built-in (compiled into the binary).
     Builtin,
     /// Prompt-only skill: injects context into the LLM system prompt.
@@ -250,6 +252,12 @@ capabilities = ["NetConnect(*)"]
         let rt: SkillRuntime = serde_json::from_str("\"wasm\"").unwrap();
         assert_eq!(rt, SkillRuntime::Wasm);
 
+        let rt: SkillRuntime = serde_json::from_str("\"shell\"").unwrap();
+        assert_eq!(rt, SkillRuntime::Shell);
+
+        let json = serde_json::to_string(&SkillRuntime::Shell).unwrap();
+        assert_eq!(json, "\"shell\"");
+
         let rt: SkillRuntime = serde_json::from_str("\"promptonly\"").unwrap();
         assert_eq!(rt, SkillRuntime::PromptOnly);
     }
@@ -268,6 +276,35 @@ capabilities = ["NetConnect(*)"]
         let json = serde_json::to_string(&native).unwrap();
         let back: SkillSource = serde_json::from_str(&json).unwrap();
         assert_eq!(back, SkillSource::Native);
+    }
+
+    #[test]
+    fn test_skill_manifest_parse_shell() {
+        let toml_str = r#"
+[skill]
+name = "disk-cleanup"
+version = "0.1.0"
+description = "Clean up temporary files"
+author = "librefang-community"
+license = "MIT"
+tags = ["disk", "cleanup", "shell"]
+
+[runtime]
+type = "shell"
+entry = "cleanup.sh"
+
+[[tools.provided]]
+name = "cleanup_tmp"
+description = "Remove temporary files older than 7 days"
+input_schema = { type = "object", properties = { days = { type = "number" } } }
+"#;
+
+        let manifest: SkillManifest = toml::from_str(toml_str).unwrap();
+        assert_eq!(manifest.skill.name, "disk-cleanup");
+        assert_eq!(manifest.runtime.runtime_type, SkillRuntime::Shell);
+        assert_eq!(manifest.runtime.entry, "cleanup.sh");
+        assert_eq!(manifest.tools.provided.len(), 1);
+        assert_eq!(manifest.tools.provided[0].name, "cleanup_tmp");
     }
 
     #[test]
