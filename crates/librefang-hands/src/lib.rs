@@ -363,7 +363,34 @@ fn default_temperature() -> f32 {
     0.7
 }
 
+/// Localized label/description for a single setting (optional).
+///
+/// If omitted, the original English label/description from `[[settings]]` is used.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HandSettingI18n {
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 /// Localized strings for a Hand definition.
+///
+/// All fields are optional — HAND.toml files work without any `[i18n.*]` section.
+/// When present, only the provided fields override their English defaults.
+///
+/// ## Example (HAND.toml)
+///
+/// ```toml
+/// [i18n.zh]
+/// name = "线索生成 Hand"
+/// description = "自主线索生成"
+///
+/// # Optional: translate individual settings. Omit to keep English labels.
+/// [i18n.zh.settings.target_industry]
+/// label = "目标行业"
+/// description = "聚焦的行业领域"
+/// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HandI18n {
     /// Localized name.
@@ -375,6 +402,10 @@ pub struct HandI18n {
     /// Localized category display name.
     #[serde(default)]
     pub category: Option<String>,
+    /// Localized setting labels/descriptions, keyed by setting key.
+    /// Optional — settings without translations fall back to English.
+    #[serde(default)]
+    pub settings: HashMap<String, HandSettingI18n>,
 }
 
 /// Complete Hand definition — parsed from HAND.toml.

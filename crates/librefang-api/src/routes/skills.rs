@@ -1200,7 +1200,7 @@ pub async fn get_hand(
             let settings_status = state
                 .kernel
                 .hands()
-                .check_settings_availability(&hand_id)
+                .check_settings_availability(&hand_id, Some(lang))
                 .unwrap_or_default();
             (
                 StatusCode::OK,
@@ -1781,9 +1781,19 @@ pub async fn deactivate_hand(
 )]
 pub async fn get_hand_settings(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Path(hand_id): Path<String>,
 ) -> impl IntoResponse {
-    let settings_status = match state.kernel.hands().check_settings_availability(&hand_id) {
+    let lang = headers
+        .get("accept-language")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(&[',', ';', '-'][..]).next());
+
+    let settings_status = match state
+        .kernel
+        .hands()
+        .check_settings_availability(&hand_id, lang)
+    {
         Ok(s) => s,
         Err(_) => {
             return (

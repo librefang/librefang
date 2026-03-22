@@ -418,11 +418,19 @@ impl HandRegistry {
     }
 
     /// Check availability of all settings options for a hand.
-    pub fn check_settings_availability(&self, hand_id: &str) -> HandResult<Vec<SettingStatus>> {
+    pub fn check_settings_availability(
+        &self,
+        hand_id: &str,
+        lang: Option<&str>,
+    ) -> HandResult<Vec<SettingStatus>> {
         let def = self
             .definitions
             .get(hand_id)
             .ok_or_else(|| HandError::NotFound(hand_id.to_string()))?;
+
+        let i18n_settings = lang
+            .and_then(|l| def.i18n.get(l))
+            .map(|entry| &entry.settings);
 
         Ok(def
             .settings
@@ -445,10 +453,21 @@ impl HandRegistry {
                         }
                     })
                     .collect();
+
+                let setting_i18n = i18n_settings.and_then(|s| s.get(&setting.key));
+                let label = setting_i18n
+                    .and_then(|si| si.label.as_deref())
+                    .unwrap_or(&setting.label)
+                    .to_string();
+                let description = setting_i18n
+                    .and_then(|si| si.description.as_deref())
+                    .unwrap_or(&setting.description)
+                    .to_string();
+
                 SettingStatus {
                     key: setting.key.clone(),
-                    label: setting.label.clone(),
-                    description: setting.description.clone(),
+                    label,
+                    description,
                     setting_type: setting.setting_type.clone(),
                     default: setting.default.clone(),
                     options,
