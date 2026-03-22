@@ -789,6 +789,31 @@ enum HandCommands {
         /// Hand ID or instance ID.
         id: String,
     },
+    /// Show current settings for a hand.
+    #[command(
+        long_about = "Show the current settings/configuration for a hand.\n\nExamples:\n  librefang hand settings clip"
+    )]
+    Settings {
+        /// Hand ID.
+        id: String,
+    },
+    /// Set a configuration value for a hand.
+    #[command(
+        long_about = "Set a configuration key-value pair for a hand.\n\nExamples:\n  librefang hand set clip interval 30m\n  librefang hand set researcher max_results 20"
+    )]
+    Set {
+        /// Hand ID.
+        id: String,
+        /// Configuration key.
+        key: String,
+        /// Configuration value.
+        value: String,
+    },
+    /// Reload hand definitions from disk.
+    #[command(
+        long_about = "Reload all hand definitions from ~/.librefang/hands/ without restarting.\n\nPicks up newly added or modified HAND.toml files.\n\nExamples:\n  librefang hand reload"
+    )]
+    Reload,
 }
 
 #[derive(Subcommand)]
@@ -1556,6 +1581,9 @@ fn main() {
             HandCommands::InstallDeps { id } => cmd_hand_install_deps(&id),
             HandCommands::Pause { id } => cmd_hand_pause(&id),
             HandCommands::Resume { id } => cmd_hand_resume(&id),
+            HandCommands::Settings { id } => cmd_hand_settings(&id),
+            HandCommands::Set { id, key, value } => cmd_hand_set(&id, &key, &value),
+            HandCommands::Reload => cmd_hand_reload(),
         },
         Some(Commands::Config(sub)) => match sub {
             ConfigCommands::Show => cmd_config_show(),
@@ -5802,6 +5830,74 @@ fn cmd_hand_resume(id: &str) {
             &[("id", &format!("{hand_label} (instance: {instance_id})"))],
         ));
     }
+}
+
+fn cmd_hand_settings(id: &str) {
+    let base = require_daemon("hand settings");
+    let client = daemon_client();
+    let body = daemon_json(client.get(format!("{base}/api/hands/{id}/settings")).send());
+    if body.get("error").is_some() {
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
+        ));
+        std::process::exit(1);
+    }
+    if let Some(config) = body.get("config").and_then(|c| c.as_object()) {
+        if config.is_empty() {
+            ui::info(&format!("Hand '{id}' has no configurable settings."));
+        } else {
+            ui::header(&format!("Settings for '{id}'"));
+            for (k, v) in config {
+                println!("  {}: {}", k.bold(), v);
+            }
+        }
+    } else {
+        ui::info(&format!("Hand '{id}' has no configurable settings."));
+    }
+}
+
+fn cmd_hand_set(id: &str, key: &str, value: &str) {
+    let base = require_daemon("hand set");
+    let client = daemon_client();
+    let mut config = serde_json::Map::new();
+    config.insert(
+        key.to_string(),
+        serde_json::Value::String(value.to_string()),
+    );
+    let body = daemon_json(
+        client
+            .put(format!("{base}/api/hands/{id}/settings"))
+            .json(&serde_json::json!({ "config": config }))
+            .send(),
+    );
+    if body.get("error").is_some() {
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
+        ));
+        std::process::exit(1);
+    }
+    ui::success(&format!("Set {key}={value} for hand '{id}'."));
+}
+
+fn cmd_hand_reload() {
+    let base = require_daemon("hand reload");
+    let client = daemon_client();
+    let body = daemon_json(client.post(format!("{base}/api/hands/reload")).send());
+    if body.get("error").is_some() {
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
+        ));
+        std::process::exit(1);
+    }
+    let added = body["added"].as_u64().unwrap_or(0);
+    let updated = body["updated"].as_u64().unwrap_or(0);
+    let total = body["total"].as_u64().unwrap_or(0);
+    ui::success(&format!(
+        "Reloaded hands: {added} added, {updated} updated, {total} total."
+    ));
 }
 
 fn fetch_active_hand_instances(

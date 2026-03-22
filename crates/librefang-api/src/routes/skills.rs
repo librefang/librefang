@@ -86,6 +86,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/hands/instances/{id}/browser",
             axum::routing::get(hand_instance_browser),
         )
+        .route("/hands/reload", axum::routing::post(reload_hands))
         // MCP server management
         .route(
             "/mcp/servers",
@@ -1774,15 +1775,18 @@ pub async fn update_hand_settings(
 
     match instance_id {
         Some(id) => match state.kernel.hands().update_config(id, config.clone()) {
-            Ok(()) => (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "ok",
-                    "hand_id": hand_id,
-                    "instance_id": id,
-                    "config": config,
-                })),
-            ),
+            Ok(()) => {
+                state.kernel.persist_hand_state();
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "ok",
+                        "hand_id": hand_id,
+                        "instance_id": id,
+                        "config": config,
+                    })),
+                )
+            }
             Err(e) => (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": format!("{e}")})),
@@ -1795,6 +1799,29 @@ pub async fn update_hand_settings(
             ),
         ),
     }
+}
+
+/// POST /api/hands/reload — Reload hand definitions from disk.
+#[utoipa::path(
+    post,
+    path = "/api/hands/reload",
+    tag = "hands",
+    responses(
+        (status = 200, description = "Reload hand definitions from disk", body = serde_json::Value)
+    )
+)]
+pub async fn reload_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let (added, updated) = state.kernel.reload_hands();
+    let total = state.kernel.hand_registry.list_definitions().len();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "added": added,
+            "updated": updated,
+            "total": total,
+        })),
+    )
 }
 
 /// GET /api/hands/instances/{id}/stats — Get dashboard stats for a hand instance.

@@ -5193,7 +5193,9 @@ system_prompt = "You are a helpful assistant."
             .unwrap_or_default();
         if let Some(old) = existing {
             info!(agent = %old.name, id = %old.id, "Removing existing hand agent for reactivation");
-            let _ = self.kill_agent(old.id);
+            if let Err(e) = self.kill_agent(old.id) {
+                warn!(agent = %old.name, id = %old.id, error = %e, "Failed to kill old hand agent, proceeding with reactivation");
+            }
         }
 
         // Spawn the agent
@@ -5298,26 +5300,49 @@ system_prompt = "You are a helpful assistant."
         Ok(())
     }
 
+    /// Reload hand definitions from disk (hot reload).
+    pub fn reload_hands(&self) -> (usize, usize) {
+        let (added, updated) = self.hand_registry.reload_from_disk(&self.config.home_dir);
+        info!(added, updated, "Reloaded hand definitions from disk");
+        (added, updated)
+    }
+
     /// Persist active hand state to disk.
-    fn persist_hand_state(&self) {
+    pub fn persist_hand_state(&self) {
         let state_path = self.config.home_dir.join("hand_state.json");
         if let Err(e) = self.hand_registry.persist_state(&state_path) {
             warn!(error = %e, "Failed to persist hand state");
         }
     }
 
-    /// Pause a hand (marks it paused; agent stays alive but won't receive new work).
+    /// Pause a hand (marks it paused and suspends background loop ticks).
     pub fn pause_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
+        // Pause the background loop for this hand's agent
+        if let Some(instance) = self.hand_registry.get_instance(instance_id) {
+            if let Some(agent_id) = instance.agent_id {
+                self.background.pause_agent(agent_id);
+            }
+        }
         self.hand_registry
             .pause(instance_id)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))
+            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+        self.persist_hand_state();
+        Ok(())
     }
 
-    /// Resume a paused hand.
+    /// Resume a paused hand (restores background loop ticks).
     pub fn resume_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         self.hand_registry
             .resume(instance_id)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))
+            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+        // Resume the background loop for this hand's agent
+        if let Some(instance) = self.hand_registry.get_instance(instance_id) {
+            if let Some(agent_id) = instance.agent_id {
+                self.background.resume_agent(agent_id);
+            }
+        }
+        self.persist_hand_state();
+        Ok(())
     }
 
     /// Set the weak self-reference for trigger dispatch.
@@ -5706,7 +5731,7 @@ system_prompt = "You are a helpful assistant."
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());
-            for (hand_id, config, old_agent_id) in saved_hands {
+            for (hand_id, config, old_agent_id, was_paused) in saved_hands {
                 // Check if hand's agent.toml has enabled=false — skip reactivation
                 let hand_agent_name = format!("{}-hand", hand_id);
                 let hand_toml = self
@@ -5726,7 +5751,16 @@ system_prompt = "You are a helpful assistant."
                 }
                 match self.activate_hand(&hand_id, config) {
                     Ok(inst) => {
-                        info!(hand = %hand_id, instance = %inst.instance_id, "Hand restored");
+                        // Restore paused state if the hand was paused before restart
+                        if was_paused {
+                            if let Err(e) = self.pause_hand(inst.instance_id) {
+                                warn!(hand = %hand_id, error = %e, "Failed to restore paused state");
+                            } else {
+                                info!(hand = %hand_id, instance = %inst.instance_id, "Hand restored (paused)");
+                            }
+                        } else {
+                            info!(hand = %hand_id, instance = %inst.instance_id, "Hand restored");
+                        }
                         // Reassign cron jobs and triggers from the pre-restart
                         // agent ID to the newly spawned agent so scheduled tasks
                         // and event triggers survive daemon restarts (issues
@@ -5772,20 +5806,42 @@ system_prompt = "You are a helpful assistant."
                 }
             }
         } else if !state_path.exists() {
-            // First boot: activate default hands for out-of-the-box experience
-            info!(
-                "First boot detected — activating {} default hand(s)",
-                Self::DEFAULT_HANDS.len()
-            );
-            for hand_id in Self::DEFAULT_HANDS {
-                match self.activate_hand(hand_id, std::collections::HashMap::new()) {
-                    Ok(inst) => {
-                        info!(hand = %hand_id, instance = %inst.instance_id, "Default hand activated");
+            // First boot
+            if Self::DEFAULT_HANDS.is_empty() {
+                // No default hands — show available hands so users know what's there
+                let defs = self.hand_registry.list_definitions();
+                if !defs.is_empty() {
+                    info!("First boot detected — no hands activated by default");
+                    info!(
+                        "Available hands ({}) — activate with: librefang hand activate <id>",
+                        defs.len()
+                    );
+                    for def in &defs {
+                        let icon = if def.icon.is_empty() {
+                            "".to_string()
+                        } else {
+                            format!("{} ", def.icon)
+                        };
+                        info!("  {icon}{id}: {desc}", id = def.id, desc = def.description);
                     }
-                    Err(e) => warn!(hand = %hand_id, error = %e, "Failed to activate default hand"),
                 }
+            } else {
+                info!(
+                    "First boot detected — activating {} default hand(s)",
+                    Self::DEFAULT_HANDS.len()
+                );
+                for hand_id in Self::DEFAULT_HANDS {
+                    match self.activate_hand(hand_id, std::collections::HashMap::new()) {
+                        Ok(inst) => {
+                            info!(hand = %hand_id, instance = %inst.instance_id, "Default hand activated");
+                        }
+                        Err(e) => {
+                            warn!(hand = %hand_id, error = %e, "Failed to activate default hand");
+                        }
+                    }
+                }
+                self.persist_hand_state();
             }
-            self.persist_hand_state();
         }
 
         // Context-engine bootstrap is async; run it at daemon startup so hook

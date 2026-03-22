@@ -120,6 +120,7 @@ use crate::types;
         routes::deactivate_hand,
         routes::hand_stats,
         routes::hand_instance_browser,
+        routes::reload_hands,
 
         // ── MCP Servers ──
         routes::list_mcp_servers,
