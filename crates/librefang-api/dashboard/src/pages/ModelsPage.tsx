@@ -103,8 +103,8 @@ export function ModelsPage() {
       )}
 
       {/* Filters */}
-      <div className="flex flex-wrap gap-3 items-center">
-        <div className="flex-1 min-w-[200px] max-w-sm">
+      <div className="flex flex-wrap gap-2 sm:gap-3 items-center">
+        <div className="flex-1 min-w-[160px] sm:min-w-[200px] max-w-sm">
           <Input value={search} onChange={e => setSearch(e.target.value)}
             placeholder={t("models.search_placeholder")}
             leftIcon={<Search className="h-4 w-4" />} />
@@ -115,7 +115,7 @@ export function ModelsPage() {
           {providers.map(p => <option key={p} value={p}>{p === "all" ? t("models.all_providers") : p}</option>)}
         </select>
 
-        <div className="flex gap-0.5 rounded-xl border border-border-subtle bg-surface p-0.5 flex-wrap">
+        <div className="flex gap-0.5 rounded-xl border border-border-subtle bg-surface p-0.5 flex-wrap overflow-x-auto">
           {tiers.map(tier => (
             <button key={tier} onClick={() => setTierFilter(tier || "all")}
               className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold transition-colors ${
@@ -158,9 +158,9 @@ export function ModelsPage() {
           <p className="text-sm text-text-dim">{allModels.length === 0 ? t("models.no_models") : t("models.no_results")}</p>
         </div>
       ) : (
-        <div className="rounded-2xl border border-border-subtle overflow-hidden">
+        <div className="rounded-2xl border border-border-subtle overflow-hidden overflow-x-auto">
           {/* Table header */}
-          <div className="grid grid-cols-[1fr_100px_80px_80px_80px_50px_50px_50px] gap-3 px-5 py-3 bg-main text-[11px] font-bold text-text-dim/60 uppercase">
+          <div className="grid grid-cols-[minmax(160px,1fr)_100px_80px_80px_80px_50px_50px_50px] min-w-[700px] gap-3 px-5 py-3 bg-main text-[11px] font-bold text-text-dim/60 uppercase">
             <span>{t("models.col_model")}</span>
             <span>{t("models.col_provider")}</span>
             <span>{t("models.col_tier")}</span>
@@ -173,7 +173,7 @@ export function ModelsPage() {
 
           {paged.map((m, i) => (
             <div key={`${m.provider}:${m.id}`}
-              className={`grid grid-cols-[1fr_100px_80px_80px_80px_50px_50px_50px] gap-3 px-5 py-3 items-center border-t border-border-subtle/50 hover:bg-surface transition-colors ${
+              className={`grid grid-cols-[minmax(160px,1fr)_100px_80px_80px_80px_50px_50px_50px] min-w-[700px] gap-3 px-5 py-3 items-center border-t border-border-subtle/50 hover:bg-surface transition-colors ${
                 !m.available ? "opacity-40" : ""
               } ${i % 2 === 0 ? "" : "bg-main/30"}`}>
               <div className="min-w-0">

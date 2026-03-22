@@ -1,5 +1,13 @@
 export type ChatRole = "user" | "assistant" | "system";
 
+export interface ToolOutputEntry {
+  id: string;
+  tool: string;
+  content: string;
+  isError: boolean;
+  timestamp: Date;
+}
+
 export function normalizeRole(raw?: string): ChatRole {
   if (raw === "User") return "user";
   if (raw === "System") return "system";
@@ -30,4 +38,25 @@ export function formatMeta(response: {
     parts.push(`$${response.cost_usd.toFixed(4)}`);
   }
   return parts.join(" | ");
+}
+
+export function normalizeToolOutput(event: {
+  tool?: unknown;
+  result?: unknown;
+  is_error?: unknown;
+}): ToolOutputEntry | null {
+  const tool = typeof event.tool === "string" ? event.tool.trim() : "";
+  if (!tool) return null;
+
+  const isError = Boolean(event.is_error);
+  const rawResult = asText(event.result).trim();
+  const content = rawResult || (isError ? "Tool failed without a preview." : "Tool finished.");
+
+  return {
+    id: `${tool}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    tool,
+    content,
+    isError,
+    timestamp: new Date(),
+  };
 }

@@ -213,8 +213,8 @@ export function A2APage() {
 
           {/* Send task modal */}
           {taskAgent && (
-            <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setTaskAgent(null)}>
-              <div className="w-full max-w-lg mx-4 animate-fade-in-scale" onClick={(e) => e.stopPropagation()}>
+            <div className="fixed inset-0 z-[200] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setTaskAgent(null)}>
+              <div className="w-full sm:max-w-lg sm:mx-4 animate-fade-in-scale" onClick={(e) => e.stopPropagation()}>
                 <Card padding="lg">
                   <h3 className="text-lg font-black mb-1">{t("a2a.send_task")}</h3>
                   <p className="text-xs text-text-dim mb-4">
@@ -255,8 +255,8 @@ export function A2APage() {
               <div className="space-y-2 stagger-children">
                 {trackedTasks.map((task) => (
                   <Card key={task.id} padding="sm">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1 flex-wrap">
                         {task.status === "completed" ? (
                           <CheckCircle2 className="w-4 h-4 text-success" />
                         ) : task.status === "failed" ? (
@@ -264,7 +264,7 @@ export function A2APage() {
                         ) : (
                           <Loader2 className="w-4 h-4 text-brand animate-spin" />
                         )}
-                        <span className="text-sm font-mono font-bold">{task.id}</span>
+                        <span className="text-xs sm:text-sm font-mono font-bold truncate">{task.id}</span>
                         <Badge
                           variant={
                             task.status === "completed" ? "success" :
