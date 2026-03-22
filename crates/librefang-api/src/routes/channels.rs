@@ -703,6 +703,20 @@ const CHANNEL_REGISTRY: &[ChannelMeta] = &[
         config_template: "[channels.mumble]\nhost = \"\"\nusername = \"librefang\"",
     },
     ChannelMeta {
+        name: "wechat", display_name: "WeChat", icon: "WX",
+        description: "WeChat personal account via iLink protocol",
+        category: "messaging", difficulty: "Easy", setup_time: "~1 min",
+        quick_setup: "Scan QR code with your WeChat app — no developer account needed",
+        setup_type: "qr",
+        fields: &[
+            ChannelField { key: "bot_token_env", label: "Bot Token (from previous session)", field_type: FieldType::Secret, env_var: Some("WECHAT_BOT_TOKEN"), required: false, placeholder: "ilink_bot_...", advanced: true },
+            ChannelField { key: "allowed_users", label: "Allowed User IDs", field_type: FieldType::List, env_var: None, required: false, placeholder: "abc123@im.wechat", advanced: true },
+            ChannelField { key: "default_agent", label: "Default Agent", field_type: FieldType::Text, env_var: None, required: false, placeholder: "assistant", advanced: true },
+        ],
+        setup_steps: &["Open WeChat on your phone", "The QR code will appear in the dashboard", "Scan it with WeChat to connect"],
+        config_template: "[channels.wechat]\nbot_token_env = \"WECHAT_BOT_TOKEN\"",
+    },
+    ChannelMeta {
         name: "wecom", display_name: "WeCom", icon: "WC",
         description: "WeCom (WeChat Work) adapter",
         category: "messaging", difficulty: "Easy", setup_time: "~3 min",
@@ -780,6 +794,7 @@ fn is_channel_configured(config: &librefang_types::config::ChannelsConfig, name:
         "gotify" => config.gotify.is_some(),
         "webhook" => config.webhook.is_some(),
         "mumble" => config.mumble.is_some(),
+        "wechat" => config.wechat.is_some(),
         "wecom" => config.wecom.is_some(),
         "qq" => config.qq.is_some(),
         _ => false,
@@ -1009,6 +1024,10 @@ fn channel_config_values(
             .and_then(|c| serde_json::to_value(c).ok()),
         "linkedin" => config
             .linkedin
+            .as_ref()
+            .and_then(|c| serde_json::to_value(c).ok()),
+        "wechat" => config
+            .wechat
             .as_ref()
             .and_then(|c| serde_json::to_value(c).ok()),
         "wecom" => config

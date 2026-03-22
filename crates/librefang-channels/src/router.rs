@@ -379,6 +379,7 @@ pub fn channel_type_to_str(ct: &ChannelType) -> &str {
         ChannelType::Email => "email",
         ChannelType::Teams => "teams",
         ChannelType::Mattermost => "mattermost",
+        ChannelType::WeChat => "wechat",
         ChannelType::WebChat => "webchat",
         ChannelType::CLI => "cli",
         ChannelType::Custom(s) => s.as_str(),

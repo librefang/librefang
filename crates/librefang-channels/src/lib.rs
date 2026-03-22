@@ -94,6 +94,8 @@ pub mod viber;
 pub mod webex;
 #[cfg(feature = "channel-webhook")]
 pub mod webhook;
+#[cfg(feature = "channel-wechat")]
+pub mod wechat;
 #[cfg(feature = "channel-wecom")]
 pub mod wecom;
 #[cfg(feature = "channel-whatsapp")]
