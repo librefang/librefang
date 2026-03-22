@@ -2,10 +2,10 @@
 
 use super::AppState;
 
-/// 构建工作流/触发器/调度/Cron 领域的路由。
+/// Build routes for the workflow/trigger/schedule/cron domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
-        // 触发器
+        // Triggers
         .route(
             "/triggers",
             axum::routing::get(list_triggers).post(create_trigger),
@@ -14,7 +14,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/triggers/{id}",
             axum::routing::delete(delete_trigger).put(update_trigger),
         )
-        // 调度
+        // Schedules
         .route(
             "/schedules",
             axum::routing::get(list_schedules).post(create_schedule),
@@ -29,7 +29,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/schedules/{id}/run",
             axum::routing::post(run_schedule),
         )
-        // 工作流
+        // Workflows
         .route(
             "/workflows",
             axum::routing::get(list_workflows).post(create_workflow),
@@ -48,7 +48,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/workflows/{id}/runs",
             axum::routing::get(list_workflow_runs),
         )
-        // 工作流模板（与 system.rs 的 agent 模板不同）
+        // Workflow templates (distinct from the agent templates in system.rs)
         .route(
             "/workflow-templates",
             axum::routing::get(list_workflow_templates),
@@ -61,7 +61,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/workflow-templates/{id}/instantiate",
             axum::routing::post(instantiate_template),
         )
-        // Cron 作业
+        // Cron jobs
         .route(
             "/cron/jobs",
             axum::routing::get(list_cron_jobs).post(create_cron_job),

@@ -361,7 +361,7 @@ export function App() {
             {navGroups.map((group) => (
               <div key={group.key} className="flex flex-col gap-1">
                 {navLayout === "collapsible" ? (
-                  // 二级菜单布局 - 可折叠
+                  // Collapsible sub-menu layout
                   <>
                     <button
                       onClick={() => toggleNavGroup(group.key)}
@@ -386,7 +386,7 @@ export function App() {
                     </div>
                   </>
                 ) : (
-                  // 分组布局 - 全部显示
+                  // Grouped layout — all items visible
                   <>
                     <h3 className={`px-3 text-[11px] font-bold uppercase tracking-[0.1em] text-text-dim/80 ${isSidebarCollapsed ? "lg:max-h-0 lg:opacity-0 lg:overflow-hidden lg:!p-0 lg:!m-0 lg:!mb-0" : "lg:max-h-20 lg:opacity-100"} transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] overflow-hidden`}>
                       {group.label}

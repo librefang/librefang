@@ -11,7 +11,7 @@ export interface SearchOptions {
 
 export function search(query: string, options?: SearchOptions): Result[];
 
-// 为.mjs文件声明模块类型
+// Declare module types for .mjs files
 declare module "@/mdx/search.mjs" {
 	export interface Result {
 		url: string;

@@ -1,9 +1,9 @@
-//! Mock LLM 驱动 — 用于测试的可配置假 LLM 提供程序。
+//! Mock LLM driver — a configurable fake LLM provider for testing.
 //!
-//! 支持：
-//! - 返回固定回复（canned responses）
-//! - 记录所有请求以便断言
-//! - 模拟流式响应
+//! Supports:
+//! - Returning canned responses
+//! - Recording all requests for assertions
+//! - Simulating streaming responses
 
 use async_trait::async_trait;
 use librefang_runtime::llm_driver::{
@@ -12,45 +12,48 @@ use librefang_runtime::llm_driver::{
 use librefang_types::message::{ContentBlock, StopReason, TokenUsage};
 use std::sync::{Arc, Mutex};
 
-/// 记录的 LLM 调用信息。
+/// Recorded LLM call information.
 #[derive(Debug, Clone)]
 pub struct RecordedCall {
-    /// 请求中的模型名称。
+    /// Model name from the request.
     pub model: String,
-    /// 消息数量。
+    /// Number of messages.
     pub message_count: usize,
-    /// 工具定义数量。
+    /// Number of tool definitions.
     pub tool_count: usize,
-    /// 系统提示（如有）。
+    /// System prompt (if any).
     pub system: Option<String>,
 }
 
-/// Mock LLM 驱动 — 返回可配置的固定回复，并记录所有调用。
+/// Mock LLM driver — returns configurable canned responses and records all calls.
 pub struct MockLlmDriver {
-    /// 固定回复文本列表，按顺序返回。用完后循环使用最后一个。
+    /// List of canned response texts, returned in order. Wraps around to the last one when exhausted.
     responses: Vec<String>,
-    /// 已记录的调用。
+    /// Recorded calls.
     calls: Arc<Mutex<Vec<RecordedCall>>>,
-    /// 当前回复索引。
+    /// Current response index.
     index: Arc<Mutex<usize>>,
-    /// 自定义输入 token 数（默认 10）。
+    /// Custom input token count (default 10).
     input_tokens: u64,
-    /// 自定义输出 token 数（默认 5）。
+    /// Custom output token count (default 5).
     output_tokens: u64,
-    /// 自定义停止原因（默认 EndTurn）。
+    /// Custom stop reason (default EndTurn).
     stop_reason: StopReason,
 }
 
 impl MockLlmDriver {
-    /// 创建一个返回固定回复的 mock driver。
+    /// Creates a mock driver that returns canned responses.
     ///
     /// ```rust
     /// use librefang_testing::MockLlmDriver;
     ///
-    /// let driver = MockLlmDriver::new(vec!["你好！".into()]);
+    /// let driver = MockLlmDriver::new(vec!["Hello!".into()]);
     /// ```
     pub fn new(responses: Vec<String>) -> Self {
-        assert!(!responses.is_empty(), "MockLlmDriver 需要至少一个固定回复");
+        assert!(
+            !responses.is_empty(),
+            "MockLlmDriver requires at least one canned response"
+        );
         Self {
             responses,
             calls: Arc::new(Mutex::new(Vec::new())),
@@ -61,12 +64,12 @@ impl MockLlmDriver {
         }
     }
 
-    /// 创建始终返回同一回复的 mock driver。
+    /// Creates a mock driver that always returns the same response.
     pub fn with_response(response: impl Into<String>) -> Self {
         Self::new(vec![response.into()])
     }
 
-    /// 设置自定义 token 用量（覆盖默认的 input=10, output=5）。
+    /// Sets custom token usage (overrides the default input=10, output=5).
     ///
     /// ```rust
     /// use librefang_testing::MockLlmDriver;
@@ -79,7 +82,7 @@ impl MockLlmDriver {
         self
     }
 
-    /// 设置自定义停止原因（覆盖默认的 EndTurn）。
+    /// Sets a custom stop reason (overrides the default EndTurn).
     ///
     /// ```rust
     /// use librefang_testing::MockLlmDriver;
@@ -92,23 +95,23 @@ impl MockLlmDriver {
         self
     }
 
-    /// 返回已记录的所有调用。
+    /// Returns all recorded calls.
     pub fn recorded_calls(&self) -> Vec<RecordedCall> {
         self.calls.lock().unwrap().clone()
     }
 
-    /// 返回调用次数。
+    /// Returns the number of calls made.
     pub fn call_count(&self) -> usize {
         self.calls.lock().unwrap().len()
     }
 
-    /// 获取下一个回复文本。
+    /// Gets the next response text.
     fn next_response(&self) -> String {
         let mut idx = self.index.lock().unwrap();
         let response = if *idx < self.responses.len() {
             self.responses[*idx].clone()
         } else {
-            // 用完后循环使用最后一个
+            // Wrap around to the last response when exhausted
             self.responses.last().unwrap().clone()
         };
         *idx += 1;
@@ -119,7 +122,7 @@ impl MockLlmDriver {
 #[async_trait]
 impl LlmDriver for MockLlmDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        // 记录调用
+        // Record the call
         {
             let call = RecordedCall {
                 model: request.model.clone(),
@@ -152,7 +155,7 @@ impl LlmDriver for MockLlmDriver {
         request: CompletionRequest,
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
-        // 模拟流式：先发送 TextDelta，再发送 ContentComplete
+        // Simulate streaming: send TextDelta first, then ContentComplete
         let response = self.complete(request).await?;
         let text = response.text();
         if !text.is_empty() {
@@ -172,13 +175,13 @@ impl LlmDriver for MockLlmDriver {
     }
 }
 
-/// 始终返回错误的 mock driver，用于测试错误处理。
+/// A mock driver that always returns errors, used for testing error handling.
 pub struct FailingLlmDriver {
     error_message: String,
 }
 
 impl FailingLlmDriver {
-    /// 创建一个始终返回指定错误的 driver。
+    /// Creates a driver that always returns the specified error.
     pub fn new(error_message: impl Into<String>) -> Self {
         Self {
             error_message: error_message.into(),

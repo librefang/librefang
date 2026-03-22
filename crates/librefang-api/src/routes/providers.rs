@@ -1,6 +1,6 @@
 //! Model catalog, provider management, and Copilot OAuth handlers.
 
-/// 构建模型/提供者领域的路由。
+/// Build routes for the model/provider domain.
 pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
     axum::Router::new()
         .route("/models", axum::routing::get(list_models))

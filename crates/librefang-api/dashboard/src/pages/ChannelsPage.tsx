@@ -366,7 +366,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
         <div className="p-6">
         <p className="text-xs text-text-dim mb-5">{channel.description}</p>
 
-        {/* 已添加的配置 */}
+        {/* Added Configurations */}
         {Object.keys(configs).length > 0 && (
           <div className="space-y-2 mb-4">
             {Object.entries(configs).map(([key, value]) => (
@@ -384,7 +384,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
           </div>
         )}
 
-        {/* 配置字段 */}
+        {/* Configuration Fields */}
         {channel.fields && channel.fields.length > 0 ? (
           <div className="space-y-3 mb-6 max-h-60 overflow-y-auto">
             {channel.fields.filter(f => !f.advanced).map((field, idx) => (
@@ -408,7 +408,7 @@ function ConfigDialog({ channel, onClose, t }: { channel: Channel; onClose: () =
           </div>
         )}
 
-        {/* 按钮 */}
+        {/* Buttons */}
         <div className="flex gap-3">
           <Button variant="secondary" className="flex-1" onClick={onClose}>{t("common.cancel")}</Button>
           <Button variant="primary" className="flex-1" onClick={() => configMutation.mutate()} disabled={configMutation.isPending}>

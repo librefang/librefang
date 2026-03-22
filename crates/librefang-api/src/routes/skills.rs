@@ -1,14 +1,14 @@
 //! Skills, marketplace, ClawHub, hands, and extension handlers.
 
-/// 构建技能/市场/Hands/MCP/集成/扩展领域的路由。
+/// Build routes for the skills/marketplace/hands/MCP/integrations/extensions domain.
 pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
     axum::Router::new()
-        // 技能
+        // Skills
         .route("/skills", axum::routing::get(list_skills))
         .route("/skills/install", axum::routing::post(install_skill))
         .route("/skills/uninstall", axum::routing::post(uninstall_skill))
         .route("/skills/create", axum::routing::post(create_skill))
-        // 市场 / ClawHub
+        // Marketplace / ClawHub
         .route(
             "/marketplace/search",
             axum::routing::get(marketplace_search),
@@ -45,7 +45,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/skillhub/install",
             axum::routing::post(skillhub_install),
         )
-        // Hands（浏览器自动化引擎）
+        // Hands (browser automation engine)
         .route("/hands", axum::routing::get(list_hands))
         .route("/hands/install", axum::routing::post(install_hand))
         .route("/hands/active", axum::routing::get(list_active_hands))
@@ -86,7 +86,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/hands/instances/{id}/browser",
             axum::routing::get(hand_instance_browser),
         )
-        // MCP 服务器管理
+        // MCP server management
         .route(
             "/mcp/servers",
             axum::routing::get(list_mcp_servers).post(add_mcp_server),
@@ -97,7 +97,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
                 .put(update_mcp_server)
                 .delete(delete_mcp_server),
         )
-        // 集成
+        // Integrations
         .route("/integrations", axum::routing::get(list_integrations))
         .route(
             "/integrations/available",
@@ -120,7 +120,7 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/integrations/reload",
             axum::routing::post(reload_integrations),
         )
-        // 扩展
+        // Extensions
         .route("/extensions", axum::routing::get(list_extensions))
         .route(
             "/extensions/install",

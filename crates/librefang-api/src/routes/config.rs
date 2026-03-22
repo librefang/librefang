@@ -2,7 +2,7 @@
 
 use super::AppState;
 
-/// 构建配置/健康/安全/迁移领域的路由。
+/// Build routes for the config/health/security/migration domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
         .route("/metrics", axum::routing::get(prometheus_metrics))

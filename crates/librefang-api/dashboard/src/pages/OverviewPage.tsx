@@ -57,7 +57,7 @@ export function OverviewPage() {
     }
   };
 
-  // 统计卡片数据
+  // Stats card data
   const statsCards = [
     {
       title: t("overview.active_agents"),
@@ -95,7 +95,7 @@ export function OverviewPage() {
     },
   ];
 
-  // 快捷操作
+  // Quick actions
   const quickActions = [
     { label: t("overview.new_workflow"), to: "/canvas", icon: Zap, primary: true },
     { label: t("overview.deploy_agent"), to: "/agents", icon: Users },
