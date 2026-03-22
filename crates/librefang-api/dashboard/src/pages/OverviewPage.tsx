@@ -262,23 +262,23 @@ export function OverviewPage() {
                 {t("overview.view_all")} →
               </button>
             </div>
-            <div className="flex items-center gap-6">
+            <div className="flex flex-wrap items-center gap-4 sm:gap-6">
               <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-success/10">
-                  <Clock className="h-6 w-6 text-success" />
+                <div className="flex h-10 w-10 sm:h-12 sm:w-12 items-center justify-center rounded-xl bg-success/10">
+                  <Clock className="h-5 w-5 sm:h-6 sm:w-6 text-success" />
                 </div>
                 <div>
-                  <p className="text-2xl font-black">{sessionsCount}</p>
+                  <p className="text-xl sm:text-2xl font-black">{sessionsCount}</p>
                   <p className="text-[10px] text-text-dim uppercase">{t("overview.active_sessions")}</p>
                 </div>
               </div>
-              <div className="h-10 w-px bg-border-subtle" />
+              <div className="h-10 w-px bg-border-subtle hidden sm:block" />
               <div className="flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-brand/10">
-                  <Shield className="h-6 w-6 text-brand" />
+                <div className="flex h-10 w-10 sm:h-12 sm:w-12 items-center justify-center rounded-xl bg-brand/10">
+                  <Shield className="h-5 w-5 sm:h-6 sm:w-6 text-brand" />
                 </div>
                 <div>
-                  <p className="text-2xl font-black">{skillsCount}</p>
+                  <p className="text-xl sm:text-2xl font-black">{skillsCount}</p>
                   <p className="text-[10px] text-text-dim uppercase">{t("nav.skills")}</p>
                 </div>
               </div>

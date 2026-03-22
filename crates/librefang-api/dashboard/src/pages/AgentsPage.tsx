@@ -126,7 +126,7 @@ export function AgentsPage() {
 
   return (
     <div className="flex flex-col gap-6 transition-colors duration-300">
-      <div className="flex justify-between items-end">
+      <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-3">
         <PageHeader
           badge={t("common.kernel_runtime")}
           title={t("agents.title")}
@@ -135,7 +135,7 @@ export function AgentsPage() {
           onRefresh={() => void agentsQuery.refetch()}
           icon={<Users className="h-4 w-4" />}
         />
-        <Button variant="primary" onClick={() => setShowCreate(true)}>
+        <Button variant="primary" onClick={() => setShowCreate(true)} className="shrink-0">
           <Plus className="w-4 h-4" />
           {t("agents.create_agent")}
         </Button>
@@ -205,14 +205,14 @@ export function AgentsPage() {
                           <span className="text-brand">{agent.model_provider}</span>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2 shrink-0" onClick={e => e.stopPropagation()}>
+                      <div className="flex items-center gap-2 shrink-0 mt-2 md:mt-0" onClick={e => e.stopPropagation()}>
                         {isSuspended ? (
                           <Button variant="secondary" size="sm" onClick={async () => { await resumeAgent(agent.id); agentsQuery.refetch(); }}>
-                            <Play className="h-3.5 w-3.5 mr-1" /> {t("agents.resume")}
+                            <Play className="h-3.5 w-3.5 mr-1" /> <span className="hidden sm:inline">{t("agents.resume")}</span>
                           </Button>
                         ) : (
                           <Button variant="secondary" size="sm" onClick={async () => { await suspendAgent(agent.id); agentsQuery.refetch(); }}>
-                            <Pause className="h-3.5 w-3.5 mr-1" /> {t("agents.suspend")}
+                            <Pause className="h-3.5 w-3.5 mr-1" /> <span className="hidden sm:inline">{t("agents.suspend")}</span>
                           </Button>
                         )}
                         <Button variant="primary" size="sm" onClick={() => navigate({ to: "/chat", search: { agentId: agent.id } })}>

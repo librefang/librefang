@@ -512,7 +512,7 @@ export function ChannelsPage() {
       />
 
       {/* Search & Controls */}
-      <div className="flex flex-col lg:flex-row gap-3">
+      <div className="flex flex-col sm:flex-row gap-3">
         <div className="flex-1">
           <Input
             value={search}
@@ -527,7 +527,7 @@ export function ChannelsPage() {
           />
         </div>
 
-        <div className="flex gap-2 items-center">
+        <div className="flex gap-2 items-center flex-wrap">
           {/* Sort buttons */}
           <div className="flex gap-1 p-1 bg-main/30 rounded-lg">
             <button
@@ -563,7 +563,7 @@ export function ChannelsPage() {
       </div>
 
       {/* Tabs */}
-      <div className="flex items-center gap-4 flex-wrap">
+      <div className="flex items-center gap-4 flex-wrap overflow-x-auto">
         <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
           <button
             onClick={() => handleTabChange("configured")}

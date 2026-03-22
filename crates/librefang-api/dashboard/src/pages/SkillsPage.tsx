@@ -434,7 +434,7 @@ export function SkillsPage() {
 
       {/* Category Chips */}
       {viewMode === "marketplace" && (
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap gap-1.5 sm:gap-2">
           {categories.map(cat => (
             <button
               key={cat.id}

@@ -102,11 +102,11 @@ export function PluginsPage() {
           <div className="flex gap-2">
             <Button variant="secondary" onClick={() => setShowScaffold(true)}>
               <FileCode className="h-4 w-4" />
-              {t("plugins.new_plugin")}
+              <span className="hidden sm:inline">{t("plugins.new_plugin")}</span>
             </Button>
             <Button variant="primary" onClick={() => setShowInstall(true)}>
               <Download className="h-4 w-4" />
-              {t("plugins.install")}
+              <span className="hidden sm:inline">{t("plugins.install")}</span>
             </Button>
           </div>
         }
@@ -143,7 +143,7 @@ export function PluginsPage() {
           ) : (
             <div className="space-y-2 stagger-children">
               {plugins.map(p => (
-                <div key={p.name} className="flex items-center gap-4 p-4 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-all">
+                <div key={p.name} className="flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-all">
                   <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
                     <Puzzle className="w-5 h-5 text-brand" />
                   </div>
@@ -161,12 +161,12 @@ export function PluginsPage() {
                       <span>{formatSize(p.size_bytes)}</span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
+                  <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto" onClick={e => e.stopPropagation()}>
                     <Button variant="secondary" size="sm"
                       onClick={() => depsMutation.mutate(p.name)}
                       disabled={depsMutation.isPending}>
                       {depsMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-                      {t("plugins.deps")}
+                      <span className="hidden sm:inline">{t("plugins.deps")}</span>
                     </Button>
                     {confirmDelete === p.name ? (
                       <div className="flex items-center gap-1">

@@ -339,7 +339,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"} animate-fade-in-up`}>
-      <div className={`flex flex-col max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
+      <div className={`flex flex-col max-w-[90%] sm:max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
         {/* 头像 + 名字 */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
           <div className={`h-7 w-7 rounded-lg flex items-center justify-center ${
@@ -443,7 +443,7 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
           ))}
         </div>
       )}
-      <div className="flex gap-3 items-end">
+      <div className="flex gap-2 sm:gap-3 items-end">
         <div className="flex-1">
           <textarea
             ref={textareaRef}
@@ -458,16 +458,16 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
             placeholder={placeholder}
             disabled={disabled}
             rows={1}
-            className="w-full min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-5 py-3.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
+            className="w-full min-h-[44px] sm:min-h-[52px] max-h-[150px] rounded-2xl border border-border-subtle bg-surface px-3 sm:px-5 py-2.5 sm:py-3.5 text-sm focus:border-brand focus:ring-2 focus:ring-brand/10 outline-none resize-none placeholder:text-text-dim/40 shadow-sm"
           />
         </div>
         <button
           type="submit"
           disabled={!message.trim() || disabled}
-          className="group relative px-5 py-3.5 rounded-2xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
+          className="group relative px-3.5 sm:px-5 py-2.5 sm:py-3.5 rounded-2xl bg-gradient-to-r from-brand to-brand/90 text-white font-bold text-sm shadow-lg shadow-brand/20 hover:shadow-brand/40 hover:-translate-y-0.5 transition-all duration-300 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:translate-y-0"
         >
           <Send className="h-4 w-4" />
-          <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
+          <span className="absolute -top-8 right-0 bg-surface border border-border-subtle rounded-lg px-2 py-1 text-[10px] text-text-dim opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap hidden sm:block">
             {t("chat.send_hint")}
           </span>
         </button>
@@ -480,21 +480,21 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
 function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected }: { agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean }) {
   const { t } = useTranslation();
   return (
-    <div className="px-4 py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface/80 to-transparent flex items-center justify-between backdrop-blur-xl backdrop-saturate-150">
-      <div className="flex items-center gap-3">
+    <div className="px-2 sm:px-4 py-2 sm:py-2.5 border-b border-border-subtle/50 bg-gradient-to-r from-surface/80 to-transparent flex items-center justify-between backdrop-blur-xl backdrop-saturate-150">
+      <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1">
         <div className="relative">
           <Wifi className="h-3.5 w-3.5 text-success" />
           <span className="absolute inset-0 rounded-full bg-success/30 animate-ping" />
         </div>
-        <span className="text-xs font-semibold text-success uppercase tracking-wide">{t("chat.secure_link")}</span>
+        <span className="text-xs font-semibold text-success uppercase tracking-wide hidden sm:inline">{t("chat.secure_link")}</span>
         {wsConnected && (
           <Badge variant="brand" dot>
             <Zap className="h-2.5 w-2.5 mr-0.5" />
             {t("chat.ws_connected")}
           </Badge>
         )}
-        <span className="text-text-dim/30">&bull;</span>
-        <span className="text-xs font-medium text-text-dim">{agentName}</span>
+        <span className="text-text-dim/30 hidden sm:inline">&bull;</span>
+        <span className="text-xs font-medium text-text-dim truncate">{agentName}</span>
         {isLoading && (
           <span className="ml-2 px-2 py-0.5 rounded-full bg-brand/10 text-brand text-[10px] font-medium animate-pulse">
             {wsConnected ? t("chat.ws_streaming") : t("chat.generating")}
@@ -576,7 +576,7 @@ export function ChatPage() {
       {/* 主内容区 */}
       <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
         {/* 左侧 Agent 列表 */}
-        <aside className="w-64 flex-shrink-0 border-r border-border-subtle bg-main/30 backdrop-blur-md flex flex-col">
+        <aside className="hidden md:flex w-64 flex-shrink-0 border-r border-border-subtle bg-main/30 backdrop-blur-md flex-col">
           <div className="p-4 border-b border-border-subtle">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
           </div>
@@ -627,6 +627,22 @@ export function ChatPage() {
             <div className="absolute bottom-0 right-0 w-48 h-48 bg-accent/5 rounded-full blur-3xl" />
           </div>
 
+          {/* Mobile agent selector */}
+          <div className="md:hidden px-3 py-2 border-b border-border-subtle bg-surface/80">
+            <select
+              value={selectedAgentId}
+              onChange={(e) => setSelectedAgentId(e.target.value)}
+              className="w-full rounded-lg border border-border-subtle bg-main px-3 py-2 text-sm font-bold outline-none focus:border-brand"
+            >
+              <option value="">{t("chat.select_agent")}</option>
+              {agents.map(agent => (
+                <option key={agent.id} value={agent.id}>
+                  {agent.name} ({agent.state || "unknown"})
+                </option>
+              ))}
+            </select>
+          </div>
+
           {selectedAgentId && (
             <ConnectionBar
               agentName={selectedAgent?.name || ""}
@@ -638,7 +654,7 @@ export function ChatPage() {
           )}
 
           {/* 消息区域 */}
-          <div className="flex-1 overflow-y-auto p-6 space-y-6 scrollbar-thin">
+          <div className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-4 sm:space-y-6 scrollbar-thin">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
                 <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-main/50" />
@@ -668,7 +684,7 @@ export function ChatPage() {
           </div>
 
           {/* 输入区域 */}
-          <div className={`p-4 border-t border-border-subtle bg-surface/90 backdrop-blur-md transition-all ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
+          <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface/90 backdrop-blur-md transition-all ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
             <ChatInput
               onSend={sendMessage}
               disabled={isLoading}

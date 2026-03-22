@@ -157,7 +157,7 @@ export function App() {
         fixed inset-y-0 left-0 z-50 flex flex-col border-r border-border-subtle bg-surface/80 backdrop-blur-xl lg:static lg:translate-x-0
         transition-[width,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]
         ${isMobileMenuOpen ? "translate-x-0 shadow-2xl" : "-translate-x-full"}
-        ${isSidebarCollapsed ? "lg:w-[72px]" : "lg:w-[280px]"}
+        w-[280px] ${isSidebarCollapsed ? "lg:w-[72px]" : "lg:w-[280px]"}
       `}>
         {/* Sidebar Header */}
         <div className={`flex h-16 items-center border-b border-border-subtle transition-all duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
@@ -267,8 +267,14 @@ export function App() {
       {/* Main Content Area */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Top Header */}
-        <header className="flex h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface/80 px-6 backdrop-blur-xl">
-          <div className="flex items-center gap-3">
+        <header className="flex h-14 lg:h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface/80 px-3 sm:px-6 backdrop-blur-xl">
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setMobileMenuOpen(true)}
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200 lg:hidden"
+            >
+              <Menu className="h-5 w-5" />
+            </button>
           </div>
           <div className="flex items-center gap-1.5">
             <Link
@@ -291,12 +297,6 @@ export function App() {
               title={t("common.toggle_theme")}
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </button>
-            <button
-              onClick={() => setMobileMenuOpen(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200 lg:hidden"
-            >
-              <Menu className="h-5 w-5" />
             </button>
           </div>
         </header>

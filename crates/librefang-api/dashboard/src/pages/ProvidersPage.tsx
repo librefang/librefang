@@ -85,33 +85,35 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
 
   if (viewMode === "list") {
     return (
-      <Card hover padding="sm" className={`flex items-center gap-4 group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
-        <button
-          onClick={(e) => { e.stopPropagation(); onSelect(p.id, !isSelected); }}
-          className="shrink-0 text-text-dim hover:text-brand transition-colors"
-        >
-          {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
-        </button>
+      <Card hover padding="sm" className={`flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 group transition-all ${isSelected ? "ring-2 ring-brand" : ""}`}>
+        <div className="flex items-center gap-3 w-full sm:w-auto">
+          <button
+            onClick={(e) => { e.stopPropagation(); onSelect(p.id, !isSelected); }}
+            className="shrink-0 text-text-dim hover:text-brand transition-colors"
+          >
+            {isSelected ? <CheckSquare className="w-5 h-5 text-brand" /> : <Square className="w-5 h-5" />}
+          </button>
 
-        <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-lg shrink-0 ${isConfigured ? "bg-success/10 border border-success/20" : "bg-brand/10 border border-brand/20"}`}>
-          {getProviderIcon(p.id)}
-        </div>
-
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <h3 className="font-black truncate">{p.display_name || p.id}</h3>
-            {isConfigured ? (
-              <Badge variant={p.reachable === true ? "success" : p.reachable === false ? "error" : "default"} className="shrink-0">
-                {p.reachable === true ? t("providers.online") : p.reachable === false ? t("providers.offline") : t("providers.not_checked")}
-              </Badge>
-            ) : (
-              <Badge variant="warning" className="shrink-0">{t("common.setup")}</Badge>
-            )}
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-lg shrink-0 ${isConfigured ? "bg-success/10 border border-success/20" : "bg-brand/10 border border-brand/20"}`}>
+            {getProviderIcon(p.id)}
           </div>
-          <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 truncate">{p.id}</p>
+
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <h3 className="font-black truncate">{p.display_name || p.id}</h3>
+              {isConfigured ? (
+                <Badge variant={p.reachable === true ? "success" : p.reachable === false ? "error" : "default"} className="shrink-0">
+                  {p.reachable === true ? t("providers.online") : p.reachable === false ? t("providers.offline") : t("providers.not_checked")}
+                </Badge>
+              ) : (
+                <Badge variant="warning" className="shrink-0">{t("common.setup")}</Badge>
+              )}
+            </div>
+            <p className="text-[10px] font-black uppercase tracking-widest text-text-dim/60 truncate">{p.id}</p>
+          </div>
         </div>
 
-        <div className="flex items-center gap-6 shrink-0">
+        <div className="hidden md:flex items-center gap-6 shrink-0">
           <div className="text-center">
             <p className="text-xs font-black">{p.model_count ?? 0}</p>
             <p className="text-[8px] uppercase text-text-dim">{t("providers.models")}</p>
@@ -128,10 +130,10 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
           )}
         </div>
 
-        <div className="flex items-center gap-1 shrink-0">
+        <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto">
           {!isConfigured && (
             <Button variant="ghost" size="sm" onClick={() => onQuickConfig(p)} leftIcon={<Key className="w-3 h-3" />}>
-              {t("providers.config")}
+              <span className="hidden sm:inline">{t("providers.config")}</span>
             </Button>
           )}
           <Button
@@ -141,7 +143,7 @@ function ProviderCard({ provider: p, isSelected, pendingId, viewMode, onSelect, 
             disabled={pendingId === p.id}
             leftIcon={pendingId === p.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
           >
-            {pendingId === p.id ? t("providers.analyzing") : t("providers.test")}
+            <span className="hidden sm:inline">{pendingId === p.id ? t("providers.analyzing") : t("providers.test")}</span>
           </Button>
           <Button variant="ghost" size="sm" onClick={() => onViewDetails(p)}>
             <ChevronRight className="w-4 h-4" />
@@ -625,7 +627,7 @@ export function ProvidersPage() {
       />
 
       {/* Search & Controls */}
-      <div className="flex flex-col lg:flex-row gap-3">
+      <div className="flex flex-col sm:flex-row gap-3">
         <div className="flex-1">
           <Input
             value={search}
@@ -640,7 +642,7 @@ export function ProvidersPage() {
           />
         </div>
 
-        <div className="flex gap-2 items-center">
+        <div className="flex gap-2 items-center flex-wrap">
           {/* Sort buttons */}
           <div className="flex gap-1 p-1 bg-main/30 rounded-lg">
             <button
@@ -685,7 +687,7 @@ export function ProvidersPage() {
       </div>
 
       {/* Tabs & Filter */}
-      <div className="flex items-center justify-between gap-4 flex-wrap">
+      <div className="flex items-center justify-between gap-3 flex-wrap overflow-x-auto">
         <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
           <button
             onClick={() => handleTabChange("configured")}

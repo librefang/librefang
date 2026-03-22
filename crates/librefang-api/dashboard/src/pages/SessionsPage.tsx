@@ -128,7 +128,7 @@ export function SessionsPage() {
             const agent = agentMap.get(s.agent_id || "");
             return (
               <div key={s.session_id}
-                className={`flex items-center gap-4 p-4 rounded-2xl border transition-all duration-300 card-glow cursor-pointer ${
+                className={`flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-2xl border transition-all duration-300 card-glow cursor-pointer ${
                   (s as any).active ? "border-success/30 bg-success/5" : "border-border-subtle hover:border-brand/30 hover:-translate-y-0.5"
                 }`}>
                 {/* Agent avatar */}
@@ -157,7 +157,7 @@ export function SessionsPage() {
                 </div>
 
                 {/* Actions */}
-                <div className="flex items-center gap-1 shrink-0">
+                <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto">
                   {!(s as any).active && s.agent_id && (
                     <Button variant="secondary" size="sm" onClick={() => handleSwitch(s.agent_id!, s.session_id)} disabled={pendingId === s.session_id}>
                       <Play className="w-3.5 h-3.5 mr-1" /> {t("common.resume")}

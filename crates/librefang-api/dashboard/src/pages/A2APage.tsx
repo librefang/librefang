@@ -255,8 +255,8 @@ export function A2APage() {
               <div className="space-y-2 stagger-children">
                 {trackedTasks.map((task) => (
                   <Card key={task.id} padding="sm">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 sm:gap-3 min-w-0 flex-1 flex-wrap">
                         {task.status === "completed" ? (
                           <CheckCircle2 className="w-4 h-4 text-success" />
                         ) : task.status === "failed" ? (
@@ -264,7 +264,7 @@ export function A2APage() {
                         ) : (
                           <Loader2 className="w-4 h-4 text-brand animate-spin" />
                         )}
-                        <span className="text-sm font-mono font-bold">{task.id}</span>
+                        <span className="text-xs sm:text-sm font-mono font-bold truncate">{task.id}</span>
                         <Badge
                           variant={
                             task.status === "completed" ? "success" :

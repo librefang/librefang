@@ -108,7 +108,7 @@ export function SchedulerPage() {
             {schedules.map(s => {
               const agent = agentMap.get(s.agent_id || "");
               return (
-                <div key={s.id} className="flex items-center gap-4 p-4 rounded-2xl border border-border-subtle hover:border-brand/30 transition-all">
+                <div key={s.id} className="flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-2xl border border-border-subtle hover:border-brand/30 transition-all">
                   <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
                     <Clock className="w-5 h-5 text-brand" />
                   </div>
@@ -124,7 +124,7 @@ export function SchedulerPage() {
                       {!agent && s.agent && <span className="font-bold text-brand">{s.agent}</span>}
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto">
                     <Button variant="secondary" size="sm" onClick={() => runMut.mutate(s.id)} disabled={runMut.isPending}>
                       {runMut.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
                     </Button>
