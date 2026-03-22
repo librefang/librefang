@@ -187,6 +187,8 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
 /// - `librefang_tool_calls_total` — total tool calls (per agent)
 /// - `librefang_panics_total` — supervisor panic count
 /// - `librefang_restarts_total` — supervisor restart count
+/// - `librefang_http_requests_total` — HTTP request counts (with telemetry feature)
+/// - `librefang_http_request_duration_ms` — HTTP request latencies (with telemetry feature)
 #[utoipa::path(
     get,
     path = "/api/metrics",
@@ -196,7 +198,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
     )
 )]
 pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut out = String::with_capacity(2048);
+    let mut out = String::with_capacity(4096);
 
     // Uptime
     let uptime = state.started_at.elapsed().as_secs();
@@ -256,6 +258,10 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
         "librefang_info{{version=\"{}\"}} 1\n",
         env!("CARGO_PKG_VERSION")
     ));
+
+    // HTTP metrics from telemetry crate
+    out.push_str("\n");
+    out.push_str(&librefang_telemetry::get_http_metrics_summary());
 
     (
         StatusCode::OK,

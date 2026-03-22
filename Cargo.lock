@@ -3761,6 +3761,7 @@ dependencies = [
  "librefang-migrate",
  "librefang-runtime",
  "librefang-skills",
+ "librefang-telemetry",
  "librefang-types",
  "librefang-wire",
  "reqwest",
@@ -4083,6 +4084,19 @@ dependencies = [
  "walkdir",
  "webpki-roots",
  "zip 8.3.0",
+]
+
+[[package]]
+name = "librefang-telemetry"
+version = "2026.3.2201"
+dependencies = [
+ "dashmap",
+ "lazy_static",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio-test",
+ "tracing",
 ]
 
 [[package]]

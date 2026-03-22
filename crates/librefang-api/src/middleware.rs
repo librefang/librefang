@@ -3,6 +3,7 @@
 //! Provides:
 //! - Request ID generation and propagation
 //! - Per-endpoint structured request logging
+//! - HTTP metrics recording (when telemetry feature is enabled)
 //! - In-memory rate limiting (per IP)
 //! - Accept-Language header parsing for i18n error responses
 
@@ -12,6 +13,8 @@ use axum::middleware::Next;
 use librefang_types::i18n;
 use std::time::Instant;
 use tracing::info;
+
+use librefang_telemetry::metrics;
 
 /// Request ID header name (standard).
 pub const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -69,6 +72,8 @@ pub async fn request_logging(request: Request<Body>, next: Next) -> Response<Bod
         latency_ms = elapsed.as_millis() as u64,
         "API request"
     );
+
+    metrics::record_http_request(&uri, method.as_str(), status, elapsed);
 
     // Inject the request ID into the response
     if let Ok(header_val) = request_id.parse() {

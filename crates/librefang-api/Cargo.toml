@@ -16,6 +16,7 @@ librefang-skills = { path = "../librefang-skills" }
 librefang-hands = { path = "../librefang-hands" }
 librefang-extensions = { path = "../librefang-extensions" }
 librefang-migrate = { path = "../librefang-migrate" }
+librefang-telemetry = { path = "../librefang-telemetry" }
 dashmap = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -46,7 +47,8 @@ utoipa = { version = "5", features = ["axum_extras"] }
 include_dir = "0.7"
 
 [features]
-default = ["all-channels"]
+default = ["all-channels", "telemetry"]
+telemetry = []
 
 # Individual channel features — forwarded to librefang-channels
 channel-telegram = ["librefang-channels/channel-telegram"]

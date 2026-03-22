@@ -6,7 +6,7 @@
     "workflows": "Workflows", "scheduler": "Scheduler", "goals": "Goals", "agents": "Agents",
     "providers": "Providers", "channels": "Channels", "skills": "Skills", "hands": "Hands", "plugins": "Plugins", "models": "Models",
     "analytics": "Analytics", "memory": "Memory", "comms": "Comms", "runtime": "Runtime", "logs": "Logs", "settings": "Settings",
-    "network": "Network", "a2a": "A2A"
+    "network": "Network", "a2a": "A2A", "telemetry": "Telemetry"
   },
   "common": {
     "refresh": "Refresh", "status": "Status", "daemon_online": "Daemon Online", "infrastructure": "Infrastructure",
@@ -216,6 +216,13 @@
     "environment": "Environment", "engine_version": "Engine Version", "system_uptime": "System Uptime",
     "engine": "Engine Info", "git_hash": "Git Commit", "build_time": "Build Time",
     "system": "System Status", "queue": "Task Queue", "pending_tasks": "Pending", "running_tasks": "Running", "completed_today": "Completed Today", "active_agents": "Active Agents", "status": "Status"
+  },
+  "telemetry": {
+    "badge": "Observability", "title": "Telemetry", "subtitle": "HTTP request metrics and observability data.",
+    "total_requests": "Total Requests", "endpoints": "Endpoints", "avg_latency": "Avg Latency",
+    "status": "Status", "collecting": "Collecting", "top_endpoints": "Top Endpoints",
+    "latency": "Latency Distribution", "prometheus_endpoint": "Prometheus Endpoint", "view_raw": "View Raw",
+    "no_data": "No telemetry data yet. Make some API requests to see metrics."
   },
   "logs": {
     "title": "Logs", "subtitle": "Real-time diagnostic events.", "export_json": "Export JSON",

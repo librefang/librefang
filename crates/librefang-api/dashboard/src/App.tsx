@@ -1,7 +1,7 @@
 import { Link, Outlet, useLocation } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2 } from "lucide-react";
+import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, Gauge } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { checkAuthRequired, setApiKey } from "./api";
@@ -137,6 +137,7 @@ export function App() {
         { to: "/network", label: t("nav.network"), icon: Share2 },
         { to: "/a2a", label: t("nav.a2a"), icon: Globe },
         { to: "/runtime", label: t("nav.runtime"), icon: Activity },
+        { to: "/telemetry", label: t("nav.telemetry"), icon: Gauge },
         { to: "/logs", label: t("nav.logs"), icon: FileText },
       ],
     },

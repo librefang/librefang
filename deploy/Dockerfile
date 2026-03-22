@@ -1,4 +1,13 @@
 # syntax=docker/dockerfile:1
+
+# Stage 1: Build React dashboard
+FROM node:20-alpine AS dashboard-builder
+WORKDIR /build
+COPY crates/librefang-api/dashboard ./dashboard
+WORKDIR /build/dashboard
+RUN npm install && npm run build
+
+# Stage 2: Build Rust binary
 FROM rust:1-slim-bookworm AS builder
 WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -9,17 +18,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Build dependencies first (cached unless Cargo.toml/Cargo.lock change)
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY xtask ./xtask
 COPY agents ./agents
 COPY packages ./packages
+COPY --from=dashboard-builder /build/static/react ./crates/librefang-api/static/react
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    cargo build --release --bin librefang \
-    && cp target/release/librefang /usr/local/bin/librefang
+    cargo build --bin librefang && \
+    cp target/debug/librefang /usr/local/bin/librefang
 
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -14,6 +14,7 @@ members = [
     "crates/librefang-desktop",
     "crates/librefang-hands",
     "crates/librefang-extensions",
+    "crates/librefang-telemetry",
     "xtask",
 ]
 
