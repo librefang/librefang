@@ -682,6 +682,88 @@ pub async fn list_workflow_runs(
 }
 
 // ---------------------------------------------------------------------------
+// Save workflow as reusable template
+// ---------------------------------------------------------------------------
+
+/// POST /api/workflows/:id/save-as-template — Convert a workflow into a reusable template.
+#[utoipa::path(
+    post,
+    path = "/api/workflows/{id}/save-as-template",
+    tag = "workflows",
+    params(("id" = String, Path, description = "Workflow ID")),
+    responses(
+        (status = 200, description = "Template created", body = serde_json::Value),
+        (status = 404, description = "Workflow not found")
+    )
+)]
+pub async fn save_workflow_as_template(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    use librefang_kernel::workflow::WorkflowEngine;
+
+    let workflow_id = WorkflowId(match id.parse() {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid workflow ID"})),
+            );
+        }
+    });
+
+    let workflow = match state.kernel.workflows.get_workflow(workflow_id).await {
+        Some(w) => w,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Workflow '{}' not found", id)})),
+            );
+        }
+    };
+
+    let template = WorkflowEngine::workflow_to_template(&workflow);
+
+    // Persist template to TOML file at ~/.librefang/workflows/templates/{id}.toml
+    let templates_dir = librefang_kernel::config::librefang_home()
+        .join("workflows")
+        .join("templates");
+    if let Err(e) = std::fs::create_dir_all(&templates_dir) {
+        warn!("Failed to create templates directory: {e}");
+    } else {
+        let toml_path = templates_dir.join(format!("{}.toml", &template.id));
+        match toml::to_string_pretty(&template) {
+            Ok(toml_str) => {
+                if let Err(e) = std::fs::write(&toml_path, toml_str) {
+                    warn!(
+                        path = %toml_path.display(),
+                        "Failed to write template file: {e}"
+                    );
+                }
+            }
+            Err(e) => {
+                warn!("Failed to serialize template to TOML: {e}");
+            }
+        }
+    }
+
+    // Register in the in-memory template registry
+    state
+        .kernel
+        .templates()
+        .register(template.clone())
+        .await;
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "created",
+            "template": template,
+        })),
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Trigger routes
 // ---------------------------------------------------------------------------
 
