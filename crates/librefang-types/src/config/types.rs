@@ -963,10 +963,11 @@ impl Default for ThinkingConfig {
 /// - `JsonSchema` — constrain output to a specific JSON Schema (OpenAI
 ///   `json_schema` mode; for providers without native support the schema is
 ///   injected into the system prompt).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ResponseFormat {
     /// Free-form text (default behaviour).
+    #[default]
     Text,
     /// Valid JSON object (no schema constraint).
     Json,
@@ -980,12 +981,6 @@ pub enum ResponseFormat {
         #[serde(default)]
         strict: Option<bool>,
     },
-}
-
-impl Default for ResponseFormat {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 /// Configuration for a sidecar channel adapter (external process-based).
