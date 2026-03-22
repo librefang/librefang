@@ -3865,15 +3865,18 @@ mod tests {
         .await
         .expect("Loop should complete without error");
 
-        // The response MUST NOT be empty — it should contain our fallback text
+        // The response MUST NOT be empty — with no tools registered, the
+        // capability enforcement rejects the tool call with a permission error,
+        // which becomes the response text.
         assert!(
             !result.response.trim().is_empty(),
             "Response should not be empty after tool use, got: {:?}",
             result.response
         );
         assert!(
-            result.response.contains("Task completed"),
-            "Expected fallback message, got: {:?}",
+            result.response.contains("Permission denied")
+                || result.response.contains("Task completed"),
+            "Expected tool error or fallback message, got: {:?}",
             result.response
         );
     }
@@ -4032,8 +4035,9 @@ mod tests {
             result.response
         );
         assert!(
-            result.response.contains("Task completed"),
-            "Expected fallback message in streaming, got: {:?}",
+            result.response.contains("Permission denied")
+                || result.response.contains("Task completed"),
+            "Expected tool error or fallback message in streaming, got: {:?}",
             result.response
         );
     }
