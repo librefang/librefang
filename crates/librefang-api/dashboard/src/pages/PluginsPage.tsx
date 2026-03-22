@@ -102,11 +102,11 @@ export function PluginsPage() {
           <div className="flex gap-2">
             <Button variant="secondary" onClick={() => setShowScaffold(true)}>
               <FileCode className="h-4 w-4" />
-              {t("plugins.new_plugin")}
+              <span className="hidden sm:inline">{t("plugins.new_plugin")}</span>
             </Button>
             <Button variant="primary" onClick={() => setShowInstall(true)}>
               <Download className="h-4 w-4" />
-              {t("plugins.install")}
+              <span className="hidden sm:inline">{t("plugins.install")}</span>
             </Button>
           </div>
         }
@@ -143,13 +143,13 @@ export function PluginsPage() {
           ) : (
             <div className="space-y-2 stagger-children">
               {plugins.map(p => (
-                <div key={p.name} className="flex items-center gap-4 p-4 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-all">
-                  <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
-                    <Puzzle className="w-5 h-5 text-brand" />
+                <div key={p.name} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-all">
+                  <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
+                    <Puzzle className="w-4 h-4 sm:w-5 sm:h-5 text-brand" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="text-sm font-bold">{p.name}</h3>
+                    <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                      <h3 className="text-xs sm:text-sm font-bold">{p.name}</h3>
                       <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">{p.version}</span>
                       {p.hooks?.ingest && <Badge variant="brand">ingest</Badge>}
                       {p.hooks?.after_turn && <Badge variant="brand">after_turn</Badge>}
@@ -166,7 +166,7 @@ export function PluginsPage() {
                       onClick={() => depsMutation.mutate(p.name)}
                       disabled={depsMutation.isPending}>
                       {depsMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
-                      {t("plugins.deps")}
+                      <span className="hidden sm:inline">{t("plugins.deps")}</span>
                     </Button>
                     {confirmDelete === p.name ? (
                       <div className="flex items-center gap-1">
@@ -241,8 +241,8 @@ export function PluginsPage() {
 
       {/* Install Modal */}
       {showInstall && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setShowInstall(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setShowInstall(false)}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[440px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("plugins.install_title")}</h3>
               <button onClick={() => setShowInstall(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
@@ -316,8 +316,8 @@ export function PluginsPage() {
 
       {/* Scaffold Modal */}
       {showScaffold && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setShowScaffold(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[400px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setShowScaffold(false)}>
+          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[400px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("plugins.scaffold_title")}</h3>
               <button onClick={() => setShowScaffold(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>

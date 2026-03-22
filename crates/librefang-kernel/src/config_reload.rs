@@ -147,6 +147,11 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         plan.restart_reasons.push("api_key changed".to_string());
     }
 
+    if old.dashboard_user != new.dashboard_user || old.dashboard_pass != new.dashboard_pass {
+        plan.noop_changes
+            .push("dashboard credentials changed (hot-reloaded)".to_string());
+    }
+
     if old.network_enabled != new.network_enabled {
         plan.restart_required = true;
         plan.restart_reasons

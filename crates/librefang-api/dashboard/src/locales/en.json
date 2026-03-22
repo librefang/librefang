@@ -269,7 +269,16 @@
     "description": "This instance requires authentication to access.",
     "placeholder": "Enter API key...",
     "submit": "Authenticate",
-    "invalid": "Invalid API key. Please try again."
+    "invalid": "Invalid credentials. Please try again.",
+    "welcome_back": "Welcome back",
+    "login_desc": "Sign in to your dashboard",
+    "username": "Username",
+    "username_placeholder": "Enter username",
+    "password": "Password",
+    "password_placeholder": "Enter password",
+    "login": "Sign In",
+    "logout": "Logout",
+    "secure_connection": "Encrypted Connection"
   },
   "network": {
     "section": "OFP Network", "title": "Network", "subtitle": "Open Federation Protocol network status and connected peers.",
