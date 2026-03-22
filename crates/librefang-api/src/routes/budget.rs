@@ -26,7 +26,11 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
         .list()
         .iter()
         .map(|e| {
-            let (tokens, tool_calls) = state.kernel.scheduler.get_usage(e.id).unwrap_or((0, 0));
+            let (tokens, tool_calls) = state
+                .kernel
+                .scheduler_ref()
+                .get_usage(e.id)
+                .unwrap_or((0, 0));
             serde_json::json!({
                 "agent_id": e.id.to_string(),
                 "name": e.name,
@@ -252,7 +256,7 @@ pub async fn agent_budget_status(
     let monthly = usage_store.query_monthly(agent_id).unwrap_or(0.0);
 
     // Token usage from scheduler
-    let token_usage = state.kernel.scheduler.get_usage(agent_id);
+    let token_usage = state.kernel.scheduler_ref().get_usage(agent_id);
     let tokens_used = token_usage.map(|(t, _)| t).unwrap_or(0);
 
     (
