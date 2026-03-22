@@ -5049,6 +5049,21 @@ system_prompt = "You are a helpful assistant."
             })?
             .clone();
 
+        // Check that all requirements (API keys, etc.) are satisfied before activating
+        if let Ok(results) = self.hand_registry.check_requirements(hand_id) {
+            let missing: Vec<_> = results
+                .iter()
+                .filter(|(_, satisfied)| !satisfied)
+                .map(|(req, _)| req.label.clone())
+                .collect();
+            if !missing.is_empty() {
+                return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Hand '{hand_id}' has unsatisfied requirements: {}",
+                    missing.join(", ")
+                ))));
+            }
+        }
+
         // Create the instance in the registry
         let instance = self
             .hand_registry
