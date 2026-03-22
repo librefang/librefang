@@ -3,7 +3,7 @@ name = "librefang-testing"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "测试基础设施：提供 mock kernel、mock LLM driver 和 API 路由测试工具"
+description = "Test infrastructure: mock kernel, mock LLM driver and API route test utilities"
 
 [dependencies]
 librefang-types = { path = "../librefang-types" }

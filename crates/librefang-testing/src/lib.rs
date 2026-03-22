@@ -1,13 +1,13 @@
-//! # librefang-testing — 测试基础设施
+//! # librefang-testing — Test Infrastructure
 //!
-//! 提供用于单元测试 API 路由的 mock 基础设施，无需启动完整的 daemon。
+//! Provides mock infrastructure for unit testing API routes without starting a full daemon.
 //!
-//! ## 主要组件
+//! ## Main Components
 //!
-//! - [`MockKernelBuilder`] — 构建最小化的 `LibreFangKernel`（内存 SQLite，临时目录）
-//! - [`MockLlmDriver`] — 可配置的 LLM 驱动 mock，支持录制调用和固定回复
-//! - [`TestAppState`] — 构建适用于 axum 测试的 `AppState`
-//! - 辅助函数 — `test_request`、`assert_json_ok`、`assert_json_error`
+//! - [`MockKernelBuilder`] — Builds a minimal `LibreFangKernel` (in-memory SQLite, temp directory)
+//! - [`MockLlmDriver`] — Configurable LLM driver mock with call recording and canned responses
+//! - [`TestAppState`] — Builds an `AppState` suitable for axum testing
+//! - Helper functions — `test_request`, `assert_json_ok`, `assert_json_error`
 
 pub mod helpers;
 pub mod mock_driver;

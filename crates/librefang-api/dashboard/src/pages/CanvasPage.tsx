@@ -35,29 +35,29 @@ import {
   Download, Upload, HelpCircle, Scan, Check, LayoutTemplate, Search, Tag
 } from "lucide-react";
 
-// 节点类型配置 — n8n 风格配色
+// Node type configuration — n8n-style color scheme
 const NODE_TYPES = [
-  // 触发器（视觉标记）
+  // Triggers (visual markers)
   { type: "start", labelKey: "canvas.node_types.start", color: "#10b981", bg: "#ecfdf5", icon: "S", descKey: "canvas.node_types.start_desc" },
   { type: "end", labelKey: "canvas.node_types.end", color: "#ef4444", bg: "#fef2f2", icon: "E", descKey: "canvas.node_types.end_desc" },
   { type: "schedule", labelKey: "canvas.node_types.schedule", color: "#f59e0b", bg: "#fffbeb", icon: "C", descKey: "canvas.node_types.schedule_desc" },
   { type: "webhook", labelKey: "canvas.node_types.webhook", color: "#6366f1", bg: "#eef2ff", icon: "W", descKey: "canvas.node_types.webhook_desc" },
   { type: "channel", labelKey: "canvas.node_types.channel", color: "#8b5cf6", bg: "#f5f3ff", icon: "M", descKey: "canvas.node_types.channel_desc" },
-  // 逻辑控制
+  // Logic control
   { type: "condition", labelKey: "canvas.node_types.condition", color: "#f59e0b", bg: "#fffbeb", icon: "?", descKey: "canvas.node_types.condition_desc" },
   { type: "loop", labelKey: "canvas.node_types.loop", color: "#8b5cf6", bg: "#f5f3ff", icon: "L", descKey: "canvas.node_types.loop_desc" },
   { type: "parallel", labelKey: "canvas.node_types.parallel", color: "#f59e0b", bg: "#fffbeb", icon: "P", descKey: "canvas.node_types.parallel_desc" },
   { type: "collect", labelKey: "canvas.node_types.collect", color: "#10b981", bg: "#ecfdf5", icon: "C", descKey: "canvas.node_types.collect_desc" },
   { type: "wait", labelKey: "canvas.node_types.wait", color: "#6b7280", bg: "#f9fafb", icon: "T", descKey: "canvas.node_types.wait_desc" },
-  // 动作
+  // Actions
   { type: "respond", labelKey: "canvas.node_types.respond", color: "#10b981", bg: "#ecfdf5", icon: "R", descKey: "canvas.node_types.respond_desc" },
   { type: "agent", labelKey: "canvas.node_types.agent", color: "#3b82f6", bg: "#eff6ff", icon: "A", descKey: "canvas.node_types.agent_desc" },
 ];
 
-// 需要绑定 agent 的节点类型
+// Node types that require an agent binding
 const AGENT_NODE_TYPES_SET = new Set(["agent", "channel", "respond", "condition", "loop", "parallel", "collect"]);
 
-// 自定义节点组件 — n8n 风格
+// Custom node component — n8n style
 function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t: (key: string) => string }) {
   const config = NODE_TYPES.find(n => n.type === (data.nodeType || nodeTypeKey)) || NODE_TYPES[11];
   const isStart = data.nodeType === "start";
@@ -136,7 +136,7 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
   );
 }
 
-// 分组节点组件
+// Group node component
 function GroupNodeComponent({ data, id }: { data: any; id: string }) {
   const expanded = data._expanded !== false;
   return (
@@ -163,13 +163,13 @@ function GroupNodeComponent({ data, id }: { data: any; id: string }) {
             <span className="text-[9px] text-brand/50">{data._childCount}</span>
           )}
         </div>
-        {/* 解散分组（保留子节点） */}
+        {/* Ungroup (keep child nodes) */}
         <button onClick={(e) => { e.stopPropagation(); data._onUngroup?.(id); }}
           title="Ungroup"
           className="p-0.5 rounded hover:bg-brand/20 text-brand/50 hover:text-brand shrink-0">
           <X className="w-3 h-3" />
         </button>
-        {/* 删除分组+子节点 */}
+        {/* Delete group + child nodes */}
         <button onClick={(e) => { e.stopPropagation(); data._onDeleteGroup?.(id); }}
           title="Delete group and children"
           className="p-0.5 rounded hover:bg-error/20 text-text-dim/30 hover:text-error shrink-0">
@@ -186,7 +186,7 @@ function GroupNodeComponent({ data, id }: { data: any; id: string }) {
   );
 }
 
-// 工作流列表侧边栏
+// Workflow list sidebar
 function WorkflowList({
   workflows, selectedId, onSelect, onDelete, onRun, isRunning, t
 }: {
@@ -246,7 +246,7 @@ function WorkflowList({
   );
 }
 
-// 模板浏览器
+// Template browser
 function TemplateBrowser({
   onInstantiate, onClose, t
 }: {
@@ -417,7 +417,7 @@ function TemplateBrowser({
   );
 }
 
-// 节点配置面板
+// Node configuration panel
 const inputClass = "mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand";
 const labelClass = "text-[10px] font-bold text-text-dim uppercase";
 
@@ -479,7 +479,7 @@ function NodeConfigPanel({
         </div>
       </div>
       <div className="p-3 space-y-2.5 overflow-y-auto flex-1">
-        {/* 基础信息 */}
+        {/* Basic info */}
         <div>
           <label className={labelClass}>{t("canvas.node_label")}</label>
           <input type="text" value={label} onChange={e => setLabel(e.target.value)} className={inputClass} />
@@ -489,7 +489,7 @@ function NodeConfigPanel({
           <input type="text" value={description} onChange={e => setDescription(e.target.value)} className={inputClass} />
         </div>
 
-        {/* Agent 绑定 */}
+        {/* Agent binding */}
         <div>
           <label className={labelClass}>{t("canvas.assign_agent")}</label>
           <select value={agentId} onChange={e => setAgentId(e.target.value)} className={inputClass}>
@@ -511,7 +511,7 @@ function NodeConfigPanel({
           </div>
         )}
 
-        {/* 执行模式 */}
+        {/* Execution mode */}
         {hasAgent && (
           <div>
             <label className={labelClass}>{t("canvas.step_mode")}</label>
@@ -525,7 +525,7 @@ function NodeConfigPanel({
           </div>
         )}
 
-        {/* Conditional 专属字段 */}
+        {/* Conditional-specific fields */}
         {hasAgent && mode === "conditional" && (
           <div>
             <label className={labelClass}>{t("canvas.condition_text")}</label>
@@ -534,7 +534,7 @@ function NodeConfigPanel({
           </div>
         )}
 
-        {/* Loop 专属字段 */}
+        {/* Loop-specific fields */}
         {hasAgent && mode === "loop" && (
           <>
             <div>
@@ -550,7 +550,7 @@ function NodeConfigPanel({
           </>
         )}
 
-        {/* 错误处理 */}
+        {/* Error handling */}
         {hasAgent && (
           <div>
             <label className={labelClass}>{t("canvas.error_mode")}</label>
@@ -569,7 +569,7 @@ function NodeConfigPanel({
           </div>
         )}
 
-        {/* 高级选项 */}
+        {/* Advanced options */}
         {hasAgent && (
           <>
             <div>
@@ -661,7 +661,7 @@ function CanvasPageInner() {
   const [showHelp, setShowHelp] = useState(false);
   const [showTemplateBrowser, setShowTemplateBrowser] = useState(false);
 
-  // 撤销/重做历史
+  // Undo/redo history
   const historyRef = useRef<{ nodes: Node[]; edges: Edge[] }[]>([]);
   const historyIndexRef = useRef(-1);
   const clipboardRef = useRef<{ nodes: Node[]; edges: Edge[] } | null>(null);
@@ -676,7 +676,7 @@ function CanvasPageInner() {
 
   const undo = useCallback(() => {
     if (historyIndexRef.current <= 0) return;
-    // 先保存当前状态到历史末尾（如果还没保存）
+    // Save current state to end of history (if not already saved)
     if (historyIndexRef.current === historyRef.current.length - 1) pushHistory();
     historyIndexRef.current--;
     const s = historyRef.current[historyIndexRef.current];
@@ -690,9 +690,9 @@ function CanvasPageInner() {
     if (s) { setNodes(s.nodes); setEdges(s.edges); }
   }, [setNodes, setEdges]);
 
-  // 记录关键操作前的快照
+  // Record snapshot before key operations
   const onNodesChangeWithHistory = useCallback((changes: any) => {
-    // 拖拽结束/删除时记录
+    // Record on drag end / delete
     const hasEnd = changes.some((c: any) => c.type === "position" && c.dragging === false);
     const hasRemove = changes.some((c: any) => c.type === "remove");
     if (hasEnd || hasRemove) pushHistory();
@@ -705,7 +705,7 @@ function CanvasPageInner() {
     onEdgesChange(changes);
   }, [onEdgesChange, pushHistory]);
 
-  // 复制选中节点
+  // Copy selected nodes
   const copySelected = useCallback(() => {
     const selNodes = nodes.filter(n => selectedNodeIds.has(n.id));
     if (selNodes.length === 0) return;
@@ -714,7 +714,7 @@ function CanvasPageInner() {
     clipboardRef.current = { nodes: JSON.parse(JSON.stringify(selNodes)), edges: JSON.parse(JSON.stringify(selEdges)) };
   }, [nodes, edges, selectedNodeIds]);
 
-  // 粘贴
+  // Paste
   const paste = useCallback(() => {
     if (!clipboardRef.current) return;
     pushHistory();
@@ -731,12 +731,12 @@ function CanvasPageInner() {
       source: idMap.get(e.source) || e.source,
       target: idMap.get(e.target) || e.target,
     }));
-    // 取消选择旧节点
+    // Deselect old nodes
     setNodes(nds => [...nds.map(n => ({ ...n, selected: false })), ...newNodes]);
     setEdges(eds => [...eds, ...newEdges]);
   }, [pushHistory, setNodes, setEdges]);
 
-  // 复制选中节点（Cmd+D）
+  // Duplicate selected nodes (Cmd+D)
   const duplicate = useCallback(() => {
     copySelected();
     paste();
@@ -747,7 +747,7 @@ function CanvasPageInner() {
     setTimeout(() => setErrorMsg(null), 5000);
   }, []);
 
-  // 重新计算分组边框以包含所有子节点（提前声明，autoLayout 需要）
+  // Recalculate group bounds to contain all child nodes (declared early, needed by autoLayout)
   const NODE_W = 200;
   const NODE_H = 80;
   const GROUP_PAD = 30;
@@ -778,12 +778,12 @@ function CanvasPageInner() {
     } : n);
   }, []);
 
-  // 全选
+  // Select all
   const selectAll = useCallback(() => {
     setNodes(nds => nds.map(n => ({ ...n, selected: true })));
   }, [setNodes]);
 
-  // 自动布局（简单的纵向排列）
+  // Auto layout (simple vertical arrangement)
   const autoLayout = useCallback(() => {
     pushHistory();
     const agentNodes = nodes.filter(n => n.type === "custom" && !n.hidden);
@@ -800,19 +800,19 @@ function CanvasPageInner() {
       const pos = positioned.get(n.id);
       return pos ? { ...n, position: pos } : n;
     }));
-    // 重新计算分组边框
+    // Recalculate group bounds
     groupNodes.forEach(g => {
       setNodes(nds => recalcGroupBounds(nds, g.id));
     });
   }, [nodes, pushHistory, setNodes, recalcGroupBounds]);
 
-  // Toast 提示
+  // Toast notification
   const showToast = useCallback((msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(null), 2000);
   }, []);
 
-  // 导出工作流 JSON
+  // Export workflow JSON
   const exportWorkflow = useCallback(() => {
     const data = { nodes, edges, name: workflowName, description: workflowDescription };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -825,7 +825,7 @@ function CanvasPageInner() {
     showToast(t("canvas.exported"));
   }, [nodes, edges, workflowName, workflowDescription, showToast, t]);
 
-  // 导入工作流 JSON
+  // Import workflow JSON
   const importWorkflow = useCallback(() => {
     const input = document.createElement("input");
     input.type = "file";
@@ -849,12 +849,12 @@ function CanvasPageInner() {
     input.click();
   }, [pushHistory, setNodes, setEdges, showToast, showError, t]);
 
-  // 连线验证：阻止 source→source 或 target→target
+  // Connection validation: prevent source->source or target->target
   const isValidConnection = useCallback((connection: Edge | Connection) => {
     return connection.source !== connection.target;
   }, []);
 
-  // 快捷键 refs
+  // Shortcut key refs
   const createGroupRef = useRef<() => void>(() => {});
   const ungroupRef = useRef<(id: string) => void>(() => {});
 
@@ -870,37 +870,37 @@ function CanvasPageInner() {
       return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
     };
     const down = (e: KeyboardEvent) => {
-      if (isInput()) return; // 不在输入框中才处理
+      if (isInput()) return; // Only handle when not in an input field
       const mod = e.metaKey || e.ctrlKey;
-      // 空格：平移模式
+      // Space: pan mode
       if (e.code === "Space" && !e.repeat) { e.preventDefault(); setSpacePressed(true); }
-      // Cmd+Z：撤销
+      // Cmd+Z: undo
       if (e.code === "KeyZ" && mod && !e.shiftKey) { e.preventDefault(); undo(); }
-      // Cmd+Shift+Z：重做
+      // Cmd+Shift+Z: redo
       if (e.code === "KeyZ" && mod && e.shiftKey) { e.preventDefault(); redo(); }
-      // Cmd+C：复制
+      // Cmd+C: copy
       if (e.code === "KeyC" && mod) { e.preventDefault(); copySelected(); }
-      // Cmd+V：粘贴
+      // Cmd+V: paste
       if (e.code === "KeyV" && mod) { e.preventDefault(); paste(); }
-      // Cmd+D：复制
+      // Cmd+D: duplicate
       if (e.code === "KeyD" && mod) { e.preventDefault(); duplicate(); }
-      // Cmd+A：全选
+      // Cmd+A: select all
       if (e.code === "KeyA" && mod) { e.preventDefault(); selectAll(); }
-      // Cmd+B：创建分组
+      // Cmd+B: create group
       if (e.code === "KeyB" && mod && !e.shiftKey) { e.preventDefault(); createGroupRef.current(); }
-      // Shift+Cmd+B：解散分组
+      // Shift+Cmd+B: ungroup
       if (e.code === "KeyB" && mod && e.shiftKey) {
         e.preventDefault();
         const groupNode = nodes.find(n => selectedNodeIds.has(n.id) && n.type === "groupNode");
         if (groupNode) ungroupRef.current(groupNode.id);
       }
-      // Cmd+1：适配视口
+      // Cmd+1: fit viewport
       if (e.code === "Digit1" && mod) { e.preventDefault(); fitView({ padding: 0.2, duration: 300 }); }
-      // Cmd+E：导出
+      // Cmd+E: export
       if (e.code === "KeyE" && mod) { e.preventDefault(); exportWorkflow(); }
-      // Cmd+I：导入
+      // Cmd+I: import
       if (e.code === "KeyI" && mod) { e.preventDefault(); importWorkflow(); }
-      // ?：快捷键帮助
+      // ?: shortcut help
       if (e.code === "Slash" && e.shiftKey && !mod) { e.preventDefault(); setShowHelp(h => !h); }
     };
     const up = (e: KeyboardEvent) => { if (e.code === "Space") setSpacePressed(false); };
@@ -909,7 +909,7 @@ function CanvasPageInner() {
     return () => { window.removeEventListener("keydown", down); window.removeEventListener("keyup", up); };
   }, [nodes, selectedNodeIds, undo, redo, copySelected, paste, duplicate, selectAll, fitView, exportWorkflow, importWorkflow]);
 
-  // 折叠/展开分组
+  // Collapse/expand group
   const toggleGroup = useCallback((groupId: string) => {
     setNodes(nds => {
       const groupNode = nds.find(n => n.id === groupId);
@@ -919,7 +919,7 @@ function CanvasPageInner() {
       const willCollapse = isExpanded;
       const childIds = new Set<string>(gd._childIds || []);
 
-      // 折叠时记录当前尺寸，展开时恢复
+      // Record current dimensions on collapse, restore on expand
       const origStyle = willCollapse
         ? { _origWidth: groupNode.style?.width, _origHeight: groupNode.style?.height }
         : {};
@@ -941,7 +941,7 @@ function CanvasPageInner() {
       });
     });
 
-    // 处理边
+    // Handle edges
     setEdges(eds => {
       const groupNode = nodes.find(n => n.id === groupId);
       const gd = groupNode?.data as any;
@@ -953,20 +953,20 @@ function CanvasPageInner() {
         const srcChild = childIds.has(e.source);
         const tgtChild = childIds.has(e.target);
 
-        // 内部边：折叠时隐藏
+        // Internal edges: hide on collapse
         if (srcChild && tgtChild) {
           return { ...e, hidden: willCollapse };
         }
         if (willCollapse) {
-          // 外部边：重定向到 group 节点，保存原始端点
+          // External edges: redirect to group node, save original endpoints
           if (srcChild) return { ...e, data: { ...e.data, _origSource: e.source }, source: groupId };
           if (tgtChild) return { ...e, data: { ...e.data, _origTarget: e.target }, target: groupId };
         } else {
-          // 展开：恢复原始端点
+          // Expand: restore original endpoints
           const ed = e.data as any;
           if (ed?._origSource) return { ...e, source: ed._origSource, data: { ...e.data, _origSource: undefined }, hidden: false };
           if (ed?._origTarget) return { ...e, target: ed._origTarget, data: { ...e.data, _origTarget: undefined }, hidden: false };
-          // 恢复内部边可见
+          // Restore internal edge visibility
           if (srcChild && tgtChild) return { ...e, hidden: false };
         }
         return e;
@@ -974,7 +974,7 @@ function CanvasPageInner() {
     });
   }, [nodes, setNodes, setEdges]);
 
-  // 解散分组：删掉 group 节点，子节点保留并清除 _groupId
+  // Ungroup: remove group node, keep child nodes and clear _groupId
   const ungroupNodes = useCallback((groupId: string) => {
     setNodes(nds => {
       const group = nds.find(n => n.id === groupId);
@@ -986,7 +986,7 @@ function CanvasPageInner() {
           : n
         );
     });
-    // 恢复被重定向的边
+    // Restore redirected edges
     setEdges(eds => eds.map(e => {
       const ed = e.data as any;
       if (ed?._origSource) return { ...e, source: ed._origSource, data: { ...e.data, _origSource: undefined }, hidden: false };
@@ -995,7 +995,7 @@ function CanvasPageInner() {
     }));
   }, [setNodes, setEdges]);
 
-  // 删除分组 + 所有子节点
+  // Delete group + all child nodes
   const deleteGroupAndChildren = useCallback((groupId: string) => {
     setNodes(nds => {
       const group = nds.find(n => n.id === groupId);
@@ -1003,7 +1003,7 @@ function CanvasPageInner() {
       childIds.add(groupId);
       return nds.filter(n => !childIds.has(n.id));
     });
-    // 删除涉及子节点的边
+    // Delete edges involving child nodes
     setEdges(eds => {
       const group = nodes.find(n => n.id === groupId);
       const childIds = new Set<string>((group?.data as any)?._childIds || []);
@@ -1026,18 +1026,18 @@ function CanvasPageInner() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), []);
 
-  // 需要 agent 的节点类型（后端所有 step 都需要 agent）
+  // Node types that require an agent (all backend steps need an agent)
   const AGENT_NODE_TYPES = AGENT_NODE_TYPES_SET;
 
-  // 加载模板数据（传入 agents 列表以便自动分配）
+  // Load template data (agents list passed in for auto-assignment)
   const loadTemplate = useCallback((availableAgents: AgentItem[]) => {
     const templateData = sessionStorage.getItem("workflowTemplate");
     if (templateData) {
       try {
         const { nodes: templateNodes, edges: templateEdges, name, description, workflowId } = JSON.parse(templateData);
-        // 找一个可用的 agent 作为默认分配
+        // Find an available agent as default assignment
         const defaultAgent = availableAgents.find(a => a.state === "Running") || availableAgents[0];
-        // 根据界面语言决定输出语言指令
+        // Determine output language instruction based on UI language
         const lang = t("_lang", { defaultValue: "en" });
         const langSuffix = lang === "zh" ? "\n\nIMPORTANT: You MUST respond entirely in Chinese (中文)." : "";
         const newNodes = templateNodes.map((n: any, idx: number) => {
@@ -1054,7 +1054,7 @@ function CanvasPageInner() {
               nodeType,
               labelKey: n.data?.label,
               descKey: n.data?.description,
-              // 保留已有 agent 绑定（按 ID 查名字），或自动分配默认 agent
+              // Keep existing agent binding (look up name by ID), or auto-assign default agent
               ...(n.data?.agentId ? {
                 agentId: n.data.agentId,
                 agentName: n.data.agentName || availableAgents.find(a => a.id === n.data.agentId)?.name || n.data.agentId,
@@ -1078,7 +1078,7 @@ function CanvasPageInner() {
         }
         if (name) setWorkflowName(name.startsWith("workflows.") ? t(name) : name);
         if (description) setWorkflowDescription(description.startsWith("workflows.") ? t(description) : description);
-        // 如果是编辑已有工作流，恢复 selectedWorkflow 以便保存时走更新逻辑
+        // If editing an existing workflow, restore selectedWorkflow so save uses update logic
         if (workflowId) setSelectedWorkflow({ id: workflowId, name: name || "", description: description || "" } as WorkflowItem);
         sessionStorage.removeItem("workflowTemplate");
         return true;
@@ -1087,13 +1087,13 @@ function CanvasPageInner() {
     return false;
   }, [t, setNodes, setEdges]);
 
-  // 加载智能体、工作流，然后加载模板
+  // Load agents, workflows, then load template
   useEffect(() => {
     Promise.all([listAgents(), listWorkflows()])
       .then(([a, w]) => {
         setAgents(a);
         setWorkflows(w);
-        // agents 就绪后再加载模板
+        // Load template after agents are ready
         if (!loadTemplate(a)) {
           const savedNodes = sessionStorage.getItem("canvasNodes");
           if (savedNodes) {
@@ -1104,12 +1104,12 @@ function CanvasPageInner() {
       .catch(() => {});
   }, [routeTimestamp, loadTemplate]);
 
-  // 保存节点到 sessionStorage
+  // Save nodes to sessionStorage
   useEffect(() => {
     if (nodes.length > 0) sessionStorage.setItem("canvasNodes", JSON.stringify(nodes));
   }, [nodes]);
 
-  // nodeType → 默认 stepMode 映射
+  // nodeType -> default stepMode mapping
   const NODE_MODE_MAP: Record<string, string> = {
     condition: "conditional",
     loop: "loop",
@@ -1117,11 +1117,11 @@ function CanvasPageInner() {
     collect: "collect",
   };
 
-  // 添加节点
+  // Add node
   const addNode = useCallback((type: string) => {
     const config = NODE_TYPES.find(n => n.type === type) || NODE_TYPES[10];
     const defaultMode = NODE_MODE_MAP[type];
-    // 用函数式更新读最新 nodes，避免闭包过期
+    // Use functional update to read latest nodes, avoiding stale closures
     setNodes(nds => {
       const existing = nds.filter(n => n.type === "custom" && !n.hidden);
       let maxY = 0;
@@ -1144,7 +1144,7 @@ function CanvasPageInner() {
     });
   }, [setNodes, t]);
 
-  // 连线
+  // Edge connections
   const edgeColor = theme === "dark" ? "#6b7280" : "#94a3b8";
   const edgeColorActive = theme === "dark" ? "#818cf8" : "#6366f1";
 
@@ -1164,19 +1164,19 @@ function CanvasPageInner() {
     }, eds));
   }, [setEdges, edgeColorActive]);
 
-  // 节点点击 → 打开配置面板
+  // Node click -> open config panel
   const onNodeClick = useCallback((_: any, node: Node) => {
     setEditingNode(node);
   }, []);
 
-  // 节点被删除时清理编辑面板
+  // Clean up editing panel when nodes are deleted
   const onNodesDelete = useCallback((deleted: Node[]) => {
     if (editingNode && deleted.some(n => n.id === editingNode.id)) {
       setEditingNode(null);
     }
   }, [editingNode]);
 
-  // group 拖拽时带动子节点
+  // Group drag moves child nodes along
   const groupDragStart = useRef<{ id: string; x: number; y: number } | null>(null);
 
   const onNodeDragStart = useCallback((_: any, node: Node) => {
@@ -1187,7 +1187,7 @@ function CanvasPageInner() {
 
   const onNodeDrag = useCallback((_: any, node: Node) => {
     if (node.type === "groupNode" && groupDragStart.current?.id === node.id) {
-      // 拖拽分组 → 带动子节点
+      // Dragging group -> move child nodes along
       const dx = node.position.x - groupDragStart.current.x;
       const dy = node.position.y - groupDragStart.current.y;
       if (dx === 0 && dy === 0) return;
@@ -1199,7 +1199,7 @@ function CanvasPageInner() {
           : n
       ));
     } else {
-      // 拖拽子节点 → 扩展所属分组边框
+      // Dragging child node -> expand parent group bounds
       const groupId = (node.data as any)?._groupId;
       if (groupId) {
         setNodes(nds => recalcGroupBounds(nds, groupId));
@@ -1207,21 +1207,21 @@ function CanvasPageInner() {
     }
   }, [setNodes, recalcGroupBounds]);
 
-  // 跟踪选中的节点
+  // Track selected nodes
   const onSelectionChange = useCallback(({ nodes: selected }: OnSelectionChangeParams) => {
     setSelectedNodeIds(new Set(selected.map(n => n.id)));
   }, []);
 
-  // 创建分组：不改变子节点位置，只在底层加一个背景框 + 标记归属
+  // Create group: keep child node positions, just add a background frame underneath + mark ownership
   const createGroup = useCallback(() => {
     if (selectedNodeIds.size < 2) return;
 
     const selected = nodes.filter(n => selectedNodeIds.has(n.id) && n.type !== "groupNode");
     if (selected.length < 2) return;
 
-    // 手动计算包围盒（考虑节点自身宽高，getNodesBounds 不一定准）
-    const NODE_W = 200; // 节点最大宽度
-    const NODE_H = 80;  // 节点估算高度
+    // Manually calculate bounding box (considering node dimensions, getNodesBounds may not be accurate)
+    const NODE_W = 200; // Max node width
+    const NODE_H = 80;  // Estimated node height
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const n of selected) {
       const w = (n.measured?.width ?? n.width ?? NODE_W);
@@ -1254,8 +1254,8 @@ function CanvasPageInner() {
       },
     };
 
-    // 用函数式更新：在现有节点前面插入 group，修改子节点 data 标记归属
-    // 不替换整个数组，保留 ReactFlow 内部节点状态（measured 等）
+    // Use functional update: insert group before existing nodes, update child node data to mark ownership
+    // Don't replace the entire array, preserve ReactFlow internal node state (measured, etc.)
     setNodes(nds => [
       groupNode,
       ...nds.map(n => childIds.includes(n.id)
@@ -1266,7 +1266,7 @@ function CanvasPageInner() {
     setSelectedNodeIds(new Set());
   }, [selectedNodeIds, nodes, setNodes, t]);
 
-  // 同步快捷键 refs
+  // Sync shortcut key refs
   createGroupRef.current = createGroup;
   ungroupRef.current = ungroupNodes;
 
@@ -1276,12 +1276,12 @@ function CanvasPageInner() {
   deleteGroupAndChildrenRef.current = deleteGroupAndChildren;
   tRef.current = t;
 
-  // 更新节点数据
+  // Update node data
   const handleNodeUpdate = useCallback((id: string, newData: any) => {
     setNodes(nds => nds.map(n => n.id === id ? { ...n, data: newData } : n));
   }, [setNodes]);
 
-  // 从节点构建后端 steps：只有绑定了真实 agent 的节点才是 step
+  // Build backend steps from nodes: only nodes bound to a real agent are steps
   const buildSteps = useCallback((nodeList: Node[]) => {
     return nodeList
       .filter(n => {
@@ -1297,7 +1297,7 @@ function CanvasPageInner() {
           prompt: d.prompt || d.description || "",
           timeout_secs: d.timeoutSecs || 120,
         };
-        // 执行模式
+        // Execution mode
         const mode = d.stepMode || "sequential";
         if (mode === "conditional") {
           step.mode = { conditional: { condition: d.condition || "" } };
@@ -1306,22 +1306,22 @@ function CanvasPageInner() {
         } else {
           step.mode = mode;
         }
-        // 错误模式
+        // Error mode
         const errMode = d.errorMode || "fail";
         if (errMode === "retry") {
           step.error_mode = { retry: { max_retries: d.maxRetries || 3 } };
         } else {
           step.error_mode = errMode;
         }
-        // 输出变量
+        // Output variable
         if (d.outputVar) step.output_var = d.outputVar;
-        // DAG 依赖
+        // DAG dependencies
         if (d.dependsOn && d.dependsOn.length > 0) step.depends_on = d.dependsOn;
         return step;
       });
   }, []);
 
-  // 保存工作流
+  // Save workflow
   const handleSave = useCallback(async () => {
     if (!workflowName.trim()) {
       showError(t("canvas.name_required"));
@@ -1352,10 +1352,10 @@ function CanvasPageInner() {
     }
   }, [workflowName, workflowDescription, selectedWorkflow, nodes, edges, buildSteps, t, showError, showToast]);
 
-  // 点击运行 → 弹出输入框
+  // Click run -> show input dialog
   const handleRunClick = useCallback((id?: string) => {
     if (id) {
-      // 从侧边栏直接运行已保存的工作流
+      // Run saved workflow directly from sidebar
       setRunInput("");
       setShowRunInput(true);
     } else if (selectedWorkflow?.id || nodes.length > 0) {
@@ -1364,12 +1364,12 @@ function CanvasPageInner() {
     }
   }, [selectedWorkflow, nodes]);
 
-  // 确认运行
+  // Confirm run
   const handleRunConfirm = useCallback(async (id?: string) => {
     setShowRunInput(false);
     let workflowId = id || selectedWorkflow?.id;
 
-    // 没有已保存的工作流 → 先保存
+    // No saved workflow -> save first
     if (!workflowId && nodes.length > 0) {
       const steps = buildSteps(nodes);
       if (steps.length === 0) {
@@ -1399,10 +1399,10 @@ function CanvasPageInner() {
     setRunningWorkflowId(workflowId);
     setErrorMsg(null);
     setRunResult(null);
-    // 运行时边动画
+    // Edge animation during run
     setEdges(eds => eds.map(e => ({ ...e, animated: true })));
 
-    // 逐步点亮节点动画
+    // Progressively highlight node animation
     const agentNodeIds = nodes.filter(n => (n.data as any).agentId).map(n => n.id);
     const allNodeIds = nodes.map(n => n.id);
     let stepTimer: ReturnType<typeof setInterval> | null = null;
@@ -1418,19 +1418,19 @@ function CanvasPageInner() {
       })));
     };
 
-    // 逐步推进动画，最后一个节点保持 running 直到 API 返回
+    // Step through animation, last node stays running until API returns
     const doneSet = new Set<string>();
     if (agentNodeIds.length > 0) {
       updateRunState(agentNodeIds[0], doneSet);
       if (agentNodeIds.length > 1) {
         stepTimer = setInterval(() => {
           if (currentStep < agentNodeIds.length - 1) {
-            // 标记当前为 done，推进到下一个
+            // Mark current as done, advance to next
             doneSet.add(agentNodeIds[currentStep]);
             currentStep++;
             updateRunState(agentNodeIds[currentStep], doneSet);
           }
-          // 到最后一个节点就停止 timer，保持 running 等 API 返回
+          // Stop timer at last node, keep running until API returns
           if (currentStep >= agentNodeIds.length - 1) {
             if (stepTimer) clearInterval(stepTimer);
             stepTimer = null;
@@ -1441,7 +1441,7 @@ function CanvasPageInner() {
 
     try {
       const resp = await runWorkflow(workflowId, runInput);
-      // 完成：所有节点标记 done
+      // Complete: mark all nodes as done
       if (stepTimer) clearInterval(stepTimer);
       setNodes(nds => nds.map(n => ({
         ...n,
@@ -1452,14 +1452,14 @@ function CanvasPageInner() {
         status: (resp as any).status || "completed",
         run_id: (resp as any).run_id || "",
       });
-      // 3秒后清除 done 状态和边动画
+      // Clear done state and edge animation after 3 seconds
       setTimeout(() => {
         setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
         setEdges(eds => eds.map(e => ({ ...e, animated: false })));
       }, 3000);
     } catch (e: any) {
       if (stepTimer) clearInterval(stepTimer);
-      // 错误：清除所有状态和边动画
+      // Error: clear all state and edge animation
       setNodes(nds => nds.map(n => ({ ...n, data: { ...(n.data as any), _runState: undefined } })));
       setEdges(eds => eds.map(e => ({ ...e, animated: false })));
       showError(e?.message || String(e));
@@ -1468,7 +1468,7 @@ function CanvasPageInner() {
     }
   }, [selectedWorkflow, nodes, edges, workflowName, workflowDescription, buildSteps, runInput, t, showError]);
 
-  // 删除工作流
+  // Delete workflow
   const handleDeleteConfirmed = useCallback(async (id: string) => {
     try {
       await deleteWorkflow(id);
@@ -1481,7 +1481,7 @@ function CanvasPageInner() {
     } catch (e) { console.error(e); }
   }, [selectedWorkflow, setNodes, setEdges]);
 
-  // 选择已保存的工作流
+  // Select saved workflow
   const handleSelectWorkflow = useCallback((w: WorkflowItem) => {
     setSelectedWorkflow(w);
     setWorkflowName(w.name);
@@ -1544,7 +1544,7 @@ function CanvasPageInner() {
     setEdges(newEdges);
   }, [setNodes, setEdges]);
 
-  // 新建工作流
+  // Create new workflow
   const handleNewWorkflow = useCallback(() => {
     setSelectedWorkflow(null);
     setNodes([]); setEdges([]);
@@ -1552,7 +1552,7 @@ function CanvasPageInner() {
     setEditingNode(null);
   }, [setNodes, setEdges]);
 
-  // 模板实例化回调：关闭浏览器，刷新工作流列表，选中新工作流
+  // Template instantiation callback: close browser, refresh workflow list, select new workflow
   const handleTemplateInstantiate = useCallback(async (workflowId: string) => {
     setShowTemplateBrowser(false);
     try {
@@ -1565,7 +1565,7 @@ function CanvasPageInner() {
     } catch { /* ignore */ }
   }, [handleSelectWorkflow]);
 
-  // 有效 agent 步骤数量
+  // Valid agent step count
   const agentStepCount = useMemo(() => buildSteps(nodes).length, [nodes, buildSteps]);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -1595,7 +1595,7 @@ function CanvasPageInner() {
           )}
         </div>
         <div className="flex items-center gap-1 flex-wrap">
-          {/* 状态信息 */}
+          {/* Status info */}
           {selectedNodeIds.size >= 2 && (
             <Button variant="secondary" size="sm" onClick={createGroup}>
               <Group className="w-3.5 h-3.5 mr-1" />
@@ -1608,7 +1608,7 @@ function CanvasPageInner() {
             </span>
           )}
 
-          {/* 视图工具 */}
+          {/* View tools */}
           <div className="flex items-center gap-0.5 px-0.5 sm:px-1">
             <Button variant="secondary" onClick={() => setIsFullscreen(!isFullscreen)} title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}>
               {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
@@ -1620,7 +1620,7 @@ function CanvasPageInner() {
 
           <div className="w-px h-5 bg-border-subtle hidden sm:block" />
 
-          {/* 文件操作 */}
+          {/* File operations */}
           <div className="flex items-center gap-0.5 px-0.5 sm:px-1">
             <Button variant="secondary" onClick={() => setShowWorkflowPanel(!showWorkflowPanel)} title={t("workflows.open_workflows")}>
               <FolderOpen className="w-4 h-4" />
@@ -1638,7 +1638,7 @@ function CanvasPageInner() {
 
           <div className="w-px h-5 bg-border-subtle hidden sm:block" />
 
-          {/* 画布操作 */}
+          {/* Canvas operations */}
           <div className="flex items-center gap-0.5 px-0.5 sm:px-1">
             <Button variant="secondary" onClick={() => { setNodes([]); setEdges([]); setEditingNode(null); }} title={t("common.clear")}>
               <Trash2 className="w-4 h-4" />
@@ -1650,7 +1650,7 @@ function CanvasPageInner() {
 
           <div className="w-px h-5 bg-border-subtle hidden sm:block" />
 
-          {/* 主操作 */}
+          {/* Primary actions */}
           <div className="flex items-center gap-1 sm:gap-1.5 pl-0.5 sm:pl-1">
             <Button variant="primary" onClick={handleSave} disabled={!workflowName.trim() || agentStepCount === 0}>
               <Save className="w-4 h-4" />
@@ -1679,7 +1679,7 @@ function CanvasPageInner() {
             isRunning={runningWorkflowId} t={t} />
         )}
 
-        {/* 节点库（可折叠） */}
+        {/* Node library (collapsible) */}
         <div className={`border-r border-border-subtle bg-surface/50 backdrop-blur overflow-y-auto transition-all duration-200 hidden sm:block ${
           sidebarCollapsed ? "w-10 px-1 py-2" : "w-52 p-3 space-y-4"
         }`}>
@@ -1717,7 +1717,7 @@ function CanvasPageInner() {
           )}
         </div>
 
-        {/* 画布 */}
+        {/* Canvas */}
         <main className="flex-1 relative">
           <div className="absolute top-3 left-3 right-3 z-10 flex gap-2">
             <input type="text" value={workflowName} onChange={(e) => setWorkflowName(e.target.value)}
@@ -1728,7 +1728,7 @@ function CanvasPageInner() {
               className="flex-1 max-w-sm rounded-xl border border-border-subtle bg-surface/90 backdrop-blur px-3 py-2 text-sm text-text-dim focus:border-brand focus:ring-2 focus:ring-brand/20 outline-none shadow-sm" />
           </div>
 
-          {/* 节点配置面板 */}
+          {/* Node configuration panel */}
           {editingNode && !showRunInput && (
             <NodeConfigPanel node={{
               ...editingNode,
@@ -1741,7 +1741,7 @@ function CanvasPageInner() {
               t={t} />
           )}
 
-          {/* 运行输入弹窗 */}
+          {/* Run input dialog */}
           {showRunInput && (
             <div className="absolute top-3 right-3 z-20 w-80 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden">
               <div className="flex items-center justify-between px-3 py-2 bg-success/10 border-b border-border-subtle">
@@ -1794,7 +1794,7 @@ function CanvasPageInner() {
             defaultViewport={{ x: 50, y: 80, zoom: 1 }}
             minZoom={0.1} maxZoom={2}
             snapToGrid snapGrid={[12, 12]}
-            // 交互：默认拖拽=框选，空格+拖拽=平移
+            // Interaction: default drag = box select, space + drag = pan
             panOnDrag={spacePressed}
             selectionOnDrag={!spacePressed}
             panOnScroll
@@ -1818,7 +1818,7 @@ function CanvasPageInner() {
               maskColor={theme === "dark" ? "rgba(0,0,0,0.3)" : "rgba(0,0,0,0.08)"} />
           </ReactFlow>
 
-          {/* 空画布引导 */}
+          {/* Empty canvas guide */}
           {nodes.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
               <div className="text-center pointer-events-auto">
@@ -1831,7 +1831,7 @@ function CanvasPageInner() {
             </div>
           )}
 
-          {/* 右键上下文菜单 */}
+          {/* Right-click context menu */}
           {contextMenu && (
             <div className="fixed z-50 rounded-xl border border-border-subtle bg-surface shadow-2xl py-1 min-w-[160px]"
               style={{ left: contextMenu.x, top: contextMenu.y }}>
@@ -1881,7 +1881,7 @@ function CanvasPageInner() {
             </div>
           )}
 
-          {/* 运行结果面板 */}
+          {/* Run result panel */}
           {runResult && (
             <div className="absolute bottom-3 left-3 right-3 z-20 max-h-48 rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden flex flex-col">
               <div className="flex items-center justify-between px-3 py-2 bg-success/10 border-b border-border-subtle shrink-0">
@@ -1898,7 +1898,7 @@ function CanvasPageInner() {
         </main>
       </div>
 
-      {/* 模板浏览器 */}
+      {/* Template browser */}
       {showTemplateBrowser && (
         <TemplateBrowser
           onInstantiate={handleTemplateInstantiate}
@@ -1914,7 +1914,7 @@ function CanvasPageInner() {
         </div>
       )}
 
-      {/* 快捷键帮助面板 */}
+      {/* Shortcut help panel */}
       {showHelp && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setShowHelp(false)}>
           <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[420px] max-w-[90vw] max-h-[80vh] overflow-y-auto animate-fade-in-scale" onClick={e => e.stopPropagation()}>

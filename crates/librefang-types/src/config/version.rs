@@ -1,7 +1,7 @@
-//! 配置版本追踪，为未来的配置迁移提供基础。
+//! Configuration version tracking, providing the foundation for future config migrations.
 
-/// 配置文件版本号，用于未来的配置迁移支持。
+/// Configuration file version number, used for future config migration support.
 ///
-/// TODO: 当配置格式发生不兼容变更时，递增此版本号，
-/// 并在 loader 中实现自动迁移逻辑（旧版本 → 新版本）。
+/// TODO: When an incompatible change is made to the config format, increment this version
+/// and implement automatic migration logic in the loader (old version -> new version).
 pub const CONFIG_VERSION: u32 = 1;

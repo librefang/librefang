@@ -1,4 +1,4 @@
-//! 所有配置 struct 与 enum 类型定义，包含 Default impl 和关联 helper 函数。
+//! All configuration struct and enum type definitions, including Default impls and associated helper functions.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
