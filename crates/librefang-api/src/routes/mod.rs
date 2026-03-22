@@ -25,7 +25,7 @@ pub mod plugins;
 pub mod providers;
 pub mod skills;
 pub mod system;
-pub mod workflows; 65f9be04 (feat: file-based input inbox for async external commands (#907))
+pub mod workflows;
 
 // Glob re-export to keep `routes::handler_name` backward compatible
 // (utoipa macros in openapi.rs, ws.rs, etc. all depend on this path format).
