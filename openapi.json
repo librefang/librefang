@@ -7,7 +7,7 @@
       "name": "Apache-2.0",
       "url": "https://www.apache.org/licenses/LICENSE-2.0"
     },
-    "version": "0.6.8-20260320"
+    "version": "2026.3.2201"
   },
   "paths": {
     "/.well-known/agent.json": {
@@ -1294,6 +1294,36 @@
         }
       }
     },
+    "/api/agents/{id}/session/reboot": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/session/reboot — Hard-reboot an agent's session (full clear, no summary).",
+        "operationId": "reboot_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Hard-reboot an agent's session without saving summary",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/agents/{id}/session/reset": {
       "post": {
         "tags": [
@@ -1420,6 +1450,84 @@
         "responses": {
           "200": {
             "description": "Session found",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/sessions/import": {
+      "post": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "POST /api/agents/{id}/sessions/import — Import a previously exported session.",
+        "operationId": "import_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Exported session JSON",
+          "content": {
+            "application/json": {
+              "schema": {}
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Session imported successfully",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/sessions/{session_id}/export": {
+      "get": {
+        "tags": [
+          "agents"
+        ],
+        "summary": "GET /api/agents/{id}/sessions/{session_id}/export — Export a session for hibernation.",
+        "operationId": "export_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Agent ID",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "session_id",
+            "in": "path",
+            "description": "Session ID to export",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exported session data",
             "content": {
               "application/json": {
                 "schema": {}
@@ -6241,7 +6349,7 @@
           "system"
         ],
         "summary": "GET /api/templates — List available agent templates.",
-        "operationId": "list_templates",
+        "operationId": "list_agent_templates",
         "responses": {
           "200": {
             "description": "List templates",
@@ -6263,7 +6371,7 @@
           "system"
         ],
         "summary": "GET /api/templates/:name — Get template details.",
-        "operationId": "get_template",
+        "operationId": "get_agent_template",
         "parameters": [
           {
             "name": "name",
@@ -7079,6 +7187,10 @@
               "null"
             ],
             "description": "Optional channel type (e.g. \"whatsapp\", \"telegram\")."
+          },
+          "ephemeral": {
+            "type": "boolean",
+            "description": "If true, this is an ephemeral \"side question\" (`/btw`).\nThe message is answered using the agent's system prompt but WITHOUT\nloading or saving session history — the real conversation is untouched."
           },
           "message": {
             "type": "string"

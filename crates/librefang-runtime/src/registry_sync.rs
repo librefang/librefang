@@ -123,7 +123,7 @@ fn download_and_extract(registry_cache: &Path) -> Result<(), Box<dyn std::error:
     tracing::info!("Downloading registry from {REGISTRY_TARBALL_URL}");
 
     let resp = ureq::get(REGISTRY_TARBALL_URL).call()?;
-    let reader = resp.into_reader();
+    let reader = resp.into_body().into_reader();
 
     // Decompress gzip
     let gz = flate2::read::GzDecoder::new(reader);
