@@ -3,7 +3,7 @@
   "nav": {
     "core": "核心", "automation": "自动化", "resources": "资源", "system": "系统",
     "overview": "概览", "canvas": "画布", "chat": "对话", "sessions": "会话", "approvals": "审批",
-    "workflows": "工作流", "scheduler": "调度器", "goals": "目标", "agents": "智能体",
+    "workflows": "工作流", "scheduler": "定时任务", "goals": "目标", "agents": "智能体",
     "providers": "供应商", "channels": "通道", "skills": "技能", "hands": "Hands", "plugins": "插件", "models": "模型",
     "analytics": "分析", "memory": "记忆", "comms": "通信", "runtime": "运行时", "logs": "日志", "settings": "设置",
     "network": "网络", "a2a": "A2A"
@@ -82,7 +82,8 @@
     "sort_trending": "热门", "sort_downloads": "下载量", "sort_stars": "星标", "sort_updated": "更新", "sort_rating": "评分",
     "no_results": "没有找到技能", "rate_limited": "请求受限", "rate_limited_desc": "ClawHub API 请求次数超限，请稍后重试。", "load_error": "加载失败",
     "search_placeholder": "搜索技能（如 python、web、ai...）",
-    "stars_count": "星标", "downloads_count": "下载", "install_timeout": "安装超时"
+    "stars_count": "星标", "downloads_count": "下载", "install_timeout": "安装超时",
+    "outputs": "技能输出"
   },
   "hands": {
     "title": "Hands", "subtitle": "可组合的功能扩展包。",
@@ -202,12 +203,12 @@
     }
   },
   "scheduler": {
-    "title": "调度器", "subtitle": "管理 Cron 任务和定期任务。", "create_job": "创建调度",
+    "title": "定时任务", "subtitle": "管理定时任务和自动化计划。", "create_job": "新建任务",
     "job_name": "任务名称", "job_name_placeholder": "例如：每周健康检查", "cron_exp": "Cron 表达式",
     "target_agent": "目标智能体", "select_agent": "选择智能体...", "active_schedules": "定时任务", "run_now": "立即运行",
     "event_triggers": "事件触发器", "system_cron": "系统 Cron",
-    "schedules": "个调度", "triggers_label": "个触发器", "cron_jobs": "个定时",
-    "no_schedules": "暂无调度任务。创建一个来自动化智能体任务。",
+    "schedules": "个任务", "triggers_label": "个触发器", "cron_jobs": "个定时",
+    "no_schedules": "暂无定时任务。创建一个来自动运行智能体。",
     "message": "消息", "message_placeholder": "发送给智能体的消息...",
     "every_minute": "每分钟", "every_n_hours": "每 {{n}} 小时", "weekly": "每周"
   },
@@ -269,7 +270,14 @@
     "description": "此实例需要身份验证才能访问。",
     "placeholder": "输入 API Key...",
     "submit": "认证",
-    "invalid": "无效的 API Key，请重试。"
+    "invalid": "无效的凭据，请重试。",
+    "login": "登录",
+    "login_desc": "登录到控制台",
+    "username": "用户名",
+    "username_placeholder": "请输入用户名",
+    "password": "密码",
+    "password_placeholder": "请输入密码",
+    "logout": "退出登录"
   },
   "network": {
     "section": "OFP 网络", "title": "网络", "subtitle": "开放联邦协议网络状态和连接的节点。",

@@ -84,6 +84,7 @@ struct ResponsesOutputItem {
 /// Content part within an output item.
 #[cfg(test)]
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ResponsesContentPart {
     #[serde(rename = "type")]
     part_type: String,
@@ -94,6 +95,7 @@ struct ResponsesContentPart {
 /// Reasoning summary text entry.
 #[cfg(test)]
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ResponsesReasoningSummary {
     #[serde(rename = "type")]
     #[serde(default)]
