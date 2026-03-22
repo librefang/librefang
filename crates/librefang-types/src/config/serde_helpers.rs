@@ -1,4 +1,4 @@
-//! 自定义序列化/反序列化辅助函数。
+//! Custom serialization/deserialization helper functions.
 
 use serde::{Deserialize, Serialize};
 

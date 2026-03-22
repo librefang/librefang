@@ -34,12 +34,14 @@ pub const API_VERSION_LATEST: &str = crate::versioning::CURRENT_VERSION;
 /// All available API versions with their status.
 pub const API_VERSIONS: &[(&str, &str)] = &[("v1", "stable")];
 
-/// 构建 v1 API 路由树。
+/// Build the v1 API route tree.
 ///
-/// 每个领域子模块提供自己的 `router()` 方法，此处通过 `.merge()` 组合。
-/// 路径相对于挂载点（如 `/health`、`/agents` 等），调用方将其嵌套在 `/api` 和 `/api/v1` 下。
+/// Each domain sub-module provides its own `router()` method, combined here via `.merge()`.
+/// Paths are relative to the mount point (e.g. `/health`, `/agents`, etc.); the caller
+/// nests them under `/api` and `/api/v1`.
 ///
-/// 未来添加 v2 时只需新建 `api_v2_routes()`，挂载到 `/api/v2`，然后更新 `API_VERSION_LATEST`。
+/// To add v2 in the future, just create `api_v2_routes()`, mount it at `/api/v2`,
+/// and update `API_VERSION_LATEST`.
 fn api_v1_routes() -> Router<Arc<AppState>> {
     Router::new()
         .merge(routes::config::router())
@@ -54,7 +56,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::providers::router())
         .merge(routes::budget::router())
         .merge(routes::goals::router())
-        // Dashboard 凭证登录（handler 定义在 server.rs 本地）
+        // Dashboard credential login (handler defined locally in server.rs)
         .route(
             "/auth/dashboard-login",
             axum::routing::post(dashboard_login),
@@ -63,7 +65,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/auth/dashboard-check",
             axum::routing::get(dashboard_auth_check),
         )
-        // OAuth/OIDC 外部认证端点
+        // OAuth/OIDC external authentication endpoints
         .route(
             "/auth/providers",
             axum::routing::get(crate::oauth::auth_providers),
@@ -350,12 +352,12 @@ pub async fn build_router(
         .nest("/api/v1", v1_routes.clone())
         // Mount the same routes at /api (latest version alias for backward compat)
         .nest("/api", v1_routes)
-        // Webhook 触发端点（不受版本管理 — 外部调用方使用固定 URL）
+        // Webhook trigger endpoints (not versioned — external callers use fixed URLs)
         .route("/hooks/wake", axum::routing::post(routes::webhook_wake))
         .route("/hooks/agent", axum::routing::post(routes::webhook_agent))
-        // A2A 协议端点 + MCP HTTP（协议级别，不受版本管理）
+        // A2A protocol endpoints + MCP HTTP (protocol-level, not versioned)
         .merge(routes::network::protocol_router())
-        // MCP HTTP 端点（协议级别，不受版本管理）
+        // MCP HTTP endpoint (protocol-level, not versioned)
         .route("/mcp", axum::routing::post(routes::mcp_http))
         // OpenAI-compatible API (follows OpenAI versioning, not ours)
         .route(

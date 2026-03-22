@@ -10,7 +10,7 @@
 //! use librefang_types::i18n::ErrorTranslator;
 //!
 //! let translator = ErrorTranslator::new("zh-CN");
-//! assert_eq!(translator.t("api-error-agent-not-found"), "未找到智能体");
+//! assert_eq!(translator.t("api-error-agent-not-found"), "Agent not found (in Chinese)");
 //! ```
 
 use fluent::{FluentArgs, FluentBundle, FluentResource, FluentValue};

@@ -27,7 +27,7 @@ interface ChatMessage {
   memories_used?: string[];
 }
 
-// Slash 命令
+// Slash commands
 const SLASH_COMMANDS = [
   { cmd: "/help", desc: "Show available commands" },
   { cmd: "/clear", desc: "Clear chat history" },
@@ -35,7 +35,7 @@ const SLASH_COMMANDS = [
   { cmd: "/info", desc: "Show current agent info" },
 ];
 
-// Markdown 样式
+// Markdown styles
 const mdComponents = {
   p: ({ children }: any) => <p className="mb-2 last:mb-0">{children}</p>,
   h1: ({ children }: any) => <h1 className="text-lg font-bold mb-2">{children}</h1>,
@@ -59,7 +59,7 @@ const mdComponents = {
   a: ({ href, children }: any) => <a href={href} className="text-brand underline" target="_blank" rel="noopener noreferrer">{children}</a>,
 };
 
-// 流式打字机效果 + Markdown
+// Streaming typewriter effect + Markdown
 function Typewriter({ text, speed = 15 }: { text: string; speed?: number }) {
   const [displayed, setDisplayed] = useState("");
   const done = displayed.length >= text.length;
@@ -142,14 +142,14 @@ function useWebSocket(agentId: string | null) {
   return { ws: wsRef, wsConnected };
 }
 
-// 聊天消息管理 - 包含历史加载和发送 (with WS streaming)
+// Chat message management - includes history loading and sending (with WS streaming)
 function useChatMessages(agentId: string | null, agents: any[] = []) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const { ws, wsConnected } = useWebSocket(agentId);
   const addSkillOutput = useUIStore((s) => s.addSkillOutput);
 
-  // 加载历史记录
+  // Load history
   useEffect(() => {
     if (!agentId) return;
     loadAgentSession(agentId)
@@ -167,12 +167,12 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
       .catch(() => {});
   }, [agentId]);
 
-  // 发送消息 - WS优先，HTTP回退
+  // Send message - WS first, HTTP fallback
   const sendMessage = useCallback(async (content: string) => {
     if (!content.trim()) return;
     const trimmed = content.trim();
 
-    // Slash 命令处理
+    // Slash command handling
     if (trimmed.startsWith("/")) {
       const sysMsg = (text: string) => {
         setMessages(prev => [...prev,
@@ -352,7 +352,7 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
   return { messages, isLoading, sendMessage, clearHistory, wsConnected };
 }
 
-// 消息气泡组件
+// Message bubble component
 function MessageBubble({ message }: { message: ChatMessage }) {
   const { t } = useTranslation();
   const isUser = message.role === "user";
@@ -372,7 +372,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"} animate-fade-in-up`}>
       <div className={`flex flex-col max-w-[90%] sm:max-w-[75%] ${isUser ? "items-end" : "items-start"}`}>
-        {/* 头像 + 名字 */}
+        {/* Avatar + name */}
         <div className={`flex items-center gap-2 mb-1.5 ${isUser ? "self-end flex-row-reverse" : "self-start"}`}>
           <div className={`h-7 w-7 rounded-lg flex items-center justify-center ${
             isUser ? "bg-gradient-to-br from-brand to-accent text-white shadow-md" : "bg-surface border border-border-subtle"
@@ -384,7 +384,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
           </span>
         </div>
 
-        {/* 消息内容 */}
+        {/* Message content */}
         <div className={`relative px-4 py-3 rounded-2xl text-sm leading-relaxed shadow-sm transition-all ${
           isUser
             ? "bg-gradient-to-br from-brand to-brand/90 text-white rounded-tr-md"
@@ -408,7 +408,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
           )}
         </div>
 
-        {/* 元信息 */}
+        {/* Meta info */}
         <div className="flex items-center gap-2 mt-1.5 text-[10px] text-text-dim/50">
           <span>{message.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
           {message.tokens?.output && !message.isStreaming && (
@@ -436,7 +436,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   );
 }
 
-// 输入框 - 带快捷键提示
+// Input box - with shortcut hints
 function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) => void; disabled: boolean; placeholder: string }) {
   const { t } = useTranslation();
   const [message, setMessage] = useState("");
@@ -462,7 +462,7 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
 
   return (
     <form onSubmit={handleSubmit} className="space-y-2">
-      {/* Slash 命令补全 */}
+      {/* Slash command autocomplete */}
       {showingSlash && filteredCmds.length > 0 && (
         <div className="rounded-xl border border-border-subtle bg-surface shadow-lg p-1 mb-1">
           {filteredCmds.map(c => (
@@ -508,7 +508,7 @@ function ChatInput({ onSend, disabled, placeholder }: { onSend: (msg: string) =>
   );
 }
 
-// 连接状态栏
+// Connection status bar
 function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnected }: { agentName: string; isLoading: boolean; messageCount: number; onClear: () => void; wsConnected?: boolean }) {
   const { t } = useTranslation();
   return (
@@ -710,7 +710,7 @@ export function ChatPage() {
     }
   }, [agents, selectedAgentId]);
 
-  // 滚动到最新消息
+  // Scroll to latest message
   useEffect(() => {
     if (messages.length > 0) {
       setTimeout(() => {
@@ -721,7 +721,7 @@ export function ChatPage() {
 
   return (
     <div className="flex h-[calc(100vh-100px)] sm:h-[calc(100vh-140px)] flex-col">
-      {/* 头部 */}
+      {/* Header */}
       <header className="pb-2 sm:pb-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 sm:gap-3">
@@ -741,9 +741,9 @@ export function ChatPage() {
         </div>
       </header>
 
-      {/* 主内容区 */}
+      {/* Main content area */}
       <div className="flex flex-1 overflow-hidden rounded-2xl border border-border-subtle bg-surface shadow-xl ring-1 ring-black/5 dark:ring-white/5">
-        {/* 左侧 Agent 列表 */}
+        {/* Left sidebar - Agent list */}
         <aside className="hidden md:flex w-64 flex-shrink-0 border-r border-border-subtle bg-main/30 backdrop-blur-md flex-col">
           <div className="p-4 border-b border-border-subtle">
             <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-dim/60">{t("nav.agents")}</h3>
@@ -787,9 +787,9 @@ export function ChatPage() {
           </div>
         </aside>
 
-        {/* 右侧聊天区域 */}
+        {/* Right side - Chat area */}
         <main className="flex-1 flex flex-col overflow-hidden bg-main/10 relative">
-          {/* 背景装饰 */}
+          {/* Background decoration */}
           <div className="absolute inset-0 pointer-events-none opacity-30">
             <div className="absolute top-0 left-0 w-64 h-64 bg-brand/5 rounded-full blur-3xl" />
             <div className="absolute bottom-0 right-0 w-48 h-48 bg-accent/5 rounded-full blur-3xl" />
@@ -821,7 +821,7 @@ export function ChatPage() {
             />
           )}
 
-          {/* 消息区域 */}
+          {/* Message area */}
           <div className="flex-1 overflow-y-auto p-3 sm:p-6 space-y-4 sm:space-y-6 scrollbar-thin">
             {!selectedAgentId ? (
               <div className="h-full flex flex-col items-center justify-center text-center relative">
@@ -855,7 +855,7 @@ export function ChatPage() {
             )}
           </div>
 
-          {/* 输入区域 */}
+          {/* Input area */}
           <div className={`p-2 sm:p-4 border-t border-border-subtle bg-surface/90 backdrop-blur-md transition-all ${!selectedAgentId ? "opacity-30 pointer-events-none" : ""}`}>
             <ChatInput
               onSend={sendMessage}

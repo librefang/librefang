@@ -64,7 +64,7 @@ export function SettingsPage() {
       />
 
       <div className="grid gap-4 sm:gap-6 lg:grid-cols-2">
-        {/* 外观设置 */}
+        {/* Appearance Settings */}
         <Card padding="lg" hover>
           <h2 className="text-lg font-black tracking-tight mb-6">{t("settings.appearance")}</h2>
           <div className="space-y-8">
@@ -104,7 +104,7 @@ export function SettingsPage() {
           </div>
         </Card>
 
-        {/* Tools 管理 */}
+        {/* Tools Management */}
         <Card padding="lg" hover>
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-lg font-black tracking-tight flex items-center gap-2">

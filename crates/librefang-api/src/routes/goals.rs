@@ -2,7 +2,7 @@
 
 use super::AppState;
 
-/// 构建目标管理领域的路由。
+/// Build routes for the goal management domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
         .route("/goals", axum::routing::get(list_goals).post(create_goal))
