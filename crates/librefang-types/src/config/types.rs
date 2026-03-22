@@ -1358,6 +1358,46 @@ pub struct KernelConfig {
     /// Alternatively you can set `provider_urls.qwen-code` to the same value.
     #[serde(default)]
     pub qwen_code_path: Option<String>,
+    /// Telemetry / observability configuration (OpenTelemetry + Prometheus).
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+}
+
+/// Telemetry / observability configuration.
+///
+/// ```toml
+/// [telemetry]
+/// enabled = false
+/// otlp_endpoint = "http://localhost:4317"
+/// service_name = "librefang"
+/// sample_rate = 1.0
+/// prometheus_enabled = false
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    /// Enable OpenTelemetry OTLP tracing export.
+    pub enabled: bool,
+    /// OTLP gRPC endpoint (default: "http://localhost:4317").
+    pub otlp_endpoint: String,
+    /// Service name reported to the OTel collector.
+    pub service_name: String,
+    /// Trace sampling rate (0.0 to 1.0). Default: 1.0 (sample everything).
+    pub sample_rate: f64,
+    /// Enable Prometheus metrics endpoint at /api/metrics.
+    pub prometheus_enabled: bool,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            otlp_endpoint: "http://localhost:4317".to_string(),
+            service_name: "librefang".to_string(),
+            sample_rate: 1.0,
+            prometheus_enabled: false,
+        }
+    }
 }
 
 /// Azure OpenAI provider configuration.
@@ -2134,6 +2174,7 @@ impl Default for KernelConfig {
             privacy: PrivacyConfig::default(),
             strict_config: false,
             qwen_code_path: None,
+            telemetry: TelemetryConfig::default(),
         }
     }
 }

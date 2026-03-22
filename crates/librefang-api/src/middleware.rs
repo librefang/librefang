@@ -453,6 +453,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_api_version_header_is_added_to_unauthorized_responses() {
+        let api_key_state = std::sync::Arc::new(tokio::sync::RwLock::new("secret".to_string()));
         let app = Router::new()
             .route("/api/private", get(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(

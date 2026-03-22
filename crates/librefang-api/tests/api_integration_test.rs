@@ -104,6 +104,8 @@ async fn start_test_server_with_provider(
         webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
             format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
         )),
+        #[cfg(feature = "telemetry")]
+        prometheus_handle: None,
     });
 
     let app = Router::new()
@@ -1365,6 +1367,8 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         webhook_store: librefang_api::webhook_store::WebhookStore::load(std::env::temp_dir().join(
             format!("librefang-test-webhooks-{}.json", uuid::Uuid::new_v4()),
         )),
+        #[cfg(feature = "telemetry")]
+        prometheus_handle: None,
     });
 
     let api_key_state = std::sync::Arc::new(tokio::sync::RwLock::new(

@@ -276,6 +276,16 @@ pub async fn prometheus_metrics(State(state): State<Arc<AppState>>) -> impl Into
         env!("CARGO_PKG_VERSION")
     ));
 
+    // Append metrics from the Prometheus recorder when the telemetry feature is
+    // enabled and the recorder has been initialized. This merges the hand-crafted
+    // LibreFang metrics above with standard `metrics` crate counters/histograms
+    // (e.g. HTTP request metrics from the telemetry middleware).
+    #[cfg(feature = "telemetry")]
+    if let Some(handle) = &state.prometheus_handle {
+        out.push_str("# --- metrics-exporter-prometheus output ---\n");
+        out.push_str(&handle.render());
+    }
+
     (
         StatusCode::OK,
         [(

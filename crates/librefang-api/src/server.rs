@@ -228,6 +228,16 @@ pub async fn build_router(
     // Start channel bridges (Telegram, etc.)
     let bridge = channel_bridge::start_channel_bridge(kernel.clone()).await;
 
+    // Initialize Prometheus metrics recorder if telemetry feature is enabled
+    // and the config has prometheus_enabled = true.
+    #[cfg(feature = "telemetry")]
+    let prom_handle = if kernel.config_ref().telemetry.prometheus_enabled {
+        info!("Initializing Prometheus metrics recorder");
+        Some(crate::telemetry::init_prometheus())
+    } else {
+        None
+    };
+
     let channels_config = kernel.config_ref().channels.clone();
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
@@ -242,6 +252,8 @@ pub async fn build_router(
         webhook_store: crate::webhook_store::WebhookStore::load(
             kernel.config_ref().home_dir.join("webhooks.json"),
         ),
+        #[cfg(feature = "telemetry")]
+        prometheus_handle: prom_handle,
     });
 
     // CORS: allow localhost origins by default, plus any configured in cors_origin.
@@ -387,8 +399,19 @@ pub async fn build_router(
         ))
         .layer(CompressionLayer::new())
         .layer(TraceLayer::new_for_http())
-        .layer(cors)
-        .with_state(state.clone());
+        .layer(cors);
+
+    // Add HTTP metrics middleware when telemetry feature is enabled and Prometheus is active.
+    #[cfg(feature = "telemetry")]
+    let app = if state.prometheus_handle.is_some() {
+        app.layer(axum::middleware::from_fn(
+            crate::telemetry::http_metrics_middleware,
+        ))
+    } else {
+        app
+    };
+
+    let app = app.with_state(state.clone());
 
     (app, state)
 }

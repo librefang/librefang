@@ -98,4 +98,7 @@ pub struct AppState {
     pub provider_probe_cache: librefang_runtime::provider_health::ProbeCache,
     /// Webhook subscription store for outbound event notifications.
     pub webhook_store: crate::webhook_store::WebhookStore,
+    /// Prometheus metrics handle (only set when `telemetry` feature + config enabled).
+    #[cfg(feature = "telemetry")]
+    pub prometheus_handle: Option<metrics_exporter_prometheus::PrometheusHandle>,
 }
