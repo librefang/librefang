@@ -41,7 +41,7 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: () => <Navigate to="/hands" />
+  component: () => <Navigate to="/overview" />
 });
 
 const overviewRoute = createRoute({
