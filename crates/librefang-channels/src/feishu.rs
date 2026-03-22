@@ -54,14 +54,6 @@ impl FeishuRegion {
         }
     }
 
-    /// WebSocket event gateway URL.
-    fn ws_gateway(self) -> &'static str {
-        match self {
-            Self::Cn => "wss://open.feishu.cn/event/ws",
-            Self::Intl => "wss://open.larksuite.com/event/ws",
-        }
-    }
-
     /// Human-readable label used in log messages.
     pub fn label(self) -> &'static str {
         match self {
@@ -559,13 +551,16 @@ impl FeishuAdapter {
 
     /// Start a WebSocket connection to the Feishu/Lark event gateway and
     /// forward received events as `ChannelMessage`s.
+    ///
+    /// Uses the two-step endpoint discovery protocol:
+    /// 1. POST `/callback/ws/endpoint` with app credentials to get the real WS URL.
+    /// 2. Connect to the returned URL via standard WebSocket upgrade (HTTP 101).
     fn start_websocket(&self, tx: mpsc::Sender<ChannelMessage>) {
         let app_id = self.app_id.clone();
         let app_secret = self.app_secret.clone();
         let region = self.region;
         let mut shutdown_rx = self.shutdown_rx.clone();
         let account_id = Arc::new(self.account_id.clone());
-        let cached_token = Arc::clone(&self.cached_token);
         let client = self.client.clone();
 
         tokio::spawn(async move {
@@ -573,25 +568,21 @@ impl FeishuAdapter {
             let mut backoff = WS_INITIAL_BACKOFF;
 
             loop {
-                // Obtain a fresh token for the WS handshake.
-                let token =
-                    match get_token_static(&client, region, &app_id, &app_secret, &cached_token)
-                        .await
-                    {
-                        Ok(t) => t,
+                // Step 1: Get the real WebSocket URL from the endpoint API.
+                let (ws_url, client_config) =
+                    match get_ws_endpoint(&client, region, &app_id, &app_secret).await {
+                        Ok(pair) => pair,
                         Err(e) => {
-                            error!("{label}: failed to obtain token for WS: {e}");
+                            error!("{label}: failed to obtain WS endpoint: {e}");
                             tokio::time::sleep(backoff).await;
                             backoff = (backoff * 2).min(WS_MAX_BACKOFF);
                             continue;
                         }
                     };
 
-                // Build WS URL with authorization.
-                let ws_url = format!("{}?app_id={}&token={}", region.ws_gateway(), app_id, token);
-
                 info!("{label}: connecting to WebSocket event gateway...");
 
+                // Step 2: Connect to the returned WebSocket URL.
                 let ws_result = tokio_tungstenite::connect_async(&ws_url).await;
                 let (ws_stream, _) = match ws_result {
                     Ok(pair) => pair,
@@ -609,8 +600,13 @@ impl FeishuAdapter {
                 use futures::{SinkExt, StreamExt};
                 let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-                // Heartbeat interval (default 30 s, may be overridden by server).
-                let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+                // Use server-provided ping interval, default 120s (matching Go SDK).
+                let ping_secs = client_config
+                    .as_ref()
+                    .map(|c| c.ping_interval)
+                    .filter(|&p| p > 0)
+                    .unwrap_or(120);
+                let mut ping_interval = tokio::time::interval(Duration::from_secs(ping_secs));
                 ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
                 loop {
@@ -695,6 +691,80 @@ impl FeishuAdapter {
             }
         });
     }
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket endpoint discovery types (Feishu /callback/ws/endpoint API)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct WsEndpointResp {
+    code: i64,
+    msg: String,
+    data: Option<WsEndpointData>,
+}
+
+#[derive(serde::Deserialize)]
+struct WsEndpointData {
+    #[serde(rename = "URL")]
+    url: String,
+    #[serde(rename = "ClientConfig")]
+    client_config: Option<WsClientConfig>,
+}
+
+#[derive(serde::Deserialize)]
+#[allow(dead_code)]
+struct WsClientConfig {
+    #[serde(rename = "ReconnectCount", default)]
+    reconnect_count: u32,
+    #[serde(rename = "ReconnectInterval", default)]
+    reconnect_interval: u64,
+    #[serde(rename = "ReconnectNonce", default)]
+    reconnect_nonce: u64,
+    #[serde(rename = "PingInterval", default)]
+    ping_interval: u64,
+}
+
+/// Obtain the real WebSocket URL from the Feishu/Lark endpoint discovery API.
+///
+/// This implements the two-step protocol used by the official Go SDK:
+/// 1. POST to `/callback/ws/endpoint` with app credentials.
+/// 2. The response contains the actual `wss://` URL to connect to.
+async fn get_ws_endpoint(
+    client: &reqwest::Client,
+    region: FeishuRegion,
+    app_id: &str,
+    app_secret: &str,
+) -> Result<(String, Option<WsClientConfig>), String> {
+    let url = format!("{}/callback/ws/endpoint", region.api_base());
+    let body = serde_json::json!({
+        "AppID": app_id,
+        "AppSecret": app_secret,
+    });
+    let resp = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("endpoint request failed: {e}"))?;
+    let status = resp.status();
+    let text = resp.text().await.map_err(|e| format!("read body: {e}"))?;
+    if !status.is_success() {
+        return Err(format!("endpoint returned HTTP {status}: {text}"));
+    }
+    let parsed: WsEndpointResp =
+        serde_json::from_str(&text).map_err(|e| format!("parse endpoint response: {e}"))?;
+    if parsed.code != 0 {
+        return Err(format!(
+            "endpoint error code {}: {}",
+            parsed.code, parsed.msg
+        ));
+    }
+    let data = parsed.data.ok_or("endpoint response missing data field")?;
+    if data.url.is_empty() {
+        return Err("endpoint returned empty URL".to_string());
+    }
+    Ok((data.url, data.client_config))
 }
 
 /// Static helper so the WS task (which cannot borrow `&self`) can refresh the
@@ -1387,14 +1457,14 @@ mod tests {
     }
 
     #[test]
-    fn test_region_ws_gateway() {
+    fn test_region_ws_endpoint_url() {
         assert_eq!(
-            FeishuRegion::Cn.ws_gateway(),
-            "wss://open.feishu.cn/event/ws"
+            format!("{}/callback/ws/endpoint", FeishuRegion::Cn.api_base()),
+            "https://open.feishu.cn/callback/ws/endpoint"
         );
         assert_eq!(
-            FeishuRegion::Intl.ws_gateway(),
-            "wss://open.larksuite.com/event/ws"
+            format!("{}/callback/ws/endpoint", FeishuRegion::Intl.api_base()),
+            "https://open.larksuite.com/callback/ws/endpoint"
         );
     }
 
