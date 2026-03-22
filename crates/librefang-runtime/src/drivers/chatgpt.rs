@@ -63,6 +63,7 @@ struct ResponsesApiRequest {
 #[cfg(test)]
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ResponsesOutputItem {
     #[serde(rename = "type")]
     item_type: String,

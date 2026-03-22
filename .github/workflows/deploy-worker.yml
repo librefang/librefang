@@ -8,6 +8,9 @@ on:
       - "deploy/worker/**"
       - "web/workers/github-stats-worker/**"
 
+permissions:
+  contents: read
+
 jobs:
   deploy-worker:
     name: Deploy Main Worker

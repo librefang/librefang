@@ -65,7 +65,10 @@ pub async fn sync_catalog_to(home_dir: &std::path::Path) -> Result<CatalogSyncRe
         for item in items {
             let path = item["path"].as_str().unwrap_or("");
             // Download provider TOML files and aliases.toml
-            if (path.starts_with("providers/") && path.ends_with(".toml")) || path == "aliases.toml"
+            // Reject paths with ".." to prevent directory traversal from malicious API responses
+            if !path.contains("..")
+                && ((path.starts_with("providers/") && path.ends_with(".toml"))
+                    || path == "aliases.toml")
             {
                 let raw_url =
                     format!("https://raw.githubusercontent.com/{CATALOG_REPO}/main/{path}");
