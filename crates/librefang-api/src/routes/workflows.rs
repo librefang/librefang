@@ -1195,7 +1195,7 @@ pub async fn list_cron_jobs(
         match uuid::Uuid::parse_str(agent_id_str) {
             Ok(uuid) => {
                 let aid = AgentId(uuid);
-                state.kernel.cron_scheduler.list_jobs(aid)
+                state.kernel.cron().list_jobs(aid)
             }
             Err(_) => {
                 return (
@@ -1205,7 +1205,7 @@ pub async fn list_cron_jobs(
             }
         }
     } else {
-        state.kernel.cron_scheduler.list_all_jobs()
+        state.kernel.cron().list_all_jobs()
     };
     let total = jobs.len();
     let jobs_json: Vec<serde_json::Value> = jobs
@@ -1249,9 +1249,9 @@ pub async fn delete_cron_job(
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron_scheduler.remove_job(job_id) {
+            match state.kernel.cron().remove_job(job_id) {
                 Ok(_) => {
-                    if let Err(e) = state.kernel.cron_scheduler.persist() {
+                    if let Err(e) = state.kernel.cron().persist() {
                         tracing::warn!("Failed to persist cron scheduler state: {e}");
                     }
                     (
@@ -1282,9 +1282,9 @@ pub async fn update_cron_job(
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron_scheduler.update_job(job_id, &body) {
+            match state.kernel.cron().update_job(job_id, &body) {
                 Ok(job) => {
-                    let _ = state.kernel.cron_scheduler.persist();
+                    let _ = state.kernel.cron().persist();
                     (
                         StatusCode::OK,
                         Json(serde_json::to_value(&job).unwrap_or_default()),
@@ -1314,9 +1314,9 @@ pub async fn toggle_cron_job(
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron_scheduler.set_enabled(job_id, enabled) {
+            match state.kernel.cron().set_enabled(job_id, enabled) {
                 Ok(()) => {
-                    if let Err(e) = state.kernel.cron_scheduler.persist() {
+                    if let Err(e) = state.kernel.cron().persist() {
                         tracing::warn!("Failed to persist cron scheduler state: {e}");
                     }
                     (
@@ -1346,7 +1346,7 @@ pub async fn get_cron_job(
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron_scheduler.get_meta(job_id) {
+            match state.kernel.cron().get_meta(job_id) {
                 Some(meta) => (
                     StatusCode::OK,
                     Json(serde_json::to_value(&meta).unwrap_or_default()),
@@ -1373,7 +1373,7 @@ pub async fn cron_job_status(
     match uuid::Uuid::parse_str(&id) {
         Ok(uuid) => {
             let job_id = librefang_types::scheduler::CronJobId(uuid);
-            match state.kernel.cron_scheduler.get_meta(job_id) {
+            match state.kernel.cron().get_meta(job_id) {
                 Some(meta) => (
                     StatusCode::OK,
                     Json(serde_json::to_value(&meta).unwrap_or_default()),

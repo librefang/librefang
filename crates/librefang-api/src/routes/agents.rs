@@ -105,7 +105,7 @@ async fn resolve_manifest(
             }
             Err(e) => {
                 tracing::warn!("Manifest signature verification failed: {e}");
-                state.kernel.audit_log.record(
+                state.kernel.audit().record(
                     "system",
                     librefang_runtime::audit::AuditAction::AuthAttempt,
                     "manifest signature verification failed",
@@ -4420,13 +4420,13 @@ mod monitoring_tests {
         let agent_id = spawn_monitoring_test_agent(&state, "logs-filter");
         let agent_id_str = agent_id.to_string();
 
-        state.kernel.audit_log.record(
+        state.kernel.audit().record(
             agent_id_str.clone(),
             AuditAction::AgentMessage,
             "exact match target",
             "custom_error",
         );
-        state.kernel.audit_log.record(
+        state.kernel.audit().record(
             agent_id_str.clone(),
             AuditAction::AgentMessage,
             "should not match substring filter",

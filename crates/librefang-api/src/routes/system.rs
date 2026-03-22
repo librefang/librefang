@@ -498,8 +498,8 @@ pub async fn audit_recent(
         .unwrap_or(50)
         .min(1000); // Cap at 1000
 
-    let entries = state.kernel.audit_log.recent(n);
-    let tip = state.kernel.audit_log.tip_hash();
+    let entries = state.kernel.audit().recent(n);
+    let tip = state.kernel.audit().tip_hash();
 
     let items: Vec<serde_json::Value> = entries
         .iter()
@@ -518,7 +518,7 @@ pub async fn audit_recent(
 
     Json(serde_json::json!({
         "entries": items,
-        "total": state.kernel.audit_log.len(),
+        "total": state.kernel.audit().len(),
         "tip_hash": tip,
     }))
 }
@@ -526,8 +526,8 @@ pub async fn audit_recent(
 /// GET /api/audit/verify — Verify the audit chain integrity.
 #[utoipa::path(get, path = "/api/audit/verify", tag = "system", responses((status = 200, description = "Audit verification result", body = serde_json::Value)))]
 pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let entry_count = state.kernel.audit_log.len();
-    match state.kernel.audit_log.verify_integrity() {
+    let entry_count = state.kernel.audit().len();
+    match state.kernel.audit().verify_integrity() {
         Ok(()) => {
             if entry_count == 0 {
                 // SECURITY: Warn that an empty audit log has no forensic value
@@ -535,13 +535,13 @@ pub async fn audit_verify(State(state): State<Arc<AppState>>) -> impl IntoRespon
                     "valid": true,
                     "entries": 0,
                     "warning": "Audit log is empty — no events have been recorded yet",
-                    "tip_hash": state.kernel.audit_log.tip_hash(),
+                    "tip_hash": state.kernel.audit().tip_hash(),
                 }))
             } else {
                 Json(serde_json::json!({
                     "valid": true,
                     "entries": entry_count,
-                    "tip_hash": state.kernel.audit_log.tip_hash(),
+                    "tip_hash": state.kernel.audit().tip_hash(),
                 }))
             }
         }
@@ -590,7 +590,7 @@ pub async fn logs_stream(
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-            let entries = state.kernel.audit_log.recent(200);
+            let entries = state.kernel.audit().recent(200);
 
             for entry in &entries {
                 // On first poll, send all existing entries as backfill.
@@ -1091,8 +1091,8 @@ fn approval_to_json(
 /// `action_summary` → `action`, `agent_id` → `agent_name`, `requested_at` → `created_at`.
 #[utoipa::path(get, path = "/api/approvals", tag = "approvals", responses((status = 200, description = "List pending and recent approvals", body = Vec<serde_json::Value>)))]
 pub async fn list_approvals(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let pending = state.kernel.approval_manager.list_pending();
-    let recent = state.kernel.approval_manager.list_recent(50);
+    let pending = state.kernel.approvals().list_pending();
+    let recent = state.kernel.approvals().list_recent(50);
 
     let registry_agents = state.kernel.registry.list();
     let agent_name_for = |agent_id: &str| {
@@ -1165,7 +1165,7 @@ pub async fn get_approval(
         }
     };
 
-    match state.kernel.approval_manager.get_pending(uuid) {
+    match state.kernel.approvals().get_pending(uuid) {
         Some(a) => {
             let registry_agents = state.kernel.registry.list();
             (StatusCode::OK, Json(approval_to_json(&a, &registry_agents)))
@@ -1201,7 +1201,7 @@ pub async fn create_approval(
 ) -> impl IntoResponse {
     use librefang_types::approval::{ApprovalRequest, RiskLevel};
 
-    let policy = state.kernel.approval_manager.policy();
+    let policy = state.kernel.approvals().policy();
     let id = uuid::Uuid::new_v4();
     let approval_req = ApprovalRequest {
         id,
@@ -1252,7 +1252,7 @@ pub async fn approve_request(
         }
     };
 
-    match state.kernel.approval_manager.resolve(
+    match state.kernel.approvals().resolve(
         uuid,
         librefang_types::approval::ApprovalDecision::Approved,
         Some("api".to_string()),
@@ -1285,7 +1285,7 @@ pub async fn reject_request(
         }
     };
 
-    match state.kernel.approval_manager.resolve(
+    match state.kernel.approvals().resolve(
         uuid,
         librefang_types::approval::ApprovalDecision::Denied,
         Some("api".to_string()),
@@ -1854,7 +1854,7 @@ pub async fn create_backup(
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {
     let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
-    let home_dir = &state.kernel.config.home_dir;
+    let home_dir = &state.kernel.home_dir();
     let backups_dir = home_dir.join("backups");
     if let Err(e) = std::fs::create_dir_all(&backups_dir) {
         return (
@@ -2048,7 +2048,7 @@ pub async fn create_backup(
         size,
         components.len()
     );
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("Backup created: {filename}"),
@@ -2070,7 +2070,7 @@ pub async fn create_backup(
 /// GET /api/backups — List existing backups.
 #[utoipa::path(get, path = "/api/backups", tag = "system", responses((status = 200, description = "List backups", body = Vec<serde_json::Value>)))]
 pub async fn list_backups(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let backups_dir = state.kernel.config.home_dir.join("backups");
+    let backups_dir = state.kernel.home_dir().join("backups");
     if !backups_dir.exists() {
         return Json(serde_json::json!({"backups": [], "total": 0}));
     }
@@ -2175,7 +2175,7 @@ pub async fn delete_backup(
         );
     }
 
-    let backups_dir = state.kernel.config.home_dir.join("backups");
+    let backups_dir = state.kernel.home_dir().join("backups");
     let backup_path = match find_backup_path(&backups_dir, &filename) {
         Ok(Some(path)) => path,
         Ok(None) => {
@@ -2254,7 +2254,7 @@ pub async fn restore_backup(
         );
     }
 
-    let home_dir = &state.kernel.config.home_dir;
+    let home_dir = &state.kernel.home_dir();
     let backups_dir = home_dir.join("backups");
     let backup_path = match find_backup_path(&backups_dir, &filename) {
         Ok(Some(path)) => path,
@@ -2385,7 +2385,7 @@ pub async fn restore_backup(
         "Restore from {filename}: {total_restored} files restored, {} errors",
         errors.len()
     );
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("Backup restored: {filename} ({total_restored} files)"),

@@ -649,11 +649,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_hands_text(&self) -> String {
-        let defs = self.kernel.hand_registry.list_definitions();
+        let defs = self.kernel.hands().list_definitions();
         if defs.is_empty() {
             return "No hands available.".to_string();
         }
-        let instances = self.kernel.hand_registry.list_instances();
+        let instances = self.kernel.hands().list_instances();
         let mut msg = format!("Available hands ({}):\n", defs.len());
         for d in &defs {
             let reqs_met = self
@@ -841,7 +841,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_schedules_text(&self) -> String {
-        let jobs = self.kernel.cron_scheduler.list_all_jobs();
+        let jobs = self.kernel.cron().list_all_jobs();
         if jobs.is_empty() {
             return "No scheduled jobs.".to_string();
         }
@@ -913,7 +913,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     next_run: None,
                 };
 
-                match self.kernel.cron_scheduler.add_job(job, false) {
+                match self.kernel.cron().add_job(job, false) {
                     Ok(id) => {
                         let id_str = id.0.to_string();
                         let id_short = safe_truncate_str(&id_str, 8);
@@ -927,7 +927,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     return "Usage: /schedule del <id-prefix>".to_string();
                 }
                 let prefix = &args[0];
-                let jobs = self.kernel.cron_scheduler.list_all_jobs();
+                let jobs = self.kernel.cron().list_all_jobs();
                 let matched: Vec<_> = jobs
                     .iter()
                     .filter(|j| j.id.0.to_string().starts_with(prefix.as_str()))
@@ -936,7 +936,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     0 => format!("No job found matching '{prefix}'."),
                     1 => {
                         let j = matched[0];
-                        match self.kernel.cron_scheduler.remove_job(j.id) {
+                        match self.kernel.cron().remove_job(j.id) {
                             Ok(_) => {
                                 let id_str = j.id.0.to_string();
                                 format!(
@@ -956,7 +956,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     return "Usage: /schedule run <id-prefix>".to_string();
                 }
                 let prefix = &args[0];
-                let jobs = self.kernel.cron_scheduler.list_all_jobs();
+                let jobs = self.kernel.cron().list_all_jobs();
                 let matched: Vec<_> = jobs
                     .iter()
                     .filter(|j| j.id.0.to_string().starts_with(prefix.as_str()))
@@ -1026,7 +1026,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_approvals_text(&self) -> String {
-        let pending = self.kernel.approval_manager.list_pending();
+        let pending = self.kernel.approvals().list_pending();
         if pending.is_empty() {
             return "No pending approvals.".to_string();
         }
@@ -1053,7 +1053,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn resolve_approval_text(&self, id_prefix: &str, approve: bool) -> String {
-        let pending = self.kernel.approval_manager.list_pending();
+        let pending = self.kernel.approvals().list_pending();
         let matched: Vec<_> = pending
             .iter()
             .filter(|r| r.id.to_string().starts_with(id_prefix))
@@ -1067,11 +1067,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 } else {
                     librefang_types::approval::ApprovalDecision::Denied
                 };
-                match self.kernel.approval_manager.resolve(
-                    req.id,
-                    decision,
-                    Some("channel".to_string()),
-                ) {
+                match self
+                    .kernel
+                    .approvals()
+                    .resolve(req.id, decision, Some("channel".to_string()))
+                {
                     Ok(_) => {
                         let verb = if approve { "Approved" } else { "Rejected" };
                         let id_str = req.id.to_string();
@@ -2545,7 +2545,7 @@ pub async fn reload_channels_from_disk(
     }
 
     // Re-read secrets.env so new API tokens are available in std::env
-    let secrets_path = state.kernel.config.home_dir.join("secrets.env");
+    let secrets_path = state.kernel.home_dir().join("secrets.env");
     if secrets_path.exists() {
         if let Ok(content) = std::fs::read_to_string(&secrets_path) {
             for line in content.lines() {
@@ -2574,7 +2574,7 @@ pub async fn reload_channels_from_disk(
     }
 
     // Re-read config from disk
-    let config_path = state.kernel.config.home_dir.join("config.toml");
+    let config_path = state.kernel.home_dir().join("config.toml");
     let fresh_config = librefang_kernel::config::load_config(Some(&config_path));
 
     // Update the live channels config so list_channels() reflects reality

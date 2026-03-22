@@ -47,7 +47,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "default_model": state.kernel.config.default_model.model,
         "uptime_seconds": uptime,
         "api_listen": state.kernel.config.api_listen,
-        "home_dir": state.kernel.config.home_dir.display().to_string(),
+        "home_dir": state.kernel.home_dir().display().to_string(),
         "log_level": state.kernel.config.log_level,
         "network_enabled": state.kernel.config.network_enabled,
         "agents": agents,
@@ -66,7 +66,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 pub async fn shutdown(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     tracing::info!("Shutdown requested via API");
     // SECURITY: Record shutdown in audit trail
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         "shutdown requested via API",
@@ -901,7 +901,7 @@ pub async fn security_status(State(state): State<Arc<AppState>>) -> impl IntoRes
         "bearer_token"
     };
 
-    let audit_count = state.kernel.audit_log.len();
+    let audit_count = state.kernel.audit().len();
 
     Json(serde_json::json!({
         "core_protections": {
@@ -1063,7 +1063,7 @@ pub async fn run_migrate(
     };
 
     let target_dir = if req.target_dir.trim().is_empty() {
-        state.kernel.config.home_dir.clone()
+        state.kernel.home_dir().to_path_buf()
     } else {
         std::path::PathBuf::from(req.target_dir.trim())
     };
@@ -1143,7 +1143,7 @@ pub async fn run_migrate(
 )]
 pub async fn config_reload(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // SECURITY: Record config reload in audit trail
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         "config reload requested via API",
@@ -1402,7 +1402,7 @@ pub async fn config_set(
         }
     };
 
-    let config_path = state.kernel.config.home_dir.join("config.toml");
+    let config_path = state.kernel.home_dir().join("config.toml");
     if config_path.file_name().and_then(|n| n.to_str()) != Some("config.toml")
         || config_path.components().any(|c| {
             matches!(
@@ -1498,7 +1498,7 @@ pub async fn config_set(
         Err(_) => "saved_reload_failed",
     };
 
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("config set: {path}"),
