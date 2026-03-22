@@ -48,6 +48,10 @@ struct ApiRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
+    /// Extended thinking configuration.
+    /// Anthropic API expects: `{"type": "enabled", "budget_tokens": N}`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,14 +201,22 @@ impl LlmDriver for AnthropicDriver {
             })
             .collect();
 
+        let thinking_value = request.thinking.as_ref().map(|tc| {
+            serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": tc.budget_tokens
+            })
+        });
+
         let api_request = ApiRequest {
             model: request.model.clone(),
             max_tokens: request.max_tokens,
             system,
             messages: api_messages,
             tools: api_tools,
-            temperature: Some(request.temperature),
+            temperature: if request.thinking.is_some() { None } else { Some(request.temperature) },
             stream: false,
+            thinking: thinking_value,
         };
 
         // Retry loop for rate limits and overloads
@@ -306,14 +318,22 @@ impl LlmDriver for AnthropicDriver {
             })
             .collect();
 
+        let thinking_value = request.thinking.as_ref().map(|tc| {
+            serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": tc.budget_tokens
+            })
+        });
+
         let api_request = ApiRequest {
             model: request.model.clone(),
             max_tokens: request.max_tokens,
             system,
             messages: api_messages,
             tools: api_tools,
-            temperature: Some(request.temperature),
+            temperature: if request.thinking.is_some() { None } else { Some(request.temperature) },
             stream: true,
+            thinking: thinking_value,
         };
 
         // Retry loop for the initial HTTP request

@@ -2363,6 +2363,11 @@ system_prompt = "You are a helpful assistant."
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
         let mut manifest = entry.manifest.clone();
 
+        // Backfill thinking config from global config if per-agent is not set
+        if manifest.thinking.is_none() {
+            manifest.thinking = self.config.thinking.clone();
+        }
+
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
             let workspace_dir = resolve_workspace_dir(
@@ -3226,6 +3231,11 @@ system_prompt = "You are a helpful assistant."
 
         // Apply model routing if configured (disabled in Stable mode)
         let mut manifest = entry.manifest.clone();
+
+        // Backfill thinking config from global config if per-agent is not set
+        if manifest.thinking.is_none() {
+            manifest.thinking = self.config.thinking.clone();
+        }
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
