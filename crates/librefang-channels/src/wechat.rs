@@ -337,7 +337,7 @@ impl WeChatAdapter {
     }
 
     /// Parse an iLink message into a ChannelMessage.
-    fn parse_message(msg: &serde_json::Value) -> Option<ChannelMessage> {
+    fn parse_message(msg: &serde_json::Value, account_id: Option<&str>) -> Option<ChannelMessage> {
         let from_user_id = msg["from_user_id"].as_str()?.to_string();
         let to_user_id = msg["to_user_id"].as_str().unwrap_or_default();
         let context_token = msg["context_token"]
@@ -457,6 +457,12 @@ impl WeChatAdapter {
             "message_type".to_string(),
             serde_json::Value::Number(serde_json::Number::from(message_type)),
         );
+        if let Some(account_id) = account_id {
+            metadata.insert(
+                "account_id".to_string(),
+                serde_json::Value::String(account_id.to_string()),
+            );
+        }
 
         Some(ChannelMessage {
             channel: ChannelType::WeChat,
@@ -523,6 +529,7 @@ impl ChannelAdapter for WeChatAdapter {
         let messages_received = self.messages_received.clone();
         let last_error = self.last_error.clone();
         let user_context_tokens = self.user_context_tokens.clone();
+        let account_id = self.account_id.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let wechat_uin = self.wechat_uin.clone();
 
@@ -584,7 +591,9 @@ impl ChannelAdapter for WeChatAdapter {
                         // Process messages
                         if let Some(msgs) = data["msgs"].as_array() {
                             for msg in msgs {
-                                if let Some(channel_msg) = Self::parse_message(msg) {
+                                if let Some(channel_msg) =
+                                    Self::parse_message(msg, account_id.as_deref())
+                                {
                                     // Filter by allowed users
                                     if !allowed_users.is_empty()
                                         && !allowed_users
@@ -806,7 +815,7 @@ mod tests {
             }]
         });
 
-        let result = WeChatAdapter::parse_message(&msg);
+        let result = WeChatAdapter::parse_message(&msg, None);
         assert!(result.is_some());
         let channel_msg = result.unwrap();
         assert_eq!(channel_msg.sender.platform_id, "abc123@im.wechat");
@@ -840,7 +849,7 @@ mod tests {
             }]
         });
 
-        let result = WeChatAdapter::parse_message(&msg);
+        let result = WeChatAdapter::parse_message(&msg, None);
         assert!(result.is_some());
         match result.unwrap().content {
             ChannelContent::Image { ref url, .. } => {
@@ -863,7 +872,34 @@ mod tests {
                 "text_item": { "text": "echo" }
             }]
         });
-        assert!(WeChatAdapter::parse_message(&msg).is_none());
+        assert!(WeChatAdapter::parse_message(&msg, None).is_none());
+    }
+
+    #[test]
+    fn test_parse_message_includes_account_id_metadata() {
+        let msg = serde_json::json!({
+            "from_user_id": "abc123@im.wechat",
+            "to_user_id": "bot456@im.bot",
+            "context_token": "ctx_789",
+            "message_type": 2,
+            "msg_id": "msg_001",
+            "item_list": [{
+                "type": 1,
+                "text_item": {
+                    "text": "Hello, world!"
+                }
+            }]
+        });
+
+        let result = WeChatAdapter::parse_message(&msg, Some("wechat-main"));
+        assert_eq!(
+            result
+                .unwrap()
+                .metadata
+                .get("account_id")
+                .and_then(|v| v.as_str()),
+            Some("wechat-main")
+        );
     }
 
     #[test]
