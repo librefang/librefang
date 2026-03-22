@@ -184,7 +184,7 @@ export function AgentsPage() {
                   const isSuspended = (agent.state || "").toLowerCase() === "suspended";
                   return (
                     <div key={agent.id}
-                      className={`flex items-center gap-4 p-4 rounded-2xl border border-border-subtle hover:border-brand/30 transition-all cursor-pointer ${isSuspended ? "opacity-60 hover:opacity-100" : "bg-surface"}`}
+                      className={`flex items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle hover:border-brand/30 transition-all cursor-pointer ${isSuspended ? "opacity-60 hover:opacity-100" : "bg-surface"}`}
                       onClick={async () => {
                         setDetailLoading(true);
                         try { const d = await getAgentDetail(agent.id); setDetailAgent(d); } catch { setDetailAgent({ name: agent.name, id: agent.id }); }
@@ -192,20 +192,20 @@ export function AgentsPage() {
                       }}>
                       <Avatar fallback={agent.name} size="md" />
                       <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <h3 className="text-sm font-bold truncate">{agent.name}</h3>
-                          <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400 font-bold">{t("agents.hand_badge")}</span>
+                        <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                          <h3 className="text-xs sm:text-sm font-bold truncate">{agent.name}</h3>
+                          <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400 font-bold hidden sm:inline">{t("agents.hand_badge")}</span>
                           <Badge variant={getStatusVariant(agent.state)}>
                             {agent.state ? t(`common.${agent.state.toLowerCase()}`, { defaultValue: agent.state }) : t("common.idle")}
                           </Badge>
                         </div>
-                        <div className="flex items-center gap-3 mt-1 text-[10px] text-text-dim/60">
+                        <div className="flex items-center gap-2 sm:gap-3 mt-0.5 sm:mt-1 text-[9px] sm:text-[10px] text-text-dim/60">
                           <span className="font-mono">{agent.id.slice(0, 8)}</span>
-                          <span>{agent.model_name || t("common.unknown")}</span>
+                          <span className="hidden sm:inline">{agent.model_name || t("common.unknown")}</span>
                           <span className="text-brand">{agent.model_provider}</span>
                         </div>
                       </div>
-                      <div className="flex items-center gap-2 shrink-0 mt-2 md:mt-0" onClick={e => e.stopPropagation()}>
+                      <div className="flex items-center gap-1 sm:gap-2 shrink-0" onClick={e => e.stopPropagation()}>
                         {isSuspended ? (
                           <Button variant="secondary" size="sm" onClick={async () => { await resumeAgent(agent.id); agentsQuery.refetch(); }}>
                             <Play className="h-3.5 w-3.5 mr-1" /> <span className="hidden sm:inline">{t("agents.resume")}</span>

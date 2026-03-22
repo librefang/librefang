@@ -108,23 +108,23 @@ export function SchedulerPage() {
             {schedules.map(s => {
               const agent = agentMap.get(s.agent_id || "");
               return (
-                <div key={s.id} className="flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-2xl border border-border-subtle hover:border-brand/30 transition-all">
-                  <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
-                    <Clock className="w-5 h-5 text-brand" />
+                <div key={s.id} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle hover:border-brand/30 transition-all">
+                  <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
+                    <Clock className="w-4 h-4 sm:w-5 sm:h-5 text-brand" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-sm font-bold truncate">{s.name || s.description || s.id.slice(0, 8)}</h3>
+                    <div className="flex items-center gap-1.5 sm:gap-2">
+                      <h3 className="text-xs sm:text-sm font-bold truncate">{s.name || s.description || s.id.slice(0, 8)}</h3>
                       {s.enabled !== false && <Badge variant="success">{t("common.active")}</Badge>}
                     </div>
-                    <div className="flex items-center gap-3 mt-1 text-[10px] text-text-dim/60">
-                      <span className="font-mono bg-main px-1.5 py-0.5 rounded">{s.cron}</span>
-                      <span className="text-text-dim">{cronHint(s.cron || "")}</span>
+                    <div className="flex items-center gap-2 sm:gap-3 mt-0.5 sm:mt-1 text-[9px] sm:text-[10px] text-text-dim/60 flex-wrap">
+                      <span className="font-mono bg-main px-1 sm:px-1.5 py-0.5 rounded">{s.cron}</span>
+                      <span className="text-text-dim hidden sm:inline">{cronHint(s.cron || "")}</span>
                       {agent && <span className="font-bold text-brand">{agent.name}</span>}
                       {!agent && s.agent && <span className="font-bold text-brand">{s.agent}</span>}
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto">
+                  <div className="flex items-center gap-1 shrink-0">
                     <Button variant="secondary" size="sm" onClick={() => runMut.mutate(s.id)} disabled={runMut.isPending}>
                       {runMut.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
                     </Button>
@@ -134,7 +134,7 @@ export function SchedulerPage() {
                         <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-lg bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
                       </div>
                     ) : (
-                      <button onClick={() => handleDelete(s.id)} className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
+                      <button onClick={() => handleDelete(s.id)} className="p-1.5 sm:p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     )}

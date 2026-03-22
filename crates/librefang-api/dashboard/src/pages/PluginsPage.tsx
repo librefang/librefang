@@ -143,13 +143,13 @@ export function PluginsPage() {
           ) : (
             <div className="space-y-2 stagger-children">
               {plugins.map(p => (
-                <div key={p.name} className="flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-all">
-                  <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
-                    <Puzzle className="w-5 h-5 text-brand" />
+                <div key={p.name} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle bg-surface hover:border-brand/30 transition-all">
+                  <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
+                    <Puzzle className="w-4 h-4 sm:w-5 sm:h-5 text-brand" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <h3 className="text-sm font-bold">{p.name}</h3>
+                    <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                      <h3 className="text-xs sm:text-sm font-bold">{p.name}</h3>
                       <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim font-mono">{p.version}</span>
                       {p.hooks?.ingest && <Badge variant="brand">ingest</Badge>}
                       {p.hooks?.after_turn && <Badge variant="brand">after_turn</Badge>}
@@ -161,7 +161,7 @@ export function PluginsPage() {
                       <span>{formatSize(p.size_bytes)}</span>
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto" onClick={e => e.stopPropagation()}>
+                  <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
                     <Button variant="secondary" size="sm"
                       onClick={() => depsMutation.mutate(p.name)}
                       disabled={depsMutation.isPending}>
