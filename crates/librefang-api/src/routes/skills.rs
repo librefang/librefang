@@ -1143,8 +1143,8 @@ pub async fn list_active_hands(State(state): State<Arc<AppState>>) -> impl IntoR
                 "instance_id": i.instance_id,
                 "hand_id": i.hand_id,
                 "status": format!("{}", i.status),
-                "agent_id": i.agent_id.map(|a| a.to_string()),
-                "agent_name": i.agent_name,
+                "agent_id": i.agent_id().map(|a: librefang_types::agent::AgentId| a.to_string()),
+                "agent_name": i.agent_name(),
                 "activated_at": i.activated_at.to_rfc3339(),
                 "updated_at": i.updated_at.to_rfc3339(),
             })
@@ -1235,14 +1235,14 @@ pub async fn get_hand(
                     }).collect::<Vec<_>>(),
                     "server_platform": server_platform(),
                     "agent": {
-                        "name": def.agent.name,
-                        "description": def.agent.description,
-                        "provider": if def.agent.model.provider == "default" {
+                        "name": def.agent().name,
+                        "description": def.agent().description,
+                        "provider": if def.agent().model.provider == "default" {
                             &state.kernel.config_ref().default_model.provider
-                        } else { &def.agent.model.provider },
-                        "model": if def.agent.model.model == "default" {
+                        } else { &def.agent().model.provider },
+                        "model": if def.agent().model.model == "default" {
                             &state.kernel.config_ref().default_model.model
-                        } else { &def.agent.model.model },
+                        } else { &def.agent().model.model },
                     },
                     "dashboard": def.dashboard.metrics.iter().map(|m| serde_json::json!({
                         "label": m.label,
@@ -1646,7 +1646,7 @@ pub async fn activate_hand(
         Ok(instance) => {
             // If the hand agent has a non-reactive schedule (autonomous hands),
             // start its background loop so it begins running immediately.
-            if let Some(agent_id) = instance.agent_id {
+            if let Some(agent_id) = instance.agent_id() {
                 let entry = state
                     .kernel
                     .agent_registry()
@@ -1672,8 +1672,8 @@ pub async fn activate_hand(
                     "instance_id": instance.instance_id,
                     "hand_id": instance.hand_id,
                     "status": format!("{}", instance.status),
-                    "agent_id": instance.agent_id.map(|a| a.to_string()),
-                    "agent_name": instance.agent_name,
+                    "agent_id": instance.agent_id().map(|a: librefang_types::agent::AgentId| a.to_string()),
+                    "agent_name": instance.agent_name(),
                     "activated_at": instance.activated_at.to_rfc3339(),
                 })),
             )
@@ -1939,7 +1939,7 @@ pub async fn hand_stats(
         }
     };
 
-    let agent_id = match instance.agent_id {
+    let agent_id = match instance.agent_id() {
         Some(aid) => aid,
         None => {
             return (
@@ -2012,7 +2012,7 @@ pub async fn hand_instance_browser(
     };
 
     // 2. Get agent_id
-    let agent_id = match instance.agent_id {
+    let agent_id = match instance.agent_id() {
         Some(aid) => aid,
         None => {
             return (StatusCode::OK, Json(serde_json::json!({"active": false})));
@@ -2118,7 +2118,7 @@ fn resolve_hand_agent(
                 Json(serde_json::json!({"error": "Hand instance not found"})),
             )
         })?;
-    let agent_id = instance.agent_id.ok_or_else(|| {
+    let agent_id = instance.agent_id().ok_or_else(|| {
         (
             StatusCode::OK,
             Json(serde_json::json!({"error": "Hand instance is not active", "active": false})),
@@ -2334,7 +2334,7 @@ pub async fn hand_instance_status(
     });
 
     // Agent-level info (only when active)
-    if let Some(agent_id) = instance.agent_id {
+    if let Some(agent_id) = instance.agent_id() {
         if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
             resp["agent"] = serde_json::json!({
                 "id": agent_id.to_string(),

@@ -8,16 +8,16 @@ use crate::{
 use dashmap::DashMap;
 use librefang_types::agent::AgentId;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-/// Entry from persisted hand state: (hand_id, config, old_agent_id, status).
+/// Entry from persisted hand state: (hand_id, config, old_agent_ids, status).
 pub type HandStateEntry = (
     String,
     HashMap<String, serde_json::Value>,
-    Option<AgentId>,
+    BTreeMap<String, AgentId>,
     HandStatus,
 );
 
@@ -86,13 +86,13 @@ impl HandRegistry {
                 serde_json::json!({
                     "hand_id": e.hand_id,
                     "config": e.config,
-                    "agent_id": e.agent_id,
+                    "agent_ids": e.agent_ids,
                     "status": e.status,
                 })
             })
             .collect();
         let wrapper = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "instances": entries,
         });
         let json = serde_json::to_string_pretty(&wrapper)
@@ -103,25 +103,23 @@ impl HandRegistry {
     }
 
     /// Load persisted hand state and re-activate hands.
-    /// Returns list of (hand_id, config, old_agent_id, status) that should be restored.
-    /// The `old_agent_id` is the agent UUID from before the restart, used to
-    /// reassign cron jobs to the newly spawned agent (issue #402).
+    /// Returns list of (hand_id, config, old_agent_ids, status) that should be restored.
+    /// The `old_agent_ids` are the agent UUIDs from before the restart, used to
+    /// reassign cron jobs to newly spawned agents (issue #402).
     pub fn load_state(path: &std::path::Path) -> Vec<HandStateEntry> {
         let data = match std::fs::read_to_string(path) {
             Ok(d) => d,
             Err(_) => return Vec::new(),
         };
 
-        // Try v2 format first (with version field and status), then fall back
-        // to v1 format (bare array of {hand_id, config, agent_id}).
+        // Try v3/v2 format (with version field), then fall back to v1 (bare array).
         let entries: Vec<serde_json::Value> =
             if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&data) {
                 if wrapper.get("version").is_some() {
-                    // v2 format
                     match wrapper.get("instances").cloned() {
                         Some(serde_json::Value::Array(arr)) => arr,
                         _ => {
-                            warn!("Hand state v2 file has no instances array");
+                            warn!("Hand state file has no instances array");
                             return Vec::new();
                         }
                     }
@@ -164,10 +162,26 @@ impl HandRegistry {
 
                 let config: HashMap<String, serde_json::Value> =
                     serde_json::from_value(e["config"].clone()).unwrap_or_default();
-                let old_agent_id: Option<AgentId> = e
-                    .get("agent_id")
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
-                Some((hand_id, config, old_agent_id, status))
+
+                // v3: agent_ids as BTreeMap<String, AgentId>
+                // v2: agent_id as single AgentId → convert to {"main": id}
+                // v1: agent_id as single AgentId → same conversion
+                let old_agent_ids: BTreeMap<String, AgentId> =
+                    if let Some(ids_val) = e.get("agent_ids") {
+                        serde_json::from_value(ids_val.clone()).unwrap_or_default()
+                    } else if let Some(id_val) = e.get("agent_id") {
+                        if let Ok(id) = serde_json::from_value::<AgentId>(id_val.clone()) {
+                            let mut map = BTreeMap::new();
+                            map.insert("main".to_string(), id);
+                            map
+                        } else {
+                            BTreeMap::new()
+                        }
+                    } else {
+                        BTreeMap::new()
+                    };
+
+                Some((hand_id, config, old_agent_ids, status))
             })
             .collect()
     }
@@ -317,10 +331,9 @@ impl HandRegistry {
         hand_id: &str,
         config: HashMap<String, serde_json::Value>,
     ) -> HandResult<HandInstance> {
-        let def = self
-            .definitions
-            .get(hand_id)
-            .ok_or_else(|| HandError::NotFound(hand_id.to_string()))?;
+        if !self.definitions.contains_key(hand_id) {
+            return Err(HandError::NotFound(hand_id.to_string()));
+        }
 
         // Hold the lock for the duration of check + insert to prevent races.
         let _guard = self.activate_lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -332,7 +345,7 @@ impl HandRegistry {
             }
         }
 
-        let instance = HandInstance::new(hand_id, &def.agent.name, config);
+        let instance = HandInstance::new(hand_id, config);
         let id = instance.instance_id;
         self.instances.insert(id, instance.clone());
         info!(hand = %hand_id, instance = %id, "Hand activated");
@@ -371,21 +384,32 @@ impl HandRegistry {
         Ok(())
     }
 
-    /// Set the agent ID for an instance (called after kernel spawns the agent).
-    pub fn set_agent(&self, instance_id: Uuid, agent_id: AgentId) -> HandResult<()> {
+    /// Set all agent IDs for an instance (called after kernel spawns agents).
+    pub fn set_agents(
+        &self,
+        instance_id: Uuid,
+        agent_ids: BTreeMap<String, AgentId>,
+    ) -> HandResult<()> {
         let mut entry = self
             .instances
             .get_mut(&instance_id)
             .ok_or(HandError::InstanceNotFound(instance_id))?;
-        entry.agent_id = Some(agent_id);
+        entry.agent_ids = agent_ids;
         entry.updated_at = chrono::Utc::now();
         Ok(())
     }
 
-    /// Find the hand instance associated with an agent.
+    /// Backward-compatible: set a single agent ID under the "main" role.
+    pub fn set_agent(&self, instance_id: Uuid, agent_id: AgentId) -> HandResult<()> {
+        let mut map = BTreeMap::new();
+        map.insert("main".to_string(), agent_id);
+        self.set_agents(instance_id, map)
+    }
+
+    /// Find the hand instance associated with an agent (checks all roles).
     pub fn find_by_agent(&self, agent_id: AgentId) -> Option<HandInstance> {
         for entry in self.instances.iter() {
-            if entry.agent_id == Some(agent_id) {
+            if entry.agent_ids.values().any(|&id| id == agent_id) {
                 return Some(entry.clone());
             }
         }

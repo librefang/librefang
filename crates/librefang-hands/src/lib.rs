@@ -10,7 +10,7 @@ pub mod registry;
 use chrono::{DateTime, Utc};
 use librefang_types::agent::{AgentId, AgentManifest, AutonomousConfig, ModelConfig};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
 // ─── Error types ─────────────────────────────────────────────────────────────
@@ -347,6 +347,32 @@ where
     })
 }
 
+/// A single agent within a multi-agent hand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandAgentManifest {
+    /// Whether this agent is the coordinator (receives user messages).
+    /// If no agent is marked coordinator, the first agent (sorted by role) is used.
+    #[serde(default)]
+    pub coordinator: bool,
+    /// Hint for other agents on when/how to invoke this agent.
+    /// Injected into the coordinator's system prompt as a dispatch guide.
+    #[serde(default)]
+    pub invoke_hint: Option<String>,
+    /// The underlying agent manifest (flattened so TOML fields sit alongside).
+    #[serde(flatten)]
+    pub manifest: AgentManifest,
+}
+
+/// Parse a single `[agent]` section (toml::Value) into an AgentManifest.
+fn parse_single_agent_section(value: &toml::Value) -> Result<AgentManifest, String> {
+    // Try full AgentManifest first, then legacy flat format
+    toml::from_str::<AgentManifest>(&value.to_string())
+        .or_else(|_| {
+            toml::from_str::<LegacyHandAgentConfig>(&value.to_string()).map(AgentManifest::from)
+        })
+        .map_err(|e| format!("Failed to parse [agent] section: {e}"))
+}
+
 fn default_module() -> String {
     "builtin:chat".to_string()
 }
@@ -409,7 +435,11 @@ pub struct HandI18n {
 }
 
 /// Complete Hand definition — parsed from HAND.toml.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Supports two agent formats:
+/// - **Single-agent** (`[agent]`): auto-converted to `{"main": ...}` with coordinator=true
+/// - **Multi-agent** (`[agents.role1]`, `[agents.role2]`, ...): each role gets its own agent
+#[derive(Debug, Clone, Serialize)]
 pub struct HandDefinition {
     /// Unique hand identifier (e.g. "clip").
     pub id: String,
@@ -420,41 +450,152 @@ pub struct HandDefinition {
     /// Category for marketplace browsing.
     pub category: HandCategory,
     /// Icon (emoji).
-    #[serde(default)]
     pub icon: String,
-    /// Tools the agent needs access to.
-    #[serde(default)]
+    /// Tools all agents need access to.
     pub tools: Vec<String>,
-    /// Skill allowlist for the spawned agent (empty = all).
-    #[serde(default)]
+    /// Skill allowlist for the spawned agents (empty = all).
     pub skills: Vec<String>,
-    /// MCP server allowlist for the spawned agent (empty = all).
-    #[serde(default)]
+    /// MCP server allowlist for the spawned agents (empty = all).
     pub mcp_servers: Vec<String>,
     /// Requirements that must be satisfied before activation.
-    #[serde(default)]
     pub requires: Vec<HandRequirement>,
     /// Configurable settings (shown in activation modal).
-    #[serde(default)]
     pub settings: Vec<HandSetting>,
-    /// Agent manifest — deserialized from either full `AgentManifest` or legacy flat format.
-    #[serde(deserialize_with = "deserialize_agent_section")]
-    pub agent: AgentManifest,
+    /// Agent manifests keyed by role name.
+    /// Single-agent hands are stored as `{"main": ...}`.
+    pub agents: BTreeMap<String, HandAgentManifest>,
     /// Dashboard metrics schema.
-    #[serde(default)]
     pub dashboard: HandDashboard,
     /// Routing keywords for hand selection.
-    #[serde(default)]
     pub routing: HandRouting,
     /// Bundled skill content (populated at load time, not in TOML).
     #[serde(skip)]
     pub skill_content: Option<String>,
     /// Token consumption and activation metadata.
-    #[serde(default)]
     pub metadata: Option<HandMetadata>,
     /// Localized strings keyed by language code (e.g. "zh", "ja").
-    #[serde(default)]
     pub i18n: HashMap<String, HandI18n>,
+}
+
+impl HandDefinition {
+    /// Get the coordinator agent manifest (the one that receives user messages).
+    /// Falls back to the first agent by role name if none is marked coordinator.
+    pub fn coordinator(&self) -> Option<(&str, &HandAgentManifest)> {
+        // Explicit coordinator
+        for (role, agent) in &self.agents {
+            if agent.coordinator {
+                return Some((role, agent));
+            }
+        }
+        // Fallback: first entry (BTreeMap is sorted)
+        self.agents.iter().next().map(|(r, a)| (r.as_str(), a))
+    }
+
+    /// Backward-compatible accessor: returns the single/coordinator agent manifest.
+    pub fn agent(&self) -> &AgentManifest {
+        self.coordinator()
+            .map(|(_, a)| &a.manifest)
+            .unwrap_or_else(|| {
+                // Should never happen — every hand has at least one agent
+                panic!("HandDefinition '{}' has no agents", self.id)
+            })
+    }
+
+    /// Whether this hand has multiple agents.
+    pub fn is_multi_agent(&self) -> bool {
+        self.agents.len() > 1
+    }
+}
+
+/// Raw intermediate struct for TOML deserialization — supports both formats.
+#[derive(Deserialize)]
+struct HandDefinitionRaw {
+    id: String,
+    name: String,
+    description: String,
+    category: HandCategory,
+    #[serde(default)]
+    icon: String,
+    #[serde(default)]
+    tools: Vec<String>,
+    #[serde(default)]
+    skills: Vec<String>,
+    #[serde(default)]
+    mcp_servers: Vec<String>,
+    #[serde(default)]
+    requires: Vec<HandRequirement>,
+    #[serde(default)]
+    settings: Vec<HandSetting>,
+    /// Single-agent format: `[agent]`
+    #[serde(default)]
+    agent: Option<toml::Value>,
+    /// Multi-agent format: `[agents.role1]`, `[agents.role2]`, ...
+    #[serde(default)]
+    agents: Option<BTreeMap<String, HandAgentManifest>>,
+    #[serde(default)]
+    dashboard: HandDashboard,
+    #[serde(default)]
+    routing: HandRouting,
+    #[serde(default)]
+    metadata: Option<HandMetadata>,
+    #[serde(default)]
+    i18n: HashMap<String, HandI18n>,
+}
+
+impl<'de> Deserialize<'de> for HandDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = HandDefinitionRaw::deserialize(deserializer)?;
+
+        let agents = if let Some(agents_map) = raw.agents {
+            // Multi-agent format: [agents.*]
+            if agents_map.is_empty() {
+                return Err(serde::de::Error::custom(
+                    "Hand must define at least one agent in [agents.*]",
+                ));
+            }
+            agents_map
+        } else if let Some(agent_value) = raw.agent {
+            // Single-agent format: [agent] → convert to {"main": ...}
+            let manifest =
+                parse_single_agent_section(&agent_value).map_err(serde::de::Error::custom)?;
+            let mut map = BTreeMap::new();
+            map.insert(
+                "main".to_string(),
+                HandAgentManifest {
+                    coordinator: true,
+                    invoke_hint: None,
+                    manifest,
+                },
+            );
+            map
+        } else {
+            return Err(serde::de::Error::custom(
+                "Hand must define either [agent] or [agents.*]",
+            ));
+        };
+
+        Ok(HandDefinition {
+            id: raw.id,
+            name: raw.name,
+            description: raw.description,
+            category: raw.category,
+            icon: raw.icon,
+            tools: raw.tools,
+            skills: raw.skills,
+            mcp_servers: raw.mcp_servers,
+            requires: raw.requires,
+            settings: raw.settings,
+            agents,
+            dashboard: raw.dashboard,
+            routing: raw.routing,
+            skill_content: None,
+            metadata: raw.metadata,
+            i18n: raw.i18n,
+        })
+    }
 }
 
 /// Token consumption and activation metadata for user awareness.
@@ -508,7 +649,7 @@ impl std::fmt::Display for HandStatus {
     }
 }
 
-/// A running Hand instance — links a HandDefinition to an actual agent.
+/// A running Hand instance — links a HandDefinition to its spawned agents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandInstance {
     /// Unique instance identifier.
@@ -517,10 +658,10 @@ pub struct HandInstance {
     pub hand_id: String,
     /// Current status.
     pub status: HandStatus,
-    /// The agent that was spawned for this hand.
-    pub agent_id: Option<AgentId>,
-    /// Agent name (for display).
-    pub agent_name: String,
+    /// Spawned agents keyed by role name → AgentId.
+    /// Empty until agents are spawned by the kernel.
+    #[serde(default)]
+    pub agent_ids: BTreeMap<String, AgentId>,
     /// User-provided configuration overrides.
     pub config: HashMap<String, serde_json::Value>,
     /// When activated.
@@ -531,21 +672,44 @@ pub struct HandInstance {
 
 impl HandInstance {
     /// Create a new pending instance.
-    pub fn new(
-        hand_id: &str,
-        agent_name: &str,
-        config: HashMap<String, serde_json::Value>,
-    ) -> Self {
+    pub fn new(hand_id: &str, config: HashMap<String, serde_json::Value>) -> Self {
         let now = Utc::now();
         Self {
             instance_id: Uuid::new_v4(),
             hand_id: hand_id.to_string(),
             status: HandStatus::Active,
-            agent_id: None,
-            agent_name: agent_name.to_string(),
+            agent_ids: BTreeMap::new(),
             config,
             activated_at: now,
             updated_at: now,
+        }
+    }
+
+    /// Get the coordinator agent ID (if agents have been spawned).
+    pub fn coordinator_agent_id(&self) -> Option<AgentId> {
+        // For single-agent hands, return the only agent
+        if self.agent_ids.len() == 1 {
+            return self.agent_ids.values().next().copied();
+        }
+        // For multi-agent hands, "main" is typically the coordinator
+        if let Some(&id) = self.agent_ids.get("main") {
+            return Some(id);
+        }
+        // Fallback: first agent alphabetically by role
+        self.agent_ids.values().next().copied()
+    }
+
+    /// Backward-compatible accessor: returns the single/first agent ID.
+    pub fn agent_id(&self) -> Option<AgentId> {
+        self.coordinator_agent_id()
+    }
+
+    /// Backward-compatible accessor: returns the agent name (coordinator role).
+    pub fn agent_name(&self) -> String {
+        if self.agent_ids.len() == 1 {
+            self.agent_ids.keys().next().cloned().unwrap_or_default()
+        } else {
+            "main".to_string()
         }
     }
 }
@@ -581,11 +745,10 @@ mod tests {
 
     #[test]
     fn hand_instance_new() {
-        let instance = HandInstance::new("clip", "clip-hand", HashMap::new());
+        let instance = HandInstance::new("clip", HashMap::new());
         assert_eq!(instance.hand_id, "clip");
-        assert_eq!(instance.agent_name, "clip-hand");
         assert_eq!(instance.status, HandStatus::Active);
-        assert!(instance.agent_id.is_none());
+        assert!(instance.agent_ids.is_empty());
     }
 
     #[test]
@@ -625,7 +788,7 @@ metrics = []
         assert_eq!(def.id, "test");
         assert_eq!(def.category, HandCategory::Content);
         assert_eq!(def.requires.len(), 1);
-        assert_eq!(def.agent.name, "test-hand");
+        assert_eq!(def.agent().name, "test-hand");
     }
 
     #[test]

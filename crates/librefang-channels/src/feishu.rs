@@ -750,7 +750,7 @@ async fn get_ws_endpoint(
     let status = resp.status();
     let text = resp.text().await.map_err(|e| format!("read body: {e}"))?;
     if !status.is_success() {
-        return Err(format!("endpoint returned HTTP {status}"));
+        return Err(format!("endpoint returned HTTP {status}: {text}"));
     }
     let parsed: WsEndpointResp =
         serde_json::from_str(&text).map_err(|e| format!("parse endpoint response: {e}"))?;

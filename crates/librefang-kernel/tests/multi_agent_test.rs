@@ -1,13 +1,18 @@
-//! Multi-agent integration test: spawn 6 agents, send messages, verify all respond.
+//! Hand lifecycle tests: activation, deactivation, pause/resume, deterministic IDs,
+//! agent tagging, tool inheritance, state persistence, coexistence, and error cases.
 //!
-//! Run with: GROQ_API_KEY=gsk_... cargo test -p librefang-kernel --test multi_agent_test -- --nocapture
+//! The last test (`test_six_agent_fleet`) is a live LLM integration test
+//! that only runs when GROQ_API_KEY is set.
 
 use librefang_kernel::LibreFangKernel;
-use librefang_types::agent::AgentManifest;
+use librefang_types::agent::{AgentId, AgentManifest};
 use librefang_types::config::{DefaultModelConfig, KernelConfig};
+use std::collections::HashMap;
 
-fn test_config() -> KernelConfig {
-    let tmp = std::env::temp_dir().join("librefang-multi-agent-test");
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn test_config(name: &str) -> KernelConfig {
+    let tmp = std::env::temp_dir().join(format!("librefang-hand-test-{name}"));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
 
@@ -24,6 +29,426 @@ fn test_config() -> KernelConfig {
     }
 }
 
+/// Install a hand from TOML content into the kernel's hand registry.
+fn install_hand(kernel: &LibreFangKernel, toml_content: &str) {
+    kernel
+        .hands()
+        .install_from_content(toml_content, "")
+        .unwrap_or_else(|e| panic!("Failed to install hand: {e}"));
+}
+
+const HAND_A: &str = r#"
+id = "test-clip"
+name = "Test Clip Hand"
+description = "A test hand for clip content"
+category = "content"
+icon = "🎬"
+tools = ["file_read", "file_write", "shell_exec"]
+
+[routing]
+aliases = ["test clip"]
+
+[agent]
+name = "clip-agent"
+description = "Creates short clips"
+module = "builtin:chat"
+system_prompt = "You are a clip agent."
+tools = ["file_read"]
+"#;
+
+const HAND_B: &str = r#"
+id = "test-devops"
+name = "Test DevOps Hand"
+description = "A test hand for devops"
+category = "development"
+icon = "🔧"
+tools = ["shell_exec"]
+
+[routing]
+aliases = ["test devops"]
+
+[agent]
+name = "devops-agent"
+description = "Manages CI/CD"
+module = "builtin:chat"
+system_prompt = "You are a devops agent."
+"#;
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_activate_hand_spawns_agent() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("activate")).unwrap();
+    install_hand(&kernel, HAND_A);
+
+    let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+
+    assert_eq!(instance.hand_id, "test-clip");
+    assert!(instance.agent_id().is_some(), "Agent should be spawned");
+
+    let agent_id = instance.agent_id().unwrap();
+    assert!(
+        kernel.agent_registry().get(agent_id).is_some(),
+        "Agent should exist in registry"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_deterministic_agent_id() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("deterministic")).unwrap();
+    install_hand(&kernel, HAND_A);
+
+    let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let expected = AgentId::from_hand_id("test-clip");
+
+    assert_eq!(
+        instance.agent_id().unwrap(),
+        expected,
+        "Agent ID should be deterministic from hand_id"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_deterministic_id_stable_across_reactivation() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("reactivate")).unwrap();
+    install_hand(&kernel, HAND_A);
+
+    // First activation
+    let inst1 = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let id1 = inst1.agent_id().unwrap();
+
+    // Deactivate
+    kernel.deactivate_hand(inst1.instance_id).unwrap();
+
+    // Re-install (since deactivate doesn't remove the definition, but it may
+    // already be registered — wrap in allow-already-active)
+    let _ = kernel.hands().install_from_content(HAND_A, "");
+
+    // Second activation
+    let inst2 = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let id2 = inst2.agent_id().unwrap();
+
+    assert_eq!(id1, id2, "Agent ID should be stable across reactivations");
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_deactivate_kills_agent() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("deactivate")).unwrap();
+    install_hand(&kernel, HAND_A);
+
+    let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let agent_id = instance.agent_id().unwrap();
+
+    // Agent should exist before deactivation
+    assert!(kernel.agent_registry().get(agent_id).is_some());
+
+    kernel.deactivate_hand(instance.instance_id).unwrap();
+
+    // Agent should be gone after deactivation
+    assert!(
+        kernel.agent_registry().get(agent_id).is_none(),
+        "Agent should be killed after deactivation"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_pause_and_resume_hand() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("pause-resume")).unwrap();
+    install_hand(&kernel, HAND_A);
+
+    let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let instance_id = instance.instance_id;
+    let agent_id = instance.agent_id().unwrap();
+
+    // Pause
+    kernel.pause_hand(instance_id).unwrap();
+    let paused = kernel.hands().get_instance(instance_id).unwrap();
+    assert_eq!(paused.status.to_string(), "Paused");
+
+    // Agent should still exist (paused, not killed)
+    assert!(
+        kernel.agent_registry().get(agent_id).is_some(),
+        "Paused agent should still exist"
+    );
+
+    // Resume
+    kernel.resume_hand(instance_id).unwrap();
+    let resumed = kernel.hands().get_instance(instance_id).unwrap();
+    assert_eq!(resumed.status.to_string(), "Active");
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_agent_tagged_with_hand_metadata() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("tags")).unwrap();
+    install_hand(&kernel, HAND_A);
+
+    let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let agent_id = instance.agent_id().unwrap();
+
+    let entry = kernel.agent_registry().get(agent_id).unwrap();
+    assert!(
+        entry.tags.contains(&"hand:test-clip".to_string()),
+        "Agent should be tagged with hand ID"
+    );
+    assert!(
+        entry
+            .tags
+            .contains(&format!("hand_instance:{}", instance.instance_id)),
+        "Agent should be tagged with instance ID"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_hand_tools_applied_to_agent() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("tools")).unwrap();
+    install_hand(&kernel, HAND_A);
+
+    let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let agent_id = instance.agent_id().unwrap();
+
+    let entry = kernel.agent_registry().get(agent_id).unwrap();
+    // HAND_A defines tools = ["file_read", "file_write", "shell_exec"]
+    for tool in &["file_read", "file_write", "shell_exec"] {
+        assert!(
+            entry
+                .manifest
+                .capabilities
+                .tools
+                .contains(&tool.to_string()),
+            "Agent should have tool '{tool}' from hand definition"
+        );
+    }
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_activate_nonexistent_hand_fails() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("nonexistent")).unwrap();
+
+    let result = kernel.activate_hand("does-not-exist", HashMap::new());
+    assert!(result.is_err(), "Activating nonexistent hand should fail");
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_deactivate_nonexistent_instance_fails() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("deactivate-none")).unwrap();
+
+    let fake_id = uuid::Uuid::new_v4();
+    let result = kernel.deactivate_hand(fake_id);
+    assert!(
+        result.is_err(),
+        "Deactivating nonexistent instance should fail"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_hand_state_persistence() {
+    let config = test_config("persistence");
+    let state_path = config.home_dir.join("hand_state.json");
+
+    let kernel = LibreFangKernel::boot_with_config(config).unwrap();
+    install_hand(&kernel, HAND_A);
+
+    let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let agent_id = instance.agent_id().unwrap();
+
+    // State file should exist after activation
+    assert!(
+        state_path.exists(),
+        "State file should be persisted after activation"
+    );
+
+    let state_json = std::fs::read_to_string(&state_path).unwrap();
+    let state: serde_json::Value = serde_json::from_str(&state_json).unwrap();
+
+    assert_eq!(state["version"], 3, "State should be version 3");
+    let instances = state["instances"].as_array().unwrap();
+    assert_eq!(instances.len(), 1);
+
+    let inst = &instances[0];
+    assert_eq!(inst["hand_id"], "test-clip");
+    // v3 uses agent_ids map
+    let agent_ids_map = inst["agent_ids"].as_object().unwrap();
+    assert!(agent_ids_map
+        .values()
+        .any(|v| v.as_str() == Some(&agent_id.to_string())));
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_multiple_hands_coexist() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("coexist")).unwrap();
+    install_hand(&kernel, HAND_A);
+    install_hand(&kernel, HAND_B);
+
+    let clip = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let devops = kernel.activate_hand("test-devops", HashMap::new()).unwrap();
+
+    assert!(clip.agent_id().is_some());
+    assert!(devops.agent_id().is_some());
+    assert_ne!(
+        clip.agent_id().unwrap(),
+        devops.agent_id().unwrap(),
+        "Different hands should have different agent IDs"
+    );
+
+    // Both agents exist
+    assert!(kernel
+        .agent_registry()
+        .get(clip.agent_id().unwrap())
+        .is_some());
+    assert!(kernel
+        .agent_registry()
+        .get(devops.agent_id().unwrap())
+        .is_some());
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_deactivate_one_hand_preserves_other() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("preserve")).unwrap();
+    install_hand(&kernel, HAND_A);
+    install_hand(&kernel, HAND_B);
+
+    let clip = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let devops = kernel.activate_hand("test-devops", HashMap::new()).unwrap();
+    let devops_agent_id = devops.agent_id().unwrap();
+
+    // Deactivate clip
+    kernel.deactivate_hand(clip.instance_id).unwrap();
+
+    // Devops agent should still be alive
+    assert!(
+        kernel.agent_registry().get(devops_agent_id).is_some(),
+        "DevOps agent should survive clip deactivation"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_find_instance_by_agent_id() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("find-by-agent")).unwrap();
+    install_hand(&kernel, HAND_A);
+
+    let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let agent_id = instance.agent_id().unwrap();
+
+    let found = kernel.hands().find_by_agent(agent_id);
+    assert!(found.is_some(), "Should find instance by agent ID");
+    assert_eq!(found.unwrap().instance_id, instance.instance_id);
+
+    // Random agent ID should not find any instance
+    let random_id = AgentId::from_hand_id("nonexistent");
+    assert!(kernel.hands().find_by_agent(random_id).is_none());
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_agent_id_from_hand_id_is_deterministic() {
+    // Pure unit test — no kernel needed
+    let id1 = AgentId::from_hand_id("clip");
+    let id2 = AgentId::from_hand_id("clip");
+    let id3 = AgentId::from_hand_id("devops");
+
+    assert_eq!(id1, id2, "Same hand_id should produce same ID");
+    assert_ne!(id1, id3, "Different hand_ids should produce different IDs");
+}
+
+#[test]
+fn test_system_prompt_preserved() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("prompt")).unwrap();
+    install_hand(&kernel, HAND_A);
+
+    let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let agent_id = instance.agent_id().unwrap();
+
+    let entry = kernel.agent_registry().get(agent_id).unwrap();
+    assert!(
+        entry.manifest.model.system_prompt.contains("clip agent"),
+        "System prompt should contain the hand's prompt"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_default_provider_resolved_to_kernel_default() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("provider")).unwrap();
+    install_hand(&kernel, HAND_A);
+
+    let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    let agent_id = instance.agent_id().unwrap();
+
+    let entry = kernel.agent_registry().get(agent_id).unwrap();
+    // HAND_A uses default provider → should resolve to kernel default ("groq")
+    assert_eq!(
+        entry.manifest.model.provider, "groq",
+        "Default provider should resolve to kernel config"
+    );
+    assert_eq!(
+        entry.manifest.model.model, "llama-3.3-70b-versatile",
+        "Default model should resolve to kernel config"
+    );
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_hand_instance_status_active_on_creation() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("status")).unwrap();
+    install_hand(&kernel, HAND_A);
+
+    let instance = kernel.activate_hand("test-clip", HashMap::new()).unwrap();
+    assert_eq!(instance.status.to_string(), "Active");
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_pause_nonexistent_instance_fails() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("pause-none")).unwrap();
+
+    let fake_id = uuid::Uuid::new_v4();
+    let result = kernel.pause_hand(fake_id);
+    assert!(result.is_err(), "Pausing nonexistent instance should fail");
+
+    kernel.shutdown();
+}
+
+#[test]
+fn test_resume_nonexistent_instance_fails() {
+    let kernel = LibreFangKernel::boot_with_config(test_config("resume-none")).unwrap();
+
+    let fake_id = uuid::Uuid::new_v4();
+    let result = kernel.resume_hand(fake_id);
+    assert!(result.is_err(), "Resuming nonexistent instance should fail");
+
+    kernel.shutdown();
+}
+
+// ── Live LLM integration test (requires GROQ_API_KEY) ───────────────────────
+
 fn load_manifest(toml_str: &str) -> AgentManifest {
     toml::from_str(toml_str).expect("Should parse manifest")
 }
@@ -35,9 +460,9 @@ async fn test_six_agent_fleet() {
         return;
     }
 
-    let kernel = LibreFangKernel::boot_with_config(test_config()).expect("Kernel should boot");
+    let kernel =
+        LibreFangKernel::boot_with_config(test_config("fleet")).expect("Kernel should boot");
 
-    // Define all 6 agents with different roles and models
     let agents = vec![
         (
             "coder",
@@ -141,7 +566,6 @@ memory_write = ["self.*"]
     println!("  Spawning {} agents...", agents.len());
     println!("{}\n", "=".repeat(60));
 
-    // Spawn all agents
     let mut agent_ids = Vec::new();
     for (name, manifest_str, _) in &agents {
         let manifest = load_manifest(manifest_str);
@@ -158,7 +582,6 @@ memory_write = ["self.*"]
         agents.len()
     );
 
-    // Send messages to each agent sequentially (to respect Groq rate limits)
     let mut results = Vec::new();
     for (i, (name, _, message)) in agents.iter().enumerate() {
         let result = kernel
@@ -182,7 +605,6 @@ memory_write = ["self.*"]
         results.push(result);
     }
 
-    // Summary
     let total_input: u64 = results.iter().map(|r| r.total_usage.input_tokens).sum();
     let total_output: u64 = results.iter().map(|r| r.total_usage.output_tokens).sum();
     println!("============================================================");
@@ -193,7 +615,6 @@ memory_write = ["self.*"]
     println!("  All responded: YES");
     println!("============================================================");
 
-    // Cleanup
     for id in agent_ids {
         kernel.kill_agent(id).unwrap();
     }

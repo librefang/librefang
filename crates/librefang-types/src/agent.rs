@@ -143,6 +143,13 @@ impl AgentId {
     pub fn from_hand_id(hand_id: &str) -> Self {
         Self(Uuid::new_v5(&Self::HAND_NAMESPACE, hand_id.as_bytes()))
     }
+
+    /// Generate a deterministic agent ID for a specific role within a multi-agent hand.
+    /// Uses UUID v5 with "{hand_id}:{role}" as input.
+    pub fn from_hand_agent(hand_id: &str, role: &str) -> Self {
+        let input = format!("{hand_id}:{role}");
+        Self(Uuid::new_v5(&Self::HAND_NAMESPACE, input.as_bytes()))
+    }
 }
 
 impl Default for AgentId {
