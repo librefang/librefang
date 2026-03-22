@@ -72,3 +72,35 @@ changelog *ARGS:
 # Run live integration tests
 integration-test *ARGS:
     cargo xtask integration-test {{ARGS}}
+
+# Publish SDKs to npm/PyPI/crates.io
+publish-sdks *ARGS:
+    cargo xtask publish-sdks {{ARGS}}
+
+# Build release binaries for multiple platforms
+dist *ARGS:
+    cargo xtask dist {{ARGS}}
+
+# Build and optionally push Docker image
+docker *ARGS:
+    cargo xtask docker {{ARGS}}
+
+# Set up local development environment
+setup *ARGS:
+    cargo xtask setup {{ARGS}}
+
+# Generate test coverage report
+coverage *ARGS:
+    cargo xtask coverage {{ARGS}}
+
+# Audit dependencies for vulnerabilities and updates
+deps *ARGS:
+    cargo xtask deps {{ARGS}}
+
+# Run code generation (OpenAPI spec, etc.)
+codegen *ARGS:
+    cargo xtask codegen {{ARGS}}
+
+# Check for broken links in documentation
+check-links *ARGS:
+    cargo xtask check-links {{ARGS}}

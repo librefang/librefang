@@ -173,7 +173,7 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     git(&root, &["pull", "--rebase", "origin", "main"])?;
 
     let current = read_workspace_version(&root)?;
-    let mut prev_tag = find_latest_stable_tag(&root);
+    let prev_tag = find_latest_stable_tag(&root);
 
     // --- Determine version ---
     let version = if let Some(v) = args.version {

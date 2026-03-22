@@ -119,6 +119,111 @@ Tests:
 
 Default binary: `target/release/librefang`. Build it first with `cargo build --release -p librefang-cli`.
 
+### `publish-sdks` — Publish SDKs
+
+Publish JavaScript, Python, and Rust SDKs to their respective registries.
+
+```bash
+cargo xtask publish-sdks                # publish all SDKs
+cargo xtask publish-sdks --js           # npm only
+cargo xtask publish-sdks --python       # PyPI only
+cargo xtask publish-sdks --rust         # crates.io only
+cargo xtask publish-sdks --dry-run      # validate without publishing
+```
+
+Requires: `npm`, `twine` (Python), `cargo` credentials configured.
+
+### `dist` — Build Distribution Binaries
+
+Cross-compile release binaries for multiple platforms.
+
+```bash
+cargo xtask dist                                          # all default targets
+cargo xtask dist --target x86_64-unknown-linux-gnu        # specific target
+cargo xtask dist --cross                                  # use cross for cross-compilation
+cargo xtask dist --output release-artifacts               # custom output dir
+```
+
+Default targets: linux (x86_64, aarch64), macOS (x86_64, aarch64), Windows (x86_64).
+Archives: `.tar.gz` for linux/macOS, `.zip` for Windows.
+
+### `docker` — Docker Image
+
+Build and optionally push the Docker image.
+
+```bash
+cargo xtask docker                          # build with version tag
+cargo xtask docker --push                   # build + push to GHCR
+cargo xtask docker --tag 2026.3.2214        # explicit tag
+cargo xtask docker --latest --push          # also tag as :latest
+cargo xtask docker --platform linux/arm64   # specific platform
+```
+
+Image: `ghcr.io/librefang/librefang`. Dockerfile: `deploy/Dockerfile`.
+
+### `setup` — Dev Environment Setup
+
+First-time setup for new contributors.
+
+```bash
+cargo xtask setup              # full setup
+cargo xtask setup --no-web     # skip frontend dependencies
+cargo xtask setup --no-fetch   # skip cargo fetch
+```
+
+Checks: cargo, rustup, pnpm, gh, docker, just.
+Actions: installs git hooks, fetches Rust deps, runs pnpm install, creates default config.
+
+### `coverage` — Test Coverage
+
+Generate test coverage reports using `cargo-llvm-cov`.
+
+```bash
+cargo xtask coverage                   # HTML report
+cargo xtask coverage --open            # HTML + open in browser
+cargo xtask coverage --lcov            # lcov format (for CI)
+cargo xtask coverage --output my-cov   # custom output dir
+```
+
+Auto-installs `cargo-llvm-cov` if not present.
+
+### `deps` — Dependency Audit
+
+Audit dependencies for security vulnerabilities and outdated packages.
+
+```bash
+cargo xtask deps                   # audit + outdated + web
+cargo xtask deps --audit           # cargo audit only
+cargo xtask deps --outdated        # cargo outdated only
+cargo xtask deps --web             # pnpm audit only
+```
+
+Auto-installs `cargo-audit` and `cargo-outdated` if not present.
+
+### `codegen` — Code Generation
+
+Run code generators (OpenAPI spec, etc.).
+
+```bash
+cargo xtask codegen                # all generators
+cargo xtask codegen --openapi      # OpenAPI spec only
+```
+
+Regenerates `openapi.json` from utoipa annotations by running the spec test.
+
+### `check-links` — Link Checker
+
+Check for broken links in documentation.
+
+```bash
+cargo xtask check-links                          # full check with lychee
+cargo xtask check-links --basic                  # built-in basic checker
+cargo xtask check-links --path docs              # specific directory
+cargo xtask check-links --exclude "example.com"  # exclude patterns
+```
+
+Uses [lychee](https://github.com/lycheeverse/lychee) if installed, otherwise falls back to a basic relative-link checker.
+
 ## What This Replaces
 
 | xtask command | Replaced |
