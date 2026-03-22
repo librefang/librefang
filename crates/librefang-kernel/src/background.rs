@@ -17,6 +17,17 @@ use tracing::{debug, info, warn};
 /// Maximum number of concurrent background LLM calls across all agents.
 const MAX_CONCURRENT_BG_LLM: usize = 5;
 
+/// RAII guard that clears the busy flag on drop, even if the task panics.
+struct BusyGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
+}
+
 /// Manages background task loops for autonomous agents.
 pub struct BackgroundExecutor {
     /// Running background task handles, keyed by agent ID.
@@ -134,11 +145,11 @@ impl BackgroundExecutor {
                         debug!(agent = %name, "Continuous loop: sending self-prompt");
                         let busy_clone = busy.clone();
                         let jh = (send_message)(agent_id, prompt);
-                        // Spawn a watcher that clears the busy flag and drops permit when done
+                        // Spawn a watcher with RAII guard — busy flag clears even on panic
                         tokio::spawn(async move {
+                            let _guard = BusyGuard { flag: busy_clone };
+                            let _permit = permit; // drop permit when watcher exits
                             let _ = jh.await;
-                            drop(permit);
-                            busy_clone.store(false, Ordering::SeqCst);
                         });
                     }
                 });
@@ -202,10 +213,11 @@ impl BackgroundExecutor {
                         debug!(agent = %name, "Periodic loop: sending scheduled prompt");
                         let busy_clone = busy.clone();
                         let jh = (send_message)(agent_id, prompt);
+                        // Spawn a watcher with RAII guard — busy flag clears even on panic
                         tokio::spawn(async move {
+                            let _guard = BusyGuard { flag: busy_clone };
+                            let _permit = permit; // drop permit when watcher exits
                             let _ = jh.await;
-                            drop(permit);
-                            busy_clone.store(false, Ordering::SeqCst);
                         });
                     }
                 });
