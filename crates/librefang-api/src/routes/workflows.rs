@@ -632,10 +632,13 @@ pub async fn create_trigger(
         .and_then(|v| v.as_str())
         .and_then(|s| s.parse().ok());
 
-    match state
-        .kernel
-        .register_trigger_with_target(agent_id, pattern, prompt_template, max_fires, target_agent)
-    {
+    match state.kernel.register_trigger_with_target(
+        agent_id,
+        pattern,
+        prompt_template,
+        max_fires,
+        target_agent,
+    ) {
         Ok(trigger_id) => {
             let mut resp = serde_json::json!({
                 "trigger_id": trigger_id.to_string(),

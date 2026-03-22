@@ -4820,9 +4820,13 @@ system_prompt = "You are a helpful assistant."
                 )));
             }
         }
-        Ok(self
-            .triggers
-            .register_with_target(agent_id, pattern, prompt_template, max_fires, target_agent))
+        Ok(self.triggers.register_with_target(
+            agent_id,
+            pattern,
+            prompt_template,
+            max_fires,
+            target_agent,
+        ))
     }
 
     /// Remove a trigger by ID.

@@ -791,7 +791,10 @@ mod tests {
         );
         let matches = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].0, owner, "Without target_agent, owner should be woken");
+        assert_eq!(
+            matches[0].0, owner,
+            "Without target_agent, owner should be woken"
+        );
     }
 
     #[test]
@@ -816,7 +819,10 @@ mod tests {
         );
         let matches = engine.evaluate(&event);
         assert_eq!(matches.len(), 1);
-        assert_eq!(matches[0].0, target, "With target_agent set, target should be woken");
+        assert_eq!(
+            matches[0].0, target,
+            "With target_agent set, target should be woken"
+        );
         assert!(matches[0].1.contains("Cross-wake"));
     }
 
