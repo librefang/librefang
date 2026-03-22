@@ -5618,7 +5618,7 @@ system_prompt = "You are a helpful assistant."
         use crate::heartbeat::{check_agents, is_quiet_hours, HeartbeatConfig};
 
         let kernel = Arc::clone(self);
-        let config = HeartbeatConfig::default();
+        let config = HeartbeatConfig::from_toml(&kernel.config.heartbeat);
         let interval_secs = config.check_interval_secs;
 
         tokio::spawn(async move {

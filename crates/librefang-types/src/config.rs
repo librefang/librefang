@@ -1451,6 +1451,9 @@ pub struct KernelConfig {
     /// Health check configuration.
     #[serde(default)]
     pub health_check: HealthCheckConfig,
+    /// Heartbeat monitor configuration (global defaults for autonomous agents).
+    #[serde(default)]
+    pub heartbeat: HeartbeatTomlConfig,
     /// Plugin registry configuration.
     #[serde(default)]
     pub plugins: PluginsConfig,
@@ -1924,6 +1927,36 @@ impl Default for HealthCheckConfig {
     }
 }
 
+/// Heartbeat monitor configuration (global defaults).
+///
+/// Configure in config.toml:
+/// ```toml
+/// [heartbeat]
+/// check_interval_secs = 30
+/// default_timeout_secs = 60
+/// keep_recent = 10
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeartbeatTomlConfig {
+    /// How often to run the heartbeat check (seconds). Default: 30.
+    pub check_interval_secs: u64,
+    /// Default threshold for unresponsiveness (seconds). Default: 60.
+    pub default_timeout_secs: u64,
+    /// How many recent heartbeat turns to keep when pruning session context. Default: 10.
+    pub keep_recent: usize,
+}
+
+impl Default for HeartbeatTomlConfig {
+    fn default() -> Self {
+        Self {
+            check_interval_secs: 30,
+            default_timeout_secs: 60,
+            keep_recent: 10,
+        }
+    }
+}
+
 /// Plugin registry configuration.
 ///
 /// Configure in config.toml:
@@ -2160,6 +2193,7 @@ impl Default for KernelConfig {
             context_engine: ContextEngineTomlConfig::default(),
             audit: AuditConfig::default(),
             health_check: HealthCheckConfig::default(),
+            heartbeat: HeartbeatTomlConfig::default(),
             plugins: PluginsConfig::default(),
             cors_origin: Vec::new(),
             strict_config: false,

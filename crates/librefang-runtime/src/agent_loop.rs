@@ -869,7 +869,12 @@ pub async fn run_agent_loop(
                 session.messages.push(Message::assistant(text));
 
                 // Prune NO_REPLY heartbeat turns to save context budget
-                crate::session_repair::prune_heartbeat_turns(&mut session.messages, 10);
+                let keep_recent = manifest
+                    .autonomous
+                    .as_ref()
+                    .and_then(|a| a.heartbeat_keep_recent)
+                    .unwrap_or(10);
+                crate::session_repair::prune_heartbeat_turns(&mut session.messages, keep_recent);
 
                 // Save session
                 memory
@@ -2177,7 +2182,12 @@ pub async fn run_agent_loop_streaming(
                 session.messages.push(Message::assistant(text));
 
                 // Prune NO_REPLY heartbeat turns to save context budget
-                crate::session_repair::prune_heartbeat_turns(&mut session.messages, 10);
+                let keep_recent = manifest
+                    .autonomous
+                    .as_ref()
+                    .and_then(|a| a.heartbeat_keep_recent)
+                    .unwrap_or(10);
+                crate::session_repair::prune_heartbeat_turns(&mut session.messages, keep_recent);
 
                 memory
                     .save_session_async(session)

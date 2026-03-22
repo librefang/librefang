@@ -64,6 +64,14 @@ readability = true              # Clean HTML → readable text
 main_lane = 3                   # Concurrent user messages
 cron_lane = 2                   # Concurrent scheduled jobs
 subagent_lane = 3               # Concurrent child agents
+# Heartbeat monitor (global defaults for autonomous agents)
+# [heartbeat]
+# check_interval_secs = 30               # How often to check agent health
+# default_timeout_secs = 60              # Seconds of inactivity before agent is unresponsive
+# keep_recent = 10                       # Heartbeat turns to keep in session context
+
+# Prompt caching — reduces LLM costs by caching system prompts (default: true)
+# prompt_caching = true                   # Anthropic cache_control + OpenAI auto-cache
 
 # ── Shell Execution Policy ───────────────────────────────────
 [exec_policy]

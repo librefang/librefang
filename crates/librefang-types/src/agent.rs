@@ -78,6 +78,15 @@ pub struct AutonomousConfig {
     pub max_restarts: u32,
     /// Heartbeat interval in seconds.
     pub heartbeat_interval_secs: u64,
+    /// Per-agent heartbeat timeout override in seconds.
+    /// When set, the agent is considered unresponsive after this many seconds
+    /// of inactivity, instead of using `heartbeat_interval_secs * 2`.
+    #[serde(default)]
+    pub heartbeat_timeout_secs: Option<u32>,
+    /// Per-agent override for how many recent heartbeat turns to keep
+    /// when pruning NO_REPLY heartbeat messages from session context.
+    #[serde(default)]
+    pub heartbeat_keep_recent: Option<usize>,
     /// Channel to send heartbeat status to (e.g., "telegram", "discord").
     pub heartbeat_channel: Option<String>,
 }
@@ -89,6 +98,8 @@ impl Default for AutonomousConfig {
             max_iterations: 50,
             max_restarts: 10,
             heartbeat_interval_secs: 30,
+            heartbeat_timeout_secs: None,
+            heartbeat_keep_recent: None,
             heartbeat_channel: None,
         }
     }
