@@ -1,5 +1,6 @@
 //! Build automation tasks for the LibreFang workspace.
 
+mod api_docs;
 mod bench;
 mod build_web;
 mod changelog;
@@ -8,17 +9,24 @@ mod ci;
 mod clean_all;
 mod codegen;
 mod coverage;
+mod db;
 mod deps;
+mod dev;
 mod dist;
 mod docker;
 mod doctor;
 mod fmt;
 mod integration_test;
+mod license_check;
+mod loc;
 mod migrate;
+mod pre_commit;
 mod publish_sdks;
 mod release;
 mod setup;
 mod sync_versions;
+mod update_deps;
+mod validate_config;
 
 use clap::{Parser, Subcommand};
 
@@ -87,6 +95,30 @@ enum Command {
 
     /// Diagnose development environment issues
     Doctor(doctor::DoctorArgs),
+
+    /// Start development environment (daemon + dashboard hot reload)
+    Dev(dev::DevArgs),
+
+    /// Database management (info, backup, reset)
+    Db(db::DbArgs),
+
+    /// Check dependency licenses for compliance
+    LicenseCheck(license_check::LicenseCheckArgs),
+
+    /// Code statistics (lines of code, crate dependency graph)
+    Loc(loc::LocArgs),
+
+    /// Update dependencies (Rust + web)
+    UpdateDeps(update_deps::UpdateDepsArgs),
+
+    /// Validate config.toml
+    ValidateConfig(validate_config::ValidateConfigArgs),
+
+    /// Run pre-commit checks (fmt + clippy + test)
+    PreCommit(pre_commit::PreCommitArgs),
+
+    /// Generate API documentation from OpenAPI spec
+    ApiDocs(api_docs::ApiDocsArgs),
 }
 
 fn main() {
@@ -111,6 +143,14 @@ fn main() {
         Command::Fmt(args) => fmt::run(args),
         Command::CleanAll(args) => clean_all::run(args),
         Command::Doctor(args) => doctor::run(args),
+        Command::Dev(args) => dev::run(args),
+        Command::Db(args) => db::run(args),
+        Command::LicenseCheck(args) => license_check::run(args),
+        Command::Loc(args) => loc::run(args),
+        Command::UpdateDeps(args) => update_deps::run(args),
+        Command::ValidateConfig(args) => validate_config::run(args),
+        Command::PreCommit(args) => pre_commit::run(args),
+        Command::ApiDocs(args) => api_docs::run(args),
     };
     if let Err(e) = result {
         eprintln!("Error: {e}");

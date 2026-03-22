@@ -281,6 +281,101 @@ cargo xtask doctor --port 5000         # check custom port
 
 Checks: toolchain, port availability, daemon health, config validity, API keys, workspace state.
 
+### `dev` — Development Environment
+
+Start the daemon and dashboard dev server together.
+
+```bash
+cargo xtask dev                        # build + start daemon + dashboard
+cargo xtask dev --no-dashboard         # daemon only
+cargo xtask dev --release              # release build
+cargo xtask dev --port 5000            # custom port
+```
+
+Press Ctrl+C to stop both processes.
+
+### `db` — Database Management
+
+Inspect, backup, or reset LibreFang databases.
+
+```bash
+cargo xtask db                         # show database info
+cargo xtask db --info                  # same as above
+cargo xtask db --backup ./backup       # backup db files
+cargo xtask db --reset                 # delete databases (daemon must be stopped)
+cargo xtask db --data-dir /custom/path # custom data directory
+```
+
+### `license-check` — License Compliance
+
+Check dependencies for license compliance.
+
+```bash
+cargo xtask license-check              # check all (Rust + web)
+cargo xtask license-check --rust       # Rust only
+cargo xtask license-check --web        # web only
+cargo xtask license-check --deny "GPL-3.0,AGPL-3.0"  # custom denied licenses
+```
+
+Uses `cargo-deny` if installed, falls back to `cargo metadata`.
+
+### `loc` — Code Statistics
+
+Lines of code and workspace structure.
+
+```bash
+cargo xtask loc                        # Rust code summary
+cargo xtask loc --crates               # per-crate breakdown
+cargo xtask loc --web                  # include web/frontend
+cargo xtask loc --deps                 # show crate dependency graph
+```
+
+### `update-deps` — Update Dependencies
+
+Batch update Rust and web dependencies.
+
+```bash
+cargo xtask update-deps                # update all
+cargo xtask update-deps --rust         # Rust only (cargo update)
+cargo xtask update-deps --web          # web only (pnpm update)
+cargo xtask update-deps --dry-run      # show outdated without updating
+cargo xtask update-deps --test         # update + run tests
+```
+
+### `validate-config` — Config Validation
+
+Validate `~/.librefang/config.toml` syntax and known fields.
+
+```bash
+cargo xtask validate-config            # validate default config
+cargo xtask validate-config --config ./my-config.toml  # custom path
+cargo xtask validate-config --show     # show parsed config contents
+```
+
+### `pre-commit` — Pre-Commit Checks
+
+Run format + clippy + tests as a pre-commit check.
+
+```bash
+cargo xtask pre-commit                 # full check (fmt + clippy + test)
+cargo xtask pre-commit --no-test       # skip tests (faster)
+cargo xtask pre-commit --no-clippy     # skip clippy
+cargo xtask pre-commit --fix           # auto-fix formatting
+```
+
+### `api-docs` — API Documentation
+
+Generate API documentation site from OpenAPI spec.
+
+```bash
+cargo xtask api-docs                   # generate Swagger UI site
+cargo xtask api-docs --open            # generate + open in browser
+cargo xtask api-docs --refresh         # regenerate openapi.json first
+cargo xtask api-docs --output my-docs  # custom output directory
+```
+
+Outputs a standalone Swagger UI HTML page with the OpenAPI spec.
+
 ## What This Replaces
 
 | xtask command | Replaced |

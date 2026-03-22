@@ -124,3 +124,35 @@ clean-all *ARGS:
 # Diagnose development environment issues
 doctor *ARGS:
     cargo xtask doctor {{ARGS}}
+
+# Start dev environment (daemon + dashboard hot reload)
+dev *ARGS:
+    cargo xtask dev {{ARGS}}
+
+# Database management (info, backup, reset)
+db *ARGS:
+    cargo xtask db {{ARGS}}
+
+# Check dependency licenses
+license-check *ARGS:
+    cargo xtask license-check {{ARGS}}
+
+# Code statistics (lines of code, dependency graph)
+loc *ARGS:
+    cargo xtask loc {{ARGS}}
+
+# Update dependencies (Rust + web)
+update-deps *ARGS:
+    cargo xtask update-deps {{ARGS}}
+
+# Validate config.toml
+validate-config *ARGS:
+    cargo xtask validate-config {{ARGS}}
+
+# Run pre-commit checks (fmt + clippy + test)
+pre-commit *ARGS:
+    cargo xtask pre-commit {{ARGS}}
+
+# Generate API docs from OpenAPI spec
+api-docs *ARGS:
+    cargo xtask api-docs {{ARGS}}
