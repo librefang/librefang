@@ -711,6 +711,7 @@ pub async fn run_agent_loop(
             system: Some(system_prompt.clone()),
             thinking: manifest.thinking.clone(),
             prompt_caching,
+            response_format: manifest.response_format.clone(),
         };
 
         // Notify phase: Thinking
@@ -2081,6 +2082,7 @@ pub async fn run_agent_loop_streaming(
             system: Some(system_prompt.clone()),
             thinking: manifest.thinking.clone(),
             prompt_caching,
+            response_format: manifest.response_format.clone(),
         };
 
         // Notify phase: on first iteration emit Streaming; on subsequent
