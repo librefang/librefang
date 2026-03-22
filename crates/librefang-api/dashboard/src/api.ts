@@ -1212,6 +1212,50 @@ export async function getHandSettings(handId: string): Promise<HandSettingsRespo
   return get<HandSettingsResponse>(`/api/hands/${encodeURIComponent(handId)}/settings`);
 }
 
+export interface HandMessageResponse {
+  response: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  iterations?: number;
+  cost_usd?: number;
+}
+
+export interface HandSessionMessage {
+  role: string;
+  content: string;
+  timestamp?: string;
+}
+
+export async function sendHandMessage(instanceId: string, message: string): Promise<HandMessageResponse> {
+  return post<HandMessageResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/message`, { message });
+}
+
+export async function getHandSession(instanceId: string): Promise<{ messages: HandSessionMessage[] }> {
+  return get<{ messages: HandSessionMessage[] }>(`/api/hands/instances/${encodeURIComponent(instanceId)}/session`);
+}
+
+export interface HandInstanceStatus {
+  instance_id: string;
+  hand_id: string;
+  hand_name?: string;
+  hand_icon?: string;
+  status: string;
+  activated_at: string;
+  config: Record<string, unknown>;
+  agent?: {
+    id: string;
+    name: string;
+    state: string;
+    model: { provider: string; model: string };
+    iterations_total?: number;
+    session_id: string;
+  };
+}
+
+export async function getHandInstanceStatus(instanceId: string): Promise<HandInstanceStatus> {
+  return get<HandInstanceStatus>(`/api/hands/instances/${encodeURIComponent(instanceId)}/status`);
+}
+
 export async function listGoals(): Promise<GoalItem[]> {
   const data = await get<{ goals?: GoalItem[]; total?: number }>("/api/goals");
   return data.goals ?? [];
