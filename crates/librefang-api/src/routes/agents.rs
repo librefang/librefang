@@ -4260,6 +4260,7 @@ mod tests {
             sender_id: None,
             sender_name: None,
             channel_type: Some("whatsapp".to_string()),
+            ephemeral: false,
         };
         assert!(request_sender_context(&req).is_none());
     }
@@ -4272,6 +4273,7 @@ mod tests {
             sender_id: Some("u-123".to_string()),
             sender_name: None,
             channel_type: None,
+            ephemeral: false,
         };
         let sender = request_sender_context(&req).expect("sender context");
         assert_eq!(sender.user_id, "u-123");

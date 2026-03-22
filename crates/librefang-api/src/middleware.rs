@@ -456,7 +456,7 @@ mod tests {
         let app = Router::new()
             .route("/api/private", get(|| async { "ok" }))
             .layer(axum::middleware::from_fn_with_state(
-                "secret".to_string(),
+                std::sync::Arc::new(tokio::sync::RwLock::new("secret".to_string())),
                 auth,
             ))
             .layer(axum::middleware::from_fn(api_version_headers));
