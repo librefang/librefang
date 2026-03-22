@@ -40,12 +40,65 @@ let isConnecting = false;
 const MAX_RECONNECT_DELAY = 60_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const MAX_FORWARD_RETRIES = 1;
+const MAX_BODY_SIZE = 64 * 1024;
+const ALLOWED_ORIGIN_RE = /^(https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?|tauri:\/\/localhost|app:\/\/localhost)$/i;
 
 // Cached agent UUID — resolved from DEFAULT_AGENT name on first use
 let cachedAgentId = null;
 
 // The user's own JID (set after connection opens) for self-chat detection
 let ownJid = null;
+
+function httpError(statusCode, message) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  return err;
+}
+
+function isAllowedOrigin(origin) {
+  return Boolean(origin && ALLOWED_ORIGIN_RE.test(origin));
+}
+
+function buildCorsHeaders(origin) {
+  if (!isAllowedOrigin(origin)) {
+    return {};
+  }
+
+  return {
+    'Access-Control-Allow-Origin': origin,
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Vary': 'Origin',
+  };
+}
+
+async function cleanupSocket() {
+  if (!sock) {
+    return;
+  }
+
+  const previousSock = sock;
+  sock = null;
+  ownJid = null;
+
+  try {
+    previousSock.ev?.removeAllListeners?.();
+  } catch (err) {
+    console.warn('[gateway] Failed to remove old socket listeners:', err.message);
+  }
+
+  try {
+    previousSock.ws?.close?.();
+  } catch (err) {
+    console.warn('[gateway] Failed to close old socket transport:', err.message);
+  }
+
+  try {
+    previousSock.end?.();
+  } catch (err) {
+    console.warn('[gateway] Failed to end old socket:', err.message);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Resolve agent name → UUID via LibreFang API
@@ -141,20 +194,23 @@ async function startConnection() {
   qrExpired = false;
   connStatus = 'disconnected';
   statusMessage = 'Connecting...';
+  await cleanupSocket();
 
-  sock = makeWASocket({
+  const activeSock = makeWASocket({
     version,
     auth: state,
     logger,
     printQRInTerminal: true,
     browser: ['LibreFang', 'Desktop', '1.0.0'],
   });
+  sock = activeSock;
 
   // Save credentials whenever they update
-  sock.ev.on('creds.update', saveCreds);
+  activeSock.ev.on('creds.update', saveCreds);
 
   // Connection state changes (QR code, connected, disconnected)
-  sock.ev.on('connection.update', async (update) => {
+  activeSock.ev.on('connection.update', async (update) => {
+    if (sock !== activeSock) return;
     const { connection, lastDisconnect, qr } = update;
 
     if (qr) {
@@ -180,8 +236,7 @@ async function startConnection() {
         connStatus = 'disconnected';
         statusMessage = 'Logged out. Generate a new QR code to reconnect.';
         qrDataUrl = '';
-        sock = null;
-        ownJid = null;
+        await cleanupSocket();
         reconnectAttempts = 0;
         // Invalidate cached agent ID so it re-resolves on next connect
         cachedAgentId = null;
@@ -197,8 +252,7 @@ async function startConnection() {
         connStatus = 'disconnected';
         statusMessage = `Disconnected: ${reason}. Use POST /login/start to reconnect.`;
         qrDataUrl = '';
-        sock = null;
-        ownJid = null;
+        await cleanupSocket();
       } else {
         // All other disconnect reasons are treated as recoverable:
         // restartRequired, timedOut, connectionClosed, connectionLost,
@@ -232,9 +286,9 @@ async function startConnection() {
       console.log('[gateway] Connected to WhatsApp!');
 
       // Capture own JID for self-chat detection
-      if (sock?.user?.id) {
+      if (activeSock.user?.id) {
         // Baileys user.id is like "1234567890:42@s.whatsapp.net" — normalize
-        ownJid = sock.user.id.replace(/:.*@/, '@');
+        ownJid = activeSock.user.id.replace(/:.*@/, '@');
         console.log(`[gateway] Own JID: ${ownJid}`);
       }
 
@@ -245,7 +299,8 @@ async function startConnection() {
   });
 
   // Incoming messages → forward to LibreFang
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+  activeSock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (sock !== activeSock) return;
     if (type !== 'notify') return;
 
     for (const msg of messages) {
@@ -483,40 +538,49 @@ async function sendMessage(to, text) {
 // ---------------------------------------------------------------------------
 // HTTP server
 // ---------------------------------------------------------------------------
-const MAX_BODY_SIZE = 64 * 1024;
-
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     let body = '';
     let size = 0;
-    let aborted = false;
+    let finished = false;
+
+    const fail = (err) => {
+      if (finished) return;
+      finished = true;
+      reject(err);
+    };
+
     req.on('data', (chunk) => {
+      if (finished) return;
       size += chunk.length;
       if (size > MAX_BODY_SIZE) {
-        aborted = true;
+        fail(httpError(413, `Request body too large (max ${MAX_BODY_SIZE} bytes)`));
         req.destroy();
-        return reject(new Error('Request body too large'));
+        return;
       }
       body += chunk;
     });
     req.on('end', () => {
-      if (aborted) return;
+      if (finished) return;
       try {
         resolve(body ? JSON.parse(body) : {});
-      } catch (e) {
-        reject(new Error('Invalid JSON'));
+      } catch (err) {
+        fail(httpError(400, 'Invalid JSON'));
       }
     });
-    req.on('error', reject);
+    req.on('error', (err) => {
+      if (finished) return;
+      reject(err);
+    });
   });
 }
 
-function jsonResponse(res, status, data) {
+function jsonResponse(req, res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(body),
-    'Access-Control-Allow-Origin': '*',
+    ...buildCorsHeaders(req.headers.origin),
   });
   res.end(body);
 }
@@ -525,9 +589,7 @@ const server = http.createServer(async (req, res) => {
   // CORS preflight
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      ...buildCorsHeaders(req.headers.origin),
     });
     return res.end();
   }
@@ -540,7 +602,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && path === '/login/start') {
       // If already connected, just return success
       if (connStatus === 'connected') {
-        return jsonResponse(res, 200, {
+        return jsonResponse(req, res, 200, {
           qr_data_url: '',
           session_id: sessionId,
           message: 'Already connected to WhatsApp',
@@ -558,7 +620,7 @@ const server = http.createServer(async (req, res) => {
         waited += 300;
       }
 
-      return jsonResponse(res, 200, {
+      return jsonResponse(req, res, 200, {
         qr_data_url: qrDataUrl,
         session_id: sessionId,
         message: statusMessage,
@@ -568,7 +630,7 @@ const server = http.createServer(async (req, res) => {
 
     // GET /login/status — poll for connection status
     if (req.method === 'GET' && path === '/login/status') {
-      return jsonResponse(res, 200, {
+      return jsonResponse(req, res, 200, {
         connected: connStatus === 'connected',
         message: statusMessage,
         expired: qrExpired,
@@ -581,16 +643,16 @@ const server = http.createServer(async (req, res) => {
       const { to, text } = body;
 
       if (!to || !text) {
-        return jsonResponse(res, 400, { error: 'Missing "to" or "text" field' });
+        return jsonResponse(req, res, 400, { error: 'Missing "to" or "text" field' });
       }
 
       await sendMessage(to, text);
-      return jsonResponse(res, 200, { success: true, message: 'Sent' });
+      return jsonResponse(req, res, 200, { success: true, message: 'Sent' });
     }
 
     // GET /health — health check
     if (req.method === 'GET' && path === '/health') {
-      return jsonResponse(res, 200, {
+      return jsonResponse(req, res, 200, {
         status: 'ok',
         connected: connStatus === 'connected',
         session_id: sessionId || null,
@@ -598,50 +660,63 @@ const server = http.createServer(async (req, res) => {
     }
 
     // 404
-    jsonResponse(res, 404, { error: 'Not found' });
+    jsonResponse(req, res, 404, { error: 'Not found' });
   } catch (err) {
     console.error(`[gateway] ${req.method} ${path} error:`, err.message);
-    jsonResponse(res, 500, { error: err.message });
+    jsonResponse(req, res, err.statusCode || 500, { error: err.message });
   }
 });
 
-server.listen(PORT, '127.0.0.1', async () => {
-  console.log(`[gateway] WhatsApp Web gateway listening on http://127.0.0.1:${PORT}`);
-  console.log(`[gateway] LibreFang URL: ${LIBREFANG_URL}`);
-  console.log(`[gateway] Default agent: ${DEFAULT_AGENT}`);
+function startServer() {
+  server.listen(PORT, '127.0.0.1', async () => {
+    console.log(`[gateway] WhatsApp Web gateway listening on http://127.0.0.1:${PORT}`);
+    console.log(`[gateway] LibreFang URL: ${LIBREFANG_URL}`);
+    console.log(`[gateway] Default agent: ${DEFAULT_AGENT}`);
 
-  // Auto-connect from existing credentials on startup
-  const fs = require('node:fs');
-  const authPath = require('node:path').join(__dirname, 'auth_store', 'creds.json');
-  if (fs.existsSync(authPath)) {
-    console.log('[gateway] Found existing auth — auto-connecting...');
-    try {
-      await startConnection();
-    } catch (err) {
-      console.error('[gateway] Auto-connect failed:', err.message);
-      // Schedule a retry after a short delay — the daemon may still be booting
-      console.log('[gateway] Will retry auto-connect in 10s...');
-      setTimeout(async () => {
-        try {
-          await startConnection();
-        } catch (retryErr) {
-          console.error('[gateway] Auto-connect retry failed:', retryErr.message);
-        }
-      }, 10_000);
+    // Auto-connect from existing credentials on startup
+    const fs = require('node:fs');
+    const authPath = require('node:path').join(__dirname, 'auth_store', 'creds.json');
+    if (fs.existsSync(authPath)) {
+      console.log('[gateway] Found existing auth — auto-connecting...');
+      try {
+        await startConnection();
+      } catch (err) {
+        console.error('[gateway] Auto-connect failed:', err.message);
+        // Schedule a retry after a short delay — the daemon may still be booting
+        console.log('[gateway] Will retry auto-connect in 10s...');
+        setTimeout(async () => {
+          try {
+            await startConnection();
+          } catch (retryErr) {
+            console.error('[gateway] Auto-connect retry failed:', retryErr.message);
+          }
+        }, 10_000);
+      }
+    } else {
+      console.log('[gateway] No auth found — waiting for POST /login/start to begin QR flow...');
     }
-  } else {
-    console.log('[gateway] No auth found — waiting for POST /login/start to begin QR flow...');
-  }
-});
+  });
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\n[gateway] Shutting down...');
-  if (sock) sock.end();
-  server.close(() => process.exit(0));
-});
+  // Graceful shutdown
+  process.on('SIGINT', () => {
+    console.log('\n[gateway] Shutting down...');
+    if (sock) sock.end();
+    server.close(() => process.exit(0));
+  });
 
-process.on('SIGTERM', () => {
-  if (sock) sock.end();
-  server.close(() => process.exit(0));
-});
+  process.on('SIGTERM', () => {
+    if (sock) sock.end();
+    server.close(() => process.exit(0));
+  });
+}
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = {
+  MAX_BODY_SIZE,
+  buildCorsHeaders,
+  isAllowedOrigin,
+  parseBody,
+};
