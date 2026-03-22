@@ -125,7 +125,7 @@ export function AgentsPage() {
   };
 
   return (
-    <div className="flex flex-col gap-6 transition-colors duration-300">
+    <div className="flex flex-col gap-4 sm:gap-6 transition-colors duration-300">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-3">
         <PageHeader
           badge={t("common.kernel_runtime")}

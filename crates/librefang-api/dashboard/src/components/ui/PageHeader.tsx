@@ -16,14 +16,14 @@ export function PageHeader({ icon, badge, title, subtitle, actions, isFetching, 
   const { t } = useTranslation();
 
   return (
-    <header className="flex flex-col justify-between gap-3 sm:gap-4 sm:flex-row sm:items-end">
+    <header className="flex flex-col justify-between gap-2 sm:gap-4 sm:flex-row sm:items-end">
       <div className="min-w-0">
-        <div className="flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
+        <div className="hidden sm:flex items-center gap-2 text-brand font-bold uppercase tracking-widest text-[10px]">
           <div className="p-1 rounded-md bg-brand/10">{icon}</div>
           {badge}
         </div>
-        <h1 className="mt-2 sm:mt-3 text-2xl sm:text-3xl font-extrabold tracking-tight md:text-4xl bg-gradient-to-r from-text-main to-text-dim/70 bg-clip-text">{title}</h1>
-        {subtitle && <p className="mt-1 sm:mt-1.5 text-text-dim font-medium max-w-2xl text-xs sm:text-sm">{subtitle}</p>}
+        <h1 className="text-xl sm:text-3xl font-extrabold tracking-tight md:text-4xl bg-gradient-to-r from-text-main to-text-dim/70 bg-clip-text sm:mt-3">{title}</h1>
+        {subtitle && <p className="mt-0.5 sm:mt-1.5 text-text-dim font-medium max-w-2xl text-[11px] sm:text-sm hidden sm:block">{subtitle}</p>}
       </div>
       <div className="flex items-center gap-2 sm:gap-3 shrink-0 flex-wrap">
         {actions}

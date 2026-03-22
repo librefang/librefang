@@ -33,7 +33,7 @@ export function AnalyticsPage() {
   const isLoading = usageQuery.isLoading;
 
   return (
-    <div className="flex flex-col gap-6 transition-colors duration-300">
+    <div className="flex flex-col gap-4 sm:gap-6 transition-colors duration-300">
       {/* Header */}
       <PageHeader
         icon={<BarChart3 className="h-4 w-4" />}
@@ -63,7 +63,7 @@ export function AnalyticsPage() {
                   <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">{kpi.label}</span>
                   <div className={`w-8 h-8 rounded-lg ${kpi.bg} flex items-center justify-center`}><kpi.icon className={`w-4 h-4 ${kpi.color}`} /></div>
                 </div>
-                <p className={`text-3xl font-black tracking-tight mt-2 ${kpi.color}`}>{kpi.value}</p>
+                <p className={`text-2xl sm:text-3xl font-black tracking-tight mt-1 sm:mt-2 ${kpi.color}`}>{kpi.value}</p>
               </Card>
             ))}
           </div>

@@ -554,23 +554,23 @@ export function ChatPage() {
   return (
     <div className="flex h-[calc(100vh-140px)] flex-col">
       {/* 头部 */}
-      <header className="pb-4">
+      <header className="pb-2 sm:pb-4">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="relative">
+          <div className="flex items-center gap-2 sm:gap-3">
+            <div className="relative hidden sm:block">
               <Sparkles className="h-5 w-5 text-brand" />
               <span className="absolute inset-0 bg-brand/30 animate-ping" />
             </div>
-            <span className="text-brand font-bold uppercase tracking-widest text-[10px]">{t("chat.neural_terminal")}</span>
+            <span className="text-brand font-bold uppercase tracking-widest text-[10px] hidden sm:inline">{t("chat.neural_terminal")}</span>
+            <h1 className="text-xl sm:text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
           </div>
           <button
             onClick={() => queryClient.invalidateQueries({ queryKey: ["agents", "list"] })}
-            className="p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-all"
+            className="p-2 sm:p-2.5 rounded-xl hover:bg-surface-hover text-text-dim hover:text-brand transition-all"
           >
             <RefreshCw className={`h-4 w-4 ${agentsQuery.isFetching ? "animate-spin" : ""}`} />
           </button>
         </div>
-        <h1 className="mt-2 text-3xl font-extrabold tracking-tight">{t("chat.title")}</h1>
       </header>
 
       {/* 主内容区 */}

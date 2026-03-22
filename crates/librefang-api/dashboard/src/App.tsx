@@ -267,14 +267,18 @@ export function App() {
       {/* Main Content Area */}
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Top Header */}
-        <header className="flex h-14 lg:h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface/80 px-3 sm:px-6 backdrop-blur-xl">
-          <div className="flex items-center gap-2">
+        <header className="flex h-12 sm:h-14 lg:h-16 shrink-0 items-center justify-between border-b border-border-subtle bg-surface/80 px-3 sm:px-6 backdrop-blur-xl">
+          <div className="flex items-center gap-2 min-w-0">
             <button
               onClick={() => setMobileMenuOpen(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200 lg:hidden"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all duration-200 lg:hidden shrink-0"
             >
               <Menu className="h-5 w-5" />
             </button>
+            {/* Mobile page title */}
+            <span className="text-sm font-bold truncate lg:hidden text-text-dim">
+              {navGroups.flatMap(g => g.items).find(i => location.pathname === i.to)?.label || "LibreFang"}
+            </span>
           </div>
           <div className="flex items-center gap-1.5">
             <Link
@@ -303,7 +307,7 @@ export function App() {
 
         {/* Main Content */}
         <main className="flex-1 overflow-auto bg-main">
-          <div key={location.pathname} className="mx-auto max-w-7xl p-3 sm:p-4 lg:p-8 animate-fade-in-up">
+          <div key={location.pathname} className="mx-auto max-w-7xl p-3 sm:p-4 lg:p-8 pb-[env(safe-area-inset-bottom,12px)] animate-fade-in-up">
             <Outlet />
           </div>
         </main>
