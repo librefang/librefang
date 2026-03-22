@@ -1190,7 +1190,8 @@ impl WorkflowTemplateRegistry {
                     mode: StepMode::Sequential,
                     timeout_secs: 120,
                     error_mode: ErrorMode::Fail,
-                    output_var: None,
+                    // Use step name as output_var so subsequent steps can reference via {{step_name}}
+                    output_var: Some(ts.name.clone()),
                 }
             })
             .collect();
