@@ -4126,3 +4126,95 @@ impl Default for LinkedInConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_config_defaults_backward_compatible() {
+        let sc = SessionConfig::default();
+        assert!(sc.reset_prompt.is_none());
+        assert!(sc.context_injection.is_empty());
+        assert!(sc.on_session_start_script.is_none());
+    }
+
+    #[test]
+    fn test_session_config_with_context_injection() {
+        let toml_str = r#"
+            reset_prompt = "Hello"
+
+            [[context_injection]]
+            name = "rules"
+            content = "Follow the rules."
+            position = "system"
+
+            [[context_injection]]
+            name = "prefs"
+            content = "Be concise."
+            position = "after_reset"
+            condition = "agent.tags contains 'chat'"
+        "#;
+        let sc: SessionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(sc.reset_prompt.as_deref(), Some("Hello"));
+        assert_eq!(sc.context_injection.len(), 2);
+
+        assert_eq!(sc.context_injection[0].name, "rules");
+        assert_eq!(sc.context_injection[0].position, InjectionPosition::System);
+        assert!(sc.context_injection[0].condition.is_none());
+
+        assert_eq!(sc.context_injection[1].name, "prefs");
+        assert_eq!(
+            sc.context_injection[1].position,
+            InjectionPosition::AfterReset
+        );
+        assert_eq!(
+            sc.context_injection[1].condition.as_deref(),
+            Some("agent.tags contains 'chat'")
+        );
+    }
+
+    #[test]
+    fn test_session_config_empty_injection_list() {
+        let toml_str = r#"
+            retention_days = 7
+        "#;
+        let sc: SessionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(sc.retention_days, 7);
+        assert!(sc.context_injection.is_empty());
+        assert!(sc.on_session_start_script.is_none());
+    }
+
+    #[test]
+    fn test_injection_position_default() {
+        assert_eq!(InjectionPosition::default(), InjectionPosition::System);
+    }
+
+    #[test]
+    fn test_injection_position_deserialization() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            pos: InjectionPosition,
+        }
+        let w: Wrapper = toml::from_str(r#"pos = "system""#).unwrap();
+        assert_eq!(w.pos, InjectionPosition::System);
+
+        let w: Wrapper = toml::from_str(r#"pos = "before_user""#).unwrap();
+        assert_eq!(w.pos, InjectionPosition::BeforeUser);
+
+        let w: Wrapper = toml::from_str(r#"pos = "after_reset""#).unwrap();
+        assert_eq!(w.pos, InjectionPosition::AfterReset);
+    }
+
+    #[test]
+    fn test_session_config_with_start_script() {
+        let toml_str = r#"
+            on_session_start_script = "/usr/local/bin/on_start.sh"
+        "#;
+        let sc: SessionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            sc.on_session_start_script.as_deref(),
+            Some("/usr/local/bin/on_start.sh")
+        );
+    }
+}

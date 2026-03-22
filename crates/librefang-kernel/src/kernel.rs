@@ -2143,7 +2143,7 @@ system_prompt = "You are a helpful assistant."
             .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
-        self.inject_reset_prompt(&mut session);
+        self.inject_reset_prompt(&mut session, agent_id);
 
         // Inherit kernel exec_policy as fallback if agent manifest doesn't have one
         let mut manifest = manifest;
@@ -4175,7 +4175,7 @@ system_prompt = "You are a helpful assistant."
             .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
-        self.inject_reset_prompt(&mut new_session);
+        self.inject_reset_prompt(&mut new_session, agent_id);
 
         // Update registry with new session ID
         self.registry
@@ -4238,7 +4238,7 @@ system_prompt = "You are a helpful assistant."
             .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
-        self.inject_reset_prompt(&mut new_session);
+        self.inject_reset_prompt(&mut new_session, agent_id);
 
         // Update registry with new session ID
         self.registry
@@ -4291,7 +4291,7 @@ system_prompt = "You are a helpful assistant."
             .memory
             .create_session_with_label(agent_id, label)
             .map_err(KernelError::LibreFang)?;
-        self.inject_reset_prompt(&mut session);
+        self.inject_reset_prompt(&mut session, agent_id);
 
         // Switch to the new session
         self.registry
@@ -4439,18 +4439,158 @@ system_prompt = "You are a helpful assistant."
     /// Inject the configured `session.reset_prompt` into a newly created session
     /// as the first system message (if configured).
     fn inject_reset_prompt(&self, session: &mut librefang_memory::session::Session) {
+    /// Inject the configured `session.reset_prompt` and any `context_injection`
+    /// entries into a newly created session. Also runs `on_session_start_script`
+    /// if configured.
+    ///
+    /// Injection order:
+    /// 1. `InjectionPosition::System` entries (global then agent-level)
+    /// 2. `reset_prompt` (if set)
+    /// 3. `InjectionPosition::AfterReset` entries (global then agent-level)
+    /// 4. `InjectionPosition::BeforeUser` entries are stored but only matter
+    ///    relative to future user messages — appended at the end for now.
+    fn inject_reset_prompt(
+        &self,
+        session: &mut librefang_memory::session::Session,
+        agent_id: AgentId,
+    ) {
+        use librefang_types::config::InjectionPosition;
+        use librefang_types::message::Message;
+
+        // Collect agent-level injections (if the agent is registered).
+        let agent_injections: Vec<librefang_types::config::ContextInjection> = self
+            .registry
+            .get(agent_id)
+            .map(|entry| entry.manifest.context_injection.clone())
+            .unwrap_or_default();
+
+        // Collect agent tags for condition evaluation.
+        let agent_tags: Vec<String> = self
+            .registry
+            .get(agent_id)
+            .map(|entry| entry.manifest.tags.clone())
+            .unwrap_or_default();
+
+        // Merge global + agent injections (global first).
+        let all_injections: Vec<&librefang_types::config::ContextInjection> = self
+            .config
+            .session
+            .context_injection
+            .iter()
+            .chain(agent_injections.iter())
+            .collect();
+
+        // Helper: check if a condition is satisfied.
+        let condition_met =
+            |cond: &Option<String>| -> bool { Self::evaluate_condition(cond, &agent_tags) };
+
+        // Phase 1: System-position injections.
+        for inj in &all_injections {
+            if inj.position == InjectionPosition::System && condition_met(&inj.condition) {
+                session.messages.push(Message::system(inj.content.clone()));
+                debug!(
+                    session_id = %session.id.0,
+                    injection = %inj.name,
+                    "Injected context (system position)"
+                );
+            }
+        }
+
+        // Phase 2: Legacy reset_prompt.
         if let Some(ref prompt) = self.config.session.reset_prompt {
             if !prompt.is_empty() {
-                session
-                    .messages
-                    .push(librefang_types::message::Message::system(prompt.clone()));
-                let _ = self.memory.save_session(session);
+                session.messages.push(Message::system(prompt.clone()));
                 debug!(
                     session_id = %session.id.0,
                     "Injected session reset prompt"
                 );
             }
         }
+
+        // Phase 3: AfterReset-position injections.
+        for inj in &all_injections {
+            if inj.position == InjectionPosition::AfterReset && condition_met(&inj.condition) {
+                session.messages.push(Message::system(inj.content.clone()));
+                debug!(
+                    session_id = %session.id.0,
+                    injection = %inj.name,
+                    "Injected context (after_reset position)"
+                );
+            }
+        }
+
+        // Phase 4: BeforeUser-position injections (appended; they logically
+        // precede user messages that haven't arrived yet).
+        for inj in &all_injections {
+            if inj.position == InjectionPosition::BeforeUser && condition_met(&inj.condition) {
+                session.messages.push(Message::system(inj.content.clone()));
+                debug!(
+                    session_id = %session.id.0,
+                    injection = %inj.name,
+                    "Injected context (before_user position)"
+                );
+            }
+        }
+
+        // Persist if anything was injected.
+        if !session.messages.is_empty() {
+            let _ = self.memory.save_session(session);
+        }
+
+        // Run on_session_start_script if configured (fire-and-forget).
+        if let Some(ref script) = self.config.session.on_session_start_script {
+            if !script.is_empty() {
+                let script = script.clone();
+                let aid = agent_id.to_string();
+                let sid = session.id.0.to_string();
+                std::thread::spawn(move || {
+                    match std::process::Command::new(&script)
+                        .arg(&aid)
+                        .arg(&sid)
+                        .output()
+                    {
+                        Ok(output) => {
+                            if !output.status.success() {
+                                tracing::warn!(
+                                    script = %script,
+                                    status = %output.status,
+                                    "on_session_start_script exited with non-zero status"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                script = %script,
+                                error = %e,
+                                "Failed to run on_session_start_script"
+                            );
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// Evaluate a simple condition expression against agent tags.
+    ///
+    /// Currently supports:
+    /// - `"agent.tags contains '<tag>'"` — true if the agent has the given tag
+    /// - `None` or empty string — always true
+    fn evaluate_condition(condition: &Option<String>, agent_tags: &[String]) -> bool {
+        let cond = match condition {
+            Some(c) if !c.is_empty() => c,
+            _ => return true,
+        };
+
+        // Parse "agent.tags contains 'value'"
+        if let Some(rest) = cond.strip_prefix("agent.tags contains ") {
+            let tag = rest.trim().trim_matches('\'').trim_matches('"');
+            return agent_tags.iter().any(|t| t == tag);
+        }
+
+        // Unknown condition format — default to true (lenient).
+        tracing::warn!(condition = %cond, "Unknown condition format, defaulting to true");
+        true
     }
 
     /// Save a summary of the current session to agent memory before reset.
@@ -9275,5 +9415,46 @@ mod tests {
         );
 
         kernel.shutdown();
+    #[test]
+    fn test_evaluate_condition_none() {
+        let tags = vec!["chat".to_string(), "dev".to_string()];
+        assert!(LibreFangKernel::evaluate_condition(&None, &tags));
+    }
+
+    #[test]
+    fn test_evaluate_condition_empty() {
+        let tags = vec!["chat".to_string()];
+        assert!(LibreFangKernel::evaluate_condition(
+            &Some(String::new()),
+            &tags
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_condition_tag_match() {
+        let tags = vec!["chat".to_string(), "dev".to_string()];
+        assert!(LibreFangKernel::evaluate_condition(
+            &Some("agent.tags contains 'chat'".to_string()),
+            &tags,
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_condition_tag_no_match() {
+        let tags = vec!["dev".to_string()];
+        assert!(!LibreFangKernel::evaluate_condition(
+            &Some("agent.tags contains 'chat'".to_string()),
+            &tags,
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_condition_unknown_format() {
+        let tags = vec!["chat".to_string()];
+        // Unknown condition format defaults to true (lenient).
+        assert!(LibreFangKernel::evaluate_condition(
+            &Some("some.unknown.expression".to_string()),
+            &tags,
+        ));
     }
 }
