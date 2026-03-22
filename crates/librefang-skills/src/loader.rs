@@ -378,10 +378,19 @@ async fn execute_shell(
         drop(stdin);
     }
 
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| SkillError::ExecutionFailed(format!("Wait for shell: {e}")))?;
+    let timeout_dur = std::time::Duration::from_secs(120);
+    let output = match tokio::time::timeout(timeout_dur, child.wait_with_output()).await {
+        Ok(result) => {
+            result.map_err(|e| SkillError::ExecutionFailed(format!("Wait for shell: {e}")))?
+        }
+        Err(_) => {
+            error!("Shell skill timed out after 120s: {}", script_path.display());
+            return Ok(SkillToolResult {
+                output: "Shell script timed out after 120 seconds".into(),
+                is_error: true,
+            });
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
