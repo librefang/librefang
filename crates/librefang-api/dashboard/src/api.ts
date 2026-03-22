@@ -83,6 +83,11 @@ export interface SkillItem {
   author?: string;
   tools_count?: number;
   tags?: string[];
+  source?: {
+    type?: string;
+    slug?: string;
+    version?: string;
+  };
 }
 
 export interface SkillsResponse {
