@@ -28,8 +28,9 @@ the source code.
 15. [Loop Guard](#15-loop-guard)
 16. [Session Repair](#16-session-repair)
 17. [Health Endpoint Redaction](#17-health-endpoint-redaction)
-18. [Security Configuration](#18-security-configuration)
-19. [Security Dependencies](#19-security-dependencies)
+18. [Dashboard Authentication](#18-dashboard-authentication)
+19. [Security Configuration](#19-security-configuration)
+20. [Security Dependencies](#20-security-dependencies)
 
 ---
 
@@ -1348,7 +1349,50 @@ if api_key.is_empty() {
 
 ---
 
-## 18. Security Configuration
+## 18. Dashboard Authentication
+
+LibreFang supports optional username/password authentication for the web dashboard.
+
+### 18.1 Configuration
+
+```toml
+# config.toml
+dashboard_user = "admin"
+dashboard_pass = "vault:dashboard_password"
+```
+
+When both fields are set, the dashboard displays a login page. Without credentials configured, the dashboard is accessible without login (or protected by `api_key` if set).
+
+### 18.2 Credential Sources (Priority Order)
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 | Environment variable | `LIBREFANG_DASHBOARD_PASS=secret` |
+| 2 | Encrypted vault | `dashboard_pass = "vault:dashboard_password"` |
+| 3 | Literal in config | `dashboard_pass = "my-password"` |
+
+### 18.3 Vault Storage (Recommended)
+
+```bash
+# Store password in encrypted vault
+librefang vault set dashboard_password
+
+# Reference in config.toml
+dashboard_pass = "vault:dashboard_password"
+```
+
+The vault uses AES-256-GCM encryption with a master key stored in the OS keyring (macOS Keychain / Windows Credential Manager / Linux Secret Service) or via the `LIBREFANG_VAULT_KEY` environment variable.
+
+### 18.4 Security Properties
+
+- **Constant-time comparison**: Credentials are compared using `subtle::ConstantTimeEq` to prevent timing attacks.
+- **HMAC session token**: On successful login, a deterministic HMAC-SHA256 token is derived from the credentials and returned as a Bearer token for subsequent API requests.
+- **No server-side sessions**: The token is deterministic, so the server does not need to store session state.
+- **Public endpoints**: `/api/auth/dashboard-login` and `/api/auth/dashboard-check` are accessible without authentication.
+
+---
+
+## 19. Security Configuration
 
 ### 18.1 config.toml Reference
 
@@ -1438,7 +1482,7 @@ defaults) will be inherited.
 
 ---
 
-## 19. Security Dependencies
+## 20. Security Dependencies
 
 | Crate | Purpose |
 |-------|---------|
