@@ -26,6 +26,7 @@ struct PyTarget {
     rust_target: &'static str,
     platform_tag: &'static str,
     ext: &'static str,
+    #[cfg_attr(not(unix), allow(dead_code))]
     exe: &'static str,
 }
 
