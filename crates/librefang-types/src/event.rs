@@ -82,8 +82,25 @@ pub enum EventPayload {
     Network(NetworkEvent),
     /// System event (health, resources).
     System(SystemEvent),
+    /// An approval request was created and is waiting for human resolution.
+    ApprovalRequested(ApprovalRequestedEvent),
     /// User-defined payload.
     Custom(Vec<u8>),
+}
+
+/// Fired when a tool invocation requires human approval before proceeding.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRequestedEvent {
+    /// The approval request ID.
+    pub request_id: String,
+    /// The agent that triggered the approval.
+    pub agent_id: String,
+    /// The tool that requires approval.
+    pub tool_name: String,
+    /// Human-readable description of what the tool wants to do.
+    pub description: String,
+    /// Risk classification.
+    pub risk_level: String,
 }
 
 /// A message between agents or from user to agent.

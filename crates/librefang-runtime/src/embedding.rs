@@ -1,17 +1,23 @@
 //! Embedding driver for vector-based semantic memory.
 //!
-//! Provides an `EmbeddingDriver` trait and an OpenAI-compatible implementation
-//! that works with any provider offering a `/v1/embeddings` endpoint (OpenAI,
-//! Groq, Together, Fireworks, Ollama, etc.).
+//! Provides an `EmbeddingDriver` trait and implementations:
+//! - `OpenAIEmbeddingDriver` — works with any provider offering a `/v1/embeddings`
+//!   endpoint (OpenAI, Groq, Together, Fireworks, Ollama, etc.).
+//! - `BedrockEmbeddingDriver` — Amazon Bedrock embedding models via SigV4-signed
+//!   REST calls (no heavy `aws-sdk-*` dependency).
 
 use async_trait::async_trait;
+use hmac::{Hmac, Mac};
 use librefang_types::model_catalog::{
     FIREWORKS_BASE_URL, GROQ_BASE_URL, LMSTUDIO_BASE_URL, MISTRAL_BASE_URL, OLLAMA_BASE_URL,
     OPENAI_BASE_URL, TOGETHER_BASE_URL, VLLM_BASE_URL,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Error type for embedding operations.
 #[derive(Debug, thiserror::Error)]
@@ -120,6 +126,11 @@ fn infer_dimensions(model: &str) -> usize {
         "all-mpnet-base-v2" => 768,
         "nomic-embed-text" => 768,
         "mxbai-embed-large" => 1024,
+        // Amazon Bedrock models
+        "amazon.titan-embed-text-v1" => 1536,
+        "amazon.titan-embed-text-v2:0" => 1024,
+        "cohere.embed-english-v3" => 1024,
+        "cohere.embed-multilingual-v3" => 1024,
         // Default to 1536 (most common)
         _ => 1536,
     }
@@ -179,6 +190,242 @@ impl EmbeddingDriver for OpenAIEmbeddingDriver {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Amazon Bedrock embedding driver (SigV4-signed REST calls)
+// ---------------------------------------------------------------------------
+
+/// Amazon Bedrock embedding driver.
+///
+/// Uses manual AWS SigV4 signing so we avoid pulling in the full `aws-sdk-*`
+/// dependency tree.  Bedrock's embedding API is invoked per-text because the
+/// Titan `/invoke` endpoint accepts a single `inputText` at a time.
+pub struct BedrockEmbeddingDriver {
+    client: reqwest::Client,
+    region: String,
+    model_id: String,
+    access_key: Zeroizing<String>,
+    secret_key: Zeroizing<String>,
+    session_token: Option<Zeroizing<String>>,
+    dims: usize,
+}
+
+/// Bedrock Titan invoke request body.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BedrockEmbedRequest<'a> {
+    input_text: &'a str,
+}
+
+/// Bedrock Titan invoke response body.
+#[derive(Deserialize)]
+struct BedrockEmbedResponse {
+    embedding: Vec<f32>,
+}
+
+impl BedrockEmbeddingDriver {
+    /// Create a new Bedrock embedding driver.
+    ///
+    /// Reads `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION`
+    /// from the environment (or the supplied overrides).
+    pub fn new(
+        model_id: String,
+        region: Option<String>,
+        dimensions_override: Option<usize>,
+    ) -> Result<Self, EmbeddingError> {
+        let access_key = std::env::var("AWS_ACCESS_KEY_ID")
+            .map_err(|_| EmbeddingError::MissingApiKey("AWS_ACCESS_KEY_ID not set".to_string()))?;
+        let secret_key = std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
+            EmbeddingError::MissingApiKey("AWS_SECRET_ACCESS_KEY not set".to_string())
+        })?;
+        let session_token = std::env::var("AWS_SESSION_TOKEN").ok().map(Zeroizing::new);
+        let region = region
+            .or_else(|| std::env::var("AWS_REGION").ok())
+            .unwrap_or_else(|| "us-east-1".to_string());
+
+        let dims = dimensions_override.unwrap_or_else(|| infer_dimensions(&model_id));
+
+        Ok(Self {
+            client: crate::http_client::proxied_client(),
+            region,
+            model_id,
+            access_key: Zeroizing::new(access_key),
+            secret_key: Zeroizing::new(secret_key),
+            session_token,
+            dims,
+        })
+    }
+
+    /// Build the Bedrock invoke URL for the configured model and region.
+    fn invoke_url(&self) -> String {
+        format!(
+            "https://bedrock-runtime.{}.amazonaws.com/model/{}/invoke",
+            self.region, self.model_id
+        )
+    }
+}
+
+// ── Minimal AWS SigV4 helpers ───────────────────────────────────────────
+
+/// Compute SHA-256 hex digest.
+fn sha256_hex(data: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hex::encode(hasher.finalize())
+}
+
+/// HMAC-SHA256.
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC can take key of any size");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
+}
+
+/// Derive the SigV4 signing key.
+fn sigv4_signing_key(secret: &str, date: &str, region: &str, service: &str) -> Vec<u8> {
+    let k_date = hmac_sha256(format!("AWS4{secret}").as_bytes(), date.as_bytes());
+    let k_region = hmac_sha256(&k_date, region.as_bytes());
+    let k_service = hmac_sha256(&k_region, service.as_bytes());
+    hmac_sha256(&k_service, b"aws4_request")
+}
+
+/// Build the full `Authorization` header value for an AWS SigV4 signed request.
+///
+/// This is a *minimal* implementation that covers the Bedrock invoke use-case
+/// (POST, JSON body, no query-string parameters).
+fn sigv4_auth_header(
+    access_key: &str,
+    secret_key: &str,
+    session_token: Option<&str>,
+    region: &str,
+    service: &str,
+    host: &str,
+    uri_path: &str,
+    payload: &[u8],
+    now: &chrono::DateTime<chrono::Utc>,
+) -> (String, String, String) {
+    let date_stamp = now.format("%Y%m%d").to_string();
+    let amz_date = now.format("%Y%m%dT%H%M%SZ").to_string();
+
+    let payload_hash = sha256_hex(payload);
+
+    // Canonical headers (must be sorted). Include security token if present.
+    let (canonical_headers, signed_headers) = if session_token.is_some() {
+        (
+            format!("content-type:application/json\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\nx-amz-security-token:{}\n", session_token.unwrap()),
+            "content-type;host;x-amz-content-sha256;x-amz-date;x-amz-security-token",
+        )
+    } else {
+        (
+            format!("content-type:application/json\nhost:{host}\nx-amz-content-sha256:{payload_hash}\nx-amz-date:{amz_date}\n"),
+            "content-type;host;x-amz-content-sha256;x-amz-date",
+        )
+    };
+
+    // Canonical request.
+    let canonical_request =
+        format!("POST\n{uri_path}\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
+
+    let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
+
+    let signing_key = sigv4_signing_key(secret_key, &date_stamp, region, service);
+    let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+
+    let auth = format!(
+        "AWS4-HMAC-SHA256 Credential={access_key}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}"
+    );
+
+    (auth, amz_date, payload_hash)
+}
+
+#[async_trait]
+impl EmbeddingDriver for BedrockEmbeddingDriver {
+    async fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        if texts.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let url = self.invoke_url();
+        // Parse host and path from URL for signing.
+        let parsed: url::Url = url
+            .parse()
+            .map_err(|e: url::ParseError| EmbeddingError::Http(e.to_string()))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| EmbeddingError::Http("no host in Bedrock URL".into()))?
+            .to_string();
+        let uri_path = parsed.path().to_string();
+
+        let mut embeddings = Vec::with_capacity(texts.len());
+
+        for &text in texts {
+            let body = serde_json::to_vec(&BedrockEmbedRequest { input_text: text })
+                .map_err(|e| EmbeddingError::Parse(e.to_string()))?;
+
+            let now = chrono::Utc::now();
+            let (auth, amz_date, payload_hash) = sigv4_auth_header(
+                &self.access_key,
+                &self.secret_key,
+                self.session_token.as_deref(),
+                &self.region,
+                "bedrock",
+                &host,
+                &uri_path,
+                &body,
+                &now,
+            );
+
+            let mut req = self
+                .client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Host", &host)
+                .header("X-Amz-Date", &amz_date)
+                .header("X-Amz-Content-Sha256", &payload_hash)
+                .header("Authorization", &auth);
+            if let Some(ref token) = self.session_token {
+                req = req.header("X-Amz-Security-Token", token.as_str());
+            }
+            let resp = req
+                .body(body)
+                .send()
+                .await
+                .map_err(|e| EmbeddingError::Http(e.to_string()))?;
+
+            let status = resp.status().as_u16();
+            if status != 200 {
+                let body_text = resp.text().await.unwrap_or_default();
+                return Err(EmbeddingError::Api {
+                    status,
+                    message: body_text,
+                });
+            }
+
+            let data: BedrockEmbedResponse = resp
+                .json()
+                .await
+                .map_err(|e| EmbeddingError::Parse(e.to_string()))?;
+
+            embeddings.push(data.embedding);
+        }
+
+        debug!(
+            "Bedrock embedded {} texts (dims={})",
+            embeddings.len(),
+            embeddings.first().map(|e| e.len()).unwrap_or(0)
+        );
+
+        Ok(embeddings)
+    }
+
+    fn dimensions(&self) -> usize {
+        self.dims
+    }
+}
+
 /// Create an embedding driver from kernel config.
 pub fn create_embedding_driver(
     provider: &str,
@@ -187,6 +434,20 @@ pub fn create_embedding_driver(
     custom_base_url: Option<&str>,
     dimensions_override: Option<usize>,
 ) -> Result<Box<dyn EmbeddingDriver + Send + Sync>, EmbeddingError> {
+    // Bedrock uses its own auth (SigV4) and endpoint format — handle early.
+    if provider == "bedrock" {
+        warn!(
+            provider = %provider,
+            model = %model,
+            "Embedding driver configured to send data to AWS Bedrock — text content will leave this machine"
+        );
+        let region = custom_base_url
+            .filter(|u| !u.is_empty())
+            .map(|s| s.to_string());
+        let driver = BedrockEmbeddingDriver::new(model.to_string(), region, dimensions_override)?;
+        return Ok(Box::new(driver));
+    }
+
     let api_key = if api_key_env.is_empty() {
         String::new()
     } else {
@@ -442,5 +703,165 @@ mod tests {
         let driver = create_embedding_driver("ollama", "nomic-embed-text", "", None, None);
         assert!(driver.is_ok());
         assert_eq!(driver.unwrap().dimensions(), 768);
+    }
+
+    // ── Bedrock / SigV4 tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_infer_dimensions_bedrock_models() {
+        assert_eq!(infer_dimensions("amazon.titan-embed-text-v1"), 1536);
+        assert_eq!(infer_dimensions("amazon.titan-embed-text-v2:0"), 1024);
+        assert_eq!(infer_dimensions("cohere.embed-english-v3"), 1024);
+        assert_eq!(infer_dimensions("cohere.embed-multilingual-v3"), 1024);
+    }
+
+    #[test]
+    fn test_sha256_hex_empty() {
+        // SHA-256 of empty string is a well-known constant.
+        let hash = sha256_hex(b"");
+        assert_eq!(
+            hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn test_sha256_hex_hello() {
+        let hash = sha256_hex(b"hello");
+        assert_eq!(
+            hash,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    #[test]
+    fn test_hmac_sha256_known_vector() {
+        // RFC 4231 test case 2: key = "Jefe", data = "what do ya want for nothing?"
+        let key = b"Jefe";
+        let data = b"what do ya want for nothing?";
+        let result = hmac_sha256(key, data);
+        assert_eq!(
+            hex::encode(&result),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    // AWS example credentials from official documentation — NOT real secrets.
+    // https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html
+    const TEST_AWS_ACCESS_KEY: &str = TEST_AWS_ACCESS_KEY;
+    const TEST_AWS_SECRET_KEY: &str = TEST_AWS_SECRET_KEY;
+
+    #[test]
+    fn test_sigv4_signing_key_deterministic() {
+        // Ensure the signing key derivation is deterministic.
+        let key1 = sigv4_signing_key(TEST_AWS_SECRET_KEY, "20260322", "us-east-1", "bedrock");
+        let key2 = sigv4_signing_key(TEST_AWS_SECRET_KEY, "20260322", "us-east-1", "bedrock");
+        assert_eq!(key1, key2);
+        assert_eq!(key1.len(), 32); // HMAC-SHA256 output is 32 bytes
+    }
+
+    #[test]
+    fn test_sigv4_auth_header_format() {
+        use chrono::TimeZone;
+        let now = chrono::Utc.with_ymd_and_hms(2026, 3, 22, 12, 0, 0).unwrap();
+        let (auth, amz_date, payload_hash) = sigv4_auth_header(
+            TEST_AWS_ACCESS_KEY,
+            TEST_AWS_SECRET_KEY,
+            "us-east-1",
+            "bedrock",
+            "bedrock-runtime.us-east-1.amazonaws.com",
+            "/model/amazon.titan-embed-text-v2:0/invoke",
+            b"{\"inputText\":\"hello\"}",
+            &now,
+        );
+
+        let expected_prefix = format!("AWS4-HMAC-SHA256 Credential={TEST_AWS_ACCESS_KEY}/20260322/us-east-1/bedrock/aws4_request");
+        assert!(auth.starts_with(&expected_prefix));
+        assert!(auth.contains("SignedHeaders=content-type;host;x-amz-content-sha256;x-amz-date"));
+        assert!(auth.contains("Signature="));
+        assert_eq!(amz_date, "20260322T120000Z");
+        assert_eq!(payload_hash, sha256_hex(b"{\"inputText\":\"hello\"}"));
+    }
+
+    #[test]
+    fn test_create_embedding_driver_bedrock_missing_keys() {
+        // Without AWS env vars set, bedrock driver creation should fail.
+        // Temporarily ensure the vars are unset for this test.
+        let had_key = std::env::var("AWS_ACCESS_KEY_ID").ok();
+        let had_secret = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
+        std::env::remove_var("AWS_ACCESS_KEY_ID");
+        std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+
+        let result =
+            create_embedding_driver("bedrock", "amazon.titan-embed-text-v2:0", "", None, None);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("AWS_ACCESS_KEY_ID"));
+
+        // Restore env vars if they were set.
+        if let Some(v) = had_key {
+            std::env::set_var("AWS_ACCESS_KEY_ID", v);
+        }
+        if let Some(v) = had_secret {
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", v);
+        }
+    }
+
+    #[test]
+    fn test_create_embedding_driver_bedrock_with_keys() {
+        // Set fake AWS keys for this test.
+        let had_key = std::env::var("AWS_ACCESS_KEY_ID").ok();
+        let had_secret = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
+        let had_region = std::env::var("AWS_REGION").ok();
+        std::env::set_var("AWS_ACCESS_KEY_ID", TEST_AWS_ACCESS_KEY);
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", TEST_AWS_SECRET_KEY);
+        std::env::set_var("AWS_REGION", "us-west-2");
+
+        let result =
+            create_embedding_driver("bedrock", "amazon.titan-embed-text-v2:0", "", None, None);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().dimensions(), 1024);
+
+        // Restore env vars.
+        match had_key {
+            Some(v) => std::env::set_var("AWS_ACCESS_KEY_ID", v),
+            None => std::env::remove_var("AWS_ACCESS_KEY_ID"),
+        }
+        match had_secret {
+            Some(v) => std::env::set_var("AWS_SECRET_ACCESS_KEY", v),
+            None => std::env::remove_var("AWS_SECRET_ACCESS_KEY"),
+        }
+        match had_region {
+            Some(v) => std::env::set_var("AWS_REGION", v),
+            None => std::env::remove_var("AWS_REGION"),
+        }
+    }
+
+    #[test]
+    fn test_bedrock_region_override_via_custom_base_url() {
+        // When custom_base_url is passed for bedrock, it's treated as a region override.
+        let had_key = std::env::var("AWS_ACCESS_KEY_ID").ok();
+        let had_secret = std::env::var("AWS_SECRET_ACCESS_KEY").ok();
+        std::env::set_var("AWS_ACCESS_KEY_ID", TEST_AWS_ACCESS_KEY);
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", TEST_AWS_SECRET_KEY);
+
+        let result = create_embedding_driver(
+            "bedrock",
+            "amazon.titan-embed-text-v1",
+            "",
+            Some("eu-west-1"),
+            None,
+        );
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().dimensions(), 1536);
+
+        match had_key {
+            Some(v) => std::env::set_var("AWS_ACCESS_KEY_ID", v),
+            None => std::env::remove_var("AWS_ACCESS_KEY_ID"),
+        }
+        match had_secret {
+            Some(v) => std::env::set_var("AWS_SECRET_ACCESS_KEY", v),
+            None => std::env::remove_var("AWS_SECRET_ACCESS_KEY"),
+        }
     }
 }

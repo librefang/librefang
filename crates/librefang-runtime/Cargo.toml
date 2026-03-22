@@ -26,6 +26,7 @@ tokio-stream = { workspace = true }
 wasmtime = { workspace = true }
 anyhow = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 zeroize = { workspace = true }
@@ -41,6 +42,7 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 shlex = "1"
 toml = { workspace = true }
+url = { workspace = true }
 dirs = { workspace = true }
 tempfile = { workspace = true }
 
