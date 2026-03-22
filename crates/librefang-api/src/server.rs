@@ -792,6 +792,39 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
 }
 
+/// Resolve a dashboard credential from: 1) env var, 2) vault:KEY syntax, 3) literal value.
+fn resolve_dashboard_credential(config_value: &str, env_var: &str, home_dir: &std::path::Path) -> String {
+    // 1. Environment variable takes priority
+    if let Ok(val) = std::env::var(env_var) {
+        if !val.trim().is_empty() {
+            return val;
+        }
+    }
+
+    let val = config_value.trim();
+
+    // 2. vault:KEY_NAME syntax — read from encrypted vault
+    if let Some(vault_key) = val.strip_prefix("vault:") {
+        let vault_path = home_dir.join("vault.enc");
+        let mut vault = librefang_extensions::vault::CredentialVault::new(vault_path);
+        match vault.unlock() {
+            Ok(()) => {
+                if let Some(secret) = vault.get(vault_key) {
+                    return secret.to_string();
+                }
+                tracing::warn!("Vault key '{vault_key}' not found in vault");
+            }
+            Err(e) => {
+                tracing::warn!("Could not unlock vault for dashboard credential: {e}");
+            }
+        }
+        return String::new();
+    }
+
+    // 3. Literal value from config
+    config_value.to_string()
+}
+
 /// Dashboard credential login — validates username/password from config.toml
 /// and returns a session token (HMAC-derived from credentials).
 async fn dashboard_login(
@@ -799,11 +832,13 @@ async fn dashboard_login(
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
     let cfg = &state.kernel.config;
-    let cfg_user = std::env::var("LIBREFANG_DASHBOARD_USER")
-        .unwrap_or_else(|_| cfg.dashboard_user.clone());
+    let cfg_user = resolve_dashboard_credential(
+        &cfg.dashboard_user, "LIBREFANG_DASHBOARD_USER", &cfg.home_dir,
+    );
     let cfg_user = cfg_user.trim();
-    let cfg_pass = std::env::var("LIBREFANG_DASHBOARD_PASS")
-        .unwrap_or_else(|_| cfg.dashboard_pass.clone());
+    let cfg_pass = resolve_dashboard_credential(
+        &cfg.dashboard_pass, "LIBREFANG_DASHBOARD_PASS", &cfg.home_dir,
+    );
     let cfg_pass = cfg_pass.trim();
 
     // If not configured, login is not needed
@@ -854,10 +889,12 @@ async fn dashboard_auth_check(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
 ) -> axum::response::Json<serde_json::Value> {
     let cfg = &state.kernel.config;
-    let du = std::env::var("LIBREFANG_DASHBOARD_USER")
-        .unwrap_or_else(|_| cfg.dashboard_user.clone());
-    let dp = std::env::var("LIBREFANG_DASHBOARD_PASS")
-        .unwrap_or_else(|_| cfg.dashboard_pass.clone());
+    let du = resolve_dashboard_credential(
+        &cfg.dashboard_user, "LIBREFANG_DASHBOARD_USER", &cfg.home_dir,
+    );
+    let dp = resolve_dashboard_credential(
+        &cfg.dashboard_pass, "LIBREFANG_DASHBOARD_PASS", &cfg.home_dir,
+    );
     let has_credentials = !du.trim().is_empty() && !dp.trim().is_empty();
     let has_api_key = !cfg.api_key.trim().is_empty();
 
@@ -934,10 +971,16 @@ pub async fn build_router(
     // If dashboard credentials are configured but no api_key, derive one from credentials.
     // This ensures the auth middleware protects write endpoints when credentials are set.
     if api_key.is_empty() {
-        let du_val = std::env::var("LIBREFANG_DASHBOARD_USER")
-            .unwrap_or_else(|_| state.kernel.config.dashboard_user.clone());
-        let dp_val = std::env::var("LIBREFANG_DASHBOARD_PASS")
-            .unwrap_or_else(|_| state.kernel.config.dashboard_pass.clone());
+        let du_val = resolve_dashboard_credential(
+            &state.kernel.config.dashboard_user,
+            "LIBREFANG_DASHBOARD_USER",
+            &state.kernel.config.home_dir,
+        );
+        let dp_val = resolve_dashboard_credential(
+            &state.kernel.config.dashboard_pass,
+            "LIBREFANG_DASHBOARD_PASS",
+            &state.kernel.config.home_dir,
+        );
         let du = du_val.trim();
         let dp = dp_val.trim();
         if !du.is_empty() && !dp.is_empty() {
