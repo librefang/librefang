@@ -2219,7 +2219,6 @@ pub async fn hand_get_session(
                     serde_json::json!({
                         "role": format!("{:?}", m.role).to_lowercase(),
                         "content": content,
-                        "timestamp": m.timestamp.map(|t| t.to_rfc3339()),
                     })
                 })
                 .collect();
@@ -2266,7 +2265,7 @@ pub async fn hand_instance_status(
         "instance_id": instance.instance_id,
         "hand_id": instance.hand_id,
         "hand_name": hand_def.as_ref().map(|d| &d.name),
-        "hand_icon": hand_def.as_ref().and_then(|d| d.icon.as_deref()),
+        "hand_icon": hand_def.as_ref().map(|d| d.icon.as_str()),
         "status": format!("{:?}", instance.status),
         "activated_at": instance.activated_at.to_rfc3339(),
         "config": instance.config,
