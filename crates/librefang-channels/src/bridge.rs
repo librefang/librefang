@@ -6,6 +6,7 @@
 use crate::formatter;
 use crate::rate_limiter::ChannelRateLimiter;
 use crate::router::AgentRouter;
+use crate::sanitizer::{InputSanitizer, SanitizeResult};
 use crate::types::{
     default_phase_emoji, AgentPhase, ChannelAdapter, ChannelContent, ChannelMessage, ChannelUser,
     LifecycleReaction, SenderContext,
@@ -299,6 +300,7 @@ pub struct BridgeManager {
     handle: Arc<dyn ChannelBridgeHandle>,
     router: Arc<AgentRouter>,
     rate_limiter: ChannelRateLimiter,
+    sanitizer: Arc<InputSanitizer>,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
     tasks: Vec<tokio::task::JoinHandle<()>>,
@@ -307,10 +309,30 @@ pub struct BridgeManager {
 impl BridgeManager {
     pub fn new(handle: Arc<dyn ChannelBridgeHandle>, router: Arc<AgentRouter>) -> Self {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let sanitize_config = librefang_types::config::SanitizeConfig::default();
         Self {
             handle,
             router,
             rate_limiter: ChannelRateLimiter::default(),
+            sanitizer: Arc::new(InputSanitizer::from_config(&sanitize_config)),
+            shutdown_tx,
+            shutdown_rx,
+            tasks: Vec::new(),
+        }
+    }
+
+    /// Create a `BridgeManager` with an explicit sanitize configuration.
+    pub fn with_sanitizer(
+        handle: Arc<dyn ChannelBridgeHandle>,
+        router: Arc<AgentRouter>,
+        sanitize_config: &librefang_types::config::SanitizeConfig,
+    ) -> Self {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        Self {
+            handle,
+            router,
+            rate_limiter: ChannelRateLimiter::default(),
+            sanitizer: Arc::new(InputSanitizer::from_config(sanitize_config)),
             shutdown_tx,
             shutdown_rx,
             tasks: Vec::new(),
@@ -335,6 +357,7 @@ impl BridgeManager {
         let handle = self.handle.clone();
         let router = self.router.clone();
         let rate_limiter = self.rate_limiter.clone();
+        let sanitizer = self.sanitizer.clone();
         let adapter_clone = adapter.clone();
         let mut shutdown = self.shutdown_rx.clone();
 
@@ -356,6 +379,7 @@ impl BridgeManager {
                                 let router = router.clone();
                                 let adapter = adapter_clone.clone();
                                 let rate_limiter = rate_limiter.clone();
+                                let sanitizer = sanitizer.clone();
                                 let sem = semaphore.clone();
                                 tokio::spawn(async move {
                                     // Acquire semaphore permit (blocks if 32 tasks are in flight).
@@ -369,6 +393,7 @@ impl BridgeManager {
                                         &router,
                                         adapter.as_ref(),
                                         &rate_limiter,
+                                        &sanitizer,
                                     ).await;
                                 });
                             }
@@ -626,14 +651,55 @@ async fn handle_send_error<F, Fut>(
 /// Dispatch a single incoming message — handles bot commands or routes to an agent.
 ///
 /// Applies per-channel policies (DM/group filtering, rate limiting, formatting, threading).
+/// Input sanitization runs early — before any command parsing or agent dispatch.
 async fn dispatch_message(
     message: &ChannelMessage,
     handle: &Arc<dyn ChannelBridgeHandle>,
     router: &Arc<AgentRouter>,
     adapter: &dyn ChannelAdapter,
     rate_limiter: &ChannelRateLimiter,
+    sanitizer: &InputSanitizer,
 ) {
     let ct_str = channel_type_str(&message.channel);
+
+    // --- Input sanitization (prompt injection detection) ---
+    if !sanitizer.is_off() {
+        let text_to_check: Option<&str> = match &message.content {
+            ChannelContent::Text(t) => Some(t.as_str()),
+            ChannelContent::Image { caption, .. } => caption.as_deref(),
+            ChannelContent::Voice { caption, .. } => caption.as_deref(),
+            ChannelContent::Video { caption, .. } => caption.as_deref(),
+            _ => None,
+        };
+        if let Some(text) = text_to_check {
+            match sanitizer.check(text) {
+                SanitizeResult::Clean => {}
+                SanitizeResult::Warned(reason) => {
+                    warn!(
+                        channel = ct_str,
+                        user = %message.sender.display_name,
+                        reason = reason.as_str(),
+                        "Suspicious channel input (warn mode, allowing through)"
+                    );
+                }
+                SanitizeResult::Blocked(reason) => {
+                    warn!(
+                        channel = ct_str,
+                        user = %message.sender.display_name,
+                        reason = reason.as_str(),
+                        "Blocked channel input (prompt injection detected)"
+                    );
+                    let _ = adapter
+                        .send(
+                            &message.sender,
+                            ChannelContent::Text(format!("Message blocked: {reason}")),
+                        )
+                        .await;
+                    return;
+                }
+            }
+        }
+    }
 
     // Fetch per-channel overrides (if configured)
     let overrides = handle
