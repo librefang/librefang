@@ -235,6 +235,7 @@ pub async fn create_workflow(
             timeout_secs: s["timeout_secs"].as_u64().unwrap_or(120),
             error_mode,
             output_var: s["output_var"].as_str().map(String::from),
+            inherit_context: s["inherit_context"].as_bool(),
         });
     }
 
@@ -420,6 +421,7 @@ pub async fn update_workflow(
                 timeout_secs: s["timeout_secs"].as_u64().unwrap_or(120),
                 error_mode,
                 output_var: s["output_var"].as_str().map(String::from),
+                inherit_context: s["inherit_context"].as_bool(),
             });
         }
         parsed_steps

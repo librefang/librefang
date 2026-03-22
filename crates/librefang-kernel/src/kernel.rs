@@ -4839,17 +4839,20 @@ system_prompt = "You are a helpful assistant."
                 KernelError::LibreFang(LibreFangError::Internal("Workflow not found".to_string()))
             })?;
 
-        // Agent resolver: looks up by name or ID in the registry
-        let resolver = |agent_ref: &StepAgent| -> Option<(AgentId, String)> {
+        // Agent resolver: looks up by name or ID in the registry.
+        // Returns (AgentId, agent_name, inherit_parent_context).
+        let resolver = |agent_ref: &StepAgent| -> Option<(AgentId, String, bool)> {
             match agent_ref {
                 StepAgent::ById { id } => {
                     let agent_id: AgentId = id.parse().ok()?;
                     let entry = self.registry.get(agent_id)?;
-                    Some((agent_id, entry.name.clone()))
+                    let inherit = entry.manifest.inherit_parent_context;
+                    Some((agent_id, entry.name.clone(), inherit))
                 }
                 StepAgent::ByName { name } => {
                     let entry = self.registry.find_by_name(name)?;
-                    Some((entry.id, entry.name.clone()))
+                    let inherit = entry.manifest.inherit_parent_context;
+                    Some((entry.id, entry.name.clone(), inherit))
                 }
             }
         };

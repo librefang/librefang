@@ -194,6 +194,7 @@ export interface WorkflowStep {
   agent_name?: string;
   prompt: string;
   timeout_secs?: number;
+  inherit_context?: boolean;
 }
 
 export interface WorkflowItem {
