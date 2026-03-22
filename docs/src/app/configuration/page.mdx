@@ -326,6 +326,11 @@ allowed_channels = []
 # secret_env = "WECOM_SECRET"
 # webhook_port = 8454
 
+# [channels.wechat]
+# bot_token_env = "WECHAT_BOT_TOKEN"   # optional: skip QR login on restart
+# default_agent = "assistant"
+# allowed_users = []
+
 # --- Browser Automation ---
 [browser]
 headless = true
@@ -706,7 +711,7 @@ timeout_secs = 10
 
 ### `[channels]`
 
-All 44 channel adapters are configured under `[channels.<name>]`. Each channel is `Option<T>` -- omitting the section disables the adapter entirely. Including the section header (even empty) enables it with default values.
+All 45 channel adapters are configured under `[channels.<name>]`. Each channel is `Option<T>` -- omitting the section disables the adapter entirely. Including the section header (even empty) enables it with default values.
 
 **Universal channel fields:** Every channel adapter supports the following common fields in addition to its own specific fields:
 
@@ -1451,6 +1456,26 @@ webhook_port = 8454
 | `webhook_port` | u16 | `8454` | Port for the incoming webhook. |
 | `token_env` | string or null | `null` | Env var holding the callback verification token. Required for verifying incoming messages. |
 | `encoding_aes_key_env` | string or null | `null` | Env var holding the encoding AES key for message encryption/decryption. |
+| `default_agent` | string or null | `null` | Agent name to route messages to. |
+| `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
+| `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |
+
+#### `[channels.wechat]`
+
+WeChat personal account channel adapter using Tencent's iLink Bot API. Connects via QR code scan — no API keys or developer accounts required.
+
+```toml
+[channels.wechat]
+# bot_token_env = "WECHAT_BOT_TOKEN"  # optional: persisted token from previous session
+allowed_users = []
+# default_agent = "assistant"
+# account_id = "my-wechat-bot"
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `bot_token_env` | string | `"WECHAT_BOT_TOKEN"` | Env var holding a persisted bot token from a previous QR login session. When set, skips QR login on restart. |
+| `allowed_users` | list of strings | `[]` | WeChat user IDs allowed to interact (format: `hash@im.wechat`). Empty = allow all. |
 | `default_agent` | string or null | `null` | Agent name to route messages to. |
 | `account_id` | string or null | `null` | Unique bot instance identifier for multi-bot routing. |
 | `overrides` | object | (defaults) | Per-channel behavior overrides. See [Channel Overrides](#channel-overrides). |

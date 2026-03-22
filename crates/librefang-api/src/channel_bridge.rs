@@ -264,6 +264,8 @@ use librefang_channels::mumble::MumbleAdapter;
 use librefang_channels::ntfy::NtfyAdapter;
 #[cfg(feature = "channel-qq")]
 use librefang_channels::qq::QqAdapter;
+#[cfg(feature = "channel-wechat")]
+use librefang_channels::wechat::WeChatAdapter;
 #[cfg(feature = "channel-wecom")]
 use librefang_channels::wecom::WeComAdapter;
 
@@ -1251,6 +1253,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             "gotify" => find_overrides!(gotify),
             "webhook" => find_overrides!(webhook),
             "linkedin" => find_overrides!(linkedin),
+            "wechat" => find_overrides!(wechat),
             "wecom" => find_overrides!(wecom),
             _ => None,
         }
@@ -1536,6 +1539,7 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(bluesky, "channel-bluesky", "Bluesky");
     check_channel!(feishu, "channel-feishu", "Feishu");
     check_channel!(revolt, "channel-revolt", "Revolt");
+    check_channel!(wechat, "channel-wechat", "WeChat");
     check_channel!(wecom, "channel-wecom", "WeCom");
     check_channel!(nextcloud, "channel-nextcloud", "Nextcloud");
     check_channel!(guilded, "channel-guilded", "Guilded");
@@ -2079,6 +2083,21 @@ pub async fn start_channel_bridge_with_config(
                 rv_config.account_id.clone(),
             ));
         }
+    }
+
+    // WeChat (personal account via iLink)
+    #[cfg(feature = "channel-wechat")]
+    for wx_config in config.wechat.iter() {
+        let bot_token = read_token(&wx_config.bot_token_env, "WeChat");
+        let adapter = Arc::new(
+            WeChatAdapter::new(bot_token, wx_config.allowed_users.clone())
+                .with_account_id(wx_config.account_id.clone()),
+        );
+        adapters.push((
+            adapter,
+            wx_config.default_agent.clone(),
+            wx_config.account_id.clone(),
+        ));
     }
 
     // WeCom/WeChat Work

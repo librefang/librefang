@@ -1,12 +1,12 @@
 # Channel Adapters
 
-LibreFang connects to messaging platforms through **44 channel adapters**, allowing users to interact with their agents across every major communication platform. Adapters span consumer messaging, enterprise collaboration, social media, community platforms, privacy-focused protocols, generic webhooks, and extensible sidecar processes.
+LibreFang connects to messaging platforms through **45 channel adapters**, allowing users to interact with their agents across every major communication platform. Adapters span consumer messaging, enterprise collaboration, social media, community platforms, privacy-focused protocols, generic webhooks, and extensible sidecar processes.
 
 All adapters share a common foundation: graceful shutdown via `watch::channel`, exponential backoff on connection failures, `Zeroizing<String>` for secrets, automatic message splitting for platform limits, per-channel model/prompt overrides, DM/group policy enforcement, per-user rate limiting, and output formatting (Markdown, TelegramHTML, SlackMrkdwn, PlainText).
 
 ## Table of Contents
 
-- [All 44 Channels](#all-44-channels)
+- [All 45 Channels](#all-44-channels)
 - [Channel Configuration](#channel-configuration)
 - [Channel Overrides](#channel-overrides)
 - [Formatter, Rate Limiter, and Policies](#formatter-rate-limiter-and-policies)
@@ -14,6 +14,7 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 - [Discord](#discord)
 - [Slack](#slack)
 - [WhatsApp](#whatsapp)
+- [WeChat (Personal)](#wechat-personal)
 - [Signal](#signal)
 - [Matrix](#matrix)
 - [Email](#email)
@@ -23,7 +24,7 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 
 ---
 
-## All 44 Channels
+## All 45 Channels
 
 ### Core (7)
 
@@ -88,7 +89,7 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 | Nostr | NIP-01 relay WebSocket | `NOSTR_PRIVATE_KEY`, `NOSTR_RELAY` | `Custom("nostr")` |
 | Mumble | TCP text protocol | `MUMBLE_SERVER`, `MUMBLE_USERNAME`, `MUMBLE_PASSWORD` | `Custom("mumble")` |
 
-### Workplace (6)
+### Workplace (7)
 
 | Channel | Protocol | Env Vars | ChannelType Variant |
 |---------|----------|----------|---------------------|
@@ -98,6 +99,7 @@ All adapters share a common foundation: graceful shutdown via `watch::channel`, 
 | DingTalk | Robot API webhook | `DINGTALK_TOKEN`, `DINGTALK_SECRET` | `Custom("dingtalk")` |
 | QQ | Bot API long-polling | `QQ_BOT_TOKEN`, `QQ_BOT_APPID` | `Custom("qq")` |
 | WeCom / WeChat Work | Enterprise API webhook | `WECOM_CORP_ID`, `WECOM_AGENT_ID`, `WECOM_SECRET` | `Custom("wecom")` |
+| WeChat (Personal) | iLink Bot API long-polling | _(QR code login)_ | `WeChat` |
 
 ### Notification (2)
 
@@ -181,7 +183,7 @@ default_agent = "home-assistant"
 | Matrix | `MATRIX_TOKEN` |
 | Email | `EMAIL_PASSWORD` |
 
-Env vars for all other channels are listed in the [All 44 Channels](#all-44-channels) tables above.
+Env vars for all other channels are listed in the [All 45 Channels](#all-44-channels) tables above.
 
 ---
 
@@ -449,6 +451,55 @@ default_agent = "assistant"
 ### How It Works
 
 The WhatsApp adapter runs an HTTP server (on the configured `webhook_port`) that receives incoming webhooks from the WhatsApp Cloud API. It handles webhook verification (GET) and message reception (POST). Responses are sent via the Cloud API's `messages` endpoint.
+
+---
+
+## WeChat (Personal)
+
+### Prerequisites
+
+- A personal WeChat account (iOS 8.0.70+ recommended)
+- WeChat ClawBot plugin access (currently in gradual rollout)
+
+### Setup
+
+1. Add to config:
+
+```toml
+[channels.wechat]
+# bot_token is obtained automatically via QR scan
+# If you have a token from a previous session, set it here to skip QR login:
+# bot_token_env = "WECHAT_BOT_TOKEN"
+default_agent = "assistant"
+allowed_users = []        # empty = allow all; format: "hash@im.wechat"
+```
+
+2. Start (or restart) the LibreFang daemon.
+3. A QR code will appear in the daemon logs — scan it with your WeChat app.
+4. Once confirmed, the adapter begins receiving messages.
+
+> **Tip:** After the first QR login, save the `bot_token` to an environment variable so subsequent restarts skip the QR flow.
+
+### How It Works
+
+The WeChat adapter uses Tencent's official **iLink protocol** (`ilinkai.weixin.qq.com`), the same protocol behind the WeChat ClawBot plugin. No third-party proxies or unofficial APIs are involved.
+
+**Connection flow:**
+1. **QR Login** — calls `GET /ilink/bot/get_bot_qrcode` to generate a QR code, then polls `GET /ilink/bot/get_qrcode_status` until the user scans and confirms. Returns a `bot_token` for all subsequent requests.
+2. **Long-Polling** — calls `POST /ilink/bot/getupdates` with a cursor (`get_updates_buf`). The server holds the connection for up to 35 seconds until new messages arrive, then returns them along with an updated cursor.
+3. **Sending** — calls `POST /ilink/bot/sendmessage` with the `context_token` from the inbound message to associate the reply with the correct conversation.
+4. **Typing** — calls `POST /ilink/bot/sendtyping` with a `typing_ticket` (fetched from `POST /ilink/bot/getconfig`) to show a typing indicator.
+
+**Supported message types:** text, image, voice, file, video (all 5 iLink item types).
+
+**Reconnection:** If a `bot_token` is configured, the adapter skips QR login and resumes polling immediately. On network errors, exponential backoff is applied (2s → 60s max).
+
+### Limitations
+
+- **Media upload** is not yet supported (CDN flow with AES-128-ECB encryption). Incoming media is received; outgoing media falls back to text placeholders.
+- **Group chat** detection is not yet implemented.
+- **Streaming** responses are not yet supported (messages are sent as complete text).
+- **Grayscale rollout** — the iLink API may not be available to all WeChat accounts yet.
 
 ---
 
