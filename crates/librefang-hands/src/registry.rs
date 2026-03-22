@@ -9,6 +9,7 @@ use dashmap::DashMap;
 use librefang_types::agent::AgentId;
 use serde::Serialize;
 use std::collections::HashMap;
+use std::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -41,6 +42,9 @@ pub struct HandRegistry {
     definitions: DashMap<String, HandDefinition>,
     /// Active hand instances, keyed by instance UUID.
     instances: DashMap<Uuid, HandInstance>,
+    /// Serializes activate/deactivate to prevent race conditions where two
+    /// concurrent requests both pass the "already active" check.
+    activate_lock: Mutex<()>,
 }
 
 impl HandRegistry {
@@ -49,24 +53,34 @@ impl HandRegistry {
         Self {
             definitions: DashMap::new(),
             instances: DashMap::new(),
+            activate_lock: Mutex::new(()),
         }
     }
 
-    /// Persist active hand state to disk so it survives restarts.
+    /// Persist hand state to disk so it survives restarts.
+    ///
+    /// Persists both Active and Paused instances so their state is not lost
+    /// across daemon restarts. Error-state instances are also persisted so
+    /// the user can see what went wrong after a restart.
     pub fn persist_state(&self, path: &std::path::Path) -> HandResult<()> {
         let entries: Vec<serde_json::Value> = self
             .instances
             .iter()
-            .filter(|e| e.status == HandStatus::Active)
+            .filter(|e| !matches!(e.status, HandStatus::Inactive))
             .map(|e| {
                 serde_json::json!({
                     "hand_id": e.hand_id,
                     "config": e.config,
                     "agent_id": e.agent_id,
+                    "status": e.status,
                 })
             })
             .collect();
-        let json = serde_json::to_string_pretty(&entries)
+        let wrapper = serde_json::json!({
+            "version": 2,
+            "instances": entries,
+        });
+        let json = serde_json::to_string_pretty(&wrapper)
             .map_err(|e| HandError::Config(format!("serialize hand state: {e}")))?;
         std::fs::write(path, json)
             .map_err(|e| HandError::Config(format!("write hand state: {e}")))?;
@@ -84,17 +98,52 @@ impl HandRegistry {
             Ok(d) => d,
             Err(_) => return Vec::new(),
         };
-        let entries: Vec<serde_json::Value> = match serde_json::from_str(&data) {
-            Ok(e) => e,
-            Err(e) => {
-                warn!("Failed to parse hand state file: {e}");
+
+        // Try v2 format first (with version field and status), then fall back
+        // to v1 format (bare array of {hand_id, config, agent_id}).
+        let entries: Vec<serde_json::Value> =
+            if let Ok(wrapper) = serde_json::from_str::<serde_json::Value>(&data) {
+                if wrapper.get("version").is_some() {
+                    // v2 format
+                    match wrapper.get("instances").cloned() {
+                        Some(serde_json::Value::Array(arr)) => arr,
+                        _ => {
+                            warn!("Hand state v2 file has no instances array");
+                            return Vec::new();
+                        }
+                    }
+                } else if let serde_json::Value::Array(arr) = wrapper {
+                    // v1 format (bare array)
+                    arr
+                } else {
+                    warn!("Hand state file has unrecognized format");
+                    return Vec::new();
+                }
+            } else {
+                warn!("Failed to parse hand state file as JSON");
                 return Vec::new();
-            }
-        };
+            };
+
         entries
             .into_iter()
             .filter_map(|e| {
                 let hand_id = e["hand_id"].as_str()?.to_string();
+
+                // Skip entries that were persisted as Paused or Error —
+                // only re-activate hands that were Active before shutdown.
+                if let Some(status) = e.get("status") {
+                    let status_str = status.as_str().unwrap_or("");
+                    if status_str == "Paused" || status_str.starts_with("Error") {
+                        info!(hand = %hand_id, status = %status_str, "Skipping non-active hand from persisted state");
+                        return None;
+                    }
+                    // Also handle {"Error": "msg"} shape from serde enum serialization
+                    if status.is_object() && status.get("Error").is_some() {
+                        info!(hand = %hand_id, "Skipping errored hand from persisted state");
+                        return None;
+                    }
+                }
+
                 let config: HashMap<String, serde_json::Value> =
                     serde_json::from_value(e["config"].clone()).unwrap_or_default();
                 let old_agent_id: Option<AgentId> = e
@@ -216,6 +265,9 @@ impl HandRegistry {
     }
 
     /// Activate a hand — creates an instance (agent spawning is done by kernel).
+    ///
+    /// Uses a mutex to serialize the check-then-insert so two concurrent
+    /// requests cannot both pass the "already active" check.
     pub fn activate(
         &self,
         hand_id: &str,
@@ -225,6 +277,9 @@ impl HandRegistry {
             .definitions
             .get(hand_id)
             .ok_or_else(|| HandError::NotFound(hand_id.to_string()))?;
+
+        // Hold the lock for the duration of check + insert to prevent races.
+        let _guard = self.activate_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         // Check if already active
         for entry in self.instances.iter() {
@@ -391,11 +446,19 @@ impl HandRegistry {
     /// Compute readiness for a hand, cross-referencing requirements with
     /// active instance state.
     ///
+    /// `requirements_met` only considers non-optional requirements.
+    /// `degraded` is true when the hand is active but any requirement
+    /// (optional or not) is unmet.
+    ///
     /// Returns `None` if the hand definition does not exist.
     pub fn readiness(&self, hand_id: &str) -> Option<HandReadiness> {
         let reqs = self.check_requirements(hand_id).ok()?;
 
-        let requirements_met = reqs.iter().all(|(_, ok)| *ok);
+        // Only mandatory (non-optional) requirements gate activation readiness.
+        let requirements_met = reqs
+            .iter()
+            .filter(|(req, _)| !req.optional)
+            .all(|(_, ok)| *ok);
 
         // A hand is active if at least one instance is in Active status.
         let active = self
@@ -403,9 +466,7 @@ impl HandRegistry {
             .iter()
             .any(|entry| entry.hand_id == hand_id && entry.status == HandStatus::Active);
 
-        // Degraded: active, but at least one non-optional requirement is unmet
-        // OR any optional requirement is unmet. In practice, the most useful
-        // definition is: active + any requirement unsatisfied.
+        // Degraded: active, but any requirement (including optional) is unmet.
         let degraded = active && reqs.iter().any(|(_, ok)| !ok);
 
         Some(HandReadiness {
@@ -810,18 +871,22 @@ system_prompt = "Test prompt"
         let reg = HandRegistry::new();
         reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
 
-        // Browser hand requires python3 + chromium. Activate it — if either
-        // requirement is unmet on this machine, it will show as degraded.
+        // Browser hand requires python3 (mandatory) + chromium (optional).
+        // Activate it — requirements_met only considers mandatory ones,
+        // while degraded considers any unmet requirement (including optional).
         let instance = reg.activate("browser", HashMap::new()).unwrap();
         let r = reg.readiness("browser").unwrap();
         assert!(r.active);
 
-        // If any requirement is not satisfied, degraded should be true
-        if !r.requirements_met {
-            assert!(r.degraded);
-        } else {
-            assert!(!r.degraded);
-        }
+        // Check all requirements to see if any are unmet
+        let reqs = reg.check_requirements("browser").unwrap();
+        let any_unmet = reqs.iter().any(|(_, ok)| !ok);
+        let any_mandatory_unmet = reqs.iter().any(|(req, ok)| !ok && !req.optional);
+
+        // requirements_met should be false only if a mandatory requirement is unmet
+        assert_eq!(!r.requirements_met, any_mandatory_unmet);
+        // degraded should be true if active and ANY requirement (including optional) is unmet
+        assert_eq!(r.degraded, any_unmet);
 
         reg.deactivate(instance.instance_id).unwrap();
     }

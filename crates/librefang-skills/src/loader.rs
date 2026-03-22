@@ -384,7 +384,10 @@ async fn execute_shell(
             result.map_err(|e| SkillError::ExecutionFailed(format!("Wait for shell: {e}")))?
         }
         Err(_) => {
-            error!("Shell skill timed out after 120s: {}", script_path.display());
+            error!(
+                "Shell skill timed out after 120s: {}",
+                script_path.display()
+            );
             return Ok(SkillToolResult {
                 output: "Shell script timed out after 120 seconds".into(),
                 is_error: true,

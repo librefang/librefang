@@ -5,25 +5,35 @@
 
 use crate::{HandDefinition, HandError};
 use serde::Deserialize;
+use std::sync::OnceLock;
+use tracing::warn;
+
+/// Cached result from the first call to `bundled_hands()`.
+static BUNDLED_CACHE: OnceLock<Vec<(&'static str, &'static str, &'static str)>> = OnceLock::new();
 
 /// Returns all hand definitions found on disk as (id, HAND.toml content, SKILL.md content).
 ///
 /// Scans `home_dir/hands/` for subdirectories containing HAND.toml.
 /// The caller passes the authoritative home directory (typically `config.home_dir`).
+///
+/// Results are cached after the first call — subsequent calls return the
+/// same `&'static` references without additional disk I/O or memory leaks.
 pub fn bundled_hands(
     home_dir: &std::path::Path,
 ) -> Vec<(&'static str, &'static str, &'static str)> {
-    // Leak strings into 'static to preserve the existing API contract.
-    // This is called once at boot and cached, so the leak is bounded.
-    disk_hands(home_dir)
-        .into_iter()
-        .map(|(id, toml, skill)| {
-            let id: &'static str = Box::leak(id.into_boxed_str());
-            let toml: &'static str = Box::leak(toml.into_boxed_str());
-            let skill: &'static str = Box::leak(skill.into_boxed_str());
-            (id, toml, skill)
+    BUNDLED_CACHE
+        .get_or_init(|| {
+            disk_hands(home_dir)
+                .into_iter()
+                .map(|(id, toml, skill)| {
+                    let id: &'static str = Box::leak(id.into_boxed_str());
+                    let toml: &'static str = Box::leak(toml.into_boxed_str());
+                    let skill: &'static str = Box::leak(skill.into_boxed_str());
+                    (id, toml, skill)
+                })
+                .collect()
         })
-        .collect()
+        .clone()
 }
 
 fn disk_hands(home_dir: &std::path::Path) -> Vec<(String, String, String)> {
@@ -47,7 +57,10 @@ fn disk_hands(home_dir: &std::path::Path) -> Vec<(String, String, String)> {
             }
             let toml = match std::fs::read_to_string(&toml_path) {
                 Ok(s) => s,
-                Err(_) => continue,
+                Err(e) => {
+                    warn!(path = %toml_path.display(), error = %e, "Failed to read HAND.toml");
+                    continue;
+                }
             };
             let skill = std::fs::read_to_string(&skill_path).unwrap_or_default();
             results.push((id, toml, skill));

@@ -1275,9 +1275,7 @@ pub async fn run_agent_loop(
                                 if !tool_result_blocks.is_empty() {
                                     let partial_results = Message {
                                         role: Role::User,
-                                        content: MessageContent::Blocks(
-                                            tool_result_blocks.clone(),
-                                        ),
+                                        content: MessageContent::Blocks(tool_result_blocks.clone()),
                                         pinned: false,
                                     };
                                     session.messages.push(partial_results.clone());
@@ -2657,9 +2655,7 @@ pub async fn run_agent_loop_streaming(
                                 if !tool_result_blocks.is_empty() {
                                     let partial_results = Message {
                                         role: Role::User,
-                                        content: MessageContent::Blocks(
-                                            tool_result_blocks.clone(),
-                                        ),
+                                        content: MessageContent::Blocks(tool_result_blocks.clone()),
                                         pinned: false,
                                     };
                                     session.messages.push(partial_results.clone());
