@@ -8,9 +8,9 @@
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="LibreFang" />
     <meta name="theme-color" content="#020617" />
-    <link rel="manifest" href="/react-assets/manifest.json" />
-    <link rel="icon" type="image/png" sizes="192x192" href="/react-assets/icon-192.png" />
-    <link rel="apple-touch-icon" href="/react-assets/icon-192.png" />
+    <link rel="manifest" href="manifest.json" />
+    <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
+    <link rel="apple-touch-icon" href="icon-192.png" />
     <title>LibreFang Dashboard</title>
   </head>
   <body>
@@ -18,7 +18,7 @@
     <script type="module" src="/src/main.tsx"></script>
     <script>
       if ("serviceWorker" in navigator) {
-        navigator.serviceWorker.register("/react-assets/sw.js").catch(() => {});
+        navigator.serviceWorker.register("sw.js").catch(() => {});
       }
     </script>
   </body>
