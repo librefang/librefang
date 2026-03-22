@@ -6,9 +6,10 @@ import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useSearch } from "@tanstack/react-router";
-import { listAgents, sendAgentMessage, loadAgentSession } from "../api";
+import { listAgents, sendAgentMessage, loadAgentSession, listPendingApprovals, resolveApproval } from "../api";
+import type { ApprovalItem } from "../api";
 import { normalizeToolOutput } from "../lib/chat";
-import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap } from "lucide-react";
+import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap, ShieldAlert, CheckCircle, XCircle } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
 import { useUIStore } from "../lib/store";
 import "katex/dist/katex.min.css";
@@ -542,6 +543,141 @@ function ConnectionBar({ agentName, isLoading, messageCount, onClear, wsConnecte
   );
 }
 
+// ---------------------------------------------------------------------------
+// Approval polling — polls pending approvals for the current agent
+// ---------------------------------------------------------------------------
+const APPROVAL_POLL_MS = 2000;
+
+function useApprovalPoller(agentId: string | null) {
+  const [pendingApprovals, setPendingApprovals] = useState<ApprovalItem[]>([]);
+
+  useEffect(() => {
+    if (!agentId) {
+      setPendingApprovals([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const items = await listPendingApprovals(agentId);
+        if (!cancelled) setPendingApprovals(items);
+      } catch {
+        // Silently ignore — API may be temporarily unavailable
+      }
+    };
+
+    poll();
+    const timer = setInterval(poll, APPROVAL_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [agentId]);
+
+  const remove = useCallback((id: string) => {
+    setPendingApprovals((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  return { pendingApprovals, removeApproval: remove };
+}
+
+// ---------------------------------------------------------------------------
+// Risk level styling helpers
+// ---------------------------------------------------------------------------
+const RISK_COLORS: Record<string, { bg: string; text: string; border: string }> = {
+  critical: { bg: "bg-error/10", text: "text-error", border: "border-error/30" },
+  high: { bg: "bg-warning/10", text: "text-warning", border: "border-warning/30" },
+  medium: { bg: "bg-brand/10", text: "text-brand", border: "border-brand/30" },
+  low: { bg: "bg-success/10", text: "text-success", border: "border-success/30" },
+};
+
+function riskStyle(level?: string) {
+  return RISK_COLORS[(level || "low").toLowerCase()] ?? RISK_COLORS.low;
+}
+
+// ---------------------------------------------------------------------------
+// Approval card displayed inline in the chat area
+// ---------------------------------------------------------------------------
+function ApprovalCard({ approval, onResolved }: { approval: ApprovalItem; onResolved: (id: string) => void }) {
+  const { t } = useTranslation();
+  const [resolving, setResolving] = useState<"approve" | "deny" | null>(null);
+
+  const handleResolve = async (approved: boolean) => {
+    setResolving(approved ? "approve" : "deny");
+    try {
+      await resolveApproval(approval.id, approved);
+      onResolved(approval.id);
+    } catch {
+      // Approval may have already been resolved or timed out
+      onResolved(approval.id);
+    } finally {
+      setResolving(null);
+    }
+  };
+
+  const rs = riskStyle(approval.risk_level);
+
+  return (
+    <div className={`mx-auto w-full max-w-lg rounded-2xl border ${rs.border} ${rs.bg} p-4 shadow-lg animate-fade-in-up`}>
+      {/* Header */}
+      <div className="flex items-center gap-2 mb-3">
+        <ShieldAlert className={`h-5 w-5 ${rs.text}`} />
+        <span className={`text-xs font-black uppercase tracking-widest ${rs.text}`}>
+          {t("chat.approval_required")}
+        </span>
+        {approval.risk_level && (
+          <span className={`ml-auto text-[10px] font-bold uppercase px-2 py-0.5 rounded-full ${rs.bg} ${rs.text} border ${rs.border}`}>
+            {approval.risk_level}
+          </span>
+        )}
+      </div>
+
+      {/* Tool info */}
+      <div className="space-y-1 mb-4">
+        <div className="flex items-center gap-2">
+          <span className="text-[10px] font-bold uppercase text-text-dim tracking-wider">{t("chat.approval_tool")}</span>
+          <code className="text-xs font-mono font-bold px-1.5 py-0.5 rounded bg-main">{approval.tool_name || "unknown"}</code>
+        </div>
+        {(approval.description || approval.action_summary || approval.action) && (
+          <p className="text-sm text-text-dim leading-relaxed">
+            {approval.description || approval.action_summary || approval.action}
+          </p>
+        )}
+      </div>
+
+      {/* Action buttons */}
+      <div className="flex gap-3">
+        <button
+          onClick={() => handleResolve(true)}
+          disabled={resolving !== null}
+          className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-success text-white font-bold text-sm shadow-lg shadow-success/20 hover:shadow-success/40 hover:-translate-y-0.5 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {resolving === "approve" ? (
+            <RefreshCw className="h-4 w-4 animate-spin" />
+          ) : (
+            <CheckCircle className="h-4 w-4" />
+          )}
+          {t("approvals.approve")}
+        </button>
+        <button
+          onClick={() => handleResolve(false)}
+          disabled={resolving !== null}
+          className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl bg-error text-white font-bold text-sm shadow-lg shadow-error/20 hover:shadow-error/40 hover:-translate-y-0.5 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {resolving === "deny" ? (
+            <RefreshCw className="h-4 w-4 animate-spin" />
+          ) : (
+            <XCircle className="h-4 w-4" />
+          )}
+          {t("approvals.reject")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function ChatPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -563,6 +699,7 @@ export function ChatPage() {
     return a.name.localeCompare(b.name);
   });
   const { messages, isLoading, sendMessage, clearHistory, wsConnected } = useChatMessages(selectedAgentId || null, agents);
+  const { pendingApprovals, removeApproval } = useApprovalPoller(selectedAgentId || null);
   const selectedAgent = agents.find(a => a.id === selectedAgentId);
 
   useEffect(() => {
@@ -709,6 +846,10 @@ export function ChatPage() {
             ) : (
               <div className="space-y-6">
                 {messages.map(msg => <MessageBubble key={msg.id} message={msg} />)}
+                {/* Inline approval cards for pending requests */}
+                {pendingApprovals.map(approval => (
+                  <ApprovalCard key={approval.id} approval={approval} onResolved={removeApproval} />
+                ))}
                 <div ref={messagesEndRef} />
               </div>
             )}

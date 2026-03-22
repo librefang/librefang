@@ -1090,6 +1090,12 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
     }
 
+    async fn subscribe_events(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<librefang_types::event::Event>> {
+        Some(self.kernel.event_bus.subscribe_all())
+    }
+
     async fn reset_session(&self, agent_id: AgentId) -> Result<String, String> {
         self.kernel
             .reset_session(agent_id)

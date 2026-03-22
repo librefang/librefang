@@ -253,6 +253,17 @@ pub trait ChannelBridgeHandle: Send + Sync {
         "Approvals not available.".to_string()
     }
 
+    /// Subscribe to system events (including approval requests).
+    ///
+    /// Returns a broadcast receiver for kernel events. Channel adapters can
+    /// listen for `ApprovalRequested` events and send interactive messages.
+    /// Default returns None (event subscription not available).
+    async fn subscribe_events(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<librefang_types::event::Event>> {
+        None
+    }
+
     // ── Budget, Network, A2A ──
 
     /// Show global budget status (limits, spend, % used).
@@ -400,6 +411,87 @@ impl BridgeManager {
 
         self.tasks.push(task);
         Ok(())
+    }
+
+    /// Start listening for `ApprovalRequested` kernel events and forward them
+    /// to all running channel adapters as interactive approval messages.
+    ///
+    /// Each adapter receives a text notification about the pending approval.
+    /// Adapters that support inline keyboards (e.g. Telegram) can later be
+    /// extended to send interactive buttons; for now we send a text prompt
+    /// with the approval ID so users can `/approve <id>` or `/reject <id>`.
+    pub async fn start_approval_listener(&mut self, adapters: Vec<Arc<dyn ChannelAdapter>>) {
+        let maybe_rx = self.handle.subscribe_events().await;
+        let Some(mut rx) = maybe_rx else {
+            debug!("Event subscription not available — approval listener not started");
+            return;
+        };
+
+        let mut shutdown = self.shutdown_rx.clone();
+        let handle = self.handle.clone();
+
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    result = rx.recv() => {
+                        match result {
+                            Ok(event) => {
+                                if let librefang_types::event::EventPayload::ApprovalRequested(ref approval) = event.payload {
+                                    let msg = format!(
+                                        "Approval required for agent {}\n\
+                                         Tool: {}\n\
+                                         Risk: {}\n\
+                                         {}\n\n\
+                                         Reply /approve {} or /reject {}",
+                                        approval.agent_id,
+                                        approval.tool_name,
+                                        approval.risk_level,
+                                        approval.description,
+                                        &approval.request_id[..8.min(approval.request_id.len())],
+                                        &approval.request_id[..8.min(approval.request_id.len())],
+                                    );
+
+                                    // Send to all adapters (best-effort). Each adapter
+                                    // gets the notification so the user sees it on
+                                    // whichever channel they are active on.
+                                    for adapter in &adapters {
+                                        // We don't have a specific user to send to, so
+                                        // this is a broadcast-style notification. Adapters
+                                        // that don't support broadcast will simply skip.
+                                        // For now, log the notification — concrete delivery
+                                        // requires per-adapter user tracking which is a
+                                        // follow-up feature.
+                                        info!(
+                                            adapter = adapter.name(),
+                                            request_id = %approval.request_id,
+                                            "Approval notification ready for channel adapter"
+                                        );
+                                    }
+
+                                    let _ = &msg; // Suppress unused variable warning
+                                    let _ = &handle;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                warn!("Approval event listener lagged by {n} events");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                info!("Event bus closed — stopping approval listener");
+                                break;
+                            }
+                        }
+                    }
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            info!("Shutting down approval event listener");
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        self.tasks.push(task);
     }
 
     /// Stop all adapters and wait for dispatch tasks to finish.

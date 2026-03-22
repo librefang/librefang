@@ -8002,16 +8002,37 @@ impl KernelHandle for LibreFangKernel {
         }
 
         let policy = self.approval_manager.policy();
+        let risk_level = crate::approval::ApprovalManager::classify_risk(tool_name);
+        let description = format!("Agent {} requests to execute {}", agent_id, tool_name);
         let req = TypedRequest {
             id: uuid::Uuid::new_v4(),
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
-            description: format!("Agent {} requests to execute {}", agent_id, tool_name),
+            description: description.clone(),
             action_summary: action_summary.chars().take(512).collect(),
-            risk_level: crate::approval::ApprovalManager::classify_risk(tool_name),
+            risk_level,
             requested_at: chrono::Utc::now(),
             timeout_secs: policy.timeout_secs,
         };
+
+        // Publish an ApprovalRequested event so channel adapters can notify users
+        {
+            use librefang_types::event::{
+                ApprovalRequestedEvent, Event, EventPayload, EventTarget,
+            };
+            let event = Event::new(
+                agent_id.parse().unwrap_or_default(),
+                EventTarget::System,
+                EventPayload::ApprovalRequested(ApprovalRequestedEvent {
+                    request_id: req.id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    tool_name: tool_name.to_string(),
+                    description: description.clone(),
+                    risk_level: format!("{:?}", risk_level),
+                }),
+            );
+            self.event_bus.publish(event).await;
+        }
 
         let decision = self.approval_manager.request_approval(req).await;
         Ok(decision == ApprovalDecision::Approved)

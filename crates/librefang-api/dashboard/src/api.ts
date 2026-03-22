@@ -928,6 +928,27 @@ export async function rejectApproval(id: string): Promise<ApiActionResponse> {
   return post<ApiActionResponse>(`/api/approvals/${encodeURIComponent(id)}/reject`, {});
 }
 
+/**
+ * List only pending approval requests, optionally filtered by agent ID.
+ */
+export async function listPendingApprovals(agentId?: string): Promise<ApprovalItem[]> {
+  const all = await listApprovals();
+  return all.filter(
+    (a) => a.status === "pending" && (!agentId || a.agent_id === agentId),
+  );
+}
+
+/**
+ * Resolve a pending approval request (approve or deny).
+ */
+export async function resolveApproval(id: string, approved: boolean): Promise<void> {
+  if (approved) {
+    await approveApproval(id);
+  } else {
+    await rejectApproval(id);
+  }
+}
+
 export async function switchAgentSession(
   agentId: string,
   sessionId: string
