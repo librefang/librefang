@@ -214,10 +214,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/channels/whatsapp/qr/status",
             axum::routing::get(routes::whatsapp_qr_status),
         )
-        .route("/templates", axum::routing::get(routes::list_templates))
+        .route("/templates", axum::routing::get(routes::list_agent_templates))
         .route(
             "/templates/{name}",
-            axum::routing::get(routes::get_template),
+            axum::routing::get(routes::get_agent_template),
         )
         .route(
             "/memory/agents/{id}/kv",
@@ -348,11 +348,11 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route(
             "/workflow-templates",
-            axum::routing::get(routes::list_templates),
+            axum::routing::get(routes::list_agent_templates),
         )
         .route(
             "/workflow-templates/{id}",
-            axum::routing::get(routes::get_template),
+            axum::routing::get(routes::get_agent_template),
         )
         .route(
             "/workflow-templates/{id}/instantiate",
@@ -1016,12 +1016,12 @@ pub async fn build_router(
     let du_val = resolve_dashboard_credential(
         &state.kernel.config_ref().dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
-        &state.kernel.home_dir(),
+        state.kernel.home_dir(),
     );
     let dp_val = resolve_dashboard_credential(
         &state.kernel.config_ref().dashboard_pass,
         "LIBREFANG_DASHBOARD_PASS",
-        &state.kernel.home_dir(),
+        state.kernel.home_dir(),
     );
     let du = du_val.trim();
     let dp = dp_val.trim();

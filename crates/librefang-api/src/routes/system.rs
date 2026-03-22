@@ -94,8 +94,8 @@ pub async fn get_profile(
 // ---------------------------------------------------------------------------
 
 /// GET /api/templates — List available agent templates.
-#[utoipa::path(get, path = "/api/templates", tag = "system", responses((status = 200, description = "List templates", body = Vec<serde_json::Value>)))]
-pub async fn list_templates() -> impl IntoResponse {
+#[utoipa::path(get, path = "/api/templates", tag = "system", operation_id = "list_agent_templates", responses((status = 200, description = "List templates", body = Vec<serde_json::Value>)))]
+pub async fn list_agent_templates() -> impl IntoResponse {
     let agents_dir = librefang_kernel::config::librefang_home().join("agents");
     let mut templates = Vec::new();
 
@@ -133,8 +133,8 @@ pub async fn list_templates() -> impl IntoResponse {
 }
 
 /// GET /api/templates/:name — Get template details.
-#[utoipa::path(get, path = "/api/templates/{name}", tag = "system", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template details", body = serde_json::Value)))]
-pub async fn get_template(
+#[utoipa::path(get, path = "/api/templates/{name}", tag = "system", operation_id = "get_agent_template", params(("name" = String, Path, description = "Template name")), responses((status = 200, description = "Template details", body = serde_json::Value)))]
+pub async fn get_agent_template(
     Path(name): Path<String>,
     lang: Option<axum::Extension<RequestLanguage>>,
 ) -> impl IntoResponse {

@@ -412,6 +412,7 @@ impl TelegramAdapter {
     ///
     /// Telegram shows a progress spinner on the button until the bot calls
     /// `answerCallbackQuery`. Fire-and-forget.
+    #[allow(dead_code)]
     fn fire_answer_callback_query(&self, callback_query_id: &str, notification_text: Option<&str>) {
         let url = format!(
             "{}/bot{}/answerCallbackQuery",
