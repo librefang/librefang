@@ -1515,7 +1515,7 @@ pub fn load_workflow_definitions(dir: &Path) -> Vec<Workflow> {
 }
 
 // ---------------------------------------------------------------------------
-// Workflow → Template conversion
+// Workflow -> Template conversion
 // ---------------------------------------------------------------------------
 
 use librefang_types::workflow_template::{
@@ -1532,7 +1532,7 @@ impl WorkflowEngine {
     /// `{{var}}` placeholders and creates a [`TemplateParameter`] for each
     /// unique variable found.
     pub fn workflow_to_template(workflow: &Workflow) -> WorkflowTemplate {
-        // Slugify workflow name → template ID
+        // Slugify workflow name -> template ID
         let id = workflow
             .name
             .to_lowercase()
@@ -1573,13 +1573,18 @@ impl WorkflowEngine {
                     StepAgent::ById { id } => Some(id.clone()),
                 };
 
-                // Don't auto-generate depends_on — let users configure DAG dependencies manually.
-                // Template consumers can add depends_on when they instantiate.
+                // Build depends_on: sequential steps depend on the previous step
+                let depends_on = if i > 0 {
+                    vec![workflow.steps[i - 1].name.clone()]
+                } else {
+                    vec![]
+                };
+
                 WorkflowTemplateStep {
                     name: step.name.clone(),
                     prompt_template: step.prompt_template.clone(),
                     agent,
-                    depends_on: vec![],
+                    depends_on,
                 }
             })
             .collect();
@@ -2802,7 +2807,6 @@ id = "{id}"
         // so no context should be injected
         assert!(!prompts[1].contains("[Parent workflow context]"));
     }
-
     // ---- DAG execution tests ----
 
     #[test]

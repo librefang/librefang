@@ -61,6 +61,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/workflow-templates/{id}/instantiate",
             axum::routing::post(instantiate_template),
         )
+        .route(
+            "/workflows/{id}/save-as-template",
+            axum::routing::post(save_workflow_as_template),
+        )
         // Cron jobs
         .route(
             "/cron/jobs",
