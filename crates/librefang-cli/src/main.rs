@@ -1318,10 +1318,28 @@ fn init_tracing_stderr(log_level: &str) {
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
 
         let fmt_layer = tracing_subscriber::fmt::layer();
+        let telemetry = librefang_kernel::config::load_config(None).telemetry;
+        let otel_layer = if telemetry.enabled {
+            use opentelemetry::trace::TracerProvider as _;
+
+            match librefang_api::telemetry::init_otel_tracing(&telemetry) {
+                Ok(provider) => Some(
+                    tracing_opentelemetry::layer()
+                        .with_tracer(provider.tracer(telemetry.service_name.clone())),
+                ),
+                Err(e) => {
+                    eprintln!("warning: failed to initialize OTLP tracing exporter: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         tracing_subscriber::registry()
             .with(env_filter)
             .with(fmt_layer)
+            .with(otel_layer)
             .init();
     }
 
@@ -1380,14 +1398,52 @@ fn init_tracing_file(log_level: &str, custom_log_dir: Option<&std::path::Path>) 
 
     match std::fs::File::create(&log_path) {
         Ok(file) => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
-                )
-                .with_writer(std::sync::Mutex::new(file))
-                .with_ansi(false)
-                .init();
+            #[cfg(feature = "telemetry")]
+            {
+                use tracing_subscriber::layer::SubscriberExt;
+                use tracing_subscriber::util::SubscriberInitExt;
+
+                let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level));
+                let fmt_layer = tracing_subscriber::fmt::layer()
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false);
+                let telemetry = librefang_kernel::config::load_config(None).telemetry;
+                let otel_layer = if telemetry.enabled {
+                    use opentelemetry::trace::TracerProvider as _;
+
+                    match librefang_api::telemetry::init_otel_tracing(&telemetry) {
+                        Ok(provider) => Some(
+                            tracing_opentelemetry::layer()
+                                .with_tracer(provider.tracer(telemetry.service_name.clone())),
+                        ),
+                        Err(e) => {
+                            eprintln!("warning: failed to initialize OTLP tracing exporter: {e}");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+
+                tracing_subscriber::registry()
+                    .with(env_filter)
+                    .with(fmt_layer)
+                    .with(otel_layer)
+                    .init();
+            }
+
+            #[cfg(not(feature = "telemetry"))]
+            {
+                tracing_subscriber::fmt()
+                    .with_env_filter(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(log_level)),
+                    )
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false)
+                    .init();
+            }
         }
         Err(_) => {
             // Fallback: suppress all output rather than corrupt the TUI

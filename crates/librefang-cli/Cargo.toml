@@ -9,7 +9,7 @@ description = "CLI tool for the LibreFang Agent OS"
 default = ["librefang-api/all-channels"]
 all-channels = ["librefang-api/all-channels"]
 mini = ["librefang-api/mini"]
-telemetry = ["librefang-api/telemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
+telemetry = ["librefang-api/telemetry", "dep:opentelemetry", "dep:opentelemetry_sdk", "dep:tracing-opentelemetry"]
 
 [[bin]]
 name = "librefang"
@@ -43,5 +43,6 @@ unic-langid = "0.9"
 open = "5.3.3"
 toml_edit = "0.25.5"
 rustls = "0.23"
+opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 tracing-opentelemetry = { workspace = true, optional = true }
