@@ -1441,14 +1441,14 @@ pub async fn list_templates(
                 "description": t.description,
                 "category": t.category,
                 "tags": t.tags,
-                "parameters": t.parameters.len(),
-                "steps": t.steps.len(),
+                "parameters": t.parameters,
+                "steps": t.steps,
                 "created_at": t.created_at,
             })
         })
         .collect();
 
-    Json(list)
+    Json(serde_json::json!({ "templates": list }))
 }
 
 /// GET /api/workflow-templates/:id — Get full template details.

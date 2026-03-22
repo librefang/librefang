@@ -755,11 +755,10 @@ export async function clawhubInstall(slug: string, version?: string): Promise<Ap
 
 export interface TemplateParameter {
   name: string;
-  label?: string;
-  type?: string;
-  required?: boolean;
-  default?: unknown;
   description?: string;
+  param_type?: string;
+  default?: unknown;
+  required?: boolean;
 }
 
 export interface WorkflowTemplate {

@@ -324,14 +324,14 @@ function TemplateBrowser({
                 {selectedTemplate.parameters!.map(p => (
                   <div key={p.name}>
                     <label className="text-[10px] font-bold text-text-dim uppercase">
-                      {p.label || p.name}
+                      {p.name}
                       {p.required && <span className="text-error ml-0.5">*</span>}
                     </label>
                     {p.description && <p className="text-[9px] text-text-dim/60 mt-0.5">{p.description}</p>}
                     <input
-                      type={p.type === "number" ? "number" : "text"}
+                      type={p.param_type === "number" ? "number" : "text"}
                       value={String(paramValues[p.name] ?? "")}
-                      onChange={e => setParamValues(prev => ({ ...prev, [p.name]: p.type === "number" ? Number(e.target.value) : e.target.value }))}
+                      onChange={e => setParamValues(prev => ({ ...prev, [p.name]: p.param_type === "number" ? Number(e.target.value) : e.target.value }))}
                       className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand"
                       placeholder={p.description || p.name}
                     />

@@ -1700,6 +1700,18 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Load workflow templates from ~/.librefang/workflows/templates/
+        {
+            let user_dir = kernel.config.home_dir.join("workflows").join("templates");
+            let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
+            if loaded > 0 {
+                info!(
+                    "Loaded {loaded} workflow template(s) from {}",
+                    user_dir.display()
+                );
+            }
+        }
+
         // Validate routing configs against model catalog
         for entry in kernel.registry.list() {
             if let Some(ref routing_config) = entry.manifest.routing {
