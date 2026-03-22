@@ -781,6 +781,24 @@ system_prompt = "Test prompt"
     }
 
     #[test]
+    fn load_state_preserves_paused_instances() {
+        let reg = HandRegistry::new();
+        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+
+        let instance = reg.activate("clip", HashMap::new()).unwrap();
+        reg.pause(instance.instance_id).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("hand_state.json");
+        reg.persist_state(&state_path).unwrap();
+
+        let saved = HandRegistry::load_state(&state_path);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].0, "clip");
+        assert!(matches!(saved[0].3, HandStatus::Paused));
+    }
+
+    #[test]
     fn set_agent() {
         let reg = HandRegistry::new();
         reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
