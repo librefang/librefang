@@ -189,18 +189,21 @@ mod tests {
 
     #[test]
     fn test_overlap_between_chunks() {
-        // Create text that will be split into multiple chunks
+        // Create text that will be split into multiple chunks.
+        // max_size must be large enough to fit the overlap (20) + separator (\n\n = 2)
+        // + the next segment (100), i.e. >= 122, otherwise the overlap is dropped.
         let para1 = "A".repeat(100);
         let para2 = "B".repeat(100);
         let text = format!("{}\n\n{}", para1, para2);
-        let chunks = chunk_text(&text, 120, 20);
+        let chunks = chunk_text(&text, 150, 20);
         assert!(chunks.len() >= 2);
-        // The second chunk should start with overlap from the first
+        // The second chunk should start with overlap from the first, followed by \n\n
         if chunks.len() >= 2 {
             let end_of_first = &chunks[0][chunks[0].len() - 20..];
+            let expected_prefix = format!("{}\n\n", end_of_first);
             assert!(
-                chunks[1].starts_with(end_of_first),
-                "second chunk should contain overlap from first"
+                chunks[1].starts_with(&expected_prefix),
+                "second chunk should begin with overlap from first chunk followed by separator"
             );
         }
     }
