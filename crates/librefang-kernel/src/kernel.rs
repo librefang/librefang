@@ -5314,14 +5314,18 @@ system_prompt = "You are a helpful assistant."
     pub fn pause_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         self.hand_registry
             .pause(instance_id)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))
+            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+        self.persist_hand_state();
+        Ok(())
     }
 
     /// Resume a paused hand.
     pub fn resume_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         self.hand_registry
             .resume(instance_id)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))
+            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+        self.persist_hand_state();
+        Ok(())
     }
 
     /// Set the weak self-reference for trigger dispatch.
@@ -5710,7 +5714,7 @@ system_prompt = "You are a helpful assistant."
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());
-            for (hand_id, config, old_agent_id) in saved_hands {
+            for (hand_id, config, old_agent_id, status) in saved_hands {
                 // Check if hand's agent.toml has enabled=false — skip reactivation
                 let hand_agent_name = format!("{}-hand", hand_id);
                 let hand_toml = self
@@ -5730,7 +5734,22 @@ system_prompt = "You are a helpful assistant."
                 }
                 match self.activate_hand(&hand_id, config) {
                     Ok(inst) => {
-                        info!(hand = %hand_id, instance = %inst.instance_id, "Hand restored");
+                        if matches!(status, librefang_hands::HandStatus::Paused) {
+                            if let Err(e) = self.pause_hand(inst.instance_id) {
+                                warn!(
+                                    hand = %hand_id,
+                                    instance = %inst.instance_id,
+                                    error = %e,
+                                    "Failed to restore paused hand state"
+                                );
+                            }
+                        }
+                        info!(
+                            hand = %hand_id,
+                            instance = %inst.instance_id,
+                            status = %status,
+                            "Hand restored"
+                        );
                         // Reassign cron jobs and triggers from the pre-restart
                         // agent ID to the newly spawned agent so scheduled tasks
                         // and event triggers survive daemon restarts (issues
