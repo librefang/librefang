@@ -743,8 +743,8 @@ impl WorkflowEngine {
                         .unwrap_or_default();
 
                     for (idx, fan_step) in &fan_out_steps {
-                        let (agent_id, agent_name, agent_inherit) =
-                            agent_resolver(&fan_step.agent).ok_or_else(|| {
+                        let (agent_id, agent_name, agent_inherit) = agent_resolver(&fan_step.agent)
+                            .ok_or_else(|| {
                                 format!("Agent not found for step '{}'", fan_step.name)
                             })?;
                         let raw_prompt = Self::expand_variables(
@@ -2179,10 +2179,7 @@ id = "{id}"
             layout: None,
         };
         let wf_id = engine.register(wf).await;
-        let run_id = engine
-            .create_run(wf_id, "data".to_string())
-            .await
-            .unwrap();
+        let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
 
         let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
         let rp = received_prompts.clone();
@@ -2217,14 +2214,7 @@ id = "{id}"
             output_var: None,
             inherit_context: None,
         };
-        let result = WorkflowEngine::build_context_prompt(
-            "hello",
-            &step,
-            0,
-            "wf",
-            &[],
-            true,
-        );
+        let result = WorkflowEngine::build_context_prompt("hello", &step, 0, "wf", &[], true);
         // No previous results => no preamble
         assert_eq!(result, "hello");
     }
@@ -2289,14 +2279,7 @@ id = "{id}"
             output_tokens: 5,
             duration_ms: 100,
         }];
-        let prompt = WorkflowEngine::build_context_prompt(
-            "next",
-            &step,
-            1,
-            "wf",
-            &results,
-            true,
-        );
+        let prompt = WorkflowEngine::build_context_prompt("next", &step, 1, "wf", &results, true);
         assert!(prompt.contains("..."));
         // The full 2000-char output should NOT appear
         assert!(!prompt.contains(&"x".repeat(2000)));

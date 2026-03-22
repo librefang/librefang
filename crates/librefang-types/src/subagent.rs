@@ -127,7 +127,10 @@ mod tests {
     #[test]
     fn truncate_output_preview_short() {
         let short = "Hello world";
-        assert_eq!(SubagentContext::truncate_output_preview(short), "Hello world");
+        assert_eq!(
+            SubagentContext::truncate_output_preview(short),
+            "Hello world"
+        );
     }
 
     #[test]
