@@ -160,13 +160,13 @@ pub async fn agent_ws(
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|token| matches_any(token))
+            .map(&matches_any)
             .unwrap_or(false);
 
         let query_auth = uri
             .query()
             .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
-            .map(|token| matches_any(token))
+            .map(&matches_any)
             .unwrap_or(false);
 
         if !header_auth && !query_auth {
