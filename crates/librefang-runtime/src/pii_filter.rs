@@ -31,8 +31,8 @@ const BUILTIN_PATTERNS: &[(&str, &str)] = &[
         "phone",
         r"(?:\+\d{1,3}[\s\-]?)?\(?\d{2,4}\)?[\s.\-]?\d{3,4}[\s.\-]?\d{3,4}",
     ),
-    // Credit card numbers (13-19 digits, with optional spaces/dashes)
-    ("credit_card", r"\b(?:\d[\s\-]?){13,19}\b"),
+    // Credit card: Visa(4), MC(51-55), Amex(34/37), Discover(6011/65) with spaces/dashes
+    ("credit_card", r"\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[\s\-]?\d{4}[\s\-]?\d{4}[\s\-]?\d{4}(?:\d{3})?\b"),
     // US Social Security Numbers (123-45-6789 or 123456789)
     ("ssn", r"\b\d{3}[\-\s]?\d{2}[\-\s]?\d{4}\b"),
 ];
