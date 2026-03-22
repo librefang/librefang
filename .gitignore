@@ -4,6 +4,8 @@
 /target-*
 **/*.rs.bk
 *.pdb
+dist
+sdk/**/target
 
 # Cloudflare Wrangler
 .wrangler/
