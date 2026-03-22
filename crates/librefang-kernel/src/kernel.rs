@@ -752,6 +752,331 @@ fn gethostname() -> Option<String> {
     }
 }
 
+// ── Public Facade Getters ────────────────────────────────────────────
+// These provide a stable API surface for external crates (librefang-api,
+// librefang-desktop) to access kernel internals. When all external call
+// sites are migrated to use getters, the underlying pub fields can be
+// narrowed to pub(crate).
+impl LibreFangKernel {
+    /// Full kernel configuration (read-only after boot).
+    #[inline]
+    pub fn config_ref(&self) -> &KernelConfig {
+        &self.config
+    }
+
+    /// LibreFang home directory path (shorthand for `config.home_dir`).
+    #[inline]
+    pub fn home_dir(&self) -> &Path {
+        &self.config.home_dir
+    }
+
+    /// Default LLM model configuration.
+    #[inline]
+    pub fn default_model(&self) -> &librefang_types::config::DefaultModelConfig {
+        &self.config.default_model
+    }
+
+    /// Agent registry (list, get, update agents).
+    #[inline]
+    pub fn agent_registry(&self) -> &AgentRegistry {
+        &self.registry
+    }
+
+    /// Memory substrate (structured storage, vector search).
+    #[inline]
+    pub fn memory_substrate(&self) -> &Arc<MemorySubstrate> {
+        &self.memory
+    }
+
+    /// Proactive memory store (mem0-style auto-memorize/retrieve).
+    #[inline]
+    pub fn proactive_memory_store(&self) -> Option<&Arc<librefang_memory::ProactiveMemoryStore>> {
+        self.proactive_memory.get()
+    }
+
+    /// Merkle hash chain audit trail.
+    #[inline]
+    pub fn audit(&self) -> &Arc<AuditLog> {
+        &self.audit_log
+    }
+
+    /// Cost metering engine.
+    #[inline]
+    pub fn metering_ref(&self) -> &Arc<MeteringEngine> {
+        &self.metering
+    }
+
+    /// Agent scheduler.
+    #[inline]
+    pub fn scheduler_ref(&self) -> &AgentScheduler {
+        &self.scheduler
+    }
+
+    /// Model catalog (RwLock — auth status refresh from API).
+    #[inline]
+    pub fn model_catalog_ref(
+        &self,
+    ) -> &std::sync::RwLock<librefang_runtime::model_catalog::ModelCatalog> {
+        &self.model_catalog
+    }
+
+    /// Skill registry (RwLock — hot-reload on install/uninstall).
+    #[inline]
+    pub fn skill_registry_ref(
+        &self,
+    ) -> &std::sync::RwLock<librefang_skills::registry::SkillRegistry> {
+        &self.skill_registry
+    }
+
+    /// Hand registry (curated autonomous capability packages).
+    #[inline]
+    pub fn hands(&self) -> &librefang_hands::registry::HandRegistry {
+        &self.hand_registry
+    }
+
+    /// Extension/integration registry (RwLock — hot-reload).
+    #[inline]
+    pub fn extensions(
+        &self,
+    ) -> &std::sync::RwLock<librefang_extensions::registry::IntegrationRegistry> {
+        &self.extension_registry
+    }
+
+    /// Integration health monitor.
+    #[inline]
+    pub fn extension_monitor(&self) -> &librefang_extensions::health::HealthMonitor {
+        &self.extension_health
+    }
+
+    /// Cron job scheduler.
+    #[inline]
+    pub fn cron(&self) -> &crate::cron::CronScheduler {
+        &self.cron_scheduler
+    }
+
+    /// Execution approval manager.
+    #[inline]
+    pub fn approvals(&self) -> &crate::approval::ApprovalManager {
+        &self.approval_manager
+    }
+
+    /// Workflow engine.
+    #[inline]
+    pub fn workflow_engine(&self) -> &WorkflowEngine {
+        &self.workflows
+    }
+
+    /// Workflow template registry.
+    #[inline]
+    pub fn templates(&self) -> &WorkflowTemplateRegistry {
+        &self.template_registry
+    }
+
+    /// Event-driven trigger engine.
+    #[inline]
+    pub fn trigger_engine(&self) -> &TriggerEngine {
+        &self.triggers
+    }
+
+    /// Process supervisor.
+    #[inline]
+    pub fn supervisor_ref(&self) -> &Supervisor {
+        &self.supervisor
+    }
+
+    /// RBAC authentication manager.
+    #[inline]
+    pub fn auth_manager(&self) -> &AuthManager {
+        &self.auth
+    }
+
+    /// Device pairing manager.
+    #[inline]
+    pub fn pairing_ref(&self) -> &crate::pairing::PairingManager {
+        &self.pairing
+    }
+
+    /// Web tools context (search + fetch).
+    #[inline]
+    pub fn web_tools(&self) -> &librefang_runtime::web_search::WebToolsContext {
+        &self.web_ctx
+    }
+
+    /// Browser automation manager.
+    #[inline]
+    pub fn browser(&self) -> &librefang_runtime::browser::BrowserManager {
+        &self.browser_ctx
+    }
+
+    /// Media understanding engine.
+    #[inline]
+    pub fn media(&self) -> &librefang_runtime::media_understanding::MediaEngine {
+        &self.media_engine
+    }
+
+    /// Text-to-speech engine.
+    #[inline]
+    pub fn tts(&self) -> &librefang_runtime::tts::TtsEngine {
+        &self.tts_engine
+    }
+
+    /// MCP server connections (Mutex — lazily initialized).
+    #[inline]
+    pub fn mcp_connections_ref(
+        &self,
+    ) -> &tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>> {
+        &self.mcp_connections
+    }
+
+    /// MCP tool definitions cache.
+    #[inline]
+    pub fn mcp_tools_ref(&self) -> &std::sync::Mutex<Vec<ToolDefinition>> {
+        &self.mcp_tools
+    }
+
+    /// Effective MCP server list (config + extensions merged).
+    #[inline]
+    pub fn effective_mcp_servers_ref(
+        &self,
+    ) -> &std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>> {
+        &self.effective_mcp_servers
+    }
+
+    /// A2A task store.
+    #[inline]
+    pub fn a2a_tasks(&self) -> &librefang_runtime::a2a::A2aTaskStore {
+        &self.a2a_task_store
+    }
+
+    /// Discovered external A2A agent cards.
+    #[inline]
+    pub fn a2a_agents(
+        &self,
+    ) -> &std::sync::Mutex<Vec<(String, librefang_runtime::a2a::AgentCard)>> {
+        &self.a2a_external_agents
+    }
+
+    /// Delivery receipt tracker.
+    #[inline]
+    pub fn delivery(&self) -> &DeliveryTracker {
+        &self.delivery_tracker
+    }
+
+    /// Running agent task handles (for cancellation).
+    #[inline]
+    pub fn running_tasks_ref(&self) -> &dashmap::DashMap<AgentId, tokio::task::AbortHandle> {
+        &self.running_tasks
+    }
+
+    /// Per-agent decision traces.
+    #[inline]
+    pub fn traces(&self) -> &dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>> {
+        &self.decision_traces
+    }
+
+    /// Channel adapters map.
+    #[inline]
+    pub fn channel_adapters_ref(
+        &self,
+    ) -> &dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>> {
+        &self.channel_adapters
+    }
+
+    /// Agent bindings for multi-account routing.
+    #[inline]
+    pub fn bindings_ref(&self) -> &std::sync::Mutex<Vec<librefang_types::config::AgentBinding>> {
+        &self.bindings
+    }
+
+    /// Broadcast configuration.
+    #[inline]
+    pub fn broadcast_ref(&self) -> &librefang_types::config::BroadcastConfig {
+        &self.broadcast
+    }
+
+    /// Uptime since kernel boot.
+    #[inline]
+    pub fn uptime(&self) -> std::time::Duration {
+        self.booted_at.elapsed()
+    }
+
+    /// Embedding driver (None = text fallback).
+    #[inline]
+    pub fn embedding(
+        &self,
+    ) -> Option<&Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>> {
+        self.embedding_driver.as_ref()
+    }
+
+    /// Command queue.
+    #[inline]
+    pub fn command_queue_ref(&self) -> &librefang_runtime::command_lane::CommandQueue {
+        &self.command_queue
+    }
+
+    /// Persistent process manager.
+    #[inline]
+    pub fn processes(&self) -> &Arc<librefang_runtime::process_manager::ProcessManager> {
+        &self.process_manager
+    }
+
+    /// OFP peer registry (set once at startup).
+    #[inline]
+    pub fn peer_registry_ref(&self) -> Option<&librefang_wire::PeerRegistry> {
+        self.peer_registry.get()
+    }
+
+    /// Hook registry.
+    #[inline]
+    pub fn hook_registry(&self) -> &librefang_runtime::hooks::HookRegistry {
+        &self.hooks
+    }
+
+    /// Auto-reply engine.
+    #[inline]
+    pub fn auto_reply(&self) -> &crate::auto_reply::AutoReplyEngine {
+        &self.auto_reply_engine
+    }
+
+    /// Default model override (hot-reloadable).
+    #[inline]
+    pub fn default_model_override_ref(
+        &self,
+    ) -> &std::sync::RwLock<Option<librefang_types::config::DefaultModelConfig>> {
+        &self.default_model_override
+    }
+
+    /// Tool policy override (hot-reloadable).
+    #[inline]
+    pub fn tool_policy_override_ref(
+        &self,
+    ) -> &std::sync::RwLock<Option<librefang_types::tool_policy::ToolPolicy>> {
+        &self.tool_policy_override
+    }
+
+    /// WhatsApp gateway PID.
+    #[inline]
+    pub fn whatsapp_pid(&self) -> &Arc<std::sync::Mutex<Option<u32>>> {
+        &self.whatsapp_gateway_pid
+    }
+
+    /// Per-agent message injection senders.
+    #[inline]
+    pub fn injection_senders_ref(
+        &self,
+    ) -> &dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<String>> {
+        &self.injection_senders
+    }
+
+    /// Context engine (pluggable memory recall + assembly).
+    #[inline]
+    pub fn context_engine_ref(
+        &self,
+    ) -> Option<&dyn librefang_runtime::context_engine::ContextEngine> {
+        self.context_engine.as_deref()
+    }
+}
+
 impl LibreFangKernel {
     /// Boot the kernel with configuration from the given path.
     pub fn boot(config_path: Option<&Path>) -> KernelResult<Self> {
