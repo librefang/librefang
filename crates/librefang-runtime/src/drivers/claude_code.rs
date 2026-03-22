@@ -792,6 +792,7 @@ mod tests {
             system: Some("You are helpful.".to_string()),
             thinking: None,
             prompt_caching: false,
+            response_format: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);
@@ -831,6 +832,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            response_format: None,
         };
 
         let prompt = ClaudeCodeDriver::build_prompt(&request);

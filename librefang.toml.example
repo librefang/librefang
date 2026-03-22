@@ -137,6 +137,23 @@ debounce_ms = 500
 # [thinking]
 # budget_tokens = 10000                   # Max tokens the model can use for thinking
 # stream_thinking = false                 # Stream thinking tokens to the client
+# Structured output — constrain agent responses to JSON or a JSON Schema.
+# Set per-agent in [[agents]] tables. Values: "text" (default), "json", or json_schema.
+#
+# Example: force JSON output
+# [agents.my_agent.response_format]
+# type = "json"
+#
+# Example: enforce a specific JSON Schema (OpenAI native; Anthropic via prompt injection)
+# [agents.my_agent.response_format]
+# type = "json_schema"
+# name = "weather_report"
+# strict = true
+# [agents.my_agent.response_format.schema]
+# type = "object"
+# properties.location.type = "string"
+# properties.temperature.type = "number"
+# required = ["location", "temperature"]
 
 # Provider region selection (provider ID → region name)
 # Some providers offer region-specific endpoints defined in registry TOML files.

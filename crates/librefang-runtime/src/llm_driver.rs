@@ -3,7 +3,7 @@
 //! Abstracts over multiple LLM providers (Anthropic, OpenAI, Ollama, etc.).
 
 use async_trait::async_trait;
-use librefang_types::config::{AzureOpenAiConfig, VertexAiConfig};
+use librefang_types::config::{AzureOpenAiConfig, ResponseFormat, VertexAiConfig};
 use librefang_types::message::{ContentBlock, Message, StopReason, TokenUsage};
 use librefang_types::tool::{ToolCall, ToolDefinition};
 use serde::{Deserialize, Serialize};
@@ -73,6 +73,11 @@ pub struct CompletionRequest {
     /// - **OpenAI**: automatic prefix caching (no request changes needed, but
     ///   cached token counts are parsed from the response).
     pub prompt_caching: bool,
+    /// Desired response format (structured output).
+    ///
+    /// When set, instructs the LLM to return output in the specified format.
+    /// `None` preserves the default free-form text behaviour.
+    pub response_format: Option<ResponseFormat>,
 }
 
 /// A response from an LLM completion.
@@ -329,6 +334,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            response_format: None,
         };
 
         let response = driver.stream(request, tx).await.unwrap();

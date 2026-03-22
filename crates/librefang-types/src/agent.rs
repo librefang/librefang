@@ -516,6 +516,12 @@ pub struct AgentManifest {
     /// Explicitly disable all tools, overriding profile / capability / filter expansion.
     #[serde(default)]
     pub tools_disabled: bool,
+    /// Desired LLM response format (structured output).
+    ///
+    /// When set, the agent loop passes this to the LLM driver so the model
+    /// returns output in the requested format (plain JSON or schema-constrained).
+    #[serde(default)]
+    pub response_format: Option<crate::config::ResponseFormat>,
     /// Whether this agent is enabled. Disabled agents are not spawned on startup.
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -574,6 +580,7 @@ impl Default for AgentManifest {
             tool_allowlist: Vec::new(),
             tool_blocklist: Vec::new(),
             tools_disabled: false,
+            response_format: None,
             enabled: true,
             allowed_plugins: Vec::new(),
             inherit_parent_context: true,
