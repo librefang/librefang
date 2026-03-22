@@ -139,6 +139,12 @@ debounce_ms = 500
 # default_agent = "assistant"
 
 # ── MCP Servers (external tool integration) ──────────────────
+# PII privacy controls — filter personal data before sending to LLM providers
+# [privacy]
+# mode = "pseudonymize"                  # "off" (default), "redact", or "pseudonymize"
+# redact_patterns = ["\\bCUST-\\d{6}\\b"]  # Additional regex patterns to filter
+
+# MCP server connections
 # [[mcp_servers]]
 # name = "filesystem"
 # timeout_secs = 30

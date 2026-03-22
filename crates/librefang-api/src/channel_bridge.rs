@@ -711,11 +711,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     librefang_kernel::workflow::StepAgent::ById { id } => {
                         let aid: AgentId = id.parse().ok()?;
                         let entry = registry_ref.get(aid)?;
-                        Some((aid, entry.name.clone()))
+                        let inherit = entry.manifest.inherit_parent_context;
+                        Some((aid, entry.name.clone(), inherit))
                     }
                     librefang_kernel::workflow::StepAgent::ByName { name } => {
                         let entry = registry_ref.find_by_name(name)?;
-                        Some((entry.id, entry.name.clone()))
+                        let inherit = entry.manifest.inherit_parent_context;
+                        Some((entry.id, entry.name.clone(), inherit))
                     }
                 },
                 |agent_id, message| {
