@@ -45,146 +45,149 @@ function LoginScreen({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticate
   }
 
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-main overflow-auto">
-      {/* Background decoration */}
-      <div className="absolute inset-0 pointer-events-none overflow-hidden">
-        <div className="absolute -top-40 -right-40 w-96 h-96 bg-brand/5 rounded-full blur-3xl" />
-        <div className="absolute -bottom-40 -left-40 w-96 h-96 bg-accent/5 rounded-full blur-3xl" />
+    <div className="fixed inset-0 z-[200] flex bg-main overflow-auto">
+      {/* Left panel — branding (desktop only) */}
+      <div className="hidden lg:flex lg:w-[45%] relative overflow-hidden bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 items-center justify-center">
+        <div className="absolute inset-0">
+          <div className="absolute top-1/4 left-1/4 w-72 h-72 bg-brand/20 rounded-full blur-[100px]" />
+          <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-accent/15 rounded-full blur-[120px]" />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 bg-brand/10 rounded-full blur-[80px] animate-pulse" />
+        </div>
+        <div className="relative z-10 text-center px-12">
+          <div className="w-24 h-24 rounded-3xl bg-white/10 backdrop-blur-sm flex items-center justify-center mx-auto mb-8 ring-1 ring-white/20 shadow-2xl">
+            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-brand to-cyan-400 shadow-lg shadow-brand/40" />
+          </div>
+          <h1 className="text-4xl font-black text-white tracking-tight">LibreFang</h1>
+          <p className="text-lg text-white/50 mt-3 font-medium">Agent Operating System</p>
+          <div className="flex items-center justify-center gap-3 mt-8">
+            <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10">
+              <span className="w-2 h-2 rounded-full bg-success animate-pulse" />
+              <span className="text-xs text-white/60 font-medium">{t("common.daemon_online", { defaultValue: "Daemon Online" })}</span>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <div className="relative w-full max-w-[380px] mx-6 my-8 animate-fade-in-scale">
-        {/* Logo + branding */}
-        <div className="flex flex-col items-center mb-8">
-          <div className="relative mb-5">
-            <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-brand/20 to-accent/10 flex items-center justify-center ring-1 ring-brand/20 shadow-xl shadow-brand/10">
-              <div className="w-8 h-8 rounded-full bg-gradient-to-br from-brand to-brand/70 shadow-lg shadow-brand/30" />
+      {/* Right panel — login form */}
+      <div className="flex-1 flex items-center justify-center p-6 sm:p-8">
+        <div className="w-full max-w-[400px] animate-fade-in-scale">
+          {/* Mobile logo */}
+          <div className="flex flex-col items-center mb-8 lg:hidden">
+            <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-brand/20 to-accent/10 flex items-center justify-center mb-4 ring-1 ring-brand/20 shadow-xl">
+              <div className="w-7 h-7 rounded-full bg-gradient-to-br from-brand to-cyan-400" />
             </div>
-            <span className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-success border-3 border-main flex items-center justify-center">
-              <span className="w-2 h-2 rounded-full bg-white" />
-            </span>
+            <h1 className="text-2xl font-black tracking-tight">LibreFang</h1>
           </div>
-          <h1 className="text-3xl font-black tracking-tight bg-gradient-to-r from-slate-900 to-slate-600 dark:from-white dark:to-slate-400 bg-clip-text text-transparent">
-            LibreFang
-          </h1>
-          <p className="text-xs text-text-dim mt-2 tracking-wide uppercase font-semibold">
-            {t("common.infrastructure", { defaultValue: "Agent Operating System" })}
-          </p>
-        </div>
 
-        {/* Login card */}
-        <div className="rounded-2xl border border-border-subtle bg-surface/80 backdrop-blur-xl shadow-2xl overflow-hidden">
-          {/* Card header */}
-          <div className="px-6 sm:px-8 pt-6 sm:pt-8 pb-2">
-            <h2 className="text-lg font-black tracking-tight">
-              {mode === "credentials" ? t("auth.login", { defaultValue: "Sign In" }) : t("auth.title")}
+          {/* Welcome text */}
+          <div className="mb-8">
+            <h2 className="text-2xl sm:text-3xl font-black tracking-tight">
+              {mode === "credentials" ? t("auth.welcome_back", { defaultValue: "Welcome back" }) : t("auth.title")}
             </h2>
-            <p className="text-xs text-text-dim mt-1">
+            <p className="text-sm text-text-dim mt-2">
               {mode === "credentials" ? t("auth.login_desc", { defaultValue: "Sign in to your dashboard" }) : t("auth.description")}
             </p>
           </div>
 
           {/* Form */}
-          <div className="px-6 sm:px-8 pb-6 sm:pb-8 pt-4">
-            {mode === "credentials" ? (
-              <form onSubmit={handleCredentialsLogin} className="space-y-5">
-                <div>
-                  <label className="text-[11px] font-bold text-text-dim uppercase tracking-wider mb-2 block">
-                    {t("auth.username", { defaultValue: "Username" })}
-                  </label>
-                  <input
-                    type="text"
-                    value={username}
-                    onChange={(e) => { setUsername(e.target.value); setError(""); }}
-                    placeholder={t("auth.username_placeholder", { defaultValue: "Enter username" })}
-                    autoFocus
-                    autoComplete="username"
-                    className={`w-full rounded-xl border px-4 py-3.5 text-sm font-medium focus:ring-2 outline-none transition-all ${
-                      error ? "border-error/50 focus:border-error focus:ring-error/10" : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
-                    }`}
-                  />
+          {mode === "credentials" ? (
+            <form onSubmit={handleCredentialsLogin} className="space-y-5">
+              <div>
+                <label className="text-xs font-bold text-text-dim mb-2 block">
+                  {t("auth.username", { defaultValue: "Username" })}
+                </label>
+                <input
+                  type="text"
+                  value={username}
+                  onChange={(e) => { setUsername(e.target.value); setError(""); }}
+                  placeholder={t("auth.username_placeholder", { defaultValue: "Enter username" })}
+                  autoFocus
+                  autoComplete="username"
+                  className={`w-full rounded-xl border px-4 py-3.5 text-sm focus:ring-2 outline-none transition-all ${
+                    error ? "border-error/50 focus:border-error focus:ring-error/10" : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+                  }`}
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-text-dim mb-2 block">
+                  {t("auth.password", { defaultValue: "Password" })}
+                </label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => { setPassword(e.target.value); setError(""); }}
+                  placeholder={t("auth.password_placeholder", { defaultValue: "Enter password" })}
+                  autoComplete="current-password"
+                  className={`w-full rounded-xl border px-4 py-3.5 text-sm focus:ring-2 outline-none transition-all ${
+                    error ? "border-error/50 focus:border-error focus:ring-error/10" : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+                  }`}
+                />
+              </div>
+
+              {error && (
+                <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-error/10 border border-error/20">
+                  <Lock className="h-4 w-4 text-error shrink-0" />
+                  <p className="text-sm text-error font-medium">{error}</p>
                 </div>
-                <div>
-                  <label className="text-[11px] font-bold text-text-dim uppercase tracking-wider mb-2 block">
-                    {t("auth.password", { defaultValue: "Password" })}
-                  </label>
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => { setPassword(e.target.value); setError(""); }}
-                    placeholder={t("auth.password_placeholder", { defaultValue: "Enter password" })}
-                    autoComplete="current-password"
-                    className={`w-full rounded-xl border px-4 py-3.5 text-sm font-medium focus:ring-2 outline-none transition-all ${
-                      error ? "border-error/50 focus:border-error focus:ring-error/10" : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
-                    }`}
-                  />
+              )}
+
+              <button
+                type="submit"
+                disabled={loading || !username.trim() || !password.trim()}
+                className="w-full rounded-xl bg-gradient-to-r from-brand to-brand/80 py-4 text-sm font-bold text-white hover:shadow-xl hover:shadow-brand/25 hover:-translate-y-0.5 active:translate-y-0 transition-all duration-200 disabled:opacity-40 disabled:hover:translate-y-0 disabled:hover:shadow-none"
+              >
+                {loading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  </span>
+                ) : t("auth.login", { defaultValue: "Sign In" })}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleApiKeyLogin} className="space-y-5">
+              <div>
+                <label className="text-xs font-bold text-text-dim mb-2 block">
+                  API Key
+                </label>
+                <input
+                  type="password"
+                  value={key}
+                  onChange={(e) => { setKey(e.target.value); setError(""); }}
+                  placeholder={t("auth.placeholder")}
+                  autoFocus
+                  className={`w-full rounded-xl border px-4 py-3.5 text-sm focus:ring-2 outline-none transition-all ${
+                    error ? "border-error/50 focus:border-error focus:ring-error/10" : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
+                  }`}
+                />
+              </div>
+
+              {error && (
+                <div className="flex items-center gap-2 px-4 py-3 rounded-xl bg-error/10 border border-error/20">
+                  <Lock className="h-4 w-4 text-error shrink-0" />
+                  <p className="text-sm text-error font-medium">{error}</p>
                 </div>
+              )}
 
-                {error && (
-                  <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-error/10 border border-error/20">
-                    <Lock className="h-3.5 w-3.5 text-error shrink-0" />
-                    <p className="text-xs text-error font-medium">{error}</p>
-                  </div>
-                )}
+              <button
+                type="submit"
+                disabled={loading || !key.trim()}
+                className="w-full rounded-xl bg-gradient-to-r from-brand to-brand/80 py-4 text-sm font-bold text-white hover:shadow-xl hover:shadow-brand/25 hover:-translate-y-0.5 active:translate-y-0 transition-all duration-200 disabled:opacity-40 disabled:hover:translate-y-0 disabled:hover:shadow-none"
+              >
+                {loading ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  </span>
+                ) : t("auth.submit")}
+              </button>
+            </form>
+          )}
 
-                <button
-                  type="submit"
-                  disabled={loading || !username.trim() || !password.trim()}
-                  className="w-full rounded-xl bg-gradient-to-r from-brand to-brand/90 py-3.5 text-sm font-bold text-white hover:shadow-lg hover:shadow-brand/25 hover:-translate-y-0.5 active:translate-y-0 transition-all duration-200 disabled:opacity-40 disabled:hover:translate-y-0 disabled:hover:shadow-none"
-                >
-                  {loading ? (
-                    <span className="flex items-center justify-center gap-2">
-                      <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      {t("common.loading", { defaultValue: "..." })}
-                    </span>
-                  ) : t("auth.login", { defaultValue: "Sign In" })}
-                </button>
-              </form>
-            ) : (
-              <form onSubmit={handleApiKeyLogin} className="space-y-5">
-                <div>
-                  <label className="text-[11px] font-bold text-text-dim uppercase tracking-wider mb-2 block">
-                    API Key
-                  </label>
-                  <input
-                    type="password"
-                    value={key}
-                    onChange={(e) => { setKey(e.target.value); setError(""); }}
-                    placeholder={t("auth.placeholder")}
-                    autoFocus
-                    className={`w-full rounded-xl border px-4 py-3.5 text-sm font-medium focus:ring-2 outline-none transition-all ${
-                      error ? "border-error/50 focus:border-error focus:ring-error/10" : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
-                    }`}
-                  />
-                </div>
-
-                {error && (
-                  <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-error/10 border border-error/20">
-                    <Lock className="h-3.5 w-3.5 text-error shrink-0" />
-                    <p className="text-xs text-error font-medium">{error}</p>
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={loading || !key.trim()}
-                  className="w-full rounded-xl bg-gradient-to-r from-brand to-brand/90 py-3.5 text-sm font-bold text-white hover:shadow-lg hover:shadow-brand/25 hover:-translate-y-0.5 active:translate-y-0 transition-all duration-200 disabled:opacity-40 disabled:hover:translate-y-0 disabled:hover:shadow-none"
-                >
-                  {loading ? (
-                    <span className="flex items-center justify-center gap-2">
-                      <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      {t("common.loading", { defaultValue: "..." })}
-                    </span>
-                  ) : t("auth.submit")}
-                </button>
-              </form>
-            )}
+          {/* Footer */}
+          <div className="flex items-center justify-center gap-2 mt-8 text-text-dim/30">
+            <Lock className="h-3 w-3" />
+            <span className="text-[10px] font-medium tracking-wider uppercase">{t("auth.secure_connection", { defaultValue: "Encrypted Connection" })}</span>
           </div>
         </div>
-
-        {/* Footer */}
-        <p className="text-center text-[10px] text-text-dim/40 mt-6 font-medium tracking-wide">
-          LibreFang Agent OS &middot; {t("auth.secure_connection", { defaultValue: "Secure Connection" })}
-        </p>
       </div>
     </div>
   );
