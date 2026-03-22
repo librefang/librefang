@@ -51,6 +51,7 @@ LibreFang 从 TOML 配置文件中读取配置：
 - [[canvas]](#canvas)
 - [[auto_reply]](#auto_reply)
 - [[broadcast]](#broadcast)
+- [[inbox]](#inbox)
 - [[[bindings]]](#bindings)
 - [[pairing]](#pairing)
 - [[extensions]](#extensions)
@@ -93,6 +94,8 @@ api_key_env = "GROQ_API_KEY"
 ```toml
 # ── 顶层字段 ──────────────────────────────────────────────────────────────
 api_key          = "your-bearer-token"
+dashboard_user   = "admin"
+dashboard_pass_hash = "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>"
 api_listen       = "127.0.0.1:4545"
 cors_origin      = ["https://dash.example.com"]
 mode             = "default"          # stable | default | dev
@@ -325,8 +328,9 @@ health_check_interval_secs = 60
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `api_key` | String | `""` | Bearer 认证令牌，空时 API 不需要认证（仅限本地开发） |
-| `dashboard_user` | String | `""` | Dashboard 登录用户名，与 `dashboard_pass` 同时设置时启用登录页 |
+| `dashboard_user` | String | `""` | Dashboard 登录用户名，与 `dashboard_pass` 或 `dashboard_pass_hash` 任一同时设置时启用登录页 |
 | `dashboard_pass` | String | `""` | Dashboard 登录密码，支持 `vault:KEY`、环境变量 `LIBREFANG_DASHBOARD_PASS`、明文 |
+| `dashboard_pass_hash` | String | `""` | Dashboard 密码的 Argon2id 哈希（PHC 格式，可选）。设置后优先于 `dashboard_pass` 进行验证。不支持 `vault:` 和环境变量，需直接写入哈希字符串 |
 | `api_listen` | String | `"127.0.0.1:4545"` | API 监听地址，也接受别名 `listen_addr` |
 | `cors_origin` | Array\<String\> | `[]` | 允许的 CORS 来源（追加到 localhost 之外） |
 | `mode` | Enum | `"default"` | 运行模式：`stable` / `default` / `dev` |
@@ -341,6 +345,37 @@ health_check_interval_secs = 60
 | `provider_api_keys` | Map | `{}` | Provider API Key 环境变量覆盖（`provider_id` → 环境变量名），如 `openai = "MY_OPENAI_KEY"` |
 | `network_enabled` | bool | `false` | 是否启用 OFP 网络层 |
 | `log_level` | String | `"info"` | 日志级别：`trace` / `debug` / `info` / `warn` / `error` |
+
+---
+
+### Dashboard 密码安全加固（可选）
+
+Dashboard 支持使用 Argon2id 哈希替代明文密码存储。这是可选的安全加固措施，**`dashboard_pass` 仍然完全支持**。
+
+如果希望在配置文件中避免存储明文密码，可以：
+
+**方式一：使用 Vault（推荐）**
+
+将密码存入 Vault，配置文件中只引用密钥名：
+```toml
+dashboard_user = "admin"
+dashboard_pass = "vault:dashboard_password"
+```
+
+**方式二：迁移到 Argon2id 哈希**
+
+1. 使用现有的 `dashboard_pass` 明文密码正常登录 Dashboard
+2. 登录成功后查看服务日志，会输出可用的哈希值：
+   ```
+   Set `dashboard_pass_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."` in config.toml ...
+   ```
+3. 将哈希值写入 `config.toml`，并删除明文密码：
+   ```toml
+   dashboard_user      = "admin"
+   dashboard_pass_hash = "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>"
+   ```
+
+> **注意：** 迁移到 `dashboard_pass_hash` 后，已登录的会话需要重新登录。
 
 ---
 
@@ -836,6 +871,91 @@ Canvas（Agent→UI）配置。
 
 ---
 
+### [inbox]
+
+文件收件箱——将文本文件投入监听目录，自动作为消息分发给 Agent。处理后的文件会移至 `processed/` 子目录，避免重复投递。
+
+```toml
+[inbox]
+enabled = true
+directory = "~/.librefang/inbox/"
+poll_interval_secs = 5
+default_agent = "assistant"
+```
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `enabled` | bool | `false` | 启用收件箱目录监听 |
+| `directory` | String? | `null` | 监听目录路径，默认 `$HOME_DIR/inbox/`，支持 `~` 展开 |
+| `poll_interval_secs` | u64 | `5` | 扫描目录的间隔（秒），最小为 1 |
+| `default_agent` | String? | `null` | 文件中无 `agent:` 指令时的默认目标 Agent |
+
+**文件格式：** 纯文本文件（`.txt`、`.md`、`.json`、`.py` 等）。首行可写 `agent:<名称>` 指定目标 Agent，其余内容作为消息体发送。无指令时使用 `default_agent`。
+
+**安全限制：** 超过 1 MB 的文件会被跳过；二进制文件（非文本扩展名）会被跳过；空文件直接移至 `processed/`，不发送。
+
+**使用示例：**
+
+指定 Agent 处理：
+
+```bash
+cat > ~/.librefang/inbox/task.txt << 'EOF'
+agent:code-reviewer
+请审查以下代码的安全性：
+
+def login(user, password):
+    query = f"SELECT * FROM users WHERE name='{user}' AND pass='{password}'"
+    return db.execute(query)
+EOF
+```
+
+使用默认 Agent：
+
+```bash
+echo "帮我总结今天的系统日志" > ~/.librefang/inbox/summarize.txt
+```
+
+Cron 定时任务：
+
+```bash
+# crontab -e
+0 9 * * * grep ERROR /var/log/app.log > ~/.librefang/inbox/daily_errors.txt
+```
+
+CI/CD 构建失败时自动分析：
+
+```bash
+# Jenkinsfile / GitHub Actions post-build step
+echo "agent:devops
+构建失败，请分析日志：
+$(tail -100 build.log)" > ~/.librefang/inbox/build_$(date +%s).txt
+```
+
+批量处理多个文件：
+
+```bash
+for doc in ~/reports/*.md; do
+  cp "$doc" ~/.librefang/inbox/
+done
+```
+
+查看收件箱状态：
+
+```bash
+curl -s http://127.0.0.1:4545/api/inbox/status
+# {"enabled":true,"pending_count":3,"processed_count":12,...}
+```
+
+**使用场景：**
+- **Cron / 脚本自动化** — 定时任务输出结果丢入目录，Agent 自动分析
+- **CI/CD 联动** — 构建失败时将日志写入 inbox，Agent 做根因分析
+- **监控告警** — Prometheus / Alertmanager 告警落盘后由 Agent 处理
+- **批量处理** — 一次性拷入多个文件，Agent 逐个处理
+- **低代码集成** — 不会写代码的用户直接往文件夹拖文件即可与 Agent 交互
+- **离线 / 隔离环境** — 无需网络，通过文件传输即可驱动 Agent
+
+---
+
 ### [[bindings]]
 
 Agent 绑定——将特定通道/账户/节点模式路由到指定 Agent。
@@ -1198,6 +1318,8 @@ LibreFang 使用以下环境变量：
 | `DISCORD_BOT_TOKEN` | Discord Bot Token |
 | `SLACK_BOT_TOKEN` | Slack Bot Token |
 | `SLACK_APP_TOKEN` | Slack App Token |
+| `LIBREFANG_DASHBOARD_USER` | Dashboard 登录用户名覆盖 |
+| `LIBREFANG_DASHBOARD_PASS` | Dashboard 登录密码覆盖 |
 | `LIBREFANG_HOME` | LibreFang 主目录覆盖（默认 `~/.librefang`） |
 | `LIBREFANG_WEBHOOK_TOKEN` | Webhook 触发端点 Bearer Token |
 | `LIBREFANG_OAUTH_CLIENT_SECRET` | OAuth2 客户端密钥 |
