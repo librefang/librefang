@@ -733,10 +733,8 @@ pub async fn save_workflow_as_template(
 
     let template = WorkflowEngine::workflow_to_template(&workflow);
 
-    // Persist template to TOML file at ~/.librefang/workflows/templates/{id}.toml
-    let templates_dir = librefang_kernel::config::librefang_home()
-        .join("workflows")
-        .join("templates");
+    // Persist template to TOML file under the active kernel home directory.
+    let templates_dir = state.kernel.home_dir().join("workflows").join("templates");
     if let Err(e) = std::fs::create_dir_all(&templates_dir) {
         warn!("Failed to create templates directory: {e}");
     } else {

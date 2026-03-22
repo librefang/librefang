@@ -1548,8 +1548,7 @@ impl WorkflowEngine {
         let steps: Vec<WorkflowTemplateStep> = workflow
             .steps
             .iter()
-            .enumerate()
-            .map(|(i, step)| {
+            .map(|step| {
                 // Extract parameters from this step's prompt_template
                 for cap in re.captures_iter(&step.prompt_template) {
                     let var_name = cap[1].to_string();
@@ -1573,18 +1572,11 @@ impl WorkflowEngine {
                     StepAgent::ById { id } => Some(id.clone()),
                 };
 
-                // Build depends_on: sequential steps depend on the previous step
-                let depends_on = if i > 0 {
-                    vec![workflow.steps[i - 1].name.clone()]
-                } else {
-                    vec![]
-                };
-
                 WorkflowTemplateStep {
                     name: step.name.clone(),
                     prompt_template: step.prompt_template.clone(),
                     agent,
-                    depends_on,
+                    depends_on: step.depends_on.clone(),
                 }
             })
             .collect();
@@ -3133,6 +3125,67 @@ id = "{id}"
         let result = WorkflowEngine::topological_sort(&steps);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Cycle detected"));
+    }
+
+    #[test]
+    fn test_workflow_to_template_preserves_depends_on_graph() {
+        let workflow = Workflow {
+            id: WorkflowId::new(),
+            name: "dag template".to_string(),
+            description: "preserve dependencies".to_string(),
+            steps: vec![
+                WorkflowStep {
+                    name: "A".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
+                    prompt_template: "step a".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 10,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                },
+                WorkflowStep {
+                    name: "B".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "b".to_string(),
+                    },
+                    prompt_template: "step b".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 10,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                },
+                WorkflowStep {
+                    name: "C".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "c".to_string(),
+                    },
+                    prompt_template: "step c".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 10,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec!["A".to_string(), "B".to_string()],
+                },
+            ],
+            created_at: Utc::now(),
+            layout: None,
+        };
+
+        let template = WorkflowEngine::workflow_to_template(&workflow);
+
+        assert!(template.steps[0].depends_on.is_empty());
+        assert!(template.steps[1].depends_on.is_empty());
+        assert_eq!(
+            template.steps[2].depends_on,
+            vec!["A".to_string(), "B".to_string()]
+        );
     }
 
     #[tokio::test]
