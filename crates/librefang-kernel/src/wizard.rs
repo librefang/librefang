@@ -186,7 +186,6 @@ impl SetupWizard {
             tools_disabled: false,
             enabled: true,
             allowed_plugins: vec![],
-            inherit_parent_context: false,
             thinking: None,
         };
 
