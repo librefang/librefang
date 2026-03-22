@@ -13,12 +13,12 @@ use std::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-/// Entry from persisted hand state: (hand_id, config, old_agent_id, was_paused).
+/// Entry from persisted hand state: (hand_id, config, old_agent_id, status).
 pub type HandStateEntry = (
     String,
     HashMap<String, serde_json::Value>,
     Option<AgentId>,
-    bool,
+    HandStatus,
 );
 
 // ─── Settings availability types ────────────────────────────────────────────
@@ -103,7 +103,7 @@ impl HandRegistry {
     }
 
     /// Load persisted hand state and re-activate hands.
-    /// Returns list of (hand_id, config, old_agent_id, was_paused) that should be activated.
+    /// Returns list of (hand_id, config, old_agent_id, status) that should be restored.
     /// The `old_agent_id` is the agent UUID from before the restart, used to
     /// reassign cron jobs to the newly spawned agent (issue #402).
     pub fn load_state(path: &std::path::Path) -> Vec<HandStateEntry> {
@@ -141,19 +141,23 @@ impl HandRegistry {
             .into_iter()
             .filter_map(|e| {
                 let hand_id = e["hand_id"].as_str()?.to_string();
+                let status = e
+                    .get("status")
+                    .and_then(|v| serde_json::from_value::<HandStatus>(v.clone()).ok())
+                    .unwrap_or(HandStatus::Active);
 
-                let mut was_paused = false;
-                if let Some(status) = e.get("status") {
-                    let status_str = status.as_str().unwrap_or("");
-                    if status_str == "Paused" {
-                        was_paused = true;
-                    } else if status_str.starts_with("Error") {
-                        info!(hand = %hand_id, status = %status_str, "Skipping non-active hand from persisted state");
+                match &status {
+                    HandStatus::Active | HandStatus::Paused => {}
+                    HandStatus::Error(message) => {
+                        info!(
+                            hand = %hand_id,
+                            error = %message,
+                            "Skipping errored hand from persisted state"
+                        );
                         return None;
                     }
-                    // Also handle {"Error": "msg"} shape from serde enum serialization
-                    if status.is_object() && status.get("Error").is_some() {
-                        info!(hand = %hand_id, "Skipping errored hand from persisted state");
+                    HandStatus::Inactive => {
+                        info!(hand = %hand_id, "Skipping inactive hand from persisted state");
                         return None;
                     }
                 }
@@ -163,7 +167,7 @@ impl HandRegistry {
                 let old_agent_id: Option<AgentId> = e
                     .get("agent_id")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
-                Some((hand_id, config, old_agent_id, was_paused))
+                Some((hand_id, config, old_agent_id, status))
             })
             .collect()
     }
@@ -810,7 +814,7 @@ system_prompt = "Test prompt"
         let saved = HandRegistry::load_state(&state_path);
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].0, "clip");
-        assert!(saved[0].3);
+        assert!(matches!(saved[0].3, HandStatus::Paused));
     }
 
     #[test]
@@ -981,6 +985,32 @@ system_prompt = "Test prompt"
         assert!(!r.degraded);
 
         reg.deactivate(instance.instance_id).unwrap();
+    }
+
+    #[test]
+    fn load_state_preserves_paused_status() {
+        let path = std::env::temp_dir().join(format!("hand-state-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "version": 2,
+                "instances": [{
+                    "hand_id": "lead",
+                    "config": {},
+                    "agent_id": serde_json::Value::Null,
+                    "status": "Paused",
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let restored = HandRegistry::load_state(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].0, "lead");
+        assert!(matches!(restored[0].3, HandStatus::Paused));
     }
 
     #[test]

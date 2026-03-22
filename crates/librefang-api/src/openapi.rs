@@ -180,6 +180,7 @@ use crate::types;
         routes::delete_workflow,
         routes::run_workflow,
         routes::list_workflow_runs,
+        routes::save_workflow_as_template,
         routes::list_triggers,
         routes::create_trigger,
         routes::delete_trigger,

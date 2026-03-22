@@ -83,6 +83,11 @@ export interface SkillItem {
   author?: string;
   tools_count?: number;
   tags?: string[];
+  source?: {
+    type?: string;
+    slug?: string;
+    version?: string;
+  };
 }
 
 export interface SkillsResponse {
@@ -734,6 +739,7 @@ export interface ClawHubSkillDetail {
   readme: string;
   icon_url?: string;
   is_installed?: boolean;
+  installed?: boolean;
 }
 
 // ClawHub API
@@ -866,6 +872,10 @@ export async function updateWorkflow(workflowId: string, payload: {
 
 export async function listWorkflowRuns(workflowId: string): Promise<WorkflowRunItem[]> {
   return get<WorkflowRunItem[]>(`/api/workflows/${encodeURIComponent(workflowId)}/runs`);
+}
+
+export async function saveWorkflowAsTemplate(workflowId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}/save-as-template`, {});
 }
 
 export async function listSchedules(): Promise<ScheduleItem[]> {

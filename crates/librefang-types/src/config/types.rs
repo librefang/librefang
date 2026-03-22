@@ -723,6 +723,35 @@ impl Default for AutoReplyConfig {
     }
 }
 
+/// File-based input inbox configuration.
+///
+/// When enabled, the kernel polls a directory for text files and dispatches
+/// their contents as messages to agents.  Files are moved to a `processed/`
+/// subdirectory after delivery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InboxConfig {
+    /// Enable inbox watcher. Default: false.
+    pub enabled: bool,
+    /// Directory to watch. Default: `~/.librefang/inbox/`
+    pub directory: Option<String>,
+    /// Poll interval in seconds. Default: 5.
+    pub poll_interval_secs: u64,
+    /// Default agent name to send files to when no `agent:` directive is found.
+    pub default_agent: Option<String>,
+}
+
+impl Default for InboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            directory: None,
+            poll_interval_secs: 5,
+            default_agent: None,
+        }
+    }
+}
+
 /// Canvas (Agent-to-UI) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1364,6 +1393,55 @@ pub struct KernelConfig {
     /// Alternatively you can set `provider_urls.qwen-code` to the same value.
     #[serde(default)]
     pub qwen_code_path: Option<String>,
+    /// Input sanitization / prompt-injection detection for channel messages.
+    #[serde(default)]
+    pub sanitize: SanitizeConfig,
+    /// File-based input inbox configuration.
+    /// Drop text files into a directory and they are dispatched to agents.
+    #[serde(default)]
+    pub inbox: InboxConfig,
+}
+
+/// Input sanitization mode for channel messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SanitizeMode {
+    /// No checking — all messages pass through (default).
+    #[default]
+    Off,
+    /// Log a warning but allow the message through.
+    Warn,
+    /// Reject the message and send an error to the user.
+    Block,
+}
+
+/// Configuration for channel input sanitization / prompt-injection detection.
+///
+/// ```toml
+/// [sanitize]
+/// mode = "warn"           # off | warn | block
+/// max_message_length = 32768
+/// custom_block_patterns = ["(?i)secret\\s+code"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SanitizeConfig {
+    /// Sanitization mode.
+    pub mode: SanitizeMode,
+    /// Maximum allowed message length in bytes (default: 32 768).
+    pub max_message_length: usize,
+    /// Additional regex patterns that should trigger a block/warn.
+    pub custom_block_patterns: Vec<String>,
+}
+
+impl Default for SanitizeConfig {
+    fn default() -> Self {
+        Self {
+            mode: SanitizeMode::Off,
+            max_message_length: 32768,
+            custom_block_patterns: Vec::new(),
+        }
+    }
 }
 
 /// Azure OpenAI provider configuration.
@@ -2141,6 +2219,8 @@ impl Default for KernelConfig {
             privacy: PrivacyConfig::default(),
             strict_config: false,
             qwen_code_path: None,
+            sanitize: SanitizeConfig::default(),
+            inbox: InboxConfig::default(),
         }
     }
 }

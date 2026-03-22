@@ -5717,7 +5717,7 @@ system_prompt = "You are a helpful assistant."
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());
-            for (hand_id, config, old_agent_id, was_paused) in saved_hands {
+            for (hand_id, config, old_agent_id, status) in saved_hands {
                 // Check if hand's agent.toml has enabled=false — skip reactivation
                 let hand_agent_name = format!("{}-hand", hand_id);
                 let hand_toml = self
@@ -5737,15 +5737,14 @@ system_prompt = "You are a helpful assistant."
                 }
                 match self.activate_hand(&hand_id, config) {
                     Ok(inst) => {
-                        // Restore paused state if the hand was paused before restart
-                        if was_paused {
+                        if matches!(status, librefang_hands::HandStatus::Paused) {
                             if let Err(e) = self.pause_hand(inst.instance_id) {
                                 warn!(hand = %hand_id, error = %e, "Failed to restore paused state");
                             } else {
                                 info!(hand = %hand_id, instance = %inst.instance_id, "Hand restored (paused)");
                             }
                         } else {
-                            info!(hand = %hand_id, instance = %inst.instance_id, "Hand restored");
+                            info!(hand = %hand_id, instance = %inst.instance_id, status = %status, "Hand restored");
                         }
                         // Reassign cron jobs and triggers from the pre-restart
                         // agent ID to the newly spawned agent so scheduled tasks
@@ -5936,6 +5935,9 @@ system_prompt = "You are a helpful assistant."
 
         // Start heartbeat monitor for agent health checking
         self.start_heartbeat_monitor();
+
+        // Start file inbox watcher if enabled
+        crate::inbox::start_inbox_watcher(Arc::clone(self));
 
         // Start OFP peer node if network is enabled
         if self.config.network_enabled && !self.config.network.shared_secret.is_empty() {
