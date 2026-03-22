@@ -291,7 +291,7 @@ impl StandaloneChat {
                     }
                     Backend::InProcess { kernel } => {
                         s.push("Mode: in-process".to_string());
-                        s.push(format!("Agents: {}", kernel.registry.count()));
+                        s.push(format!("Agents: {}", kernel.agent_registry().count()));
                         s.push(format!("Agent: {}", self.agent_name));
                     }
                     Backend::None => s.push("Mode: disconnected".to_string()),
@@ -408,7 +408,7 @@ impl StandaloneChat {
                 }
             }
             Backend::InProcess { kernel } => {
-                let catalog = kernel.model_catalog.read().unwrap();
+                let catalog = kernel.model_catalog_ref().read().unwrap();
                 catalog
                     .available_models()
                     .into_iter()
@@ -478,25 +478,27 @@ impl StandaloneChat {
             Backend::InProcess { kernel } => {
                 if let Some(id) = self.agent_id_inprocess {
                     let provider = kernel
-                        .model_catalog
+                        .model_catalog_ref()
                         .read()
                         .unwrap()
                         .find_model(model_id)
                         .map(|e| e.provider.clone());
                     let result = if let Some(ref prov) = provider {
-                        kernel.registry.update_model_and_provider(
+                        kernel.agent_registry().update_model_and_provider(
                             id,
                             model_id.to_string(),
                             prov.clone(),
                         )
                     } else {
-                        kernel.registry.update_model(id, model_id.to_string())
+                        kernel
+                            .agent_registry()
+                            .update_model(id, model_id.to_string())
                     };
                     match result {
                         Ok(()) => {
                             let prov_label = provider.unwrap_or_else(|| {
                                 kernel
-                                    .registry
+                                    .agent_registry()
                                     .get(id)
                                     .map(|e| e.manifest.model.provider.clone())
                                     .unwrap_or_else(|| "?".to_string())
@@ -552,7 +554,7 @@ impl StandaloneChat {
         self.chat.mode_label = "in-process".to_string();
 
         if let Backend::InProcess { ref kernel } = self.backend {
-            if let Some(entry) = kernel.registry.get(id) {
+            if let Some(entry) = kernel.agent_registry().get(id) {
                 self.chat.model_label = format!(
                     "{}/{}",
                     entry.manifest.model.provider, entry.manifest.model.model
@@ -630,7 +632,7 @@ impl StandaloneChat {
         };
 
         // Check for existing agents
-        let existing = kernel.registry.list();
+        let existing = kernel.agent_registry().list();
         let existing = if self.agent_name.is_empty() {
             preferred_inprocess_agent(&existing)
         } else {

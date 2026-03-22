@@ -50,6 +50,14 @@ impl AgentRegistry {
             .and_then(|id| self.agents.get(id.value()).map(|e| e.value().clone()))
     }
 
+    /// Touch the agent's `last_active` timestamp without changing any other field.
+    /// Used to prevent heartbeat false-positives during long-running operations.
+    pub fn touch(&self, id: AgentId) {
+        if let Some(mut entry) = self.agents.get_mut(&id) {
+            entry.last_active = chrono::Utc::now();
+        }
+    }
+
     /// Update agent state.
     pub fn set_state(&self, id: AgentId, state: AgentState) -> LibreFangResult<()> {
         let mut entry = self

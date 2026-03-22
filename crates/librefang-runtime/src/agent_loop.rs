@@ -718,6 +718,12 @@ pub async fn run_agent_loop(
             cb(LoopPhase::Thinking);
         }
 
+        // Stamp last_active before LLM call to prevent heartbeat false-positives
+        // during long-running completions.
+        if let Some(ref k) = kernel {
+            k.touch_heartbeat(&agent_id_str);
+        }
+
         // Call LLM with retry, error classification, and circuit breaker
         let provider_name = manifest.model.provider.as_str();
         let mut response = call_with_retry(&*driver, request, Some(provider_name), None).await?;
@@ -2090,6 +2096,12 @@ pub async fn run_agent_loop_streaming(
             } else {
                 cb(LoopPhase::Thinking);
             }
+        }
+
+        // Stamp last_active before LLM call to prevent heartbeat false-positives
+        // during long-running completions.
+        if let Some(ref k) = kernel {
+            k.touch_heartbeat(&agent_id_str);
         }
 
         // Stream LLM call with retry, error classification, and circuit breaker

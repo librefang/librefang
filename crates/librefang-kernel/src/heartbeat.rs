@@ -79,6 +79,12 @@ pub fn check_agents(registry: &AgentRegistry, config: &HeartbeatConfig) -> Vec<H
             continue;
         }
 
+        // Skip non-autonomous agents — they are passive (wait for messages)
+        // and should not be flagged as unresponsive by the heartbeat monitor.
+        if entry_ref.manifest.autonomous.is_none() {
+            continue;
+        }
+
         let inactive_secs = (now - entry_ref.last_active).num_seconds();
 
         // Determine timeout: per-agent heartbeat_timeout_secs > interval*2 > global default
@@ -230,6 +236,70 @@ mod tests {
         assert_eq!(summary.total_checked, 0);
         assert_eq!(summary.responsive, 0);
         assert_eq!(summary.unresponsive, 0);
+    }
+
+    #[test]
+    fn test_check_agents_skips_non_autonomous() {
+        use chrono::Duration;
+        use librefang_types::agent::{
+            AgentEntry, AgentIdentity, AgentManifest, AgentMode, AutonomousConfig, SessionId,
+        };
+
+        let registry = AgentRegistry::new();
+        let config = HeartbeatConfig::default();
+
+        // Register a running, non-autonomous agent (autonomous = None).
+        // It has been inactive long enough to be "unresponsive" if checked,
+        // but it should be skipped entirely.
+        let non_autonomous_entry = AgentEntry {
+            id: AgentId::new(),
+            name: "passive-agent".to_string(),
+            manifest: AgentManifest::default(), // autonomous is None
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: Utc::now(),
+            last_active: Utc::now() - Duration::seconds(300),
+            parent: None,
+            children: Vec::new(),
+            session_id: SessionId::new(),
+            source_toml_path: None,
+            tags: Vec::new(),
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+        };
+        registry.register(non_autonomous_entry).unwrap();
+
+        // Register a running, autonomous agent that IS inactive.
+        let autonomous_manifest = AgentManifest {
+            autonomous: Some(AutonomousConfig::default()),
+            ..Default::default()
+        };
+        let autonomous_entry = AgentEntry {
+            id: AgentId::new(),
+            name: "autonomous-agent".to_string(),
+            manifest: autonomous_manifest,
+            state: AgentState::Running,
+            mode: AgentMode::default(),
+            created_at: Utc::now(),
+            last_active: Utc::now() - Duration::seconds(300),
+            parent: None,
+            children: Vec::new(),
+            session_id: SessionId::new(),
+            source_toml_path: None,
+            tags: Vec::new(),
+            identity: AgentIdentity::default(),
+            onboarding_completed: false,
+            onboarding_completed_at: None,
+        };
+        registry.register(autonomous_entry).unwrap();
+
+        let statuses = check_agents(&registry, &config);
+
+        // Only the autonomous agent should appear in the results.
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].name, "autonomous-agent");
+        assert!(statuses[0].unresponsive);
     }
 
     #[test]

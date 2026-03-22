@@ -1901,6 +1901,7 @@ impl LibreFangKernel {
 
                     // Re-register in the in-memory registry
                     let mut restored_entry = entry;
+                    restored_entry.last_active = chrono::Utc::now();
 
                     // Check enabled flag — also do a direct TOML read as fallback
                     let mut is_enabled = restored_entry.manifest.enabled;
@@ -7981,6 +7982,12 @@ impl KernelHandle for LibreFangKernel {
                 tools: e.manifest.capabilities.tools.clone(),
             })
             .collect()
+    }
+
+    fn touch_heartbeat(&self, agent_id: &str) {
+        if let Ok(id) = agent_id.parse::<AgentId>() {
+            self.registry.touch(id);
+        }
     }
 
     fn kill_agent(&self, agent_id: &str) -> Result<(), String> {

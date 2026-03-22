@@ -370,7 +370,7 @@ impl EmbeddingDriver for BedrockEmbeddingDriver {
             let (auth, amz_date, payload_hash) = sigv4_auth_header(
                 &self.access_key,
                 &self.secret_key,
-                self.session_token.as_deref(),
+                self.session_token.as_ref().map(|s| s.as_str()),
                 &self.region,
                 "bedrock",
                 &host,
@@ -796,8 +796,7 @@ mod tests {
 
         let result =
             create_embedding_driver("bedrock", "amazon.titan-embed-text-v2:0", "", None, None);
-        assert!(result.is_err());
-        let err_msg = result.err().unwrap().to_string();
+        let err_msg = result.err().expect("expected Err").to_string();
         assert!(err_msg.contains("AWS_ACCESS_KEY_ID"));
 
         // Restore env vars if they were set.
