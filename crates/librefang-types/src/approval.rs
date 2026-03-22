@@ -115,8 +115,7 @@ impl ApprovalRequest {
         }
         if self.tool_name.len() > MAX_TOOL_NAME_LEN {
             return Err(format!(
-                "tool_name too long ({} chars, max {MAX_TOOL_NAME_LEN})",
-                self.tool_name.len()
+                "tool_name too long (max {MAX_TOOL_NAME_LEN} chars)"
             ));
         }
         if !self
@@ -132,16 +131,14 @@ impl ApprovalRequest {
         // -- description --
         if self.description.len() > MAX_DESCRIPTION_LEN {
             return Err(format!(
-                "description too long ({} chars, max {MAX_DESCRIPTION_LEN})",
-                self.description.len()
+                "description too long (max {MAX_DESCRIPTION_LEN} chars)"
             ));
         }
 
         // -- action_summary --
         if self.action_summary.len() > MAX_ACTION_SUMMARY_LEN {
             return Err(format!(
-                "action_summary too long ({} chars, max {MAX_ACTION_SUMMARY_LEN})",
-                self.action_summary.len()
+                "action_summary too long (max {MAX_ACTION_SUMMARY_LEN} chars)"
             ));
         }
 
@@ -186,10 +183,7 @@ fn validate_tool_name(name: &str, label: &str) -> Result<(), String> {
         return Err(format!("{label} must not be empty"));
     }
     if name.len() > MAX_TOOL_NAME_LEN {
-        return Err(format!(
-            "{label} too long ({} chars, max {MAX_TOOL_NAME_LEN})",
-            name.len()
-        ));
+        return Err(format!("{label} too long (max {MAX_TOOL_NAME_LEN} chars)"));
     }
     if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Err(format!(
@@ -237,13 +231,12 @@ impl ChannelToolRule {
         }
         if self.allowed_tools.len() > MAX_CHANNEL_RULE_TOOLS {
             return Err(format!(
-                "allowed_tools list too long ({}, max {MAX_CHANNEL_RULE_TOOLS})",
-                self.allowed_tools.len()
+                "allowed_tools list too long (max {MAX_CHANNEL_RULE_TOOLS})"
             ));
         }
         if self.denied_tools.len() > MAX_CHANNEL_RULE_TOOLS {
             return Err(format!(
-                "denied_tools list too long ({}, max {MAX_CHANNEL_RULE_TOOLS})",
+                "denied_tools list too long (max {MAX_CHANNEL_RULE_TOOLS})",
                 self.denied_tools.len()
             ));
         }
