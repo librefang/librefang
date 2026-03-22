@@ -495,7 +495,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
-        Ok(self.kernel.registry.find_by_name(name).map(|e| e.id))
+        Ok(self
+            .kernel
+            .agent_registry()
+            .find_by_name(name)
+            .map(|e| e.id))
     }
 
     async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
@@ -718,7 +722,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         };
 
         let kernel = self.kernel.clone();
-        let registry_ref = &self.kernel.registry;
+        let registry_ref = &self.kernel.agent_registry();
         let result = self
             .kernel
             .workflows
@@ -795,7 +799,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         pattern_str: &str,
         prompt: &str,
     ) -> String {
-        let agent = match self.kernel.registry.find_by_name(agent_name) {
+        let agent = match self.kernel.agent_registry().find_by_name(agent_name) {
             Some(e) => e,
             None => return format!("Agent '{agent_name}' not found."),
         };
@@ -886,7 +890,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     return "Usage: /schedule add <agent> <min> <hour> <dom> <month> <dow> <message>".to_string();
                 }
                 let agent_name = &args[0];
-                let agent = match self.kernel.registry.find_by_name(agent_name) {
+                let agent = match self.kernel.agent_registry().find_by_name(agent_name) {
                     Some(e) => e,
                     None => return format!("Agent '{agent_name}' not found."),
                 };
@@ -1177,7 +1181,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         channel_type: &str,
         account_id: Option<&str>,
     ) -> Option<librefang_types::config::ChannelOverrides> {
-        let channels = &self.kernel.config.channels;
+        let channels = &self.kernel.config_ref().channels;
 
         /// Look up channel overrides, preferring the entry whose `account_id`
         /// matches the message's account_id. Falls back to the first entry
@@ -1328,7 +1332,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     // ── Budget, Network, A2A ──
 
     async fn budget_text(&self) -> String {
-        let budget = &self.kernel.config.budget;
+        let budget = &self.kernel.config_ref().budget;
         let status = self.kernel.metering.budget_status(budget);
 
         let fmt_limit = |v: f64| -> String {
@@ -1368,7 +1372,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn peers_text(&self) -> String {
-        if !self.kernel.config.network_enabled {
+        if !self.kernel.config_ref().network_enabled {
             return "OFP peer network is disabled. Set network_enabled = true in config.toml."
                 .to_string();
         }

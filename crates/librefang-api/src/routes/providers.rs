@@ -355,7 +355,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
             entry["regions"] = serde_json::Value::Object(regions);
 
             // Mark which region is active (if configured via [provider_regions])
-            if let Some(active) = state.kernel.config.provider_regions.get(&p.id) {
+            if let Some(active) = state.kernel.config_ref().provider_regions.get(&p.id) {
                 entry["active_region"] = serde_json::json!(active);
             }
         }
@@ -671,8 +671,8 @@ pub async fn set_provider_key(
         match guard.as_ref() {
             Some(dm) => (dm.provider.clone(), dm.api_key_env.clone()),
             None => (
-                state.kernel.config.default_model.provider.clone(),
-                state.kernel.config.default_model.api_key_env.clone(),
+                state.kernel.config_ref().default_model.provider.clone(),
+                state.kernel.config_ref().default_model.api_key_env.clone(),
             ),
         }
     };
@@ -745,7 +745,7 @@ pub async fn set_provider_key(
                 .unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
                 Some(dm) => dm.api_key_env != env_var,
-                None => state.kernel.config.default_model.api_key_env != env_var,
+                None => state.kernel.config_ref().default_model.api_key_env != env_var,
             }
         };
         if needs_update {
@@ -756,7 +756,7 @@ pub async fn set_provider_key(
                 .unwrap_or_else(|e| e.into_inner());
             let base = guard
                 .clone()
-                .unwrap_or_else(|| state.kernel.config.default_model.clone());
+                .unwrap_or_else(|| state.kernel.config_ref().default_model.clone());
             *guard = Some(librefang_types::config::DefaultModelConfig {
                 api_key_env: env_var.clone(),
                 ..base

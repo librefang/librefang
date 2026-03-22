@@ -147,7 +147,7 @@ pub async fn agent_ws(
 ) -> impl IntoResponse {
     // SECURITY: Authenticate WebSocket upgrades (bypasses middleware).
     // Trim whitespace so empty/whitespace-only api_key disables auth.
-    let api_key_raw = &state.kernel.config.api_key;
+    let api_key_raw = &state.kernel.config_ref().api_key;
     let api_key = api_key_raw.trim();
     if !api_key.is_empty() {
         // SECURITY: Use constant-time comparison to prevent timing attacks on API key
@@ -197,7 +197,7 @@ pub async fn agent_ws(
     };
 
     // Verify agent exists
-    if state.kernel.registry.get(agent_id).is_none() {
+    if state.kernel.agent_registry().get(agent_id).is_none() {
         return axum::http::StatusCode::NOT_FOUND.into_response();
     }
 
@@ -836,7 +836,7 @@ async fn handle_command(
         },
         "model" => {
             if args.is_empty() {
-                if let Some(entry) = state.kernel.registry.get(agent_id) {
+                if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
                     serde_json::json!({"type": "command_result", "command": cmd, "message": format!("Current model: {} (provider: {})", entry.manifest.model.model, entry.manifest.model.provider)})
                 } else {
                     serde_json::json!({"type": "error", "content": "Agent not found"})
@@ -844,7 +844,7 @@ async fn handle_command(
             } else {
                 match state.kernel.set_agent_model(agent_id, args, None) {
                     Ok(()) => {
-                        if let Some(entry) = state.kernel.registry.get(agent_id) {
+                        if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
                             let model = &entry.manifest.model.model;
                             let provider = &entry.manifest.model.provider;
                             serde_json::json!({
@@ -921,7 +921,7 @@ async fn handle_command(
             serde_json::json!({"type": "command_result", "command": cmd, "message": msg})
         }
         "budget" => {
-            let budget = &state.kernel.config.budget;
+            let budget = &state.kernel.config_ref().budget;
             let status = state.kernel.metering.budget_status(budget);
             let fmt = |v: f64| -> String {
                 if v > 0.0 {
@@ -942,7 +942,7 @@ async fn handle_command(
             serde_json::json!({"type": "command_result", "command": cmd, "message": msg})
         }
         "peers" => {
-            let msg = if !state.kernel.config.network_enabled {
+            let msg = if !state.kernel.config_ref().network_enabled {
                 "OFP network disabled.".to_string()
             } else {
                 match state.kernel.peer_registry.get() {

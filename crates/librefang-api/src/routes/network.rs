@@ -111,8 +111,8 @@ pub async fn get_peer(
     )
 )]
 pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let enabled = state.kernel.config.network_enabled
-        && !state.kernel.config.network.shared_secret.is_empty();
+    let enabled = state.kernel.config_ref().network_enabled
+        && !state.kernel.config_ref().network.shared_secret.is_empty();
 
     let (node_id, listen_address, connected_peers, total_peers) =
         if let Some(peer_node) = state.kernel.peer_node.get() {
@@ -145,20 +145,21 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 )]
 pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.registry.list();
-    let base_url = format!("http://{}", state.kernel.config.api_listen);
+    let agents = state.kernel.agent_registry().list();
+    let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
 
     // Use service-level A2A config for the well-known card when available.
-    let (service_name, service_description) = if let Some(ref a2a_cfg) = state.kernel.config.a2a {
-        let name = if a2a_cfg.name.is_empty() {
-            "LibreFang Agent OS".to_string()
+    let (service_name, service_description) =
+        if let Some(ref a2a_cfg) = state.kernel.config_ref().a2a {
+            let name = if a2a_cfg.name.is_empty() {
+                "LibreFang Agent OS".to_string()
+            } else {
+                a2a_cfg.name.clone()
+            };
+            (name, a2a_cfg.description.clone())
         } else {
-            a2a_cfg.name.clone()
+            ("LibreFang Agent OS".to_string(), String::new())
         };
-        (name, a2a_cfg.description.clone())
-    } else {
-        ("LibreFang Agent OS".to_string(), String::new())
-    };
 
     // Aggregate skills from ALL agents.
     let skills: Vec<librefang_runtime::a2a::AgentSkill> = agents
@@ -199,8 +200,8 @@ pub async fn a2a_agent_card(State(state): State<Arc<AppState>>) -> impl IntoResp
     )
 )]
 pub async fn a2a_list_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let agents = state.kernel.registry.list();
-    let base_url = format!("http://{}", state.kernel.config.api_listen);
+    let agents = state.kernel.agent_registry().list();
+    let base_url = format!("http://{}", state.kernel.config_ref().api_listen);
 
     let cards: Vec<serde_json::Value> = agents
         .iter()
@@ -249,7 +250,7 @@ pub async fn a2a_send_task(
         .unwrap_or_else(|| "No message provided".to_string());
 
     // Find target agent (use first available or specified)
-    let agents = state.kernel.registry.list();
+    let agents = state.kernel.agent_registry().list();
     if agents.is_empty() {
         return (
             StatusCode::NOT_FOUND,
@@ -775,13 +776,13 @@ pub async fn mcp_http(
             None,
             Some(&state.kernel.media_engine),
             None, // exec_policy
-            if state.kernel.config.tts.enabled {
+            if state.kernel.config_ref().tts.enabled {
                 Some(&state.kernel.tts_engine)
             } else {
                 None
             },
-            if state.kernel.config.docker.enabled {
-                Some(&state.kernel.config.docker)
+            if state.kernel.config_ref().docker.enabled {
+                Some(&state.kernel.config_ref().docker)
             } else {
                 None
             },
@@ -822,7 +823,7 @@ pub async fn mcp_http(
 pub async fn comms_topology(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     use librefang_types::comms::{EdgeKind, TopoEdge, TopoNode, Topology};
 
-    let agents = state.kernel.registry.list();
+    let agents = state.kernel.agent_registry().list();
 
     let nodes: Vec<TopoNode> = agents
         .iter()
@@ -1057,7 +1058,7 @@ pub async fn comms_events(
         .unwrap_or(100)
         .min(500);
 
-    let agents = state.kernel.registry.list();
+    let agents = state.kernel.agent_registry().list();
 
     // Primary source: event bus (has full source/target context)
     let bus_events = state.kernel.event_bus.history(500).await;
@@ -1113,7 +1114,7 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
         loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-            let agents = state.kernel.registry.list();
+            let agents = state.kernel.agent_registry().list();
             let entries = state.kernel.audit().recent(50);
 
             for entry in &entries {
@@ -1168,7 +1169,7 @@ pub async fn comms_send(
             )
         }
     };
-    if state.kernel.registry.get(from_id).is_none() {
+    if state.kernel.agent_registry().get(from_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Source agent not found"})),
@@ -1185,7 +1186,7 @@ pub async fn comms_send(
             )
         }
     };
-    if state.kernel.registry.get(to_id).is_none() {
+    if state.kernel.agent_registry().get(to_id).is_none() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Target agent not found"})),

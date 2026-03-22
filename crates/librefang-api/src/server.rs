@@ -863,7 +863,7 @@ async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let cfg = &state.kernel.config;
+    let cfg = &state.kernel.config_ref();
     let cfg_user = resolve_dashboard_credential(
         &cfg.dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
@@ -928,7 +928,7 @@ async fn dashboard_login(
 async fn dashboard_auth_check(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
 ) -> axum::response::Json<serde_json::Value> {
-    let cfg = &state.kernel.config;
+    let cfg = &state.kernel.config_ref();
     let du = resolve_dashboard_credential(
         &cfg.dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
@@ -996,7 +996,7 @@ pub async fn build_router(
             }
         }
         // Add explicitly configured CORS origins from config.toml
-        for origin in &state.kernel.config.cors_origin {
+        for origin in &state.kernel.config_ref().cors_origin {
             if let Ok(v) = origin.parse::<axum::http::HeaderValue>() {
                 origins.push(v);
             } else {
@@ -1010,16 +1010,16 @@ pub async fn build_router(
     };
 
     // Trim whitespace so `api_key = ""` or `api_key = "  "` both disable auth.
-    let explicit_api_key = state.kernel.config.api_key.trim().to_string();
+    let explicit_api_key = state.kernel.config_ref().api_key.trim().to_string();
 
     // Derive dashboard session token from credentials (if configured).
     let du_val = resolve_dashboard_credential(
-        &state.kernel.config.dashboard_user,
+        &state.kernel.config_ref().dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
         &state.kernel.home_dir(),
     );
     let dp_val = resolve_dashboard_credential(
-        &state.kernel.config.dashboard_pass,
+        &state.kernel.config_ref().dashboard_pass,
         "LIBREFANG_DASHBOARD_PASS",
         &state.kernel.home_dir(),
     );
