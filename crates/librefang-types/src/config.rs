@@ -1476,6 +1476,51 @@ pub struct KernelConfig {
     /// Alternatively you can set `provider_urls.qwen-code` to the same value.
     #[serde(default)]
     pub qwen_code_path: Option<String>,
+    /// Input sanitization / prompt-injection detection for channel messages.
+    #[serde(default)]
+    pub sanitize: SanitizeConfig,
+}
+
+/// Input sanitization mode for channel messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SanitizeMode {
+    /// No checking — all messages pass through (default).
+    #[default]
+    Off,
+    /// Log a warning but allow the message through.
+    Warn,
+    /// Reject the message and send an error to the user.
+    Block,
+}
+
+/// Configuration for channel input sanitization / prompt-injection detection.
+///
+/// ```toml
+/// [sanitize]
+/// mode = "warn"           # off | warn | block
+/// max_message_length = 32768
+/// custom_block_patterns = ["(?i)secret\\s+code"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SanitizeConfig {
+    /// Sanitization mode.
+    pub mode: SanitizeMode,
+    /// Maximum allowed message length in bytes (default: 32 768).
+    pub max_message_length: usize,
+    /// Additional regex patterns that should trigger a block/warn.
+    pub custom_block_patterns: Vec<String>,
+}
+
+impl Default for SanitizeConfig {
+    fn default() -> Self {
+        Self {
+            mode: SanitizeMode::Off,
+            max_message_length: 32768,
+            custom_block_patterns: Vec::new(),
+        }
+    }
 }
 
 /// Azure OpenAI provider configuration.
@@ -2252,6 +2297,7 @@ impl Default for KernelConfig {
             privacy: PrivacyConfig::default(),
             strict_config: false,
             qwen_code_path: None,
+            sanitize: SanitizeConfig::default(),
         }
     }
 }
