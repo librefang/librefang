@@ -361,9 +361,15 @@ impl TelegramAdapter {
                             })
                         } else {
                             // Callback button — sends callback_query to the bot
+                            // Telegram limits callback_data to 64 bytes
+                            let action = if btn.action.len() > 64 {
+                                btn.action[..64].to_string()
+                            } else {
+                                btn.action.clone()
+                            };
                             serde_json::json!({
                                 "text": btn.label,
-                                "callback_data": btn.action,
+                                "callback_data": action,
                             })
                         }
                     })
