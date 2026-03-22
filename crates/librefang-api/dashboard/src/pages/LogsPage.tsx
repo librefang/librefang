@@ -62,7 +62,7 @@ export function LogsPage() {
 
       <Card padding="none" className="flex-1 overflow-hidden">
         {/* 搜索和筛选 */}
-        <div className="bg-main border-b border-border-subtle px-6 py-3 flex items-center gap-4">
+        <div className="bg-main border-b border-border-subtle px-3 sm:px-6 py-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-4">
           <div className="flex-1">
             <Input
               value={search}
@@ -82,14 +82,14 @@ export function LogsPage() {
           </select>
         </div>
 
-        <div className="bg-main border-b border-border-subtle px-4 py-3 flex gap-4 items-center text-[10px] font-black uppercase tracking-widest text-text-dim/60">
+        <div className="bg-main border-b border-border-subtle px-4 py-3 hidden sm:flex gap-4 items-center text-[10px] font-black uppercase tracking-widest text-text-dim/60">
           <span className="shrink-0 w-16">{t("logs.timestamp")}</span>
           <span className="shrink-0 w-14">{t("common.type")}</span>
           <span className="shrink-0 w-28">{t("logs.module")}</span>
           <span className="shrink-0 w-16">{t("logs.agent")}</span>
           <span className="flex-1">{t("logs.message")}</span>
         </div>
-        <div className="p-4 font-mono text-xs space-y-1 max-h-[60vh] overflow-y-auto scrollbar-thin">
+        <div className="p-2 sm:p-4 font-mono text-xs space-y-1 max-h-[60vh] overflow-y-auto scrollbar-thin">
           {auditQuery.isLoading ? (
             <div className="text-center py-8 text-text-dim">{t("common.loading")}</div>
           ) : filteredLogs.length === 0 ? (
@@ -105,11 +105,13 @@ export function LogsPage() {
               const reason = l.outcome && l.outcome !== detail ? l.outcome : "";
               const agentId = l.agent_id ? l.agent_id.slice(0, 8) : "";
               return (
-                <div key={l.seq || l.id || i} className="flex gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-start">
-                  <span className="text-text-dim/40 shrink-0 w-16 text-[10px]">{time}</span>
-                  <span className="shrink-0 w-14"><span className={`px-1.5 py-0.5 rounded text-[10px] font-black uppercase ${levelStyle.bg} ${levelStyle.color}`}>{level}</span></span>
-                  <span className="text-brand font-bold shrink-0 w-28 truncate text-[10px]">{l.action || l.source || "-"}</span>
-                  <span className="text-text-dim/40 font-mono shrink-0 w-16 text-[9px]">{agentId || "-"}</span>
+                <div key={l.seq || l.id || i} className="flex flex-col sm:flex-row gap-1 sm:gap-4 p-2 hover:bg-surface-hover rounded transition-colors items-start">
+                  <div className="flex items-center gap-2 sm:contents">
+                    <span className="text-text-dim/40 shrink-0 sm:w-16 text-[10px]">{time}</span>
+                    <span className="shrink-0 sm:w-14"><span className={`px-1.5 py-0.5 rounded text-[10px] font-black uppercase ${levelStyle.bg} ${levelStyle.color}`}>{level}</span></span>
+                    <span className="text-brand font-bold shrink-0 sm:w-28 truncate text-[10px]">{l.action || l.source || "-"}</span>
+                    <span className="text-text-dim/40 font-mono shrink-0 sm:w-16 text-[9px] hidden sm:inline">{agentId || "-"}</span>
+                  </div>
                   <div className="min-w-0 flex-1">
                     <span className="text-slate-700 dark:text-slate-300 text-[11px] break-all">{detail}</span>
                     {reason && (

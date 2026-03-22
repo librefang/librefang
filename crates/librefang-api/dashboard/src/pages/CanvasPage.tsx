@@ -23,7 +23,7 @@ import {
   ConnectionLineType,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, type AgentItem, type WorkflowItem } from "../api";
+import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, listWorkflowTemplates, instantiateTemplate, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate } from "../api";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -32,7 +32,7 @@ import {
   Play, Save, Trash2, Plus, FolderOpen, Loader2,
   Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight,
   Copy, ClipboardPaste, LayoutGrid,
-  Download, Upload, HelpCircle, Scan, Check
+  Download, Upload, HelpCircle, Scan, Check, LayoutTemplate, Search, Tag
 } from "lucide-react";
 
 // 节点类型配置 — n8n 风格配色
@@ -239,6 +239,177 @@ function WorkflowList({
   );
 }
 
+// 模板浏览器
+function TemplateBrowser({
+  onInstantiate, onClose, t
+}: {
+  onInstantiate: (workflowId: string) => void;
+  onClose: () => void;
+  t: (key: string) => string;
+}) {
+  const [templates, setTemplates] = useState<ApiWorkflowTemplate[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [selectedTemplate, setSelectedTemplate] = useState<ApiWorkflowTemplate | null>(null);
+  const [paramValues, setParamValues] = useState<Record<string, unknown>>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLoading(true);
+    listWorkflowTemplates(searchQuery || undefined)
+      .then(setTemplates)
+      .catch(() => setTemplates([]))
+      .finally(() => setLoading(false));
+  }, [searchQuery]);
+
+  const handleSelect = (tmpl: ApiWorkflowTemplate) => {
+    setSelectedTemplate(tmpl);
+    setError(null);
+    // Pre-fill defaults
+    const defaults: Record<string, unknown> = {};
+    for (const p of tmpl.parameters ?? []) {
+      if (p.default !== undefined) defaults[p.name] = p.default;
+    }
+    setParamValues(defaults);
+  };
+
+  const handleInstantiate = async () => {
+    if (!selectedTemplate) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      const resp = await instantiateTemplate(selectedTemplate.id, paramValues);
+      const workflowId = (resp as any).workflow_id || (resp as any).id || "";
+      onInstantiate(workflowId);
+    } catch (e: any) {
+      setError(e?.message || t("canvas.template_instantiate_error"));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
+      <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[640px] max-w-[90vw] max-h-[80vh] flex flex-col animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle shrink-0">
+          <div className="flex items-center gap-2">
+            <LayoutTemplate className="w-4 h-4 text-brand" />
+            <h3 className="text-sm font-bold">{t("canvas.browse_templates")}</h3>
+          </div>
+          <button onClick={onClose} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>
+        </div>
+
+        {selectedTemplate ? (
+          /* Template detail + params form */
+          <div className="flex-1 overflow-y-auto p-5 space-y-4">
+            <button onClick={() => setSelectedTemplate(null)} className="text-xs text-brand hover:underline flex items-center gap-1">
+              <ArrowLeft className="w-3 h-3" /> {t("common.back")}
+            </button>
+            <div>
+              <h4 className="text-base font-bold">{selectedTemplate.name}</h4>
+              {selectedTemplate.description && <p className="text-xs text-text-dim mt-1">{selectedTemplate.description}</p>}
+              <div className="flex gap-1.5 mt-2">
+                {selectedTemplate.category && <Badge variant="brand">{selectedTemplate.category}</Badge>}
+                {selectedTemplate.tags?.map(tag => (
+                  <Badge key={tag} variant="default">{tag}</Badge>
+                ))}
+              </div>
+            </div>
+
+            {(selectedTemplate.parameters ?? []).length > 0 && (
+              <div className="space-y-3">
+                <h5 className="text-[10px] font-black uppercase tracking-wider text-text-dim/50">{t("canvas.template_params")}</h5>
+                {selectedTemplate.parameters!.map(p => (
+                  <div key={p.name}>
+                    <label className="text-[10px] font-bold text-text-dim uppercase">
+                      {p.name}
+                      {p.required && <span className="text-error ml-0.5">*</span>}
+                    </label>
+                    {p.description && <p className="text-[9px] text-text-dim/60 mt-0.5">{p.description}</p>}
+                    <input
+                      type={p.param_type === "number" ? "number" : "text"}
+                      value={String(paramValues[p.name] ?? "")}
+                      onChange={e => setParamValues(prev => ({ ...prev, [p.name]: p.param_type === "number" ? Number(e.target.value) : e.target.value }))}
+                      className="mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand"
+                      placeholder={p.description || p.name}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {error && (
+              <div className="px-3 py-2 rounded-lg bg-error/10 border border-error/30 text-error text-xs">{error}</div>
+            )}
+
+            <Button variant="primary" className="w-full" onClick={handleInstantiate} disabled={submitting}>
+              {submitting ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Play className="w-4 h-4 mr-1" />}
+              {t("canvas.use_template")}
+            </Button>
+          </div>
+        ) : (
+          /* Template list */
+          <div className="flex-1 overflow-y-auto">
+            {/* Search */}
+            <div className="px-5 pt-4 pb-2">
+              <div className="relative">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-text-dim/40" />
+                <input
+                  type="text" value={searchQuery}
+                  onChange={e => setSearchQuery(e.target.value)}
+                  placeholder={t("canvas.template_search")}
+                  className="w-full rounded-xl border border-border-subtle bg-main pl-8 pr-3 py-2 text-xs outline-none focus:border-brand"
+                />
+              </div>
+            </div>
+
+            {loading ? (
+              <div className="flex items-center justify-center py-12">
+                <Loader2 className="w-5 h-5 animate-spin text-brand" />
+              </div>
+            ) : templates.length === 0 ? (
+              <div className="text-center py-12">
+                <p className="text-xs text-text-dim">{t("canvas.no_templates")}</p>
+              </div>
+            ) : (
+              <div className="px-5 pb-4 grid gap-2">
+                {templates.map(tmpl => (
+                  <button
+                    key={tmpl.id}
+                    onClick={() => handleSelect(tmpl)}
+                    className="p-3 rounded-xl border border-border-subtle bg-surface hover:border-brand/50 hover:shadow-sm transition-all text-left"
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm font-bold truncate">{tmpl.name}</span>
+                      <div className="flex gap-1 shrink-0">
+                        {tmpl.category && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-brand/10 text-brand">{tmpl.category}</span>
+                        )}
+                      </div>
+                    </div>
+                    {tmpl.description && <p className="text-[10px] text-text-dim mt-1 line-clamp-2">{tmpl.description}</p>}
+                    {tmpl.tags && tmpl.tags.length > 0 && (
+                      <div className="flex gap-1 mt-2 flex-wrap">
+                        {tmpl.tags.map(tag => (
+                          <span key={tag} className="text-[9px] px-1.5 py-0.5 rounded-full bg-main text-text-dim flex items-center gap-0.5">
+                            <Tag className="w-2.5 h-2.5" /> {tag}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // 节点配置面板
 const inputClass = "mt-1 w-full rounded-lg border border-border-subtle bg-main px-2 py-1.5 text-xs outline-none focus:border-brand";
 const labelClass = "text-[10px] font-bold text-text-dim uppercase";
@@ -289,7 +460,7 @@ function NodeConfigPanel({
   const hasAgent = !!agentId;
 
   return (
-    <div className="absolute top-3 right-3 z-20 w-80 max-h-[calc(100%-24px)] rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden flex flex-col">
+    <div className="absolute top-3 right-3 z-20 w-[calc(100%-24px)] sm:w-80 max-h-[calc(100%-24px)] rounded-xl border border-border-subtle bg-surface shadow-2xl overflow-hidden flex flex-col">
       <div className="flex items-center justify-between px-3 py-2 bg-main/50 border-b border-border-subtle shrink-0">
         <span className="text-xs font-bold">{t("canvas.node_config")}</span>
         <div className="flex items-center gap-1">
@@ -450,6 +621,7 @@ function CanvasPageInner() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; nodeId?: string } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(false);
+  const [showTemplateBrowser, setShowTemplateBrowser] = useState(false);
 
   // 撤销/重做历史
   const historyRef = useRef<{ nodes: Node[]; edges: Edge[] }[]>([]);
@@ -648,6 +820,12 @@ function CanvasPageInner() {
   const createGroupRef = useRef<() => void>(() => {});
   const ungroupRef = useRef<(id: string) => void>(() => {});
 
+  // Stable refs for group callbacks — prevents nodeTypes from changing on every render
+  const toggleGroupRef = useRef<(id: string) => void>(() => {});
+  const ungroupNodesRef = useRef<(id: string) => void>(() => {});
+  const deleteGroupAndChildrenRef = useRef<(id: string) => void>(() => {});
+  const tRef = useRef(t);
+
   useEffect(() => {
     const isInput = () => {
       const tag = document.activeElement?.tagName;
@@ -796,15 +974,19 @@ function CanvasPageInner() {
     });
   }, [nodes, setNodes, setEdges]);
 
+  // IMPORTANT: nodeTypes must be referentially stable to prevent ReactFlow from
+  // unmounting/remounting all nodes on every render, which breaks click handlers.
+  // We use refs for all callbacks and the translation function so the deps are empty.
   const nodeTypes = useMemo(() => ({
-    custom: (props: any) => <CustomNode {...props} t={t} />,
+    custom: (props: any) => <CustomNode {...props} t={tRef.current} />,
     groupNode: (props: any) => <GroupNodeComponent {...props} data={{
       ...props.data,
-      _onToggle: toggleGroup,
-      _onUngroup: ungroupNodes,
-      _onDeleteGroup: deleteGroupAndChildren,
+      _onToggle: (id: string) => toggleGroupRef.current(id),
+      _onUngroup: (id: string) => ungroupNodesRef.current(id),
+      _onDeleteGroup: (id: string) => deleteGroupAndChildrenRef.current(id),
     }} />,
-  }), [t, toggleGroup, ungroupNodes, deleteGroupAndChildren]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), []);
 
   // 需要 agent 的节点类型（后端所有 step 都需要 agent）
   const AGENT_NODE_TYPES = AGENT_NODE_TYPES_SET;
@@ -1049,6 +1231,12 @@ function CanvasPageInner() {
   // 同步快捷键 refs
   createGroupRef.current = createGroup;
   ungroupRef.current = ungroupNodes;
+
+  // Sync stable refs for group callbacks used by nodeTypes
+  toggleGroupRef.current = toggleGroup;
+  ungroupNodesRef.current = ungroupNodes;
+  deleteGroupAndChildrenRef.current = deleteGroupAndChildren;
+  tRef.current = t;
 
   // 更新节点数据
   const handleNodeUpdate = useCallback((id: string, newData: any) => {
@@ -1299,6 +1487,19 @@ function CanvasPageInner() {
     setEditingNode(null);
   }, [setNodes, setEdges]);
 
+  // 模板实例化回调：关闭浏览器，刷新工作流列表，选中新工作流
+  const handleTemplateInstantiate = useCallback(async (workflowId: string) => {
+    setShowTemplateBrowser(false);
+    try {
+      const updatedList = await listWorkflows();
+      setWorkflows(updatedList);
+      const created = updatedList.find(w => w.id === workflowId);
+      if (created) {
+        handleSelectWorkflow(created);
+      }
+    } catch { /* ignore */ }
+  }, [handleSelectWorkflow]);
+
   // 有效 agent 步骤数量
   const agentStepCount = useMemo(() => buildSteps(nodes).length, [nodes, buildSteps]);
 
@@ -1307,8 +1508,8 @@ function CanvasPageInner() {
 
   return (
     <div className={`flex flex-col transition-all duration-300 ${isFullscreen ? "fixed inset-0 z-[100] bg-main" : "h-[calc(100vh-140px)]"}`}>
-      <header className="flex justify-between items-end pb-4">
-        <div className="flex items-center gap-4">
+      <header className="flex flex-wrap justify-between items-end gap-2 pb-2 sm:pb-4">
+        <div className="flex items-center gap-2 sm:gap-4">
           {isFullscreen && (
             <Button variant="ghost" size="sm" onClick={() => navigate({ to: "/workflows" })}>
               <ArrowLeft className="w-4 h-4 mr-1" />
@@ -1328,22 +1529,22 @@ function CanvasPageInner() {
             </>
           )}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 flex-wrap">
           {/* 状态信息 */}
           {selectedNodeIds.size >= 2 && (
             <Button variant="secondary" size="sm" onClick={createGroup}>
               <Group className="w-3.5 h-3.5 mr-1" />
-              {t("canvas.create_group")}
+              <span className="hidden sm:inline">{t("canvas.create_group")}</span>
             </Button>
           )}
           {agentStepCount > 0 && (
-            <span className="text-[10px] font-bold text-success px-2">
+            <span className="text-[10px] font-bold text-success px-2 hidden sm:inline">
               {agentStepCount} {t("canvas.agent_steps")}
             </span>
           )}
 
           {/* 视图工具 */}
-          <div className="flex items-center gap-0.5 px-1">
+          <div className="flex items-center gap-0.5 px-0.5 sm:px-1">
             <Button variant="secondary" onClick={() => setIsFullscreen(!isFullscreen)} title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}>
               {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
             </Button>
@@ -1352,45 +1553,48 @@ function CanvasPageInner() {
             </Button>
           </div>
 
-          <div className="w-px h-5 bg-border-subtle" />
+          <div className="w-px h-5 bg-border-subtle hidden sm:block" />
 
           {/* 文件操作 */}
-          <div className="flex items-center gap-0.5 px-1">
+          <div className="flex items-center gap-0.5 px-0.5 sm:px-1">
             <Button variant="secondary" onClick={() => setShowWorkflowPanel(!showWorkflowPanel)} title={t("workflows.open_workflows")}>
               <FolderOpen className="w-4 h-4" />
+            </Button>
+            <Button variant="secondary" onClick={() => setShowTemplateBrowser(true)} title={t("canvas.browse_templates")}>
+              <LayoutTemplate className="w-4 h-4" />
             </Button>
             <Button variant="secondary" onClick={exportWorkflow} title="Export (Cmd+E)">
               <Download className="w-4 h-4" />
             </Button>
-            <Button variant="secondary" onClick={importWorkflow} title="Import (Cmd+I)">
+            <Button variant="secondary" onClick={importWorkflow} title="Import (Cmd+I)" className="hidden sm:flex">
               <Upload className="w-4 h-4" />
             </Button>
           </div>
 
-          <div className="w-px h-5 bg-border-subtle" />
+          <div className="w-px h-5 bg-border-subtle hidden sm:block" />
 
           {/* 画布操作 */}
-          <div className="flex items-center gap-0.5 px-1">
+          <div className="flex items-center gap-0.5 px-0.5 sm:px-1">
             <Button variant="secondary" onClick={() => { setNodes([]); setEdges([]); setEditingNode(null); }} title={t("common.clear")}>
               <Trash2 className="w-4 h-4" />
             </Button>
-            <Button variant="secondary" onClick={() => setShowHelp(true)} title="Shortcuts (?)">
+            <Button variant="secondary" onClick={() => setShowHelp(true)} title="Shortcuts (?)" className="hidden sm:flex">
               <HelpCircle className="w-4 h-4" />
             </Button>
           </div>
 
-          <div className="w-px h-5 bg-border-subtle" />
+          <div className="w-px h-5 bg-border-subtle hidden sm:block" />
 
           {/* 主操作 */}
-          <div className="flex items-center gap-1.5 pl-1">
+          <div className="flex items-center gap-1 sm:gap-1.5 pl-0.5 sm:pl-1">
             <Button variant="primary" onClick={handleSave} disabled={!workflowName.trim() || agentStepCount === 0}>
-              <Save className="w-4 h-4 mr-1" />
-              {t("common.save")}
+              <Save className="w-4 h-4" />
+              <span className="hidden sm:inline ml-1">{t("common.save")}</span>
             </Button>
             <Button variant="primary" onClick={() => handleRunClick()}
               disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId}>
-              {runningWorkflowId ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <Play className="w-4 h-4 mr-1" />}
-              {t("workflows.run_workflow")}
+              {runningWorkflowId ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+              <span className="hidden sm:inline ml-1">{t("workflows.run_workflow")}</span>
             </Button>
           </div>
         </div>
@@ -1411,7 +1615,7 @@ function CanvasPageInner() {
         )}
 
         {/* 节点库（可折叠） */}
-        <div className={`border-r border-border-subtle bg-surface/50 backdrop-blur overflow-y-auto transition-all duration-200 ${
+        <div className={`border-r border-border-subtle bg-surface/50 backdrop-blur overflow-y-auto transition-all duration-200 hidden sm:block ${
           sidebarCollapsed ? "w-10 px-1 py-2" : "w-52 p-3 space-y-4"
         }`}>
           <button onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -1623,6 +1827,15 @@ function CanvasPageInner() {
           )}
         </main>
       </div>
+
+      {/* 模板浏览器 */}
+      {showTemplateBrowser && (
+        <TemplateBrowser
+          onInstantiate={handleTemplateInstantiate}
+          onClose={() => setShowTemplateBrowser(false)}
+          t={t}
+        />
+      )}
 
       {/* Toast */}
       {toast && (

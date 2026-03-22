@@ -541,7 +541,9 @@ impl LlmDriver for ClaudeCodeDriver {
         let model_flag = Self::model_flag(&request.model);
 
         let mut cmd = tokio::process::Command::new(&self.cli_path);
-        for arg in self.build_command_args(&prepared.text, "stream-json", true, model_flag.as_deref()) {
+        for arg in
+            self.build_command_args(&prepared.text, "stream-json", true, model_flag.as_deref())
+        {
             cmd.arg(arg);
         }
 

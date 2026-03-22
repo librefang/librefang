@@ -786,7 +786,7 @@ async fn dispatch_message(
                 format!("[User sent a voice message ({duration_seconds}s): {url}]\nCaption: {c}")
             }
             None => format!("[User sent a voice message ({duration_seconds}s): {url}]"),
-        }
+        },
         ChannelContent::Video {
             ref url,
             ref caption,
@@ -803,6 +803,22 @@ async fn dispatch_message(
         }
         ChannelContent::FileData { ref filename, .. } => {
             format!("[User sent a local file: {filename}]")
+        }
+        ChannelContent::Interactive { ref text, .. } => {
+            // Interactive messages are outbound-only; if one arrives as inbound
+            // treat the text portion as the user message.
+            text.clone()
+        }
+        ChannelContent::ButtonCallback {
+            ref action,
+            ref message_text,
+        } => {
+            // A user clicked an interactive button — pass the callback action
+            // as the message text so the agent can handle it.
+            match message_text {
+                Some(mt) => format!("[Button clicked: {action}] (on message: {mt})"),
+                None => format!("[Button clicked: {action}]"),
+            }
         }
     };
 

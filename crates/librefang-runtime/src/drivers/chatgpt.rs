@@ -61,6 +61,7 @@ struct ResponsesApiRequest {
 
 /// A single output item in the Responses API response.
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct ResponsesOutputItem {
     #[serde(rename = "type")]
@@ -83,7 +84,9 @@ struct ResponsesOutputItem {
 
 /// Content part within an output item.
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ResponsesContentPart {
     #[serde(rename = "type")]
     part_type: String,
@@ -93,7 +96,9 @@ struct ResponsesContentPart {
 
 /// Reasoning summary text entry.
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ResponsesReasoningSummary {
     #[serde(rename = "type")]
     #[serde(default)]

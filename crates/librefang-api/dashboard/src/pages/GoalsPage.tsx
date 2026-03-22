@@ -164,7 +164,7 @@ export function GoalsPage() {
         </div>
       ) : (
         <>
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4 stagger-children">
+          <div className="grid grid-cols-2 gap-2 sm:gap-4 xl:grid-cols-4 stagger-children">
             {[
               { label: t("goals.total"), value: stats.total, color: "text-brand", bg: "bg-brand/10", icon: Target },
               { label: t("goals.pending"), value: stats.pending, color: "text-text-dim", bg: "bg-main", icon: Shield },
@@ -183,7 +183,7 @@ export function GoalsPage() {
             ))}
           </div>
 
-          <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
+          <div className="grid gap-6 lg:grid-cols-[320px_1fr] xl:grid-cols-[360px_1fr]">
             <Card padding="lg" hover>
               <div className="flex items-center gap-2 mb-5">
                 <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center"><Plus className="w-4 h-4 text-brand" /></div>
@@ -208,13 +208,13 @@ export function GoalsPage() {
               </div>
               <div className="space-y-2">
                 {rows.map(r => (
-                  <div key={r.goal.id} className="p-4 rounded-xl bg-main/40 border border-border-subtle hover:border-brand/30 transition-all" style={{ marginLeft: `${r.depth * 20}px` }}>
+                  <div key={r.goal.id} className="p-3 sm:p-4 rounded-xl bg-main/40 border border-border-subtle hover:border-brand/30 transition-all" style={{ marginLeft: `${r.depth * 12}px` }}>
                     {editingId === r.goal.id ? (
                       <div className="flex flex-col gap-2">
                         <input value={editDraft.title} onChange={e => setEditDraft({...editDraft, title: e.target.value})} className={inputClass} placeholder={t("goals.title_label")} />
                         <textarea value={editDraft.description} onChange={e => setEditDraft({...editDraft, description: e.target.value})} className={`${inputClass} resize-none`} rows={2} placeholder={t("goals.desc_label")} />
-                        <div className="flex gap-2">
-                          <select value={editDraft.status} onChange={e => setEditDraft({...editDraft, status: e.target.value})} className={inputClass}>
+                        <div className="flex flex-wrap gap-2">
+                          <select value={editDraft.status} onChange={e => setEditDraft({...editDraft, status: e.target.value})} className={`${inputClass} flex-1 min-w-[120px]`}>
                             <option value="pending">{t("goals.pending")}</option>
                             <option value="in_progress">{t("goals.in_progress")}</option>
                             <option value="completed">{t("goals.completed")}</option>
@@ -233,8 +233,8 @@ export function GoalsPage() {
                         </div>
                       </div>
                     ) : (
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="flex items-center gap-3 flex-1 min-w-0">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3">
+                        <div className="flex items-center gap-2 sm:gap-3 flex-1 min-w-0 flex-wrap">
                           {r.hasChildren && <button onClick={() => setExpandedById({...expandedById, [r.goal.id]: !expandedById[r.goal.id]})} className="text-text-dim font-bold hover:text-brand transition-colors w-5">{expandedById[r.goal.id] ? "\u2212" : "+"}</button>}
                           <span className="text-sm font-black truncate">{r.goal.title}</span>
                           <Badge variant={r.goal.status === "completed" ? "success" : r.goal.status === "in_progress" ? "warning" : "default"}>
@@ -244,7 +244,7 @@ export function GoalsPage() {
                             <span className="text-xs text-text-dim">{r.goal.progress}%</span>
                           )}
                         </div>
-                        <div className="flex items-center gap-1">
+                        <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto">
                           <button onClick={() => handleStatusChange(r.goal.id, r.goal.status === "completed" ? "pending" : "completed")} className="p-1.5 rounded-lg hover:bg-brand/10 text-text-dim hover:text-brand transition-all" title={t("goals.toggle_reset")}>
                             <Target className="h-3.5 w-3.5" />
                           </button>
