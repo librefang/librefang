@@ -1573,18 +1573,13 @@ impl WorkflowEngine {
                     StepAgent::ById { id } => Some(id.clone()),
                 };
 
-                // Build depends_on: sequential steps depend on the previous step
-                let depends_on = if i > 0 {
-                    vec![workflow.steps[i - 1].name.clone()]
-                } else {
-                    vec![]
-                };
-
+                // Don't auto-generate depends_on — let users configure DAG dependencies manually.
+                // Template consumers can add depends_on when they instantiate.
                 WorkflowTemplateStep {
                     name: step.name.clone(),
                     prompt_template: step.prompt_template.clone(),
                     agent,
-                    depends_on,
+                    depends_on: vec![],
                 }
             })
             .collect();
