@@ -69,8 +69,8 @@ function LoginScreen({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticate
       </div>
 
       {/* Right panel — login form */}
-      <div className="flex-1 flex items-center justify-center p-6 sm:p-8">
-        <div className="w-full max-w-[400px] animate-fade-in-scale">
+      <div className="flex-1 flex flex-col items-center justify-center p-6 sm:p-8">
+        <div className="w-full max-w-[400px] animate-fade-in-scale flex-1 flex flex-col justify-center">
           {/* Mobile logo */}
           <div className="flex flex-col items-center mb-8 lg:hidden">
             <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-brand/20 to-accent/10 flex items-center justify-center mb-4 ring-1 ring-brand/20 shadow-xl">
@@ -182,11 +182,11 @@ function LoginScreen({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticate
             </form>
           )}
 
-          {/* Footer */}
-          <div className="flex items-center justify-center gap-2 mt-8 text-text-dim/30">
-            <Lock className="h-3 w-3" />
-            <span className="text-[10px] font-medium tracking-wider uppercase">{t("auth.secure_connection", { defaultValue: "Encrypted Connection" })}</span>
-          </div>
+        </div>
+        {/* Footer — pinned to bottom */}
+        <div className="flex items-center justify-center gap-2 py-4 text-text-dim/30 shrink-0">
+          <Lock className="h-3 w-3" />
+          <span className="text-[10px] font-medium tracking-wider uppercase">{t("auth.secure_connection", { defaultValue: "Encrypted Connection" })}</span>
         </div>
       </div>
     </div>
