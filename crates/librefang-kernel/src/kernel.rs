@@ -5247,14 +5247,19 @@ system_prompt = "You are a helpful assistant."
             if entry.tags.contains(&hand_tag) {
                 saved_triggers.extend(self.triggers.take_agent_triggers(entry.id));
                 let old_id = entry.id;
+                // Extract role from tag (hand_role:xxx) to migrate cron to correct new agent
+                let old_role = entry
+                    .tags
+                    .iter()
+                    .find_map(|t| t.strip_prefix("hand_role:"))
+                    .unwrap_or("main")
+                    .to_string();
                 if let Err(e) = self.kill_agent(old_id) {
                     warn!(agent = %old_id, error = %e, "Failed to kill old hand agent");
                 }
-                // Migrate cron jobs
-                let coordinator_id = AgentId::from_hand_agent(hand_id, "main");
-                let migrated = self
-                    .cron_scheduler
-                    .reassign_agent_jobs(old_id, coordinator_id);
+                // Migrate cron jobs to the same role in the new hand
+                let new_id = AgentId::from_hand_agent(hand_id, &old_role);
+                let migrated = self.cron_scheduler.reassign_agent_jobs(old_id, new_id);
                 if migrated > 0 {
                     let _ = self.cron_scheduler.persist();
                 }

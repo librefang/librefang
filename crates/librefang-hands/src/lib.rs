@@ -325,28 +325,6 @@ impl From<LegacyHandAgentConfig> for AgentManifest {
     }
 }
 
-/// Serde helper: accepts both full `AgentManifest` (nested `[agent.model]`) and
-/// legacy flat format, converting the latter on the fly.
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum AgentSection {
-    /// New format: `[agent.model]` table with full AgentManifest fields.
-    Full(Box<AgentManifest>),
-    /// Legacy format: flat provider/model/max_tokens/temperature/system_prompt.
-    Legacy(LegacyHandAgentConfig),
-}
-
-fn deserialize_agent_section<'de, D>(deserializer: D) -> Result<AgentManifest, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let section = AgentSection::deserialize(deserializer)?;
-    Ok(match section {
-        AgentSection::Full(m) => *m,
-        AgentSection::Legacy(l) => l.into(),
-    })
-}
-
 /// A single agent within a multi-agent hand.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandAgentManifest {
