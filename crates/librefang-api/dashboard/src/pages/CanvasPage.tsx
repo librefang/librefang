@@ -820,6 +820,12 @@ function CanvasPageInner() {
   const createGroupRef = useRef<() => void>(() => {});
   const ungroupRef = useRef<(id: string) => void>(() => {});
 
+  // Stable refs for group callbacks — prevents nodeTypes from changing on every render
+  const toggleGroupRef = useRef<(id: string) => void>(() => {});
+  const ungroupNodesRef = useRef<(id: string) => void>(() => {});
+  const deleteGroupAndChildrenRef = useRef<(id: string) => void>(() => {});
+  const tRef = useRef(t);
+
   useEffect(() => {
     const isInput = () => {
       const tag = document.activeElement?.tagName;
@@ -968,15 +974,19 @@ function CanvasPageInner() {
     });
   }, [nodes, setNodes, setEdges]);
 
+  // IMPORTANT: nodeTypes must be referentially stable to prevent ReactFlow from
+  // unmounting/remounting all nodes on every render, which breaks click handlers.
+  // We use refs for all callbacks and the translation function so the deps are empty.
   const nodeTypes = useMemo(() => ({
-    custom: (props: any) => <CustomNode {...props} t={t} />,
+    custom: (props: any) => <CustomNode {...props} t={tRef.current} />,
     groupNode: (props: any) => <GroupNodeComponent {...props} data={{
       ...props.data,
-      _onToggle: toggleGroup,
-      _onUngroup: ungroupNodes,
-      _onDeleteGroup: deleteGroupAndChildren,
+      _onToggle: (id: string) => toggleGroupRef.current(id),
+      _onUngroup: (id: string) => ungroupNodesRef.current(id),
+      _onDeleteGroup: (id: string) => deleteGroupAndChildrenRef.current(id),
     }} />,
-  }), [t, toggleGroup, ungroupNodes, deleteGroupAndChildren]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), []);
 
   // 需要 agent 的节点类型（后端所有 step 都需要 agent）
   const AGENT_NODE_TYPES = AGENT_NODE_TYPES_SET;
@@ -1221,6 +1231,12 @@ function CanvasPageInner() {
   // 同步快捷键 refs
   createGroupRef.current = createGroup;
   ungroupRef.current = ungroupNodes;
+
+  // Sync stable refs for group callbacks used by nodeTypes
+  toggleGroupRef.current = toggleGroup;
+  ungroupNodesRef.current = ungroupNodes;
+  deleteGroupAndChildrenRef.current = deleteGroupAndChildren;
+  tRef.current = t;
 
   // 更新节点数据
   const handleNodeUpdate = useCallback((id: string, newData: any) => {
