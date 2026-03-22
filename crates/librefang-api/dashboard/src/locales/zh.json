@@ -82,7 +82,8 @@
     "sort_trending": "热门", "sort_downloads": "下载量", "sort_stars": "星标", "sort_updated": "更新", "sort_rating": "评分",
     "no_results": "没有找到技能", "rate_limited": "请求受限", "rate_limited_desc": "ClawHub API 请求次数超限，请稍后重试。", "load_error": "加载失败",
     "search_placeholder": "搜索技能（如 python、web、ai...）",
-    "stars_count": "星标", "downloads_count": "下载", "install_timeout": "安装超时"
+    "stars_count": "星标", "downloads_count": "下载", "install_timeout": "安装超时",
+    "outputs": "技能输出"
   },
   "hands": {
     "title": "Hands", "subtitle": "可组合的功能扩展包。",

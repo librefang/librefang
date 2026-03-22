@@ -5,6 +5,7 @@ import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu,
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
 import { checkAuthRequired, setApiKey } from "./api";
+import { SkillOutputPanel } from "./components/ui/SkillOutputPanel";
 
 function AuthDialog({ onAuthenticated }: { onAuthenticated: () => void }) {
   const { t } = useTranslation();
@@ -322,6 +323,7 @@ export function App() {
       </div>
 
       <CommandPalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
+      <SkillOutputPanel />
       {authChecked && authNeeded && (
         <AuthDialog onAuthenticated={() => setAuthNeeded(false)} />
       )}

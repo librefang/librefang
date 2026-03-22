@@ -8,6 +8,15 @@ interface Toast {
   type: "success" | "error" | "info";
 }
 
+interface SkillOutput {
+  id: string;
+  skillName: string;
+  agentId?: string;
+  agentName?: string;
+  content: string;
+  timestamp: number;
+}
+
 interface UIState {
   theme: "light" | "dark";
   language: string;
@@ -16,6 +25,7 @@ interface UIState {
   navLayout: "grouped" | "collapsible";
   collapsedNavGroups: Record<string, boolean>;
   toasts: Toast[];
+  skillOutputs: SkillOutput[];
   toggleTheme: () => void;
   setLanguage: (lang: string) => void;
   setMobileMenuOpen: (open: boolean) => void;
@@ -24,6 +34,9 @@ interface UIState {
   toggleNavGroup: (key: string) => void;
   addToast: (message: string, type?: "success" | "error" | "info") => void;
   removeToast: (id: string) => void;
+  addSkillOutput: (output: Omit<SkillOutput, "id" | "timestamp">) => void;
+  dismissSkillOutput: (id: string) => void;
+  clearSkillOutputs: () => void;
 }
 
 export const useUIStore = create<UIState>()(
@@ -36,6 +49,7 @@ export const useUIStore = create<UIState>()(
       navLayout: "grouped",
       collapsedNavGroups: {},
       toasts: [],
+      skillOutputs: [],
       toggleTheme: () =>
         set((state) => ({ theme: state.theme === "light" ? "dark" : "light" })),
       setLanguage: (lang) => {
@@ -54,6 +68,18 @@ export const useUIStore = create<UIState>()(
         set((state) => ({
           toasts: state.toasts.filter((t) => t.id !== id),
         })),
+      addSkillOutput: (output) =>
+        set((state) => ({
+          skillOutputs: [
+            { ...output, id: Date.now().toString(), timestamp: Date.now() },
+            ...state.skillOutputs,
+          ].slice(0, 50),
+        })),
+      dismissSkillOutput: (id) =>
+        set((state) => ({
+          skillOutputs: state.skillOutputs.filter((o) => o.id !== id),
+        })),
+      clearSkillOutputs: () => set({ skillOutputs: [] }),
     }),
     {
       name: "librefang-ui-storage",

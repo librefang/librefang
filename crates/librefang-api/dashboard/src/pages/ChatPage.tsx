@@ -7,6 +7,7 @@ import { useSearch } from "@tanstack/react-router";
 import { listAgents, sendAgentMessage, loadAgentSession } from "../api";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
+import { useUIStore } from "../lib/store";
 
 interface ChatMessage {
   id: string;
@@ -133,6 +134,7 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const { ws, wsConnected } = useWebSocket(agentId);
+  const addSkillOutput = useUIStore((s) => s.addSkillOutput);
 
   // 加载历史记录
   useEffect(() => {
@@ -307,6 +309,13 @@ function useChatMessages(agentId: string | null, agents: any[] = []) {
                 }
               : m
           ));
+          // Persist skill outputs
+          if (response.memories_saved?.length) {
+            const agentName = agents.find(a => a.id === agentId)?.name;
+            response.memories_saved.forEach((mem: string) => {
+              addSkillOutput({ skillName: "memory", agentId: agentId || undefined, agentName, content: mem });
+            });
+          }
           setIsLoading(false);
         }
       }, 20);
