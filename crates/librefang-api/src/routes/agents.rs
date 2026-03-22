@@ -3919,6 +3919,69 @@ pub async fn get_agent_deliveries(
 }
 
 // ---------------------------------------------------------------------------
+// Mid-turn message injection (#956)
+// ---------------------------------------------------------------------------
+
+/// POST /api/agents/:id/inject — Inject a message into a running agent's tool loop.
+///
+/// If the agent is currently executing tools (mid-turn), the injected message
+/// will be processed between tool calls, interrupting the remaining sequence.
+/// Returns `{"injected": true}` if accepted, `{"injected": false}` if no
+/// active tool loop is running for this agent.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/inject",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body = crate::types::InjectMessageRequest,
+    responses(
+        (status = 200, description = "Injection result", body = crate::types::InjectMessageResponse),
+        (status = 400, description = "Invalid agent ID"),
+        (status = 404, description = "Agent not found"),
+        (status = 413, description = "Message too large")
+    )
+)]
+pub async fn inject_message(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<InjectMessageRequest>,
+) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid agent ID"})),
+            );
+        }
+    };
+
+    // Reject oversized injection messages
+    const MAX_INJECT_SIZE: usize = 16 * 1024; // 16KB
+    if req.message.len() > MAX_INJECT_SIZE {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "injection message too large"})),
+        );
+    }
+
+    match state.kernel.inject_message(agent_id, &req.message).await {
+        Ok(injected) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"injected": injected})),
+        ),
+        Err(e) => {
+            let status = if e.to_string().contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(serde_json::json!({"error": e.to_string()})))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 #[cfg(test)]

@@ -333,6 +333,13 @@ pub struct LibreFangKernel {
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
     agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// Per-agent mid-turn message injection senders (#956).
+    /// When an agent loop is running, it holds the receiver; callers use the sender
+    /// to inject messages between tool calls.
+    pub injection_senders: dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<String>>,
+    /// Per-agent injection receivers, created alongside senders and consumed by the agent loop.
+    injection_receivers:
+        dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<String>>>>,
     /// Sticky assistant routing per conversation (assistant + sender/thread).
     /// Preserves follow-up context for brief messages after a route to a specialist/hand.
     assistant_routes: dashmap::DashMap<String, AssistantRouteTarget>,
@@ -1415,6 +1422,8 @@ impl LibreFangKernel {
             default_model_override: std::sync::RwLock::new(None),
             tool_policy_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
+            injection_senders: dashmap::DashMap::new(),
+            injection_receivers: dashmap::DashMap::new(),
             assistant_routes: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
             command_queue,
@@ -2471,6 +2480,13 @@ system_prompt = "You are a helpful assistant."
                 "prompt_caching".to_string(),
                 serde_json::Value::Bool(self.config.prompt_caching),
             );
+
+            // Pass privacy config to the agent loop via metadata.
+            if let Ok(privacy_json) = serde_json::to_value(&self.config.privacy) {
+                manifest
+                    .metadata
+                    .insert("privacy".to_string(), privacy_json);
+            }
         }
 
         let memory = Arc::clone(&self.memory);
@@ -2540,6 +2556,9 @@ system_prompt = "You are a helpful assistant."
                     let _ = phase_tx.try_send(event);
                 });
 
+            // Set up mid-turn injection channel (#956)
+            let injection_rx = kernel_clone.setup_injection_channel(agent_id);
+
             let result = run_agent_loop_streaming(
                 &manifest,
                 &message_owned,
@@ -2573,8 +2592,12 @@ system_prompt = "You are a helpful assistant."
                 None, // content_blocks (streaming path uses text only for now)
                 kernel_clone.proactive_memory.get().cloned(),
                 kernel_clone.context_engine_for_agent(&manifest),
+                Some(&injection_rx),
             )
             .await;
+
+            // Tear down injection channel after loop finishes
+            kernel_clone.teardown_injection_channel(agent_id);
 
             match result {
                 Ok(result) => {
@@ -3322,6 +3345,13 @@ system_prompt = "You are a helpful assistant."
                 "prompt_caching".to_string(),
                 serde_json::Value::Bool(self.config.prompt_caching),
             );
+
+            // Pass privacy config to the agent loop via metadata.
+            if let Ok(privacy_json) = serde_json::to_value(&self.config.privacy) {
+                manifest
+                    .metadata
+                    .insert("privacy".to_string(), privacy_json);
+            }
         }
 
         let is_stable = self.config.mode == librefang_types::config::KernelMode::Stable;
@@ -3406,6 +3436,9 @@ system_prompt = "You are a helpful assistant."
 
         let proactive_memory = self.proactive_memory.get().cloned();
 
+        // Set up mid-turn injection channel (#956)
+        let injection_rx = self.setup_injection_channel(agent_id);
+
         let result = run_agent_loop(
             &manifest,
             &message_with_links,
@@ -3438,9 +3471,14 @@ system_prompt = "You are a helpful assistant."
             content_blocks,
             proactive_memory,
             self.context_engine_for_agent(&manifest),
+            Some(&injection_rx),
         )
-        .await
-        .map_err(KernelError::LibreFang)?;
+        .await;
+
+        // Tear down injection channel after loop finishes
+        self.teardown_injection_channel(agent_id);
+
+        let result = result.map_err(KernelError::LibreFang)?;
 
         // Append new messages to canonical session for cross-channel memory
         if session.messages.len() > messages_before {
@@ -3496,6 +3534,64 @@ system_prompt = "You are a helpful assistant."
         }
 
         Ok(result)
+    }
+
+    /// Inject a message into a running agent's tool-execution loop (#956).
+    ///
+    /// If the agent is currently executing tools (mid-turn), the message will be
+    /// picked up between tool calls and interrupt the remaining sequence.
+    /// Returns `Ok(true)` if the message was sent, `Ok(false)` if no active
+    /// loop is running for this agent, or `Err` if the agent doesn't exist.
+    pub async fn inject_message(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> KernelResult<bool> {
+        // Verify the agent exists
+        if self.registry.get(agent_id).is_none() {
+            return Err(KernelError::LibreFang(
+                LibreFangError::AgentNotFound(agent_id.to_string()),
+            ));
+        }
+        if let Some(tx) = self.injection_senders.get(&agent_id) {
+            match tx.try_send(message.to_string()) {
+                Ok(()) => {
+                    info!(agent_id = %agent_id, "Mid-turn message injected");
+                    Ok(true)
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    warn!(agent_id = %agent_id, "Injection channel full — message dropped");
+                    Ok(false)
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    // Receiver dropped — loop is no longer running
+                    self.injection_senders.remove(&agent_id);
+                    Ok(false)
+                }
+            }
+        } else {
+            // No active loop for this agent
+            Ok(false)
+        }
+    }
+
+    /// Set up the injection channel for an agent before running its loop.
+    /// Returns the receiver wrapped in a Mutex for the agent loop to consume.
+    fn setup_injection_channel(
+        &self,
+        agent_id: AgentId,
+    ) -> Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<String>>> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        self.injection_senders.insert(agent_id, tx);
+        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+        self.injection_receivers.insert(agent_id, Arc::clone(&rx));
+        rx
+    }
+
+    /// Tear down the injection channel after the agent loop finishes.
+    fn teardown_injection_channel(&self, agent_id: AgentId) {
+        self.injection_senders.remove(&agent_id);
+        self.injection_receivers.remove(&agent_id);
     }
 
     /// Resolve a module path relative to the kernel's home directory.
@@ -4854,7 +4950,28 @@ system_prompt = "You are a helpful assistant."
     ///
     /// Any matching triggers will dispatch messages to the subscribing agents.
     /// Returns the list of (agent_id, message) pairs that were triggered.
+    /// Includes depth limiting to prevent circular trigger chains (max 5 levels).
     pub async fn publish_event(&self, event: Event) -> Vec<(AgentId, String)> {
+        // Depth guard: prevent circular trigger chains
+        static TRIGGER_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        const MAX_TRIGGER_DEPTH: u32 = 5;
+
+        let depth = TRIGGER_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if depth >= MAX_TRIGGER_DEPTH {
+            TRIGGER_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            warn!(depth, "Trigger depth limit reached, skipping evaluation to prevent circular chain");
+            return vec![];
+        }
+
+        // Decrement depth on all exit paths using a drop guard
+        struct DepthGuard;
+        impl Drop for DepthGuard {
+            fn drop(&mut self) {
+                TRIGGER_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let _guard = DepthGuard;
+
         // Evaluate triggers before publishing (so describe_event works on the event)
         let triggered = self.triggers.evaluate(&event);
 
@@ -4887,15 +5004,42 @@ system_prompt = "You are a helpful assistant."
         prompt_template: String,
         max_fires: u64,
     ) -> KernelResult<TriggerId> {
-        // Verify agent exists
+        self.register_trigger_with_target(agent_id, pattern, prompt_template, max_fires, None)
+    }
+
+    /// Register a trigger with an optional cross-session target agent.
+    ///
+    /// When `target_agent` is `Some`, the triggered message is routed to that
+    /// agent instead of the owner. Both owner and target must exist.
+    pub fn register_trigger_with_target(
+        &self,
+        agent_id: AgentId,
+        pattern: TriggerPattern,
+        prompt_template: String,
+        max_fires: u64,
+        target_agent: Option<AgentId>,
+    ) -> KernelResult<TriggerId> {
+        // Verify owner agent exists
         if self.registry.get(agent_id).is_none() {
             return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
                 agent_id.to_string(),
             )));
         }
-        Ok(self
-            .triggers
-            .register(agent_id, pattern, prompt_template, max_fires))
+        // Verify target agent exists (if specified)
+        if let Some(target) = target_agent {
+            if self.registry.get(target).is_none() {
+                return Err(KernelError::LibreFang(LibreFangError::AgentNotFound(
+                    target.to_string(),
+                )));
+            }
+        }
+        Ok(self.triggers.register_with_target(
+            agent_id,
+            pattern,
+            prompt_template,
+            max_fires,
+            target_agent,
+        ))
     }
 
     /// Remove a trigger by ID.
@@ -4935,17 +5079,20 @@ system_prompt = "You are a helpful assistant."
                 KernelError::LibreFang(LibreFangError::Internal("Workflow not found".to_string()))
             })?;
 
-        // Agent resolver: looks up by name or ID in the registry
-        let resolver = |agent_ref: &StepAgent| -> Option<(AgentId, String)> {
+        // Agent resolver: looks up by name or ID in the registry.
+        // Returns (AgentId, agent_name, inherit_parent_context).
+        let resolver = |agent_ref: &StepAgent| -> Option<(AgentId, String, bool)> {
             match agent_ref {
                 StepAgent::ById { id } => {
                     let agent_id: AgentId = id.parse().ok()?;
                     let entry = self.registry.get(agent_id)?;
-                    Some((agent_id, entry.name.clone()))
+                    let inherit = entry.manifest.inherit_parent_context;
+                    Some((agent_id, entry.name.clone(), inherit))
                 }
                 StepAgent::ByName { name } => {
                     let entry = self.registry.find_by_name(name)?;
-                    Some((entry.id, entry.name.clone()))
+                    let inherit = entry.manifest.inherit_parent_context;
+                    Some((entry.id, entry.name.clone(), inherit))
                 }
             }
         };
