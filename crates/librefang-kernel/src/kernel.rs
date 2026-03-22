@@ -1718,7 +1718,9 @@ system_prompt = "You are a helpful assistant."
         {
             let bundled_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../workflows/templates");
-            let loaded = kernel.template_registry.load_templates_from_dir(&bundled_dir);
+            let loaded = kernel
+                .template_registry
+                .load_templates_from_dir(&bundled_dir);
             if loaded > 0 {
                 info!("Loaded {loaded} bundled workflow template(s)");
             }
