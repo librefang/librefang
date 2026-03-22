@@ -470,12 +470,23 @@ export interface GoalItem {
 
 type Json = Record<string, unknown>;
 
+// Global 401 handler — set by App.tsx to trigger login screen
+let _onUnauthorized: (() => void) | null = null;
+export function setOnUnauthorized(fn: (() => void) | null) {
+  _onUnauthorized = fn;
+}
+
 function authHeader(): HeadersInit {
   const token = localStorage.getItem("librefang-api-key") || "";
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 async function parseError(response: Response): Promise<Error> {
+  // If 401, trigger global logout
+  if (response.status === 401 && _onUnauthorized) {
+    clearApiKey();
+    _onUnauthorized();
+  }
   const text = await response.text();
   let message = response.statusText;
   try {

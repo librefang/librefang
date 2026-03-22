@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, LogOut } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
-import { checkAuthRequired, setApiKey, hasApiKey, clearApiKey, checkDashboardAuthMode, dashboardLogin, type AuthMode } from "./api";
+import { checkAuthRequired, setApiKey, hasApiKey, clearApiKey, checkDashboardAuthMode, dashboardLogin, setOnUnauthorized, type AuthMode } from "./api";
 import { SkillOutputPanel } from "./components/ui/SkillOutputPanel";
 
 function LoginScreen({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
@@ -205,20 +205,21 @@ export function App() {
 
   // Check auth on mount — determine if credentials or api_key login is needed
   useEffect(() => {
-    checkDashboardAuthMode().then(async (mode) => {
+    // Register global 401 handler — any API call returning 401 will trigger login
+    setOnUnauthorized(() => setAuthNeeded(true));
+
+    checkDashboardAuthMode().then((mode) => {
       setAuthMode(mode);
       if (mode === "none") {
         setAuthNeeded(false);
-      } else if (hasApiKey()) {
-        // Have a stored token — verify it's still valid
-        const needed = await checkAuthRequired();
-        setAuthNeeded(needed);
       } else {
-        // No token stored — login required
-        setAuthNeeded(true);
+        // credentials or api_key mode: need login unless we already have a stored token
+        setAuthNeeded(!hasApiKey());
       }
       setAuthChecked(true);
     });
+
+    return () => setOnUnauthorized(null);
   }, []);
 
   useEffect(() => {
