@@ -146,6 +146,7 @@
     "ctx_edit": "编辑节点", "ctx_copy": "复制", "ctx_duplicate": "复制节点", "ctx_add_agent": "添加智能体节点", "ctx_paste": "粘贴", "ctx_select_all": "全选", "ctx_auto_layout": "自动排列",
     "click_to_assign": "点击绑定智能体", "saved": "已保存", "exported": "已导出", "imported": "已导入", "import_error": "无效的工作流文件",
     "templates": "模板", "browse_templates": "浏览模板", "use_template": "使用模板", "template_params": "模板参数", "no_templates": "暂无模板", "template_search": "搜索模板...", "template_instantiate_error": "从模板创建工作流失败",
+    "save_as_template": "保存为模板", "saved_as_template": "已保存为模板", "save_first_to_template": "请先保存工作流再创建模板",
     "shortcuts_title": "快捷键",
     "sc_undo": "撤销", "sc_redo": "重做", "sc_copy": "复制", "sc_paste": "粘贴", "sc_duplicate": "复制节点",
     "sc_select_all": "全选", "sc_group": "创建分组", "sc_ungroup": "解散分组", "sc_fit_view": "适配视口",

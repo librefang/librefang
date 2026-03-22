@@ -24,6 +24,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, listWorkflowTemplates, instantiateTemplate, type AgentItem, type WorkflowItem, type WorkflowTemplate as ApiWorkflowTemplate } from "../api";
+import { listAgents, listWorkflows, createWorkflow, updateWorkflow, deleteWorkflow, runWorkflow, saveWorkflowAsTemplate, type AgentItem, type WorkflowItem } from "../api";
 import { Card } from "../components/ui/Card";
 import { Button } from "../components/ui/Button";
 import { Badge } from "../components/ui/Badge";
@@ -33,6 +34,7 @@ import {
   Maximize2, Minimize2, ArrowLeft, X, Group, ChevronDown, ChevronRight,
   Copy, ClipboardPaste, LayoutGrid,
   Download, Upload, HelpCircle, Scan, Check, LayoutTemplate, Search, Tag
+  Download, Upload, HelpCircle, Scan, Check, BookCopy
 } from "lucide-react";
 
 // 节点类型配置 — n8n 风格配色
@@ -1312,6 +1314,20 @@ function CanvasPageInner() {
     }
   }, [workflowName, workflowDescription, selectedWorkflow, nodes, edges, buildSteps, t, showError, showToast]);
 
+  // 保存为模板
+  const handleSaveAsTemplate = useCallback(async () => {
+    if (!selectedWorkflow?.id) {
+      showError(t("canvas.save_first_to_template"));
+      return;
+    }
+    try {
+      await saveWorkflowAsTemplate(selectedWorkflow.id);
+      showToast(t("canvas.saved_as_template"));
+    } catch (e: any) {
+      showError(e?.message || String(e));
+    }
+  }, [selectedWorkflow, t, showError, showToast]);
+
   // 点击运行 → 弹出输入框
   const handleRunClick = useCallback((id?: string) => {
     if (id) {
@@ -1590,6 +1606,11 @@ function CanvasPageInner() {
             <Button variant="primary" onClick={handleSave} disabled={!workflowName.trim() || agentStepCount === 0}>
               <Save className="w-4 h-4" />
               <span className="hidden sm:inline ml-1">{t("common.save")}</span>
+            </Button>
+            <Button variant="ghost" onClick={handleSaveAsTemplate} disabled={!selectedWorkflow?.id}
+              title={t("canvas.save_as_template")}>
+              <BookCopy className="w-4 h-4 mr-1" />
+              {t("canvas.save_as_template")}
             </Button>
             <Button variant="primary" onClick={() => handleRunClick()}
               disabled={(!selectedWorkflow && agentStepCount === 0) || !!runningWorkflowId}>

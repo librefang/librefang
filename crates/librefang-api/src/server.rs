@@ -357,6 +357,8 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route(
             "/workflow-templates/{id}/instantiate",
             axum::routing::post(routes::instantiate_template),
+            "/workflows/{id}/save-as-template",
+            axum::routing::post(routes::save_workflow_as_template),
         )
         .route("/skills", axum::routing::get(routes::list_skills))
         .route(
