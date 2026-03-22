@@ -119,6 +119,13 @@ function CustomNode({ data, type: nodeTypeKey, t }: { data: any; type: string; t
         </div>
       ) : null}
 
+      {/* Depends-on badge */}
+      {data.dependsOn && data.dependsOn.length > 0 && (
+        <div className="px-3 py-1 border-t border-border-subtle/50 flex items-center gap-1.5">
+          <span className="text-[9px] text-text-dim/60">⬆ {data.dependsOn.length} dep{data.dependsOn.length > 1 ? "s" : ""}</span>
+        </div>
+      )}
+
       {/* Source Handle */}
       {!isEnd && (
         <Handle type="source" position={Position.Bottom}
@@ -436,6 +443,7 @@ function NodeConfigPanel({
   const [until, setUntil] = useState(d.until || "");
   // Retry fields
   const [maxRetries, setMaxRetries] = useState<number>(d.maxRetries || 3);
+  const [dependsOn, setDependsOn] = useState<string[]>(d.dependsOn || []);
 
   const handleSave = () => {
     const agent = agents.find(a => a.id === agentId);
@@ -453,6 +461,7 @@ function NodeConfigPanel({
       maxIterations: mode === "loop" ? maxIterations : undefined,
       until: mode === "loop" ? until : undefined,
       maxRetries: errorMode === "retry" ? maxRetries : undefined,
+      dependsOn: dependsOn.length > 0 ? dependsOn : undefined,
     });
     onClose();
   };
@@ -575,6 +584,35 @@ function NodeConfigPanel({
               <input type="text" value={outputVar} onChange={e => setOutputVar(e.target.value)}
                 placeholder="e.g. research_result" className={inputClass} />
             </div>
+            {/* Depends On — multi-select other step nodes */}
+            {(() => {
+              // Collect sibling nodes that have an agent (i.e. are steps), excluding self
+              const siblingSteps = (node as any)._siblingNodes as Array<{ id: string; label: string }> | undefined;
+              if (!siblingSteps || siblingSteps.length === 0) return null;
+              return (
+                <div>
+                  <label className={labelClass}>
+                    {t("canvas.depends_on")} <span className="text-text-dim/50 normal-case font-normal">{t("canvas.depends_on_hint")}</span>
+                  </label>
+                  <div className="mt-1 space-y-1 max-h-28 overflow-y-auto rounded-lg border border-border-subtle bg-main p-1.5">
+                    {siblingSteps.map(s => (
+                      <label key={s.id} className="flex items-center gap-2 px-1.5 py-1 rounded hover:bg-brand/5 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={dependsOn.includes(s.label)}
+                          onChange={e => {
+                            if (e.target.checked) setDependsOn([...dependsOn, s.label]);
+                            else setDependsOn(dependsOn.filter(n => n !== s.label));
+                          }}
+                          className="rounded border-border-subtle"
+                        />
+                        <span className="text-xs text-text truncate">{s.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              );
+            })()}
           </>
         )}
 
@@ -1277,6 +1315,8 @@ function CanvasPageInner() {
         }
         // 输出变量
         if (d.outputVar) step.output_var = d.outputVar;
+        // DAG 依赖
+        if (d.dependsOn && d.dependsOn.length > 0) step.depends_on = d.dependsOn;
         return step;
       });
   }, []);
@@ -1462,19 +1502,44 @@ function CanvasPageInner() {
         agentId: step.agent_id || step.agent?.agent_id,
         agentName: step.agent_name || step.agent?.name,
         nodeType: "agent",
+        dependsOn: step.depends_on || [],
       }
     };
     });
     setNodes(newNodes);
 
+    // Build edges: use depends_on (DAG) if any step has dependencies, else sequential
+    const hasDag = stepsArray.some((s: any) => s.depends_on && s.depends_on.length > 0);
     const newEdges: Edge[] = [];
-    for (let i = 0; i < newNodes.length - 1; i++) {
-      newEdges.push({
-        id: `edge-${i}`,
-        source: newNodes[i].id,
-        target: newNodes[i + 1].id,
-        markerEnd: { type: MarkerType.ArrowClosed }
+    if (hasDag) {
+      // Build name→nodeId map
+      const nameToId: Record<string, string> = {};
+      stepsArray.forEach((step: any, idx: number) => { nameToId[step.name] = `node-${idx}`; });
+      stepsArray.forEach((step: any, idx: number) => {
+        (step.depends_on || []).forEach((dep: string, depIdx: number) => {
+          const sourceId = nameToId[dep];
+          if (sourceId) {
+            newEdges.push({
+              id: `dep-${idx}-${depIdx}`,
+              source: sourceId,
+              target: `node-${idx}`,
+              markerEnd: { type: MarkerType.ArrowClosed },
+              style: { strokeDasharray: "6 3" },
+              label: "depends",
+              labelStyle: { fontSize: 9, fill: "#6b7280" },
+            });
+          }
+        });
       });
+    } else {
+      for (let i = 0; i < newNodes.length - 1; i++) {
+        newEdges.push({
+          id: `edge-${i}`,
+          source: newNodes[i].id,
+          target: newNodes[i + 1].id,
+          markerEnd: { type: MarkerType.ArrowClosed }
+        });
+      }
     }
     setEdges(newEdges);
   }, [setNodes, setEdges]);
@@ -1665,7 +1730,12 @@ function CanvasPageInner() {
 
           {/* 节点配置面板 */}
           {editingNode && !showRunInput && (
-            <NodeConfigPanel node={editingNode} agents={agents}
+            <NodeConfigPanel node={{
+              ...editingNode,
+              _siblingNodes: nodes
+                .filter(n => n.id !== editingNode.id && AGENT_NODE_TYPES_SET.has((n.data as any).nodeType))
+                .map(n => ({ id: n.id, label: (n.data as any).label || n.id })),
+            } as any} agents={agents}
               onUpdate={handleNodeUpdate} onClose={() => setEditingNode(null)}
               onDelete={(id) => { setNodes(nds => nds.filter(n => n.id !== id)); setEditingNode(null); }}
               t={t} />

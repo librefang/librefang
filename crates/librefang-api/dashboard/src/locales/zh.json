@@ -140,6 +140,7 @@
     "condition_text": "条件文本", "condition_placeholder": "当前一步输出包含此文本时才执行", "loop_until": "输出包含以下内容时停止", "loop_until_placeholder": "例如：完成", "loop_max": "最大循环次数",
     "error_mode": "错误处理", "error_fail": "出错停止", "error_skip": "出错跳过", "error_retry": "出错重试", "max_retries": "最大重试次数",
     "timeout": "超时时间（秒）", "output_var": "输出变量名", "output_var_hint": "（后续步骤用 {{变量名}} 引用）",
+    "depends_on": "依赖步骤", "depends_on_hint": "（必须先完成的步骤）",
     "create_group": "创建分组", "new_group": "分组", "unsaved": "有未保存的更改",
     "empty_title": "空画布", "empty_hint": "从左侧添加节点，或右键画布添加",
     "collapse_sidebar": "折叠侧栏", "expand_sidebar": "展开侧栏",

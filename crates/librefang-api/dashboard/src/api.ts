@@ -195,6 +195,7 @@ export interface WorkflowStep {
   prompt: string;
   timeout_secs?: number;
   inherit_context?: boolean;
+  depends_on?: string[];
 }
 
 export interface WorkflowItem {

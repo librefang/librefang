@@ -140,6 +140,7 @@
     "condition_text": "Condition Text", "condition_placeholder": "Execute if prev output contains...", "loop_until": "Stop When Output Contains", "loop_until_placeholder": "e.g. DONE", "loop_max": "Max Iterations",
     "error_mode": "Error Handling", "error_fail": "Stop on Error", "error_skip": "Skip on Error", "error_retry": "Retry on Error", "max_retries": "Max Retries",
     "timeout": "Timeout (seconds)", "output_var": "Output Variable", "output_var_hint": "(use {{name}} in later steps)",
+    "depends_on": "Depends On", "depends_on_hint": "(steps that must complete first)",
     "create_group": "Group Selected", "new_group": "Group", "unsaved": "Unsaved changes",
     "empty_title": "Empty Canvas", "empty_hint": "Add nodes from the sidebar or right-click to add",
     "collapse_sidebar": "Collapse", "expand_sidebar": "Expand",

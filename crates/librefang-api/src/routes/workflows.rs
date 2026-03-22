@@ -228,6 +228,15 @@ pub async fn create_workflow(
         let mode = parse_step_mode(&s["mode"], s);
         let error_mode = parse_error_mode(&s["error_mode"], s);
 
+        let depends_on: Vec<String> = s["depends_on"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         steps.push(WorkflowStep {
             name: step_name,
             agent,
@@ -237,6 +246,7 @@ pub async fn create_workflow(
             error_mode,
             output_var: s["output_var"].as_str().map(String::from),
             inherit_context: s["inherit_context"].as_bool(),
+            depends_on,
         });
     }
 
@@ -328,6 +338,7 @@ pub async fn get_workflow(
                         "timeout_secs": s.timeout_secs,
                         "error_mode": serde_json::to_value(&s.error_mode).unwrap_or_default(),
                         "output_var": s.output_var,
+                        "depends_on": s.depends_on,
                     })
                 }).collect::<Vec<_>>(),
                 "created_at": w.created_at.to_rfc3339(),
@@ -414,6 +425,15 @@ pub async fn update_workflow(
             let mode = parse_step_mode(&s["mode"], s);
             let error_mode = parse_error_mode(&s["error_mode"], s);
 
+            let depends_on: Vec<String> = s["depends_on"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
             parsed_steps.push(WorkflowStep {
                 name: step_name,
                 agent,
@@ -423,6 +443,7 @@ pub async fn update_workflow(
                 error_mode,
                 output_var: s["output_var"].as_str().map(String::from),
                 inherit_context: s["inherit_context"].as_bool(),
+                depends_on,
             });
         }
         parsed_steps
