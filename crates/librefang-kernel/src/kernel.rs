@@ -2160,23 +2160,23 @@ system_prompt = "You are a helpful assistant."
             &self.memory,
             driver,
             &tools,
-            None,  // no kernel handle — keep side questions simple
-            None,  // no skills
-            None,  // no MCP
-            None,  // no web
-            None,  // no browser
-            None,  // no embeddings
+            None, // no kernel handle — keep side questions simple
+            None, // no skills
+            None, // no MCP
+            None, // no web
+            None, // no browser
+            None, // no embeddings
             manifest.workspace.as_deref(),
-            None,  // no phase callback
-            None,  // no media
-            None,  // no TTS
-            None,  // no docker
-            None,  // no hooks
+            None, // no phase callback
+            None, // no media
+            None, // no TTS
+            None, // no docker
+            None, // no hooks
             ctx_window,
-            None,  // no process manager
-            None,  // no content blocks
-            None,  // no proactive memory
-            None,  // no context engine
+            None, // no process manager
+            None, // no content blocks
+            None, // no proactive memory
+            None, // no context engine
         )
         .await
         .map_err(KernelError::LibreFang)?;
@@ -8542,7 +8542,10 @@ mod tests {
         // Use a random AgentId that doesn't exist
         let bogus_id = AgentId::new();
         let result = kernel.send_message_ephemeral(bogus_id, "hello?").await;
-        assert!(result.is_err(), "ephemeral message to unknown agent should error");
+        assert!(
+            result.is_err(),
+            "ephemeral message to unknown agent should error"
+        );
 
         kernel.shutdown();
     }
@@ -8576,7 +8579,9 @@ mod tests {
 
         // Send ephemeral message (will fail because no LLM provider, but that's OK —
         // the point is the session should remain untouched)
-        let _ = kernel.send_message_ephemeral(agent_id, "what is 2+2?").await;
+        let _ = kernel
+            .send_message_ephemeral(agent_id, "what is 2+2?")
+            .await;
 
         // Check session is unchanged
         let session_after = kernel.memory.get_session(session_id).unwrap();

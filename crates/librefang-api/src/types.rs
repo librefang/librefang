@@ -309,7 +309,7 @@ mod tests {
         let req: MessageRequest = serde_json::from_str(json).unwrap();
         assert_eq!(req.message, "/btw what is rust?");
         assert!(!req.ephemeral); // ephemeral is detected at route level, not here
-        // Route-level stripping:
+                                 // Route-level stripping:
         let stripped = req.message.strip_prefix("/btw ").unwrap();
         assert_eq!(stripped, "what is rust?");
     }
