@@ -84,6 +84,7 @@ struct ResponsesOutputItem {
 
 /// Content part within an output item.
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct ResponsesContentPart {
@@ -95,6 +96,7 @@ struct ResponsesContentPart {
 
 /// Reasoning summary text entry.
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct ResponsesReasoningSummary {
