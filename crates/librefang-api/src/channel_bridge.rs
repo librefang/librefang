@@ -1412,6 +1412,19 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
         msg
     }
+
+    async fn send_channel_push(
+        &self,
+        channel_type: &str,
+        recipient: &str,
+        message: &str,
+        thread_id: Option<&str>,
+    ) -> Result<String, String> {
+        use librefang_runtime::kernel_handle::KernelHandle;
+        self.kernel
+            .send_channel_message(channel_type, recipient, message, thread_id)
+            .await
+    }
 }
 
 /// Parse a trigger pattern string from chat into a `TriggerPattern`.
