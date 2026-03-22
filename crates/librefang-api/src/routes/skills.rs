@@ -736,7 +736,12 @@ pub async fn skillhub_search(
         }
     }
 
-    let cache_dir = state.kernel.config.home_dir.join(".cache").join("skillhub");
+    let cache_dir = state
+        .kernel
+        .config_ref()
+        .home_dir
+        .join(".cache")
+        .join("skillhub");
     let client = librefang_skills::skillhub::SkillhubClient::with_defaults(cache_dir);
 
     match client.search(&query, limit).await {
@@ -800,7 +805,12 @@ pub async fn skillhub_browse(
         }
     }
 
-    let cache_dir = state.kernel.config.home_dir.join(".cache").join("skillhub");
+    let cache_dir = state
+        .kernel
+        .config_ref()
+        .home_dir
+        .join(".cache")
+        .join("skillhub");
     let client = librefang_skills::skillhub::SkillhubClient::with_defaults(cache_dir);
 
     match client.browse(sort, limit).await {
@@ -844,10 +854,15 @@ pub async fn skillhub_skill_detail(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
 ) -> impl IntoResponse {
-    let cache_dir = state.kernel.config.home_dir.join(".cache").join("skillhub");
+    let cache_dir = state
+        .kernel
+        .config_ref()
+        .home_dir
+        .join(".cache")
+        .join("skillhub");
     let client = librefang_skills::skillhub::SkillhubClient::with_defaults(cache_dir);
 
-    let skills_dir = state.kernel.config.home_dir.join("skills");
+    let skills_dir = state.kernel.config_ref().home_dir.join("skills");
     let is_installed = client.is_installed(&slug, &skills_dir);
 
     match client.get_skill(&slug).await {
@@ -919,8 +934,13 @@ pub async fn skillhub_install(
     State(state): State<Arc<AppState>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
 ) -> impl IntoResponse {
-    let skills_dir = state.kernel.config.home_dir.join("skills");
-    let cache_dir = state.kernel.config.home_dir.join(".cache").join("skillhub");
+    let skills_dir = state.kernel.config_ref().home_dir.join("skills");
+    let cache_dir = state
+        .kernel
+        .config_ref()
+        .home_dir
+        .join(".cache")
+        .join("skillhub");
     let client = librefang_skills::skillhub::SkillhubClient::with_defaults(cache_dir);
 
     // Check if already installed
