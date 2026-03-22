@@ -152,7 +152,7 @@ export function WorkflowsPage() {
 
       {/* 主内容区 */}
       {hasWorkflows ? (
-        <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
+        <div className="grid gap-6 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]">
           {/* 工作流列表 */}
           <div className="space-y-2">
             <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-1">

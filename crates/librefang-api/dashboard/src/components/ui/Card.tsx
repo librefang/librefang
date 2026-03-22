@@ -10,9 +10,9 @@ interface CardProps extends HTMLAttributes<HTMLDivElement> {
 
 const paddingStyles: Record<CardPadding, string> = {
   none: "",
-  sm: "p-3",
-  md: "p-4",
-  lg: "p-6",
+  sm: "p-2.5 sm:p-3",
+  md: "p-3 sm:p-4",
+  lg: "p-4 sm:p-6",
 };
 
 export function Card({
@@ -26,7 +26,7 @@ export function Card({
   return (
     <div
       className={`
-        rounded-2xl border border-border-subtle bg-surface shadow-sm
+        rounded-xl sm:rounded-2xl border border-border-subtle bg-surface shadow-sm
         ${paddingStyles[padding]}
         ${hover ? "hover:border-brand/30 hover:-translate-y-1 cursor-pointer card-glow" : ""}
         ${glow ? "card-glow" : ""}
