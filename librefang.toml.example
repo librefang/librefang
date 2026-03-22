@@ -222,3 +222,4 @@ debounce_ms = 500
 # ── Vault (Encrypted Credential Storage) ─────────────────────
 # [vault]
 # enabled = true               # Auto-detected if vault.enc exists
+

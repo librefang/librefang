@@ -36,6 +36,9 @@ tokio-tungstenite = { workspace = true }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 rustls-native-certs = { workspace = true }
+ureq = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
 shlex = "1"
 toml = { workspace = true }
 dirs = { workspace = true }
