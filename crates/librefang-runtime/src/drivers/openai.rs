@@ -1653,16 +1653,34 @@ fn parse_groq_failed_tool_call(body: &str) -> Option<CompletionResponse> {
 }
 
 /// Ensure a `serde_json::Value` is an object.  OpenAI-compatible APIs expect
-/// tool-call arguments to be a JSON object (`{}`), never `null`.  When a tool
-/// has no parameters the deserialized value may be `null` (e.g. from
-/// `Value::default()` on empty/invalid input); this helper normalises it to `{}`.
+/// tool-call arguments to be a JSON object (`{}`), never `null`.
+///
+/// Handles several malformed-input scenarios that occur when models hallucinate
+/// or return non-standard tool calls:
+///
+/// - `null` → `{}`
+/// - A JSON string that parses as an object → use the parsed object
+/// - Any other type (string, number, array, bool) → `{"raw_input": <value>}`
+///   so the original value is preserved for debugging rather than silently lost.
 fn ensure_object(v: serde_json::Value) -> serde_json::Value {
-    match &v {
+    match v {
         serde_json::Value::Object(_) => v,
         serde_json::Value::Null => serde_json::json!({}),
+        serde_json::Value::String(ref s) => {
+            // The model may return a JSON-encoded string instead of a proper
+            // object — attempt to parse it.
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+                if parsed.is_object() {
+                    warn!("Tool input was a JSON string instead of an object, parsed successfully");
+                    return parsed;
+                }
+            }
+            warn!(value = %s, "Tool input was a non-parseable string, wrapping in raw_input");
+            serde_json::json!({"raw_input": v})
+        }
         other => {
-            warn!(value = ?other, "Tool input was not an object or null, replacing with empty object");
-            serde_json::json!({})
+            warn!(value = ?other, "Tool input was not an object, wrapping in raw_input");
+            serde_json::json!({"raw_input": other})
         }
     }
 }
@@ -1960,6 +1978,62 @@ mod tests {
         assert!(
             content.is_some(),
             "deepseek-reasoner assistant messages must always have non-null content for multi-turn"
+        );
+    }
+
+    #[test]
+    fn test_ensure_object_null_becomes_empty() {
+        assert_eq!(
+            ensure_object(serde_json::Value::Null),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn test_ensure_object_preserves_object() {
+        let input = serde_json::json!({"query": "test"});
+        assert_eq!(ensure_object(input.clone()), input);
+    }
+
+    #[test]
+    fn test_ensure_object_parses_json_string() {
+        let input = serde_json::json!(r#"{"query": "rust lang"}"#);
+        assert_eq!(
+            ensure_object(input),
+            serde_json::json!({"query": "rust lang"})
+        );
+    }
+
+    #[test]
+    fn test_ensure_object_wraps_plain_string() {
+        assert_eq!(
+            ensure_object(serde_json::json!("plain text")),
+            serde_json::json!({"raw_input": "plain text"})
+        );
+    }
+
+    #[test]
+    fn test_ensure_object_wraps_number() {
+        assert_eq!(
+            ensure_object(serde_json::json!(42)),
+            serde_json::json!({"raw_input": 42})
+        );
+    }
+
+    #[test]
+    fn test_ensure_object_wraps_array() {
+        assert_eq!(
+            ensure_object(serde_json::json!([1, 2])),
+            serde_json::json!({"raw_input": [1, 2]})
+        );
+    }
+
+    #[test]
+    fn test_ensure_object_string_with_json_array_wraps() {
+        let input = serde_json::json!(r#"[1, 2, 3]"#);
+        assert_eq!(
+            ensure_object(input),
+            serde_json::json!({"raw_input": "[1, 2, 3]"})
         );
     }
 }
