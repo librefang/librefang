@@ -1434,18 +1434,7 @@ pub async fn list_templates(
 
     let list: Vec<serde_json::Value> = filtered
         .iter()
-        .map(|t| {
-            serde_json::json!({
-                "id": t.id,
-                "name": t.name,
-                "description": t.description,
-                "category": t.category,
-                "tags": t.tags,
-                "parameters": t.parameters,
-                "steps": t.steps,
-                "created_at": t.created_at,
-            })
-        })
+        .filter_map(|t| serde_json::to_value(t).ok())
         .collect();
 
     Json(serde_json::json!({ "templates": list }))

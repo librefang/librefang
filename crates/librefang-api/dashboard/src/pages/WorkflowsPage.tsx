@@ -70,6 +70,14 @@ export function WorkflowsPage() {
   };
 
   const handleUseTemplate = async (tmpl: WorkflowTemplate) => {
+    const hasRequiredParams = (tmpl.parameters ?? []).some(p => p.required);
+    if (hasRequiredParams) {
+      // Template needs params — open canvas with TemplateBrowser
+      sessionStorage.removeItem("canvasNodes");
+      sessionStorage.removeItem("workflowTemplate");
+      navigate({ to: "/canvas", search: { t: Date.now(), openTemplates: "1" } });
+      return;
+    }
     try {
       const resp = await instantiateTemplate(tmpl.id, {});
       const workflowId = (resp as any).workflow_id || (resp as any).id;
@@ -78,7 +86,6 @@ export function WorkflowsPage() {
         openWorkflow(workflowId);
       }
     } catch {
-      // Fallback: open canvas with template name
       sessionStorage.removeItem("canvasNodes");
       sessionStorage.removeItem("workflowTemplate");
       navigate({ to: "/canvas", search: { t: Date.now() } });
