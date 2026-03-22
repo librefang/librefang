@@ -104,3 +104,23 @@ codegen *ARGS:
 # Check for broken links in documentation
 check-links *ARGS:
     cargo xtask check-links {{ARGS}}
+
+# Run criterion benchmarks
+bench *ARGS:
+    cargo xtask bench {{ARGS}}
+
+# Migrate agents from other frameworks
+migrate *ARGS:
+    cargo xtask migrate {{ARGS}}
+
+# Check formatting (Rust + web)
+fmt-all *ARGS:
+    cargo xtask fmt-check {{ARGS}}
+
+# Clean all build artifacts
+clean-all *ARGS:
+    cargo xtask clean-all {{ARGS}}
+
+# Diagnose development environment issues
+doctor *ARGS:
+    cargo xtask doctor {{ARGS}}

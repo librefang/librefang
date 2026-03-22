@@ -224,6 +224,63 @@ cargo xtask check-links --exclude "example.com"  # exclude patterns
 
 Uses [lychee](https://github.com/lycheeverse/lychee) if installed, otherwise falls back to a basic relative-link checker.
 
+### `bench` — Benchmarks
+
+Run criterion benchmarks with optional baseline comparison.
+
+```bash
+cargo xtask bench                              # run all benchmarks
+cargo xtask bench --name dispatch              # specific benchmark
+cargo xtask bench --save-baseline main         # save baseline
+cargo xtask bench --baseline main              # compare against baseline
+cargo xtask bench --open                       # open HTML report
+```
+
+### `migrate` — Framework Migration
+
+Import agents from other agent frameworks into LibreFang.
+
+```bash
+cargo xtask migrate --source openclaw --source-dir ~/openclaw-data
+cargo xtask migrate --source openfang --source-dir ./import --dry-run
+cargo xtask migrate --source openclaw --source-dir ./data --target-dir ~/.librefang
+```
+
+Supported sources: `openclaw`, `openfang`.
+
+### `fmt-check` — Format Check
+
+Unified formatting check across Rust and frontend code.
+
+```bash
+cargo xtask fmt-check                  # check all
+cargo xtask fmt-check --fix            # auto-fix formatting
+cargo xtask fmt-check --no-web         # Rust only
+cargo xtask fmt-check --no-rust        # web only (prettier)
+```
+
+### `clean-all` — Deep Clean
+
+Remove all build artifacts across Rust and frontend.
+
+```bash
+cargo xtask clean-all                  # remove everything
+cargo xtask clean-all --rust           # target/ + dist/ only
+cargo xtask clean-all --web            # node_modules/ + .next/ + dist/ only
+cargo xtask clean-all --dry-run        # show what would be deleted
+```
+
+### `doctor` — Environment Diagnostics
+
+Deep health check of the development environment.
+
+```bash
+cargo xtask doctor                     # full diagnostics
+cargo xtask doctor --port 5000         # check custom port
+```
+
+Checks: toolchain, port availability, daemon health, config validity, API keys, workspace state.
+
 ## What This Replaces
 
 | xtask command | Replaced |

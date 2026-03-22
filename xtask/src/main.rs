@@ -1,15 +1,20 @@
 //! Build automation tasks for the LibreFang workspace.
 
+mod bench;
 mod build_web;
 mod changelog;
 mod check_links;
 mod ci;
+mod clean_all;
 mod codegen;
 mod coverage;
 mod deps;
 mod dist;
 mod docker;
+mod doctor;
+mod fmt_check;
 mod integration_test;
+mod migrate;
 mod publish_sdks;
 mod release;
 mod setup;
@@ -67,6 +72,21 @@ enum Command {
 
     /// Check for broken links in documentation
     CheckLinks(check_links::CheckLinksArgs),
+
+    /// Run criterion benchmarks
+    Bench(bench::BenchArgs),
+
+    /// Migrate agents from other frameworks (OpenClaw, OpenFang)
+    Migrate(migrate::MigrateArgs),
+
+    /// Check formatting (Rust + web)
+    FmtCheck(fmt_check::FmtCheckArgs),
+
+    /// Clean all build artifacts (target/, node_modules/, dist/, .next/)
+    CleanAll(clean_all::CleanAllArgs),
+
+    /// Diagnose development environment issues
+    Doctor(doctor::DoctorArgs),
 }
 
 fn main() {
@@ -86,6 +106,11 @@ fn main() {
         Command::Deps(args) => deps::run(args),
         Command::Codegen(args) => codegen::run(args),
         Command::CheckLinks(args) => check_links::run(args),
+        Command::Bench(args) => bench::run(args),
+        Command::Migrate(args) => migrate::run(args),
+        Command::FmtCheck(args) => fmt_check::run(args),
+        Command::CleanAll(args) => clean_all::run(args),
+        Command::Doctor(args) => doctor::run(args),
     };
     if let Err(e) = result {
         eprintln!("Error: {e}");
