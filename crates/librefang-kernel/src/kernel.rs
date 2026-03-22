@@ -5548,6 +5548,9 @@ system_prompt = "You are a helpful assistant."
         // Start heartbeat monitor for agent health checking
         self.start_heartbeat_monitor();
 
+        // Start file inbox watcher if enabled
+        crate::inbox::start_inbox_watcher(Arc::clone(self));
+
         // Start OFP peer node if network is enabled
         if self.config.network_enabled && !self.config.network.shared_secret.is_empty() {
             let kernel = Arc::clone(self);
