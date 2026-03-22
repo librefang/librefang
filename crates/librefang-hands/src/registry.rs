@@ -13,6 +13,14 @@ use std::sync::Mutex;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+/// Entry from persisted hand state: (hand_id, config, old_agent_id, status).
+pub type HandStateEntry = (
+    String,
+    HashMap<String, serde_json::Value>,
+    Option<AgentId>,
+    HandStatus,
+);
+
 // ─── Settings availability types ────────────────────────────────────────────
 
 /// Availability status of a single setting option.
@@ -98,15 +106,7 @@ impl HandRegistry {
     /// Returns list of (hand_id, config, old_agent_id, status) that should be restored.
     /// The `old_agent_id` is the agent UUID from before the restart, used to
     /// reassign cron jobs to the newly spawned agent (issue #402).
-    #[allow(clippy::type_complexity)]
-    pub fn load_state(
-        path: &std::path::Path,
-    ) -> Vec<(
-        String,
-        HashMap<String, serde_json::Value>,
-        Option<AgentId>,
-        HandStatus,
-    )> {
+    pub fn load_state(path: &std::path::Path) -> Vec<HandStateEntry> {
         let data = match std::fs::read_to_string(path) {
             Ok(d) => d,
             Err(_) => return Vec::new(),
@@ -422,11 +422,19 @@ impl HandRegistry {
     }
 
     /// Check availability of all settings options for a hand.
-    pub fn check_settings_availability(&self, hand_id: &str) -> HandResult<Vec<SettingStatus>> {
+    pub fn check_settings_availability(
+        &self,
+        hand_id: &str,
+        lang: Option<&str>,
+    ) -> HandResult<Vec<SettingStatus>> {
         let def = self
             .definitions
             .get(hand_id)
             .ok_or_else(|| HandError::NotFound(hand_id.to_string()))?;
+
+        let i18n_settings = lang
+            .and_then(|l| def.i18n.get(l))
+            .map(|entry| &entry.settings);
 
         Ok(def
             .settings
@@ -449,10 +457,21 @@ impl HandRegistry {
                         }
                     })
                     .collect();
+
+                let setting_i18n = i18n_settings.and_then(|s| s.get(&setting.key));
+                let label = setting_i18n
+                    .and_then(|si| si.label.as_deref())
+                    .unwrap_or(&setting.label)
+                    .to_string();
+                let description = setting_i18n
+                    .and_then(|si| si.description.as_deref())
+                    .unwrap_or(&setting.description)
+                    .to_string();
+
                 SettingStatus {
                     key: setting.key.clone(),
-                    label: setting.label.clone(),
-                    description: setting.description.clone(),
+                    label,
+                    description,
                     setting_type: setting.setting_type.clone(),
                     default: setting.default.clone(),
                     options,

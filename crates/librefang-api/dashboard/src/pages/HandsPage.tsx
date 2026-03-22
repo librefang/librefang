@@ -30,7 +30,6 @@ import {
   Power,
   PowerOff,
   Loader2,
-  Check,
   X,
   Pause,
   Play,
@@ -39,18 +38,49 @@ import {
   CheckCircle2,
   XCircle,
   Wrench,
-  Tag,
   Activity,
   MessageCircle,
   Send,
   User,
   Bot,
   AlertCircle,
+  ChevronRight,
 } from "lucide-react";
 import { PageHeader } from "../components/ui/PageHeader";
 import { ListSkeleton } from "../components/ui/Skeleton";
 
 const REFRESH_MS = 15000;
+
+/* ── Inject slideInRight keyframes once at module level ──── */
+if (typeof document !== "undefined" && !document.getElementById("hands-keyframes")) {
+  const style = document.createElement("style");
+  style.id = "hands-keyframes";
+  style.textContent = `
+    @keyframes slideInRight {
+      from { transform: translateX(100%); opacity: 0; }
+      to   { transform: translateX(0);    opacity: 1; }
+    }
+  `;
+  document.head.appendChild(style);
+}
+
+/* ── Markdown components for chat ─────────────────────────── */
+const mdComponents = {
+  p: ({ children }: Record<string, unknown>) => <p className="mb-1.5 last:mb-0">{children as React.ReactNode}</p>,
+  ul: ({ children }: Record<string, unknown>) => <ul className="list-disc pl-4 mb-1.5 space-y-0.5">{children as React.ReactNode}</ul>,
+  ol: ({ children }: Record<string, unknown>) => <ol className="list-decimal pl-4 mb-1.5 space-y-0.5">{children as React.ReactNode}</ol>,
+  li: ({ children }: Record<string, unknown>) => <li className="text-xs">{children as React.ReactNode}</li>,
+  code: (props: Record<string, unknown>) => {
+    const { children } = props;
+    const text = String(children);
+    const isBlock = text.includes("\n");
+    return isBlock
+      ? <pre className="p-2 rounded-lg bg-main font-mono text-[10px] overflow-x-auto mb-1.5"><code>{children as React.ReactNode}</code></pre>
+      : <code className="px-1 py-0.5 rounded bg-main font-mono text-[10px]">{children as React.ReactNode}</code>;
+  },
+  pre: ({ children }: Record<string, unknown>) => <>{children as React.ReactNode}</>,
+  strong: ({ children }: Record<string, unknown>) => <strong className="font-bold">{children as React.ReactNode}</strong>,
+};
 
 /* ── Inline metrics for active hand cards ─────────────────── */
 
@@ -78,23 +108,6 @@ function HandMetricsInline({ instanceId }: { instanceId: string }) {
     </div>
   );
 }
-
-/* ── Markdown components for chat ─────────────────────────── */
-const mdComponents = {
-  p: ({ children }: Record<string, unknown>) => <p className="mb-1.5 last:mb-0">{children as React.ReactNode}</p>,
-  ul: ({ children }: Record<string, unknown>) => <ul className="list-disc pl-4 mb-1.5 space-y-0.5">{children as React.ReactNode}</ul>,
-  ol: ({ children }: Record<string, unknown>) => <ol className="list-decimal pl-4 mb-1.5 space-y-0.5">{children as React.ReactNode}</ol>,
-  li: ({ children }: Record<string, unknown>) => <li className="text-xs">{children as React.ReactNode}</li>,
-  code: ({ children, ...props }: Record<string, unknown>) => {
-    const text = String(children);
-    const isBlock = text.includes("\n");
-    return isBlock
-      ? <pre className="p-2 rounded-lg bg-main font-mono text-[10px] overflow-x-auto mb-1.5"><code>{children as React.ReactNode}</code></pre>
-      : <code className="px-1 py-0.5 rounded bg-main font-mono text-[10px]" {...props}>{children as React.ReactNode}</code>;
-  },
-  pre: ({ children }: Record<string, unknown>) => <>{children as React.ReactNode}</>,
-  strong: ({ children }: Record<string, unknown>) => <strong className="font-bold">{children as React.ReactNode}</strong>,
-};
 
 /* ── Chat panel for an active hand instance ──────────────── */
 
@@ -125,7 +138,6 @@ function HandChatPanel({
   const endRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // Load session history on mount
   useEffect(() => {
     getHandSession(instanceId)
       .then((data) => {
@@ -142,14 +154,12 @@ function HandChatPanel({
       .catch(() => {});
   }, [instanceId]);
 
-  // Auto-scroll
   useEffect(() => {
     if (messages.length > 0) {
       setTimeout(() => endRef.current?.scrollIntoView({ behavior: "smooth" }), 60);
     }
   }, [messages]);
 
-  // Focus input on mount
   useEffect(() => {
     setTimeout(() => inputRef.current?.focus(), 100);
   }, []);
@@ -290,7 +300,7 @@ function HandChatPanel({
                   ) : msg.role === "user" ? (
                     <span>{msg.content}</span>
                   ) : (
-                    <Markdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                    <Markdown remarkPlugins={[remarkGfm]} components={mdComponents as Record<string, React.ComponentType>}>
                       {msg.content}
                     </Markdown>
                   )}
@@ -351,7 +361,7 @@ function HandChatPanel({
   );
 }
 
-/* ── Detail panel (modal) for a hand ──────────────────────── */
+/* ── Detail side panel ───────────────────────────────────── */
 
 function HandDetailPanel({
   hand,
@@ -362,6 +372,7 @@ function HandDetailPanel({
   onDeactivate,
   onPause,
   onResume,
+  onChat,
   isPending,
 }: {
   hand: HandDefinitionItem;
@@ -396,39 +407,37 @@ function HandDetailPanel({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/40 backdrop-blur-xl backdrop-saturate-150"
+      className="fixed inset-0 z-50 flex justify-end bg-black/30 backdrop-blur-sm"
       onClick={onClose}
     >
       <div
-        className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[560px] sm:max-w-[90vw] max-h-[85vh] sm:max-h-[80vh] overflow-y-auto animate-fade-in-scale"
+        className="bg-surface w-full sm:w-[480px] h-full shadow-2xl border-l border-border-subtle flex flex-col animate-slide-in-right"
         onClick={(e) => e.stopPropagation()}
+        style={{ animation: "slideInRight 0.25s ease-out" }}
       >
-        {/* Sticky header */}
-        <div className="px-6 py-5 border-b border-border-subtle sticky top-0 bg-surface/95 backdrop-blur-xl backdrop-saturate-150 z-10">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
+        {/* Header */}
+        <div className="px-6 py-5 border-b border-border-subtle shrink-0">
+          <div className="flex items-start justify-between">
+            <div className="flex items-center gap-3 min-w-0">
               <div
-                className={`w-10 h-10 rounded-xl flex items-center justify-center ${
+                className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 ${
                   isActive
                     ? isPaused
-                      ? "bg-warning/20 text-warning"
-                      : "bg-success/20 text-success"
-                    : "bg-main text-text-dim/40"
+                      ? "bg-warning/15 text-warning"
+                      : "bg-success/15 text-success"
+                    : "bg-brand/10 text-brand"
                 }`}
               >
-                <Hand className="w-5 h-5" />
+                <Hand className="w-6 h-6" />
               </div>
-              <div>
-                <h2 className="text-base font-bold">{hand.name || hand.id}</h2>
-                <div className="flex items-center gap-2 mt-0.5">
+              <div className="min-w-0">
+                <h2 className="text-lg font-bold truncate">{hand.name || hand.id}</h2>
+                <div className="flex items-center gap-1.5 mt-1 flex-wrap">
                   {isActive ? (
                     isPaused ? (
-                      <Badge variant="warning">{t("hands.paused")}</Badge>
+                      <Badge variant="warning" dot>{t("hands.paused")}</Badge>
                     ) : (
-                      <Badge variant="success">
-                        <Check className="w-3 h-3 mr-0.5" />
-                        {t("hands.active_label")}
-                      </Badge>
+                      <Badge variant="success" dot>{t("hands.active_label")}</Badge>
                     )
                   ) : hand.requirements_met ? (
                     <Badge variant="default">{t("hands.ready")}</Badge>
@@ -437,7 +446,6 @@ function HandDetailPanel({
                   )}
                   {hand.category && (
                     <Badge variant="info">
-                      <Tag className="w-3 h-3 mr-0.5" />
                       {t(`hands.cat_${hand.category}`, { defaultValue: hand.category })}
                     </Badge>
                   )}
@@ -446,186 +454,14 @@ function HandDetailPanel({
             </div>
             <button
               onClick={onClose}
-              className="p-1.5 rounded-lg text-text-dim hover:text-text hover:bg-main transition-colors"
+              className="p-2 -mr-2 rounded-xl text-text-dim hover:text-text hover:bg-main transition-colors"
             >
-              <X className="w-4 h-4" />
+              <X className="w-5 h-5" />
             </button>
           </div>
-        </div>
-
-        <div className="px-6 py-4 space-y-5">
-          {/* Description */}
-          {hand.description && (
-            <p className="text-xs text-text-dim leading-relaxed">
-              {hand.description}
-            </p>
-          )}
-
-          {/* Instance info */}
-          {instance && (
-            <div className="space-y-1.5">
-              <p className="text-[10px] text-text-dim/60 font-mono">
-                {t("hands.instance")}: {instance.instance_id?.slice(0, 12)}
-              </p>
-              {instance.agent_name && (
-                <p className="text-[10px] text-text-dim/60">
-                  {t("hands.agent")}: {instance.agent_name}
-                </p>
-              )}
-              {instance.activated_at && (
-                <p className="text-[10px] text-text-dim/60">
-                  {t("hands.activated_at")}:{" "}
-                  {new Date(instance.activated_at).toLocaleString()}
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* Metrics */}
-          {isActive && (
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <BarChart3 className="w-3.5 h-3.5 text-brand/60" />
-                <span className="text-xs font-semibold">{t("hands.metrics")}</span>
-              </div>
-              {statsQuery.isLoading ? (
-                <div className="flex items-center gap-2 text-text-dim/50 text-[10px]">
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  Loading...
-                </div>
-              ) : stats.metrics &&
-                Object.keys(stats.metrics).length > 0 ? (
-                <div className="grid grid-cols-2 gap-2">
-                  {Object.entries(stats.metrics).map(([label, m]) => (
-                    <div
-                      key={label}
-                      className="p-2 rounded-xl bg-main border border-border-subtle"
-                    >
-                      <p className="text-[9px] text-text-dim/60 truncate">
-                        {label}
-                      </p>
-                      <p className="text-sm font-bold text-brand mt-0.5">
-                        {String(m.value ?? "-")}
-                      </p>
-                      {m.format && (
-                        <p className="text-[8px] text-text-dim/40">{m.format}</p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="text-[10px] text-text-dim/50">
-                  {t("hands.metrics_no_data")}
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* Settings */}
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <Settings className="w-3.5 h-3.5 text-text-dim/60" />
-              <span className="text-xs font-semibold">{t("hands.settings")}</span>
-            </div>
-            {settingsQuery.isLoading ? (
-              <div className="flex items-center gap-2 text-text-dim/50 text-[10px]">
-                <Loader2 className="w-3 h-3 animate-spin" />
-                Loading...
-              </div>
-            ) : settings.settings && settings.settings.length > 0 ? (
-              <div className="space-y-1.5">
-                {settings.settings.map((s) => {
-                  const currentVal =
-                    settings.current_values?.[s.key ?? ""];
-                  return (
-                    <div
-                      key={s.key}
-                      className="p-2 rounded-xl bg-main border border-border-subtle"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] font-semibold">
-                          {s.label || s.key}
-                        </span>
-                        {currentVal !== undefined && (
-                          <span className="text-[9px] text-brand font-mono">
-                            {String(currentVal)}
-                          </span>
-                        )}
-                      </div>
-                      {s.description && (
-                        <p className="text-[9px] text-text-dim/50 mt-0.5">
-                          {s.description}
-                        </p>
-                      )}
-                      {s.default !== undefined && (
-                        <p className="text-[8px] text-text-dim/40 mt-0.5">
-                          {t("hands.default_value")}: {s.default}
-                        </p>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="text-[10px] text-text-dim/50">
-                {t("hands.settings_empty")}
-              </p>
-            )}
-          </div>
-
-          {/* Requirements */}
-          {hand.requirements && hand.requirements.length > 0 && (
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <CheckCircle2 className="w-3.5 h-3.5 text-text-dim/60" />
-                <span className="text-xs font-semibold">
-                  {t("hands.requirements")}
-                </span>
-              </div>
-              <div className="space-y-1">
-                {hand.requirements.map((r) => (
-                  <div
-                    key={r.key}
-                    className="flex items-center gap-2 text-[10px]"
-                  >
-                    {r.satisfied ? (
-                      <CheckCircle2 className="w-3 h-3 text-success shrink-0" />
-                    ) : (
-                      <XCircle className="w-3 h-3 text-error shrink-0" />
-                    )}
-                    <span className={r.satisfied ? "text-text-dim" : "text-error"}>
-                      {r.label || r.key}
-                    </span>
-                    {r.optional && (
-                      <span className="text-[8px] text-text-dim/40">
-                        (optional)
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Tools */}
-          {hand.tools && hand.tools.length > 0 && (
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <Wrench className="w-3.5 h-3.5 text-text-dim/60" />
-                <span className="text-xs font-semibold">{t("hands.tools")}</span>
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {hand.tools.map((tool) => (
-                  <Badge key={tool} variant="default">
-                    {tool}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-          )}
 
           {/* Action buttons */}
-          <div className="flex items-center gap-2 pt-2 border-t border-border-subtle">
+          <div className="flex items-center gap-2 mt-4">
             {isActive ? (
               <>
                 <Button
@@ -635,57 +471,40 @@ function HandDetailPanel({
                     instance && onChat(instance.instance_id, hand.name || hand.id)
                   }
                   disabled={isPaused}
+                  className="flex-1"
                 >
-                  <MessageCircle className="w-3.5 h-3.5 mr-1" />
+                  <MessageCircle className="w-3.5 h-3.5 mr-1.5" />
                   {t("chat.title")}
                 </Button>
                 {isPaused ? (
                   <Button
                     variant="success"
                     size="sm"
-                    onClick={() =>
-                      instance && onResume(instance.instance_id)
-                    }
+                    onClick={() => instance && onResume(instance.instance_id)}
                     disabled={isPending}
+                    title={t("hands.resume")}
                   >
-                    {isPending ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" />
-                    ) : (
-                      <Play className="w-3.5 h-3.5 mr-1" />
-                    )}
-                    {t("hands.resume")}
+                    {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
                   </Button>
                 ) : (
                   <Button
                     variant="secondary"
                     size="sm"
-                    onClick={() =>
-                      instance && onPause(instance.instance_id)
-                    }
+                    onClick={() => instance && onPause(instance.instance_id)}
                     disabled={isPending}
+                    title={t("hands.pause")}
                   >
-                    {isPending ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" />
-                    ) : (
-                      <Pause className="w-3.5 h-3.5 mr-1" />
-                    )}
-                    {t("hands.pause")}
+                    {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Pause className="w-3.5 h-3.5" />}
                   </Button>
                 )}
                 <Button
                   variant="danger"
                   size="sm"
-                  onClick={() =>
-                    instance && onDeactivate(instance.instance_id)
-                  }
+                  onClick={() => instance && onDeactivate(instance.instance_id)}
                   disabled={isPending}
+                  title={t("hands.deactivate")}
                 >
-                  {isPending ? (
-                    <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" />
-                  ) : (
-                    <PowerOff className="w-3.5 h-3.5 mr-1" />
-                  )}
-                  {t("hands.deactivate")}
+                  {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PowerOff className="w-3.5 h-3.5" />}
                 </Button>
               </>
             ) : (
@@ -694,17 +513,408 @@ function HandDetailPanel({
                 size="sm"
                 onClick={() => onActivate(hand.id)}
                 disabled={isPending || !hand.requirements_met}
+                className="flex-1"
               >
                 {isPending ? (
-                  <Loader2 className="w-3.5 h-3.5 animate-spin mr-1" />
+                  <Loader2 className="w-3.5 h-3.5 animate-spin mr-1.5" />
                 ) : (
-                  <Power className="w-3.5 h-3.5 mr-1" />
+                  <Power className="w-3.5 h-3.5 mr-1.5" />
                 )}
                 {t("hands.activate")}
               </Button>
             )}
           </div>
         </div>
+
+        {/* Scrollable content */}
+        <div className="flex-1 overflow-y-auto scrollbar-thin">
+          <div className="px-6 py-5 space-y-6">
+            {/* Description */}
+            {hand.description && (
+              <div>
+                <p className="text-sm text-text-dim leading-relaxed">
+                  {hand.description}
+                </p>
+              </div>
+            )}
+
+            {/* Instance info */}
+            {instance && (
+              <div className="p-3 rounded-xl bg-main/50 border border-border-subtle space-y-1.5">
+                <p className="text-[10px] text-text-dim/60 font-mono">
+                  {t("hands.instance")}: {instance.instance_id?.slice(0, 16)}
+                </p>
+                {instance.agent_name && (
+                  <p className="text-[10px] text-text-dim/60">
+                    {t("hands.agent")}: {instance.agent_name}
+                  </p>
+                )}
+                {instance.activated_at && (
+                  <p className="text-[10px] text-text-dim/60">
+                    {t("hands.activated_at")}:{" "}
+                    {new Date(instance.activated_at).toLocaleString()}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Metrics */}
+            {isActive && (
+              <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <BarChart3 className="w-4 h-4 text-brand/60" />
+                  <span className="text-xs font-bold">{t("hands.metrics")}</span>
+                </div>
+                {statsQuery.isLoading ? (
+                  <div className="flex items-center gap-2 text-text-dim/50 text-[10px]">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    {t("common.loading")}
+                  </div>
+                ) : stats.metrics && Object.keys(stats.metrics).length > 0 ? (
+                  <div className="grid grid-cols-2 gap-2">
+                    {Object.entries(stats.metrics).map(([label, m]) => (
+                      <div
+                        key={label}
+                        className="p-3 rounded-xl bg-main border border-border-subtle"
+                      >
+                        <p className="text-[10px] text-text-dim/60 truncate">{label}</p>
+                        <p className="text-base font-bold text-brand mt-0.5">
+                          {String(m.value ?? "-")}
+                        </p>
+                        {m.format && (
+                          <p className="text-[8px] text-text-dim/40">{m.format}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-[10px] text-text-dim/50">
+                    {t("hands.metrics_no_data")}
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Settings */}
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <Settings className="w-4 h-4 text-text-dim/60" />
+                <span className="text-xs font-bold">{t("hands.settings")}</span>
+                {settings.settings && settings.settings.length > 0 && (
+                  <span className="text-[10px] text-text-dim/40">{settings.settings.length}</span>
+                )}
+              </div>
+              {settingsQuery.isLoading ? (
+                <div className="flex items-center gap-2 text-text-dim/50 text-[10px]">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  {t("common.loading")}
+                </div>
+              ) : settings.settings && settings.settings.length > 0 ? (
+                <div className="rounded-xl border border-border-subtle overflow-hidden divide-y divide-border-subtle/50">
+                  {settings.settings.map((s) => {
+                    const currentVal = settings.current_values?.[s.key ?? ""];
+                    const displayVal = currentVal !== undefined ? String(currentVal) : (s.default !== undefined ? String(s.default) : undefined);
+                    const isDefault = currentVal === undefined;
+                    return (
+                      <div key={s.key} className="px-3.5 py-2.5 bg-main/30 hover:bg-main/60 transition-colors">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0 flex-1">
+                            <span className="text-[11px] font-semibold block">
+                              {s.label || s.key}
+                            </span>
+                            {s.description && (
+                              <p className="text-[10px] text-text-dim/45 mt-0.5 leading-snug">
+                                {s.description}
+                              </p>
+                            )}
+                          </div>
+                          {displayVal !== undefined && (
+                            <span className={`text-[10px] font-mono shrink-0 px-2 py-0.5 rounded-md mt-0.5 ${
+                              isDefault
+                                ? "text-text-dim/50 bg-main"
+                                : "text-brand bg-brand/8"
+                            }`}>
+                              {displayVal || <span className="text-text-dim/30 italic">-</span>}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-[10px] text-text-dim/50">
+                  {t("hands.settings_empty")}
+                </p>
+              )}
+            </div>
+
+            {/* Requirements */}
+            {hand.requirements && hand.requirements.length > 0 && (
+              <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <CheckCircle2 className="w-4 h-4 text-text-dim/60" />
+                  <span className="text-xs font-bold">
+                    {t("hands.requirements")}
+                  </span>
+                </div>
+                <div className="space-y-1.5">
+                  {hand.requirements.map((r) => (
+                    <div
+                      key={r.key}
+                      className="flex items-center gap-2 text-[11px]"
+                    >
+                      {r.satisfied ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-success shrink-0" />
+                      ) : (
+                        <XCircle className="w-3.5 h-3.5 text-error shrink-0" />
+                      )}
+                      <span className={r.satisfied ? "text-text-dim" : "text-error"}>
+                        {r.label || r.key}
+                      </span>
+                      {r.optional && (
+                        <span className="text-[9px] text-text-dim/40">(optional)</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Tools */}
+            {hand.tools && hand.tools.length > 0 && (
+              <div>
+                <div className="flex items-center gap-2 mb-3">
+                  <Wrench className="w-4 h-4 text-text-dim/60" />
+                  <span className="text-xs font-bold">{t("hands.tools")}</span>
+                  <span className="text-[10px] text-text-dim/40">{hand.tools.length}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-1.5">
+                  {hand.tools.map((tool) => (
+                    <div
+                      key={tool}
+                      className="flex items-center gap-2 px-2.5 py-2 rounded-lg bg-main/50 border border-border-subtle/50"
+                    >
+                      <div className="w-1.5 h-1.5 rounded-full bg-brand/40 shrink-0" />
+                      <span className="text-[10px] font-mono text-text-dim truncate">{tool}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+    </div>
+  );
+}
+
+/* ── Active hand card (horizontal strip) ─────────────────── */
+
+function ActiveHandCard({
+  hand,
+  instance,
+  onChat,
+  onDeactivate,
+  onDetail,
+  isPending,
+}: {
+  hand: HandDefinitionItem;
+  instance: HandInstanceItem;
+  onChat: (instanceId: string, handName: string) => void;
+  onDeactivate: (id: string) => void;
+  onDetail: (hand: HandDefinitionItem) => void;
+  isPending: boolean;
+}) {
+  const { t } = useTranslation();
+  const isPaused = instance.status === "paused";
+
+  return (
+    <div
+      className={`group relative flex items-center gap-3 px-4 py-3 rounded-2xl border cursor-pointer transition-all shrink-0 min-w-[240px] max-w-[320px] ${
+        isPaused
+          ? "border-warning/30 bg-warning/5 hover:border-warning/50"
+          : "border-success/30 bg-success/5 hover:border-success/50"
+      }`}
+      onClick={() => onDetail(hand)}
+    >
+      <div
+        className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+          isPaused
+            ? "bg-warning/20 text-warning"
+            : "bg-success/20 text-success"
+        }`}
+      >
+        <Hand className="w-5 h-5" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <h4 className="text-sm font-bold truncate">{hand.name || hand.id}</h4>
+          {isPaused && (
+            <span className="w-1.5 h-1.5 rounded-full bg-warning shrink-0" />
+          )}
+          {!isPaused && (
+            <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse shrink-0" />
+          )}
+        </div>
+        {instance.instance_id && (
+          <HandMetricsInline instanceId={instance.instance_id} />
+        )}
+      </div>
+      <div
+        className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {!isPaused && (
+          <button
+            onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
+            className="p-1.5 rounded-lg text-brand hover:bg-brand/10 transition-colors"
+            title={t("chat.title")}
+          >
+            <MessageCircle className="w-4 h-4" />
+          </button>
+        )}
+        <button
+          onClick={() => onDeactivate(instance.instance_id)}
+          disabled={isPending}
+          className="p-1.5 rounded-lg text-text-dim hover:text-error hover:bg-error/10 transition-colors disabled:opacity-40"
+          title={t("hands.deactivate")}
+        >
+          {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <PowerOff className="w-4 h-4" />}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ── Hand card (grid item) ───────────────────────────────── */
+
+function HandCard({
+  hand,
+  instance,
+  isActive,
+  onActivate,
+  onDeactivate,
+  onDetail,
+  onChat,
+  isPending,
+}: {
+  hand: HandDefinitionItem;
+  instance: HandInstanceItem | undefined;
+  isActive: boolean;
+  onActivate: (id: string) => void;
+  onDeactivate: (id: string) => void;
+  onDetail: (hand: HandDefinitionItem) => void;
+  onChat: (instanceId: string, handName: string) => void;
+  isPending: boolean;
+}) {
+  const { t } = useTranslation();
+  const isPaused = instance?.status === "paused";
+
+  return (
+    <div
+      className="group p-4 rounded-2xl border border-border-subtle hover:border-brand/30 bg-surface hover:bg-surface/80 transition-all cursor-pointer"
+      onClick={() => onDetail(hand)}
+      role="button"
+      tabIndex={0}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onDetail(hand);
+        }
+      }}
+    >
+      {/* Top: icon + status */}
+      <div className="flex items-start justify-between mb-3">
+        <div
+          className={`w-11 h-11 rounded-2xl flex items-center justify-center ${
+            isActive
+              ? isPaused
+                ? "bg-warning/15 text-warning"
+                : "bg-success/15 text-success"
+              : "bg-brand/8 text-brand/60 group-hover:bg-brand/12 group-hover:text-brand"
+          } transition-colors`}
+        >
+          <Hand className="w-5 h-5" />
+        </div>
+        <div
+          className="flex items-center gap-1"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {isActive && instance && !isPaused && (
+            <button
+              onClick={() => onChat(instance.instance_id, hand.name || hand.id)}
+              className="p-1.5 rounded-lg text-brand/60 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-all"
+              title={t("chat.title")}
+            >
+              <MessageCircle className="w-4 h-4" />
+            </button>
+          )}
+          {isActive && instance ? (
+            <button
+              onClick={() => onDeactivate(instance.instance_id)}
+              disabled={isPending}
+              className="p-1.5 rounded-lg text-text-dim/40 hover:text-error hover:bg-error/10 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-40"
+              title={t("hands.deactivate")}
+            >
+              {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <PowerOff className="w-4 h-4" />}
+            </button>
+          ) : (
+            <button
+              onClick={() => onActivate(hand.id)}
+              disabled={isPending || !hand.requirements_met}
+              className="p-1.5 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 opacity-0 group-hover:opacity-100 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+              title={t("hands.activate")}
+            >
+              {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Power className="w-4 h-4" />}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Name + category */}
+      <h3 className="text-sm font-bold truncate mb-1">{hand.name || hand.id}</h3>
+      <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+        {isActive && (
+          isPaused ? (
+            <Badge variant="warning" dot>{t("hands.paused")}</Badge>
+          ) : (
+            <Badge variant="success" dot>{t("hands.active_label")}</Badge>
+          )
+        )}
+        {!isActive && !hand.requirements_met && (
+          <Badge variant="warning">{t("hands.missing_req")}</Badge>
+        )}
+        {hand.category && (
+          <span className="text-[10px] text-text-dim/50">
+            {t(`hands.cat_${hand.category}`, { defaultValue: hand.category })}
+          </span>
+        )}
+      </div>
+
+      {/* Description */}
+      <p className="text-[11px] text-text-dim leading-relaxed line-clamp-2 min-h-[2.5em]">
+        {hand.description || "-"}
+      </p>
+
+      {/* Tools count + metrics */}
+      <div className="flex items-center justify-between mt-3 pt-3 border-t border-border-subtle/50">
+        <div className="flex items-center gap-3">
+          {hand.tools && hand.tools.length > 0 && (
+            <span className="text-[10px] text-text-dim/50 flex items-center gap-1">
+              <Wrench className="w-3 h-3" />
+              {hand.tools.length}
+            </span>
+          )}
+          {hand.requirements && hand.requirements.length > 0 && (
+            <span className="text-[10px] text-text-dim/50 flex items-center gap-1">
+              <CheckCircle2 className="w-3 h-3" />
+              {hand.requirements.filter((r) => r.satisfied).length}/{hand.requirements.length}
+            </span>
+          )}
+        </div>
+        <ChevronRight className="w-3.5 h-3.5 text-text-dim/30 group-hover:text-brand/50 transition-colors" />
       </div>
     </div>
   );
@@ -718,6 +928,7 @@ export function HandsPage() {
   const addToast = useUIStore((s) => s.addToast);
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState<string>("all");
   const [detailHand, setDetailHand] = useState<HandDefinitionItem | null>(null);
   const [chatInstance, setChatInstance] = useState<{ id: string; name: string } | null>(null);
 
@@ -752,23 +963,51 @@ export function HandsPage() {
     [instances],
   );
 
-  const filtered = hands
-    .filter((h) => {
-      if (!search) return true;
-      const q = search.toLowerCase();
-      return (
-        (h.name || "").toLowerCase().includes(q) ||
-        (h.id || "").toLowerCase().includes(q) ||
-        (h.description || "").toLowerCase().includes(q)
-      );
-    })
-    .sort((a, b) => {
-      const aActive = activeHandIds.has(a.id) ? 0 : 1;
-      const bActive = activeHandIds.has(b.id) ? 0 : 1;
-      return (
-        aActive - bActive || (a.name || a.id).localeCompare(b.name || b.id)
-      );
-    });
+  // Extract unique categories
+  const categories = useMemo(() => {
+    const cats = new Set<string>();
+    for (const h of hands) {
+      if (h.category) cats.add(h.category);
+    }
+    return Array.from(cats).sort();
+  }, [hands]);
+
+  // Active hands with their definitions
+  const activeHands = useMemo(
+    () =>
+      instances
+        .map((inst) => ({
+          instance: inst,
+          hand: hands.find((h) => h.id === inst.hand_id),
+        }))
+        .filter((x) => x.hand != null) as Array<{
+        instance: HandInstanceItem;
+        hand: HandDefinitionItem;
+      }>,
+    [instances, hands],
+  );
+
+  // Filtered hands for the grid — exclude hands already shown in active strip
+  const filtered = useMemo(() => {
+    return hands
+      .filter((h) => {
+        // Exclude hands already displayed in the active strip
+        if (activeHandIds.has(h.id)) return false;
+        // Category filter
+        if (selectedCategory !== "all" && h.category !== selectedCategory) return false;
+        // Search filter
+        if (search) {
+          const q = search.toLowerCase();
+          return (
+            (h.name || "").toLowerCase().includes(q) ||
+            (h.id || "").toLowerCase().includes(q) ||
+            (h.description || "").toLowerCase().includes(q)
+          );
+        }
+        return true;
+      })
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
+  }, [hands, search, selectedCategory, activeHandIds]);
 
   async function handleActivate(id: string) {
     setPendingId(id);
@@ -829,14 +1068,13 @@ export function HandsPage() {
 
   const activeCount = activeHandIds.size;
 
-  // Find the instance for the detail hand
   const detailInstance = detailHand
     ? instances.find((i) => i.hand_id === detailHand.id)
     : undefined;
   const detailIsActive = detailHand ? activeHandIds.has(detailHand.id) : false;
 
   return (
-    <div className="flex flex-col gap-6 transition-colors duration-300">
+    <div className="flex flex-col gap-5 transition-colors duration-300">
       <PageHeader
         badge={t("hands.orchestration")}
         title={t("hands.title")}
@@ -849,7 +1087,7 @@ export function HandsPage() {
         icon={<Hand className="h-4 w-4" />}
         actions={
           <div className="flex items-center gap-3">
-            <Badge variant="success">
+            <Badge variant="success" dot>
               {activeCount} {t("hands.active_label")}
             </Badge>
             <Badge variant="default">
@@ -859,161 +1097,116 @@ export function HandsPage() {
         }
       />
 
-      {/* Search */}
-      {hands.length > 0 && (
-        <Input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={t("hands.search_placeholder")}
-          leftIcon={<Search className="h-4 w-4" />}
-        />
+      {/* Active hands strip */}
+      {activeHands.length > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-2.5">
+            <Activity className="w-4 h-4 text-success" />
+            <span className="text-xs font-bold text-text-dim">
+              {t("hands.instances")}
+            </span>
+          </div>
+          <div className="flex gap-3 overflow-x-auto pb-2 scrollbar-thin -mx-1 px-1">
+            {activeHands.map(({ hand, instance }) => (
+              <ActiveHandCard
+                key={instance.instance_id}
+                hand={hand}
+                instance={instance}
+                onChat={(id, name) => setChatInstance({ id, name })}
+                onDeactivate={handleDeactivate}
+                onDetail={setDetailHand}
+                isPending={pendingId === hand.id || pendingId === instance.instance_id}
+              />
+            ))}
+          </div>
+        </div>
       )}
 
-      {/* Hands List */}
+      {/* Category filter + Search */}
+      {hands.length > 0 && (
+        <div className="flex flex-col sm:flex-row gap-3">
+          {/* Category pills */}
+          <div className="flex items-center gap-1.5 overflow-x-auto scrollbar-thin pb-1 shrink-0">
+            <button
+              onClick={() => setSelectedCategory("all")}
+              className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-all ${
+                selectedCategory === "all"
+                  ? "bg-brand text-white shadow-sm shadow-brand/20"
+                  : "bg-main text-text-dim hover:text-text hover:bg-main/80 border border-border-subtle"
+              }`}
+            >
+              {t("providers.filter_all")}
+            </button>
+            {categories.map((cat) => (
+              <button
+                key={cat}
+                onClick={() =>
+                  setSelectedCategory(selectedCategory === cat ? "all" : cat)
+                }
+                className={`px-3 py-1.5 rounded-xl text-[11px] font-bold whitespace-nowrap transition-all ${
+                  selectedCategory === cat
+                    ? "bg-brand text-white shadow-sm shadow-brand/20"
+                    : "bg-main text-text-dim hover:text-text hover:bg-main/80 border border-border-subtle"
+                }`}
+              >
+                {t(`hands.cat_${cat}`, { defaultValue: cat })}
+              </button>
+            ))}
+          </div>
+
+          {/* Search */}
+          <div className="flex-1">
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t("hands.search_placeholder")}
+              leftIcon={<Search className="h-4 w-4" />}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Hands grid */}
       {handsQuery.isLoading ? (
-        <ListSkeleton rows={4} />
+        <ListSkeleton rows={6} />
       ) : hands.length === 0 ? (
+        <div className="text-center py-20">
+          <div className="w-16 h-16 rounded-3xl bg-brand/8 flex items-center justify-center mx-auto mb-4">
+            <Hand className="w-8 h-8 text-brand/30" />
+          </div>
+          <p className="text-sm font-bold text-text-dim/60">{t("common.no_data")}</p>
+          <p className="text-xs text-text-dim/40 mt-1">{t("hands.subtitle")}</p>
+        </div>
+      ) : filtered.length === 0 ? (
         <div className="text-center py-16">
-          <Hand className="w-10 h-10 text-text-dim/20 mx-auto mb-3" />
-          <p className="text-sm text-text-dim">{t("common.no_data")}</p>
+          <Search className="w-8 h-8 text-text-dim/20 mx-auto mb-3" />
+          <p className="text-sm text-text-dim/50">
+            {t("agents.no_matching")}
+          </p>
         </div>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-1 md:grid-cols-2 stagger-children">
+        <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 stagger-children">
           {filtered.map((h) => {
             const isActive = activeHandIds.has(h.id);
             const instance = instances.find((i) => i.hand_id === h.id);
-            const isPending = pendingId === h.id;
-            const isPaused = instance?.status === "paused";
             return (
-              <div
+              <HandCard
                 key={h.id}
-                className={`p-4 rounded-2xl border transition-all cursor-pointer ${
-                  isActive
-                    ? isPaused
-                      ? "border-warning/30 bg-warning/5"
-                      : "border-success/30 bg-success/5"
-                    : "border-border-subtle hover:border-brand/30"
-                }`}
-                onClick={() => setDetailHand(h)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    setDetailHand(h);
-                  }
-                }}
-              >
-                <div className="flex items-start gap-3">
-                  <div
-                    className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
-                      isActive
-                        ? isPaused
-                          ? "bg-warning/20 text-warning"
-                          : "bg-success/20 text-success"
-                        : "bg-main text-text-dim/40"
-                    }`}
-                  >
-                    <Hand className="w-5 h-5" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-sm font-bold truncate">
-                        {h.name || h.id}
-                      </h3>
-                      {isActive ? (
-                        isPaused ? (
-                          <Badge variant="warning">
-                            <Pause className="w-3 h-3 mr-0.5" />
-                            {t("hands.paused")}
-                          </Badge>
-                        ) : (
-                          <Badge variant="success">
-                            <Check className="w-3 h-3 mr-0.5" />
-                            {t("hands.active_label")}
-                          </Badge>
-                        )
-                      ) : h.requirements_met ? (
-                        <Badge variant="default">{t("hands.ready")}</Badge>
-                      ) : (
-                        <Badge variant="warning">
-                          {t("hands.missing_req")}
-                        </Badge>
-                      )}
-                      {h.category && (
-                        <Badge variant="info">
-                          <Tag className="w-3 h-3 mr-0.5" />
-                          {t(`hands.cat_${h.category}`, { defaultValue: h.category })}
-                        </Badge>
-                      )}
-                    </div>
-                    <p className="text-[10px] text-text-dim mt-0.5 line-clamp-2">
-                      {h.description || "-"}
-                    </p>
-                    {instance && (
-                      <p className="text-[9px] text-text-dim/50 font-mono mt-1">
-                        {t("hands.instance")}:{" "}
-                        {instance.instance_id?.slice(0, 8)}
-                      </p>
-                    )}
-                    {/* Inline metrics for active hands */}
-                    {isActive && instance && (
-                      <HandMetricsInline instanceId={instance.instance_id} />
-                    )}
-                  </div>
-                  <div
-                    className="shrink-0 flex items-center gap-1.5"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    {isActive && instance && !isPaused && (
-                      <Button
-                        variant="primary"
-                        size="sm"
-                        onClick={() =>
-                          setChatInstance({ id: instance.instance_id, name: h.name || h.id })
-                        }
-                      >
-                        <MessageCircle className="w-3.5 h-3.5" />
-                      </Button>
-                    )}
-                    {isActive ? (
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        onClick={() =>
-                          instance && handleDeactivate(instance.instance_id)
-                        }
-                        disabled={isPending}
-                      >
-                        {isPending ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <PowerOff className="w-3.5 h-3.5" />
-                        )}
-                      </Button>
-                    ) : (
-                      <Button
-                        variant="primary"
-                        size="sm"
-                        onClick={() => handleActivate(h.id)}
-                        disabled={isPending || !h.requirements_met}
-                      >
-                        {isPending ? (
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                        ) : (
-                          <Power className="w-3.5 h-3.5" />
-                        )}
-                      </Button>
-                    )}
-                  </div>
-                </div>
-              </div>
+                hand={h}
+                instance={instance}
+                isActive={isActive}
+                onActivate={handleActivate}
+                onDeactivate={(id) => handleDeactivate(id)}
+                onDetail={setDetailHand}
+                onChat={(id, name) => setChatInstance({ id, name })}
+                isPending={pendingId === h.id || (instance ? pendingId === instance.instance_id : false)}
+              />
             );
           })}
         </div>
       )}
 
-      {/* Detail panel modal */}
+      {/* Detail side panel */}
       {detailHand && (
         <HandDetailPanel
           hand={detailHand}
