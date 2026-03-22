@@ -1223,6 +1223,36 @@ export function hasApiKey(): boolean {
   return !!localStorage.getItem("librefang-api-key");
 }
 
+export type AuthMode = "credentials" | "api_key" | "none";
+
+export async function checkDashboardAuthMode(): Promise<AuthMode> {
+  try {
+    const resp = await fetch("/api/auth/dashboard-check");
+    if (!resp.ok) return "none";
+    const data = await resp.json();
+    return (data.mode as AuthMode) || "none";
+  } catch {
+    return "none";
+  }
+}
+
+export async function dashboardLogin(username: string, password: string): Promise<{ ok: boolean; token?: string; error?: string }> {
+  try {
+    const resp = await fetch("/api/auth/dashboard-login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await resp.json();
+    if (data.ok && data.token) {
+      setApiKey(data.token);
+    }
+    return data;
+  } catch (e: any) {
+    return { ok: false, error: e.message || "Network error" };
+  }
+}
+
 // ── Plugins ──────────────────────────────────────────
 
 export interface PluginItem {

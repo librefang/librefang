@@ -6,6 +6,7 @@ use crate::rate_limiter;
 use crate::routes::{self, AppState};
 use crate::webchat;
 use crate::ws;
+use axum::response::IntoResponse;
 use axum::Router;
 use librefang_kernel::LibreFangKernel;
 use std::net::SocketAddr;
@@ -758,6 +759,15 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/pairing/notify",
             axum::routing::post(routes::pairing_notify),
         )
+        // Dashboard credential login
+        .route(
+            "/auth/dashboard-login",
+            axum::routing::post(dashboard_login),
+        )
+        .route(
+            "/auth/dashboard-check",
+            axum::routing::get(dashboard_auth_check),
+        )
         // OAuth/OIDC external authentication endpoints
         .route(
             "/auth/providers",
@@ -780,6 +790,73 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/auth/introspect",
             axum::routing::post(crate::oauth::auth_introspect),
         )
+}
+
+/// Dashboard credential login — validates username/password from config.toml
+/// and returns a session token (HMAC-derived from credentials).
+async fn dashboard_login(
+    axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> axum::response::Response {
+    let cfg = &state.kernel.config;
+    let cfg_user = cfg.dashboard_user.trim();
+    let cfg_pass = cfg.dashboard_pass.trim();
+
+    // If not configured, login is not needed
+    if cfg_user.is_empty() || cfg_pass.is_empty() {
+        return axum::response::Json(serde_json::json!({
+            "ok": true, "token": "", "message": "No credentials required"
+        }))
+        .into_response();
+    }
+
+    let user = body.get("username").and_then(|v| v.as_str()).unwrap_or("");
+    let pass = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Constant-time comparison
+    use subtle::ConstantTimeEq;
+    let user_ok = user.as_bytes().ct_eq(cfg_user.as_bytes());
+    let pass_ok = pass.as_bytes().ct_eq(cfg_pass.as_bytes());
+
+    if user_ok.into() && pass_ok.into() {
+        // Generate a deterministic token from credentials so no server-side state needed
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(cfg_pass.as_bytes()).expect("HMAC key");
+        mac.update(cfg_user.as_bytes());
+        mac.update(b"librefang-dashboard-session");
+        let token = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
+
+        axum::response::Json(serde_json::json!({
+            "ok": true,
+            "token": token,
+        }))
+        .into_response()
+    } else {
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::response::Json(serde_json::json!({
+                "ok": false,
+                "error": "Invalid username or password"
+            })),
+        )
+            .into_response()
+    }
+}
+
+/// Check what auth mode the dashboard needs.
+async fn dashboard_auth_check(
+    axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
+) -> axum::response::Json<serde_json::Value> {
+    let cfg = &state.kernel.config;
+    let has_credentials =
+        !cfg.dashboard_user.trim().is_empty() && !cfg.dashboard_pass.trim().is_empty();
+    let has_api_key = !cfg.api_key.trim().is_empty();
+
+    axum::response::Json(serde_json::json!({
+        "mode": if has_credentials { "credentials" } else if has_api_key { "api_key" } else { "none" },
+    }))
 }
 
 /// Build the full API router with all routes, middleware, and state.
@@ -845,7 +922,22 @@ pub async fn build_router(
     };
 
     // Trim whitespace so `api_key = ""` or `api_key = "  "` both disable auth.
-    let api_key = state.kernel.config.api_key.trim().to_string();
+    let mut api_key = state.kernel.config.api_key.trim().to_string();
+
+    // If dashboard credentials are configured but no api_key, derive one from credentials.
+    // This ensures the auth middleware protects write endpoints when credentials are set.
+    if api_key.is_empty() {
+        let du = state.kernel.config.dashboard_user.trim();
+        let dp = state.kernel.config.dashboard_pass.trim();
+        if !du.is_empty() && !dp.is_empty() {
+            use hmac::{Hmac, Mac};
+            use sha2::Sha256;
+            let mut mac = Hmac::<Sha256>::new_from_slice(dp.as_bytes()).expect("HMAC key");
+            mac.update(du.as_bytes());
+            mac.update(b"librefang-dashboard-session");
+            api_key = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
+        }
+    }
     let gcra_limiter = rate_limiter::create_rate_limiter();
 
     // Build the versioned API routes. All /api/* endpoints are defined once

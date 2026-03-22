@@ -237,7 +237,9 @@ pub async fn auth(
         // (they are the authentication entry points themselves).
         || (path == "/api/auth/providers" && is_get)
         || (path.starts_with("/api/auth/login") && is_get)
-        || path == "/api/auth/callback";
+        || path == "/api/auth/callback"
+        || path == "/api/auth/dashboard-login"
+        || path == "/api/auth/dashboard-check";
 
     if is_public {
         return next.run(request).await;

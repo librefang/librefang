@@ -4,60 +4,125 @@ import { useTranslation } from "react-i18next";
 import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2 } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
-import { checkAuthRequired, setApiKey } from "./api";
+import { checkAuthRequired, setApiKey, checkDashboardAuthMode, dashboardLogin, type AuthMode } from "./api";
 import { SkillOutputPanel } from "./components/ui/SkillOutputPanel";
 
-function AuthDialog({ onAuthenticated }: { onAuthenticated: () => void }) {
+function LoginScreen({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
   const { t } = useTranslation();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [key, setKey] = useState("");
-  const [error, setError] = useState(false);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  async function handleSubmit(e: React.FormEvent) {
+  async function handleCredentialsLogin(e: React.FormEvent) {
+    e.preventDefault();
+    if (!username.trim() || !password.trim()) return;
+    setLoading(true);
+    setError("");
+    const result = await dashboardLogin(username.trim(), password.trim());
+    setLoading(false);
+    if (result.ok) {
+      onAuthenticated();
+    } else {
+      setError(result.error || t("auth.invalid"));
+    }
+  }
+
+  async function handleApiKeyLogin(e: React.FormEvent) {
     e.preventDefault();
     if (!key.trim()) return;
+    setLoading(true);
+    setError("");
     setApiKey(key.trim());
     const stillNeeded = await checkAuthRequired();
+    setLoading(false);
     if (stillNeeded) {
-      setError(true);
-      return;
+      setError(t("auth.invalid"));
+    } else {
+      onAuthenticated();
     }
-    onAuthenticated();
   }
 
   return (
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/70 backdrop-blur-md">
-      <div className="w-full max-w-md mx-4 animate-fade-in-scale">
-        <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl p-8">
-          <div className="flex flex-col items-center mb-6">
-            <div className="w-14 h-14 rounded-2xl bg-brand/10 flex items-center justify-center mb-4 ring-2 ring-brand/20">
-              <Lock className="h-7 w-7 text-brand" />
-            </div>
-            <h2 className="text-xl font-black tracking-tight">{t("auth.title")}</h2>
-            <p className="text-sm text-text-dim mt-1">{t("auth.description")}</p>
+    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-main">
+      <div className="w-full max-w-sm mx-6 animate-fade-in-scale">
+        {/* Logo */}
+        <div className="flex flex-col items-center mb-8">
+          <div className="w-16 h-16 rounded-2xl bg-brand/10 flex items-center justify-center mb-4 ring-2 ring-brand/20 shadow-lg shadow-brand/10">
+            <div className="w-6 h-6 rounded-full bg-brand animate-pulse" />
           </div>
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <input
-              type="password"
-              value={key}
-              onChange={(e) => { setKey(e.target.value); setError(false); }}
-              placeholder={t("auth.placeholder")}
-              autoFocus
-              className={`w-full rounded-xl border px-4 py-3 text-sm focus:ring-2 outline-none transition-all ${
-                error
-                  ? "border-error focus:border-error focus:ring-error/10"
-                  : "border-border-subtle bg-main focus:border-brand focus:ring-brand/10"
-              }`}
-            />
-            {error && (
-              <p className="text-xs text-error font-medium">{t("auth.invalid")}</p>
-            )}
-            <button
-              type="submit"
-              className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-all shadow-lg shadow-brand/20"
-            >
-              {t("auth.submit")}
-            </button>
-          </form>
+          <h1 className="text-2xl font-black tracking-tight">LibreFang</h1>
+          <p className="text-sm text-text-dim mt-1">
+            {mode === "credentials" ? t("auth.login_desc", { defaultValue: "Sign in to your dashboard" }) : t("auth.description")}
+          </p>
+        </div>
+
+        {/* Login Form */}
+        <div className="rounded-2xl border border-border-subtle bg-surface shadow-2xl p-6 sm:p-8">
+          {mode === "credentials" ? (
+            <form onSubmit={handleCredentialsLogin} className="space-y-4">
+              <div>
+                <label className="text-xs font-bold text-text-dim uppercase tracking-wider mb-1.5 block">
+                  {t("auth.username", { defaultValue: "Username" })}
+                </label>
+                <input
+                  type="text"
+                  value={username}
+                  onChange={(e) => { setUsername(e.target.value); setError(""); }}
+                  placeholder={t("auth.username_placeholder", { defaultValue: "Enter username" })}
+                  autoFocus
+                  autoComplete="username"
+                  className="w-full rounded-xl border border-border-subtle bg-main px-4 py-3 text-sm focus:ring-2 focus:border-brand focus:ring-brand/10 outline-none transition-all"
+                />
+              </div>
+              <div>
+                <label className="text-xs font-bold text-text-dim uppercase tracking-wider mb-1.5 block">
+                  {t("auth.password", { defaultValue: "Password" })}
+                </label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => { setPassword(e.target.value); setError(""); }}
+                  placeholder={t("auth.password_placeholder", { defaultValue: "Enter password" })}
+                  autoComplete="current-password"
+                  className="w-full rounded-xl border border-border-subtle bg-main px-4 py-3 text-sm focus:ring-2 focus:border-brand focus:ring-brand/10 outline-none transition-all"
+                />
+              </div>
+              {error && <p className="text-xs text-error font-medium">{error}</p>}
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-all shadow-lg shadow-brand/20 disabled:opacity-50"
+              >
+                {loading ? "..." : t("auth.login", { defaultValue: "Sign In" })}
+              </button>
+            </form>
+          ) : (
+            <form onSubmit={handleApiKeyLogin} className="space-y-4">
+              <div>
+                <label className="text-xs font-bold text-text-dim uppercase tracking-wider mb-1.5 block">
+                  {t("auth.title")}
+                </label>
+                <input
+                  type="password"
+                  value={key}
+                  onChange={(e) => { setKey(e.target.value); setError(""); }}
+                  placeholder={t("auth.placeholder")}
+                  autoFocus
+                  className="w-full rounded-xl border border-border-subtle bg-main px-4 py-3 text-sm focus:ring-2 focus:border-brand focus:ring-brand/10 outline-none transition-all"
+                />
+              </div>
+              {error && <p className="text-xs text-error font-medium">{error}</p>}
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full rounded-xl bg-brand py-3 text-sm font-bold text-white hover:bg-brand/90 transition-all shadow-lg shadow-brand/20 disabled:opacity-50"
+              >
+                {loading ? "..." : t("auth.submit")}
+              </button>
+            </form>
+          )}
         </div>
       </div>
     </div>
@@ -71,12 +136,14 @@ export function App() {
   const location = useLocation();
 
   const [authNeeded, setAuthNeeded] = useState(false);
+  const [authMode, setAuthMode] = useState<AuthMode>("none");
   const [authChecked, setAuthChecked] = useState(false);
 
-  // Check auth on mount
+  // Check auth on mount — determine if credentials or api_key login is needed
   useEffect(() => {
-    checkAuthRequired().then((needed) => {
-      setAuthNeeded(needed);
+    Promise.all([checkDashboardAuthMode(), checkAuthRequired()]).then(([mode, needed]) => {
+      setAuthMode(mode);
+      setAuthNeeded(mode === "credentials" ? needed : needed);
       setAuthChecked(true);
     });
   }, []);
@@ -325,7 +392,7 @@ export function App() {
       <CommandPalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
       <SkillOutputPanel />
       {authChecked && authNeeded && (
-        <AuthDialog onAuthenticated={() => setAuthNeeded(false)} />
+        <LoginScreen mode={authMode} onAuthenticated={() => setAuthNeeded(false)} />
       )}
     </div>
   );

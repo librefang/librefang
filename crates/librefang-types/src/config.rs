@@ -1270,6 +1270,13 @@ pub struct KernelConfig {
     /// require a `Authorization: Bearer <key>` header.
     /// If empty, the API is unauthenticated (local development only).
     pub api_key: String,
+    /// Dashboard login username. When both dashboard_user and dashboard_pass
+    /// are set, the dashboard requires username/password login.
+    #[serde(default)]
+    pub dashboard_user: String,
+    /// Dashboard login password (plaintext in config, compared with constant-time).
+    #[serde(default)]
+    pub dashboard_pass: String,
     /// Kernel operating mode (stable, default, dev).
     #[serde(default)]
     pub mode: KernelMode,
@@ -2097,6 +2104,8 @@ impl Default for KernelConfig {
             network: NetworkConfig::default(),
             channels: ChannelsConfig::default(),
             api_key: String::new(),
+            dashboard_user: String::new(),
+            dashboard_pass: String::new(),
             mode: KernelMode::default(),
             language: "en".to_string(),
             users: Vec::new(),
