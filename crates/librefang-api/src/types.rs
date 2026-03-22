@@ -243,6 +243,20 @@ pub struct PaginatedResponse<T: Serialize> {
     pub limit: Option<usize>,
 }
 
+/// Request to push a proactive outbound message from an agent to a channel.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct PushMessageRequest {
+    /// Channel adapter name (e.g., "telegram", "slack", "discord").
+    pub channel: String,
+    /// Recipient identifier (platform-specific: chat_id, username, email, etc.).
+    pub recipient: String,
+    /// The message text to send.
+    pub message: String,
+    /// Optional thread/topic ID for threaded replies (platform-specific).
+    #[serde(default)]
+    pub thread_id: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
