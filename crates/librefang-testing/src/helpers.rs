@@ -1,16 +1,16 @@
-//! 测试辅助函数 — HTTP 请求构建和响应断言。
+//! Test helper functions — HTTP request building and response assertions.
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 
-/// 构建一个测试用的 HTTP 请求。
+/// Builds a test HTTP request.
 ///
-/// # 参数
-/// - `method` — HTTP 方法（GET、POST 等）
-/// - `path` — 请求路径（例如 "/api/health"）
-/// - `body` — 请求体（None 表示空 body）
+/// # Parameters
+/// - `method` — HTTP method (GET, POST, etc.)
+/// - `path` — Request path (e.g. "/api/health")
+/// - `body` — Request body (None for empty body)
 ///
-/// # 示例
+/// # Example
 ///
 /// ```rust
 /// use librefang_testing::test_request;
@@ -35,16 +35,16 @@ pub fn test_request(method: Method, path: &str, body: Option<&str>) -> Request<B
         None => Body::empty(),
     };
 
-    builder.body(body).expect("构建测试请求失败")
+    builder.body(body).expect("failed to build test request")
 }
 
-/// 断言响应状态码为 200 且 body 是有效的 JSON。
+/// Asserts the response status is 200 and the body is valid JSON.
 ///
-/// 返回解析后的 `serde_json::Value`。
+/// Returns the parsed `serde_json::Value`.
 ///
 /// # Panics
 ///
-/// 如果状态码不是 200 或 body 不是有效 JSON，则 panic。
+/// Panics if the status code is not 200 or the body is not valid JSON.
 pub async fn assert_json_ok(response: axum::http::Response<Body>) -> serde_json::Value {
     let status = response.status();
     let body = read_body(response).await;
@@ -52,21 +52,21 @@ pub async fn assert_json_ok(response: axum::http::Response<Body>) -> serde_json:
     assert_eq!(
         status,
         StatusCode::OK,
-        "期望状态码 200，实际为 {status}。响应体: {body}"
+        "expected status 200, got {status}. Response body: {body}"
     );
 
     serde_json::from_str(&body).unwrap_or_else(|e| {
-        panic!("响应体不是有效的 JSON: {e}。原始内容: {body}");
+        panic!("response body is not valid JSON: {e}. Raw content: {body}");
     })
 }
 
-/// 断言响应状态码为指定的错误码且 body 是有效的 JSON。
+/// Asserts the response status matches the expected error code and the body is valid JSON.
 ///
-/// 返回解析后的 `serde_json::Value`。
+/// Returns the parsed `serde_json::Value`.
 ///
 /// # Panics
 ///
-/// 如果状态码不匹配或 body 不是有效 JSON，则 panic。
+/// Panics if the status code does not match or the body is not valid JSON.
 pub async fn assert_json_error(
     response: axum::http::Response<Body>,
     expected_status: StatusCode,
@@ -76,22 +76,22 @@ pub async fn assert_json_error(
 
     assert_eq!(
         status, expected_status,
-        "期望状态码 {expected_status}，实际为 {status}。响应体: {body}"
+        "expected status {expected_status}, got {status}. Response body: {body}"
     );
 
     serde_json::from_str(&body).unwrap_or_else(|e| {
-        panic!("响应体不是有效的 JSON: {e}。原始内容: {body}");
+        panic!("response body is not valid JSON: {e}. Raw content: {body}");
     })
 }
 
-/// 读取 response body 为字符串。
+/// Reads the response body as a string.
 async fn read_body(response: axum::http::Response<Body>) -> String {
     use http_body_util::BodyExt;
     let bytes = response
         .into_body()
         .collect()
         .await
-        .expect("读取响应体失败")
+        .expect("failed to read response body")
         .to_bytes();
-    String::from_utf8(bytes.to_vec()).expect("响应体不是有效的 UTF-8")
+    String::from_utf8(bytes.to_vec()).expect("response body is not valid UTF-8")
 }
