@@ -14,6 +14,7 @@ pub mod cron;
 pub mod error;
 pub mod event_bus;
 pub mod heartbeat;
+pub mod inbox;
 pub mod kernel;
 pub mod metering;
 pub mod orchestration;
