@@ -9077,8 +9077,8 @@ mod tests {
     #[test]
     fn test_evaluate_condition_unknown_format() {
         let tags = vec!["chat".to_string()];
-        // Unknown condition format defaults to true (lenient).
-        assert!(LibreFangKernel::evaluate_condition(
+        // Unknown condition format defaults to false (strict — prevents accidental injection).
+        assert!(!LibreFangKernel::evaluate_condition(
             &Some("some.unknown.expression".to_string()),
             &tags,
         ));
