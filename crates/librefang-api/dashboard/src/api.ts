@@ -486,8 +486,13 @@ export function setOnUnauthorized(fn: (() => void) | null) {
 }
 
 function authHeader(): HeadersInit {
+  const lang = localStorage.getItem("i18nextLng") || navigator.language || "en";
   const token = localStorage.getItem("librefang-api-key") || "";
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const headers: HeadersInit = { "Accept-Language": lang };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
 }
 
 async function parseError(response: Response): Promise<Error> {

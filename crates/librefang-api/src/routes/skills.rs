@@ -1062,7 +1062,16 @@ fn server_platform() -> &'static str {
         (status = 200, description = "List all hand definitions", body = serde_json::Value)
     )
 )]
-pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_hands(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let lang = headers
+        .get("accept-language")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(&[',', ';', '-'][..]).next())
+        .unwrap_or("en");
+
     let defs = state.kernel.hands().list_definitions();
     let hands: Vec<serde_json::Value> = defs
         .iter()
@@ -1079,10 +1088,19 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 .unwrap_or(false);
             let active = readiness.as_ref().map(|r| r.active).unwrap_or(false);
             let degraded = readiness.as_ref().map(|r| r.degraded).unwrap_or(false);
+
+            let i18n_entry = d.i18n.get(lang);
+            let resolved_name = i18n_entry
+                .and_then(|l| l.name.as_deref())
+                .unwrap_or(&d.name);
+            let resolved_desc = i18n_entry
+                .and_then(|l| l.description.as_deref())
+                .unwrap_or(&d.description);
+
             serde_json::json!({
                 "id": d.id,
-                "name": d.name,
-                "description": d.description,
+                "name": resolved_name,
+                "description": resolved_desc,
                 "category": d.category,
                 "icon": d.icon,
                 "tools": d.tools,
@@ -1099,6 +1117,7 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "has_settings": !d.settings.is_empty(),
                 "settings_count": d.settings.len(),
                 "metadata": d.metadata.clone().unwrap_or_default(),
+                "i18n": d.i18n,
             })
         })
         .collect();
@@ -1150,9 +1169,24 @@ pub async fn list_active_hands(State(state): State<Arc<AppState>>) -> impl IntoR
 pub async fn get_hand(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     match state.kernel.hands().get_definition(&hand_id) {
         Some(def) => {
+            let lang = headers
+                .get("accept-language")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(&[',', ';', '-'][..]).next())
+                .unwrap_or("en");
+
+            let i18n_entry = def.i18n.get(lang);
+            let resolved_name = i18n_entry
+                .and_then(|l| l.name.as_deref())
+                .unwrap_or(&def.name);
+            let resolved_desc = i18n_entry
+                .and_then(|l| l.description.as_deref())
+                .unwrap_or(&def.description);
+
             let reqs = state
                 .kernel
                 .hands()
@@ -1174,8 +1208,8 @@ pub async fn get_hand(
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "id": def.id,
-                    "name": def.name,
-                    "description": def.description,
+                    "name": resolved_name,
+                    "description": resolved_desc,
                     "category": def.category,
                     "icon": def.icon,
                     "tools": def.tools,
@@ -1217,6 +1251,7 @@ pub async fn get_hand(
                     })).collect::<Vec<_>>(),
                     "settings": settings_status,
                     "metadata": def.metadata.clone().unwrap_or_default(),
+                    "i18n": def.i18n,
                 })),
             )
         }
@@ -2244,7 +2279,14 @@ pub async fn hand_get_session(
 pub async fn hand_instance_status(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
+    let lang = headers
+        .get("accept-language")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(&[',', ';', '-'][..]).next())
+        .unwrap_or("en");
+
     let instance = match state.kernel.hands().get_instance(id) {
         Some(i) => i,
         None => {
@@ -2263,10 +2305,18 @@ pub async fn hand_instance_status(
         .into_iter()
         .find(|d| d.id == instance.hand_id);
 
+    let resolved_name: Option<String> = hand_def.as_ref().map(|d| {
+        d.i18n
+            .get(lang)
+            .and_then(|l| l.name.as_deref())
+            .unwrap_or(&d.name)
+            .to_string()
+    });
+
     let mut resp = serde_json::json!({
         "instance_id": instance.instance_id,
         "hand_id": instance.hand_id,
-        "hand_name": hand_def.as_ref().map(|d| &d.name),
+        "hand_name": resolved_name,
         "hand_icon": hand_def.as_ref().map(|d| d.icon.as_str()),
         "status": format!("{:?}", instance.status),
         "activated_at": instance.activated_at.to_rfc3339(),
