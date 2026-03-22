@@ -2471,6 +2471,13 @@ system_prompt = "You are a helpful assistant."
                 "prompt_caching".to_string(),
                 serde_json::Value::Bool(self.config.prompt_caching),
             );
+
+            // Pass privacy config to the agent loop via metadata.
+            if let Ok(privacy_json) = serde_json::to_value(&self.config.privacy) {
+                manifest
+                    .metadata
+                    .insert("privacy".to_string(), privacy_json);
+            }
         }
 
         let memory = Arc::clone(&self.memory);
@@ -3322,6 +3329,13 @@ system_prompt = "You are a helpful assistant."
                 "prompt_caching".to_string(),
                 serde_json::Value::Bool(self.config.prompt_caching),
             );
+
+            // Pass privacy config to the agent loop via metadata.
+            if let Ok(privacy_json) = serde_json::to_value(&self.config.privacy) {
+                manifest
+                    .metadata
+                    .insert("privacy".to_string(), privacy_json);
+            }
         }
 
         let is_stable = self.config.mode == librefang_types::config::KernelMode::Stable;
