@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -26,7 +26,7 @@ fn repo_root() -> PathBuf {
     }
 }
 
-fn generate_openapi(root: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn generate_openapi(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     println!("Generating OpenAPI spec...");
 
     // Run the openapi spec test which regenerates openapi.json

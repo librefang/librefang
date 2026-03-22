@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -58,10 +58,7 @@ fn has_cargo_subcommand(sub: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn run_cargo_audit(
-    root: &PathBuf,
-    ignore_ids: &[String],
-) -> Result<bool, Box<dyn std::error::Error>> {
+fn run_cargo_audit(root: &Path, ignore_ids: &[String]) -> Result<bool, Box<dyn std::error::Error>> {
     if !has_cargo_subcommand("audit") {
         println!("  Installing cargo-audit...");
         let status = Command::new("cargo")
@@ -84,7 +81,7 @@ fn run_cargo_audit(
     Ok(status.success())
 }
 
-fn run_cargo_outdated(root: &PathBuf) -> Result<bool, Box<dyn std::error::Error>> {
+fn run_cargo_outdated(root: &Path) -> Result<bool, Box<dyn std::error::Error>> {
     if !has_cargo_subcommand("outdated") {
         println!("  Installing cargo-outdated...");
         let status = Command::new("cargo")
@@ -105,7 +102,7 @@ fn run_cargo_outdated(root: &PathBuf) -> Result<bool, Box<dyn std::error::Error>
     Ok(status.success())
 }
 
-fn run_pnpm_audit(dir: &PathBuf, label: &str) -> bool {
+fn run_pnpm_audit(dir: &Path, label: &str) -> bool {
     if !dir.join("package.json").exists() {
         return true;
     }

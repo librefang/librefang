@@ -87,7 +87,7 @@ fn install_git_hooks(root: &Path) {
     }
 }
 
-fn pnpm_install(dir: &PathBuf, label: &str) {
+fn pnpm_install(dir: &Path, label: &str) {
     if !dir.join("package.json").exists() {
         println!("  Skipping {} (no package.json)", label);
         return;

@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -34,7 +34,7 @@ fn repo_root() -> PathBuf {
     }
 }
 
-fn check_cargo_deny(root: &PathBuf, denied: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
+fn check_cargo_deny(root: &Path, denied: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     // Try cargo-deny first
     let deny_check = Command::new("cargo").args(["deny", "--version"]).output();
 
@@ -93,7 +93,7 @@ fn check_cargo_deny(root: &PathBuf, denied: &[&str]) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-fn check_web_licenses(root: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn check_web_licenses(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let web_dir = root.join("web");
     if !web_dir.join("package.json").exists() {
         println!("Skipping web license check (no web/package.json)");

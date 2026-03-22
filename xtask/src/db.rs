@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
 pub struct DbArgs {
@@ -29,7 +29,7 @@ fn default_data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".librefang"))
 }
 
-fn find_db_files(data_dir: &PathBuf) -> Vec<PathBuf> {
+fn find_db_files(data_dir: &Path) -> Vec<PathBuf> {
     let mut dbs = Vec::new();
     if data_dir.exists() {
         if let Ok(entries) = fs::read_dir(data_dir) {
@@ -119,14 +119,10 @@ pub fn run(args: DbArgs) -> Result<(), Box<dyn std::error::Error>> {
                 db.file_name().unwrap_or_default().to_string_lossy()
             );
         }
-        // Also remove WAL/SHM files
+        // Also remove WAL/SHM files (e.g. librefang.db-wal, librefang.db-shm)
         for suffix in &["-wal", "-shm"] {
             for db in &db_files {
-                let wal = db.with_extension(format!(
-                    "{}{}",
-                    db.extension().unwrap_or_default().to_string_lossy(),
-                    suffix
-                ));
+                let wal = PathBuf::from(format!("{}{}", db.display(), suffix));
                 if wal.exists() {
                     fs::remove_file(&wal)?;
                 }

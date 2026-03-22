@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -80,7 +80,7 @@ const TARGETS: &[PyTarget] = &[
     },
 ];
 
-fn download_asset(url: &str, dest: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn download_asset(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
     for attempt in 1..=5 {
         let status = Command::new("curl")
             .args(["-fsSL", "-o", &dest.to_string_lossy(), url])
@@ -103,12 +103,11 @@ fn pypi_version(version: &str) -> String {
 
 fn build_wheel(
     target: &PyTarget,
-    _version: &str,
     pypi_ver: &str,
     repo: &str,
     tag: &str,
-    work: &PathBuf,
-    dist: &PathBuf,
+    work: &Path,
+    dist: &Path,
     dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let pkg_name = "librefang";
@@ -240,7 +239,7 @@ fn build_wheel(
     Ok(())
 }
 
-fn walkdir(dir: &PathBuf) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn walkdir(dir: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let mut files = Vec::new();
     for entry in fs::read_dir(dir)?.flatten() {
         let path = entry.path();
@@ -265,8 +264,12 @@ fn sha256_base64url(data: &[u8]) -> String {
         .spawn()
         .expect("python3 required for SHA256 hashing");
 
-    child.stdin.take().unwrap().write_all(data).unwrap();
-    let output = child.wait_with_output().unwrap();
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(data);
+    }
+    let output = child
+        .wait_with_output()
+        .expect("failed to wait for python3");
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
@@ -285,7 +288,6 @@ pub fn run(args: PublishPypiBinariesArgs) -> Result<(), Box<dyn std::error::Erro
         println!("\n=== {} ({}) ===", target.rust_target, target.platform_tag);
         build_wheel(
             target,
-            &args.version,
             &pypi_ver,
             &args.repo,
             &args.tag,

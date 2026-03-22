@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -44,7 +44,7 @@ fn has_lychee() -> bool {
         .unwrap_or(false)
 }
 
-fn run_lychee(root: &PathBuf, args: &CheckLinksArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn run_lychee(root: &Path, args: &CheckLinksArgs) -> Result<(), Box<dyn std::error::Error>> {
     let target = if let Some(ref p) = args.path {
         p.clone()
     } else {
@@ -88,13 +88,13 @@ fn run_lychee(root: &PathBuf, args: &CheckLinksArgs) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-fn basic_check(root: &PathBuf, args: &CheckLinksArgs) -> Result<(), Box<dyn std::error::Error>> {
+fn basic_check(root: &Path, args: &CheckLinksArgs) -> Result<(), Box<dyn std::error::Error>> {
     use regex::Regex;
 
     let target_dir = if let Some(ref p) = args.path {
         root.join(p)
     } else {
-        root.clone()
+        root.to_path_buf()
     };
 
     println!("Running basic link checker...");
@@ -150,7 +150,7 @@ fn basic_check(root: &PathBuf, args: &CheckLinksArgs) -> Result<(), Box<dyn std:
     }
 }
 
-fn walkdir(dir: &PathBuf, ext: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+fn walkdir(dir: &Path, ext: &str) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let mut results = Vec::new();
     if !dir.exists() {
         return Ok(results);
@@ -160,7 +160,7 @@ fn walkdir(dir: &PathBuf, ext: &str) -> Result<Vec<PathBuf>, Box<dyn std::error:
 }
 
 fn walk_recursive(
-    dir: &PathBuf,
+    dir: &Path,
     ext: &str,
     results: &mut Vec<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {

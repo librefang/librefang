@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -105,7 +105,7 @@ fn npm_os(platform: &str) -> &str {
     }
 }
 
-fn download_asset(url: &str, dest: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn download_asset(url: &str, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
     for attempt in 1..=5 {
         let status = Command::new("curl")
             .args(["-fsSL", "-o", &dest.to_string_lossy(), url])
@@ -326,7 +326,7 @@ pub fn run(args: PublishNpmBinariesArgs) -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
-fn copy_dir_recursive(src: &PathBuf, dst: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)?.flatten() {
         let path = entry.path();

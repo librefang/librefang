@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -34,7 +34,7 @@ fn repo_root() -> PathBuf {
     }
 }
 
-fn find_openapi_spec(root: &PathBuf) -> Option<PathBuf> {
+fn find_openapi_spec(root: &Path) -> Option<PathBuf> {
     let candidates = [
         root.join("openapi.json"),
         root.join("crates/librefang-api/openapi.json"),

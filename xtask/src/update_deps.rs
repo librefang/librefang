@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -38,7 +38,7 @@ fn repo_root() -> PathBuf {
     }
 }
 
-fn update_rust(root: &PathBuf, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn update_rust(root: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Rust Dependencies ===");
 
     if dry_run {
@@ -73,7 +73,7 @@ fn update_rust(root: &PathBuf, dry_run: bool) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-fn update_web(root: &PathBuf, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn update_web(root: &Path, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
     let web_dirs = [
         ("web", root.join("web")),
         ("dashboard", root.join("crates/librefang-api/dashboard")),

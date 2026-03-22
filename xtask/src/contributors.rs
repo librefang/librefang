@@ -1,6 +1,6 @@
 use clap::Parser;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -76,7 +76,7 @@ fn generate_contributors_svg(
     repo: &str,
     output: &str,
     max_count: usize,
-    root: &PathBuf,
+    root: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Fetching contributors for {}...", repo);
     let data = gh_api(&format!("repos/{}/contributors?per_page=100", repo))?;
@@ -99,11 +99,7 @@ fn generate_contributors_svg(
     let pad_y = 3usize;
     let count = contributors.len();
     let cols = count.min(columns);
-    let rows = if cols > 0 {
-        (count + cols - 1) / cols
-    } else {
-        1
-    };
+    let rows = if cols > 0 { count.div_ceil(cols) } else { 1 };
     let width = pad_x * 2 + cols * cell;
     let height = pad_y * 2 + rows * cell;
 
@@ -165,7 +161,7 @@ fn generate_contributors_svg(
 fn generate_star_history_svg(
     repo: &str,
     output: &str,
-    root: &PathBuf,
+    root: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("Fetching stargazers for {}...", repo);
 
