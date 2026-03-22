@@ -276,7 +276,8 @@
     "username": "用户名",
     "username_placeholder": "请输入用户名",
     "password": "密码",
-    "password_placeholder": "请输入密码"
+    "password_placeholder": "请输入密码",
+    "logout": "退出登录"
   },
   "network": {
     "section": "OFP 网络", "title": "网络", "subtitle": "开放联邦协议网络状态和连接的节点。",

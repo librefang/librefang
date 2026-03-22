@@ -1,10 +1,10 @@
 import { Link, Outlet, useLocation } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2 } from "lucide-react";
+import { Globe, Sun, Moon, Search, ChevronLeft, ChevronRight, ChevronDown, Menu, Home, Layers, MessageCircle, Clock, CheckCircle, Calendar, Shield, Users, Server, Network, Bell, Hand, BarChart3, Database, Activity, FileText, Settings, Puzzle, Cpu, Lock, Share2, LogOut } from "lucide-react";
 import { useUIStore } from "./lib/store";
 import { CommandPalette, useCommandPalette } from "./components/ui/CommandPalette";
-import { checkAuthRequired, setApiKey, hasApiKey, checkDashboardAuthMode, dashboardLogin, type AuthMode } from "./api";
+import { checkAuthRequired, setApiKey, hasApiKey, clearApiKey, checkDashboardAuthMode, dashboardLogin, type AuthMode } from "./api";
 import { SkillOutputPanel } from "./components/ui/SkillOutputPanel";
 
 function LoginScreen({ mode, onAuthenticated }: { mode: AuthMode; onAuthenticated: () => void }) {
@@ -387,6 +387,15 @@ export function App() {
             >
               {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
+            {authMode !== "none" && hasApiKey() && (
+              <button
+                onClick={() => { clearApiKey(); setAuthNeeded(true); }}
+                className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-error hover:bg-error/10 transition-all duration-200"
+                title={t("auth.logout", { defaultValue: "Logout" })}
+              >
+                <LogOut className="h-4 w-4" />
+              </button>
+            )}
           </div>
         </header>
 
