@@ -161,7 +161,7 @@ function CodePanel({
 	}
 
 	if (!code) {
-		// 尝试从子元素中提取代码内容
+		// Try to extract code content from child elements
 		if (child && isValidElement(child) && child.type === "pre") {
 			const childProps = child.props as { children?: React.ReactNode };
 			const codeChild = childProps.children;
@@ -170,7 +170,7 @@ function CodePanel({
 				code = codeProps.children || "";
 			}
 		}
-		// 如果仍然没有代码使用空字符串
+		// If still no code found, use an empty string
 		if (!code) {
 			code = "";
 		}
