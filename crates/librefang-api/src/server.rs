@@ -126,6 +126,38 @@ fn resolve_dashboard_credential(
     config_value.to_string()
 }
 
+pub(crate) fn dashboard_session_token(kernel: &LibreFangKernel) -> Option<String> {
+    let cfg = kernel.config_ref();
+    let username = resolve_dashboard_credential(
+        &cfg.dashboard_user,
+        "LIBREFANG_DASHBOARD_USER",
+        kernel.home_dir(),
+    );
+    let password = resolve_dashboard_credential(
+        &cfg.dashboard_pass,
+        "LIBREFANG_DASHBOARD_PASS",
+        kernel.home_dir(),
+    );
+
+    crate::password_hash::derive_dashboard_session_token(
+        username.trim(),
+        password.trim(),
+        cfg.dashboard_pass_hash.trim(),
+    )
+}
+
+pub(crate) fn valid_api_tokens(kernel: &LibreFangKernel) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let explicit_api_key = kernel.config_ref().api_key.trim();
+    if !explicit_api_key.is_empty() {
+        tokens.push(explicit_api_key.to_string());
+    }
+    if let Some(token) = dashboard_session_token(kernel) {
+        tokens.push(token);
+    }
+    tokens
+}
+
 /// Dashboard credential login — validates username/password using Argon2id
 /// (with transparent fallback from legacy plaintext passwords) and returns
 /// a session token (HMAC-SHA256-derived from credentials).
@@ -282,40 +314,8 @@ pub async fn build_router(
             .allow_headers(tower_http::cors::Any)
     };
 
-    // Trim whitespace so `api_key = ""` or `api_key = "  "` both disable auth.
-    let explicit_api_key = state.kernel.config_ref().api_key.trim().to_string();
-
-    // Derive dashboard session token from credentials (if configured).
-    // When only an Argon2id hash is stored (no plaintext password), we cannot
-    // pre-derive the session token at boot — the token is generated at login
-    // time instead. The pre-derived token only works with plaintext passwords.
-    let du_val = resolve_dashboard_credential(
-        &state.kernel.config_ref().dashboard_user,
-        "LIBREFANG_DASHBOARD_USER",
-        state.kernel.home_dir(),
-    );
-    let dp_val = resolve_dashboard_credential(
-        &state.kernel.config_ref().dashboard_pass,
-        "LIBREFANG_DASHBOARD_PASS",
-        state.kernel.home_dir(),
-    );
-    let du = du_val.trim();
-    let dp = dp_val.trim();
-    let dashboard_token = if !du.is_empty() && !dp.is_empty() {
-        crate::password_hash::derive_session_token(du, dp)
-    } else {
-        String::new()
-    };
-
-    // Build composite key: both explicit api_key AND dashboard token are valid.
-    // Middleware accepts any token matching either one.
-    // Format: "key1\nkey2" — middleware splits and checks each.
-    let api_key = match (explicit_api_key.is_empty(), dashboard_token.is_empty()) {
-        (false, false) => format!("{explicit_api_key}\n{dashboard_token}"),
-        (false, true) => explicit_api_key,
-        (true, false) => dashboard_token,
-        (true, true) => String::new(),
-    };
+    // Middleware accepts any token in this composite key.
+    let api_key = valid_api_tokens(state.kernel.as_ref()).join("\n");
     let api_key_lock = Arc::new(tokio::sync::RwLock::new(api_key));
     let gcra_limiter = rate_limiter::create_rate_limiter();
 

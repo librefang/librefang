@@ -48,6 +48,30 @@ pub enum VerifyResult {
     Denied,
 }
 
+/// Pick the server-side secret used to derive dashboard session tokens.
+fn dashboard_session_secret<'a>(cfg_pass: &'a str, pass_hash: &'a str) -> Option<&'a str> {
+    if !pass_hash.is_empty() {
+        Some(pass_hash)
+    } else if !cfg_pass.is_empty() {
+        Some(cfg_pass)
+    } else {
+        None
+    }
+}
+
+/// Derive the dashboard session token from the configured credentials.
+pub fn derive_dashboard_session_token(
+    username: &str,
+    cfg_pass: &str,
+    pass_hash: &str,
+) -> Option<String> {
+    let secret = dashboard_session_secret(cfg_pass, pass_hash)?;
+    if username.is_empty() {
+        return None;
+    }
+    Some(derive_session_token(username, secret))
+}
+
 /// Verify dashboard credentials with Argon2id (preferred) or legacy plaintext fallback.
 ///
 /// - If `pass_hash` is non-empty, verify with Argon2id only.
@@ -71,7 +95,8 @@ pub fn verify_dashboard_password(
     // Strategy 1: Argon2id hash is configured — use it exclusively.
     if !pass_hash.is_empty() {
         if verify_password(input_pass, pass_hash) {
-            let token = derive_session_token(cfg_user, input_pass);
+            let token =
+                derive_dashboard_session_token(cfg_user, cfg_pass, pass_hash).unwrap_or_default();
             return VerifyResult::Ok {
                 token,
                 upgrade_hash: None,
@@ -88,7 +113,8 @@ pub fn verify_dashboard_password(
     let pass_ok: bool = input_pass.as_bytes().ct_eq(cfg_pass.as_bytes()).into();
 
     if pass_ok {
-        let token = derive_session_token(cfg_user, input_pass);
+        let token =
+            derive_dashboard_session_token(cfg_user, cfg_pass, pass_hash).unwrap_or_default();
         // Generate an Argon2id hash so the caller can persist it for future logins.
         let upgrade_hash = hash_password(input_pass).ok();
         VerifyResult::Ok {
@@ -253,5 +279,12 @@ mod tests {
             .collect();
 
         assert_eq!(derive_session_token("user", "pass"), expected);
+    }
+
+    #[test]
+    fn test_dashboard_session_token_uses_hash_when_available() {
+        let token =
+            derive_dashboard_session_token("admin", "legacy-pass", "stored-hash").expect("token");
+        assert_eq!(token, derive_session_token("admin", "stored-hash"));
     }
 }
