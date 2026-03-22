@@ -172,10 +172,10 @@ export function CommsPage() {
       />
 
       {/* Tabs */}
-      <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit">
+      <div className="flex gap-1 p-1 bg-main/30 rounded-xl w-fit overflow-x-auto">
         <button
           onClick={() => setActiveTab("channels")}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
             activeTab === "channels" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
@@ -184,7 +184,7 @@ export function CommsPage() {
         </button>
         <button
           onClick={() => setActiveTab("topology")}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
             activeTab === "topology" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
@@ -193,7 +193,7 @@ export function CommsPage() {
         </button>
         <button
           onClick={() => setActiveTab("events")}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-bold transition-all ${
+          className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all whitespace-nowrap ${
             activeTab === "events" ? "bg-surface text-brand shadow-sm" : "text-text-dim hover:text-text-main"
           }`}
         >
@@ -220,7 +220,7 @@ export function CommsPage() {
       {activeTab === "channels" && (
         <>
           {/* Stats Grid */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 stagger-children">
+          <div className="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4 stagger-children">
             {[
               { icon: Radio, label: t("comms.total_channels"), value: channels.length, color: "text-brand", bg: "bg-brand/10" },
               { icon: CheckCircle2, label: t("comms.connected"), value: configuredCount, color: "text-success", bg: "bg-success/10" },
@@ -311,7 +311,7 @@ export function CommsPage() {
           ) : topology ? (
             <div className="space-y-6">
               {/* Nodes */}
-              <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-4">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4">
                 {topology.nodes?.map((node, i) => (
                   <TopologyNode key={node.id || i} node={node} />
                 ))}

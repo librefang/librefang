@@ -52,7 +52,7 @@ export function NetworkPage() {
       ) : (
         <>
           {/* Network status cards */}
-          <div className="grid gap-4 md:grid-cols-3 stagger-children">
+          <div className="grid gap-2 sm:gap-4 md:grid-cols-3 stagger-children">
             <Card hover padding="md">
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-black uppercase tracking-widest text-text-dim/60">
@@ -117,7 +117,7 @@ export function NetworkPage() {
                 description={t("network.no_peers_desc")}
               />
             ) : (
-              <div className="grid gap-3 md:grid-cols-2 stagger-children">
+              <div className="grid gap-2 sm:gap-3 md:grid-cols-2 stagger-children">
                 {peers.map((peer) => (
                   <Card key={peer.id} hover padding="md">
                     <div className="flex items-start justify-between">
