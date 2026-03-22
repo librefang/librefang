@@ -495,13 +495,8 @@ impl ChannelAdapter for SlackAdapter {
         user: &ChannelUser,
         message: &InteractiveMessage,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.api_send_interactive_message(
-            &user.platform_id,
-            &message.text,
-            &message.buttons,
-            None,
-        )
-        .await
+        self.api_send_interactive_message(&user.platform_id, &message.text, &message.buttons, None)
+            .await
     }
 
     async fn send_in_thread(
@@ -762,18 +757,9 @@ async fn parse_slack_block_action(
 
     let mut metadata = HashMap::new();
     metadata.insert(SENDER_USER_ID_KEY.to_string(), serde_json::json!(user_id));
-    metadata.insert(
-        "action_id".to_string(),
-        serde_json::json!(action_id),
-    );
-    metadata.insert(
-        "trigger_id".to_string(),
-        serde_json::json!(trigger_id),
-    );
-    metadata.insert(
-        "block_action".to_string(),
-        serde_json::Value::Bool(true),
-    );
+    metadata.insert("action_id".to_string(), serde_json::json!(action_id));
+    metadata.insert("trigger_id".to_string(), serde_json::json!(trigger_id));
+    metadata.insert("block_action".to_string(), serde_json::Value::Bool(true));
 
     Some(ChannelMessage {
         channel: ChannelType::Slack,
@@ -1099,12 +1085,17 @@ mod tests {
             "trigger_id": "trigger_123"
         });
 
-        let msg = parse_slack_block_action(&interaction, &bot_id, &[]).await.unwrap();
+        let msg = parse_slack_block_action(&interaction, &bot_id, &[])
+            .await
+            .unwrap();
         assert_eq!(msg.channel, ChannelType::Slack);
         assert_eq!(msg.sender.platform_id, "C789");
         assert!(msg.is_group);
         match &msg.content {
-            ChannelContent::ButtonCallback { action, message_text } => {
+            ChannelContent::ButtonCallback {
+                action,
+                message_text,
+            } => {
                 assert_eq!(action, "approve_req_001");
                 assert_eq!(message_text.as_deref(), Some("Approve this request?"));
             }
@@ -1148,13 +1139,11 @@ mod tests {
             "trigger_id": "t"
         });
 
-        let msg = parse_slack_block_action(
-            &interaction,
-            &bot_id,
-            &["C111".to_string()],
-        )
-        .await;
-        assert!(msg.is_none(), "Channel not in allowed list should be filtered");
+        let msg = parse_slack_block_action(&interaction, &bot_id, &["C111".to_string()]).await;
+        assert!(
+            msg.is_none(),
+            "Channel not in allowed list should be filtered"
+        );
     }
 
     #[tokio::test]
@@ -1183,7 +1172,9 @@ mod tests {
             "trigger_id": "t"
         });
 
-        let msg = parse_slack_block_action(&interaction, &bot_id, &[]).await.unwrap();
+        let msg = parse_slack_block_action(&interaction, &bot_id, &[])
+            .await
+            .unwrap();
         assert!(!msg.is_group);
         assert_eq!(msg.sender.platform_id, "D789");
         match &msg.content {

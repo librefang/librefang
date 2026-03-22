@@ -1186,9 +1186,7 @@ fn parse_telegram_callback_query(
     );
 
     // Thread ID for forum topics
-    let thread_id = message["message_thread_id"]
-        .as_i64()
-        .map(|t| t.to_string());
+    let thread_id = message["message_thread_id"].as_i64().map(|t| t.to_string());
 
     Some(ChannelMessage {
         channel: ChannelType::Telegram,
@@ -2508,9 +2506,14 @@ mod tests {
             }
         });
 
-        let msg =
-            parse_telegram_callback_query(&callback, &[], "fake_token", "https://api.telegram.org", &client)
-                .unwrap();
+        let msg = parse_telegram_callback_query(
+            &callback,
+            &[],
+            "fake_token",
+            "https://api.telegram.org",
+            &client,
+        )
+        .unwrap();
 
         assert_eq!(msg.channel, ChannelType::Telegram);
         assert_eq!(msg.sender.platform_id, "-100123");
