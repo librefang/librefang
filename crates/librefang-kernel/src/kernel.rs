@@ -4588,9 +4588,9 @@ system_prompt = "You are a helpful assistant."
             return agent_tags.iter().any(|t| t == tag);
         }
 
-        // Unknown condition format — default to true (lenient).
-        tracing::warn!(condition = %cond, "Unknown condition format, defaulting to true");
-        true
+        // Unknown condition format — default to false (strict). Prevents accidental injection.
+        tracing::warn!(condition = %cond, "Unknown condition format, skipping injection");
+        false
     }
 
     /// Save a summary of the current session to agent memory before reset.
