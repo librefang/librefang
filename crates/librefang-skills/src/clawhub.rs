@@ -51,6 +51,8 @@ pub struct ClawHubStats {
     #[serde(default)]
     pub installs_current: u64,
     #[serde(default)]
+    pub installs: u64,
+    #[serde(default)]
     pub stars: u64,
     #[serde(default)]
     pub versions: u64,
@@ -79,7 +81,7 @@ pub struct ClawHubOwner {
     #[serde(default)]
     pub display_name: String,
     #[serde(default)]
-    pub image: String,
+    pub image: Option<String>,
 }
 
 // -- Browse: GET /api/v1/skills?limit=N&sort=trending ----------------------

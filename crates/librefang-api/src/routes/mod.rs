@@ -89,6 +89,9 @@ pub struct AppState {
     /// ClawHub response cache — prevents 429 rate limiting on rapid dashboard refreshes.
     /// Maps cache key → (fetched_at, response_json) with 120s TTL.
     pub clawhub_cache: DashMap<String, (Instant, serde_json::Value)>,
+    /// Skillhub response cache — prevents rate limiting on rapid dashboard refreshes.
+    /// Maps cache key → (fetched_at, response_json) with TTL.
+    pub skillhub_cache: DashMap<String, (Instant, serde_json::Value)>,
     /// Probe cache for local provider health checks (ollama/vllm/lmstudio).
     /// Avoids blocking the `/api/providers` endpoint on TCP timeouts to
     /// unreachable local services. 60-second TTL.

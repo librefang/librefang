@@ -269,7 +269,10 @@
     "search_placeholder": "Search skills (e.g. python, web, ai...)",
     "stars_count": "stars",
     "downloads_count": "downloads",
-    "install_timeout": "Installation timed out"
+    "install_timeout": "Installation timed out",
+    "skillhub": "Skillhub",
+    "skillhub_search_placeholder": "Search Skillhub skills...",
+    "skillhub_rate_limited_desc": "Skillhub API rate limit exceeded. Please try again later."
   },
   "hands": {
     "title": "Hands",

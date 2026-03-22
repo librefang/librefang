@@ -24,6 +24,27 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             axum::routing::get(clawhub_skill_code),
         )
         .route("/clawhub/install", axum::routing::post(clawhub_install))
+        // Skillhub marketplace
+        .route(
+            "/skillhub/search",
+            axum::routing::get(skillhub_search),
+        )
+        .route(
+            "/skillhub/browse",
+            axum::routing::get(skillhub_browse),
+        )
+        .route(
+            "/skillhub/skill/{slug}",
+            axum::routing::get(skillhub_skill_detail),
+        )
+        .route(
+            "/skillhub/skill/{slug}/code",
+            axum::routing::get(skillhub_skill_code),
+        )
+        .route(
+            "/skillhub/install",
+            axum::routing::post(skillhub_install),
+        )
         // Hands（浏览器自动化引擎）
         .route("/hands", axum::routing::get(list_hands))
         .route("/hands/install", axum::routing::post(install_hand))
@@ -153,6 +174,9 @@ pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoRespons
             let source = match &s.manifest.source {
                 Some(librefang_skills::SkillSource::ClawHub { slug, version }) => {
                     serde_json::json!({"type": "clawhub", "slug": slug, "version": version})
+                }
+                Some(librefang_skills::SkillSource::Skillhub { slug, version }) => {
+                    serde_json::json!({"type": "skillhub", "slug": slug, "version": version})
                 }
                 Some(librefang_skills::SkillSource::OpenClaw) => {
                     serde_json::json!({"type": "openclaw"})
@@ -516,7 +540,7 @@ pub async fn clawhub_skill_detail(
             let author_image = detail
                 .owner
                 .as_ref()
-                .map(|o| o.image.as_str())
+                .and_then(|o| o.image.as_deref())
                 .unwrap_or("");
 
             (
@@ -676,6 +700,283 @@ pub async fn clawhub_install(
                 StatusCode::INTERNAL_SERVER_ERROR
             };
             tracing::warn!("ClawHub install failed: {msg}");
+            (status, Json(serde_json::json!({"error": msg})))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Skillhub marketplace endpoints
+// ---------------------------------------------------------------------------
+
+/// GET /api/skillhub/search — Search Skillhub skills.
+pub async fn skillhub_search(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let query = params.get("q").cloned().unwrap_or_default();
+    if query.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({"items": [], "next_cursor": null})),
+        );
+    }
+
+    let limit: u32 = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+
+    // Check cache (120s TTL)
+    let cache_key = format!("sh_search:{}:{}", query, limit);
+    if let Some(entry) = state.skillhub_cache.get(&cache_key) {
+        if entry.0.elapsed().as_secs() < 120 {
+            return (StatusCode::OK, Json(entry.1.clone()));
+        }
+    }
+
+    let cache_dir = state.kernel.config.home_dir.join(".cache").join("skillhub");
+    let client = librefang_skills::skillhub::SkillhubClient::with_defaults(cache_dir);
+
+    match client.search(&query, limit).await {
+        Ok(results) => {
+            let items: Vec<serde_json::Value> = results
+                .results
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "slug": e.slug,
+                        "name": e.display_name,
+                        "description": e.summary,
+                        "version": e.version,
+                        "score": e.score,
+                        "updated_at": e.updated_at,
+                    })
+                })
+                .collect();
+            let resp = serde_json::json!({
+                "items": items,
+                "next_cursor": null,
+            });
+            state
+                .skillhub_cache
+                .insert(cache_key, (Instant::now(), resp.clone()));
+            (StatusCode::OK, Json(resp))
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            tracing::warn!("Skillhub search failed: {msg}");
+            let status = if is_clawhub_rate_limit(&e) {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::OK
+            };
+            (
+                status,
+                Json(serde_json::json!({"items": [], "next_cursor": null, "error": msg})),
+            )
+        }
+    }
+}
+
+/// GET /api/skillhub/browse — Browse Skillhub skills from the static index.
+pub async fn skillhub_browse(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let sort = params.get("sort").map(|s| s.as_str()).unwrap_or("trending");
+
+    let limit: u32 = params
+        .get("limit")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+
+    // Check cache (300s TTL)
+    let cache_key = format!("sh_browse:{}:{}", sort, limit);
+    if let Some(entry) = state.skillhub_cache.get(&cache_key) {
+        if entry.0.elapsed().as_secs() < 300 {
+            return (StatusCode::OK, Json(entry.1.clone()));
+        }
+    }
+
+    let cache_dir = state.kernel.config.home_dir.join(".cache").join("skillhub");
+    let client = librefang_skills::skillhub::SkillhubClient::with_defaults(cache_dir);
+
+    match client.browse(sort, limit).await {
+        Ok(results) => {
+            let items: Vec<serde_json::Value> = results
+                .skills
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "slug": e.slug,
+                        "name": e.name,
+                        "description": e.description,
+                        "version": e.version,
+                        "downloads": e.downloads,
+                        "stars": e.stars,
+                        "categories": e.categories,
+                    })
+                })
+                .collect();
+            let resp = serde_json::json!({
+                "items": items,
+            });
+            state
+                .skillhub_cache
+                .insert(cache_key, (Instant::now(), resp.clone()));
+            (StatusCode::OK, Json(resp))
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            tracing::warn!("Skillhub browse failed: {msg}");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"items": [], "error": msg})),
+            )
+        }
+    }
+}
+
+/// GET /api/skillhub/skill/{slug} — Get detailed info about a Skillhub skill.
+pub async fn skillhub_skill_detail(
+    State(state): State<Arc<AppState>>,
+    Path(slug): Path<String>,
+) -> impl IntoResponse {
+    let cache_dir = state.kernel.config.home_dir.join(".cache").join("skillhub");
+    let client = librefang_skills::skillhub::SkillhubClient::with_defaults(cache_dir);
+
+    let skills_dir = state.kernel.config.home_dir.join("skills");
+    let is_installed = client.is_installed(&slug, &skills_dir);
+
+    match client.get_skill(&slug).await {
+        Ok(detail) => {
+            let version = detail
+                .latest_version
+                .as_ref()
+                .map(|v| v.version.as_str())
+                .unwrap_or("");
+            let author = detail
+                .owner
+                .as_ref()
+                .map(|o| o.handle.as_str())
+                .unwrap_or("");
+            let author_name = detail
+                .owner
+                .as_ref()
+                .map(|o| o.display_name.as_str())
+                .unwrap_or("");
+            let author_image = detail
+                .owner
+                .as_ref()
+                .and_then(|o| o.image.as_deref())
+                .unwrap_or("");
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "slug": detail.skill.slug,
+                    "name": detail.skill.display_name,
+                    "description": detail.skill.summary,
+                    "version": version,
+                    "downloads": std::cmp::max(detail.skill.stats.downloads, detail.skill.stats.installs),
+                    "stars": detail.skill.stats.stars,
+                    "author": author,
+                    "author_name": author_name,
+                    "author_image": author_image,
+                    "tags": detail.skill.tags,
+                    "updated_at": detail.skill.updated_at,
+                    "created_at": detail.skill.created_at,
+                    "installed": is_installed,
+                    "source": "skillhub",
+                })),
+            )
+        }
+        Err(e) => {
+            let status = if is_clawhub_rate_limit(&e) {
+                StatusCode::TOO_MANY_REQUESTS
+            } else {
+                StatusCode::NOT_FOUND
+            };
+            (status, Json(serde_json::json!({"error": format!("{e}")})))
+        }
+    }
+}
+
+/// GET /api/skillhub/skill/{slug}/code — Source code viewing is not available for Skillhub skills.
+pub async fn skillhub_skill_code(Path(_slug): Path<String>) -> impl IntoResponse {
+    (
+        StatusCode::NOT_FOUND,
+        Json(
+            serde_json::json!({"error": "Source code viewing is not available for Skillhub skills"}),
+        ),
+    )
+}
+
+/// POST /api/skillhub/install — Install a skill from Skillhub.
+pub async fn skillhub_install(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<crate::types::ClawHubInstallRequest>,
+) -> impl IntoResponse {
+    let skills_dir = state.kernel.config.home_dir.join("skills");
+    let cache_dir = state.kernel.config.home_dir.join(".cache").join("skillhub");
+    let client = librefang_skills::skillhub::SkillhubClient::with_defaults(cache_dir);
+
+    // Check if already installed
+    if client.is_installed(&req.slug, &skills_dir) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": format!("Skill '{}' is already installed", req.slug),
+                "status": "already_installed",
+            })),
+        );
+    }
+
+    match client.install(&req.slug, &skills_dir).await {
+        Ok(result) => {
+            let warnings: Vec<serde_json::Value> = result
+                .warnings
+                .iter()
+                .map(|w| {
+                    serde_json::json!({
+                        "severity": format!("{:?}", w.severity),
+                        "message": w.message,
+                    })
+                })
+                .collect();
+
+            let translations: Vec<serde_json::Value> = result
+                .tool_translations
+                .iter()
+                .map(|(from, to)| serde_json::json!({"from": from, "to": to}))
+                .collect();
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "installed",
+                    "name": result.skill_name,
+                    "version": result.version,
+                    "slug": result.slug,
+                    "is_prompt_only": result.is_prompt_only,
+                    "warnings": warnings,
+                    "tool_translations": translations,
+                })),
+            )
+        }
+        Err(e) => {
+            let msg = format!("{e}");
+            let status = if matches!(e, librefang_skills::SkillError::SecurityBlocked(_)) {
+                StatusCode::FORBIDDEN
+            } else if is_clawhub_rate_limit(&e) {
+                StatusCode::TOO_MANY_REQUESTS
+            } else if matches!(e, librefang_skills::SkillError::Network(_)) {
+                StatusCode::BAD_GATEWAY
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            tracing::warn!("Skillhub install failed: {msg}");
             (status, Json(serde_json::json!({"error": msg})))
         }
     }
