@@ -1555,6 +1555,7 @@ impl LibreFangKernel {
 
                     // Re-register in the in-memory registry
                     let mut restored_entry = entry;
+                    restored_entry.last_active = chrono::Utc::now();
 
                     // Check enabled flag — also do a direct TOML read as fallback
                     let mut is_enabled = restored_entry.manifest.enabled;
