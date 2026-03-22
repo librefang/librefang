@@ -814,6 +814,14 @@ enum HandCommands {
         long_about = "Reload all hand definitions from ~/.librefang/hands/ without restarting.\n\nPicks up newly added or modified HAND.toml files.\n\nExamples:\n  librefang hand reload"
     )]
     Reload,
+    /// Chat with an active hand interactively.
+    #[command(
+        long_about = "Start an interactive chat session with an active hand.\n\nThe hand must be activated first. Type your messages and press Enter.\nType /quit or Ctrl+C to exit.\n\nExamples:\n  librefang hand chat clip\n  librefang hand chat researcher"
+    )]
+    Chat {
+        /// Hand ID (e.g. "clip", "researcher").
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1584,6 +1592,7 @@ fn main() {
             HandCommands::Settings { id } => cmd_hand_settings(&id),
             HandCommands::Set { id, key, value } => cmd_hand_set(&id, &key, &value),
             HandCommands::Reload => cmd_hand_reload(),
+            HandCommands::Chat { id } => cmd_hand_chat(&id),
         },
         Some(Commands::Config(sub)) => match sub {
             ConfigCommands::Show => cmd_config_show(),
@@ -5898,6 +5907,70 @@ fn cmd_hand_reload() {
     ui::success(&format!(
         "Reloaded hands: {added} added, {updated} updated, {total} total."
     ));
+}
+
+fn cmd_hand_chat(id: &str) {
+    let base = require_daemon("hand chat");
+    let client = daemon_client();
+    let active = fetch_active_hand_instances(&base, &client);
+    let resolved = match resolve_hand_instance(&active, id) {
+        Some(instance) => instance,
+        None => {
+            ui::error(&format!("No active hand instance found for '{id}'."));
+            ui::hint("Activate it first: librefang hand activate");
+            std::process::exit(1);
+        }
+    };
+    let instance_id = resolved["instance_id"]
+        .as_str()
+        .expect("instance_id missing");
+    let hand_id = resolved["hand_id"].as_str().unwrap_or(id);
+    let hand_name = resolved["hand_name"]
+        .as_str()
+        .or_else(|| resolved["name"].as_str())
+        .unwrap_or(hand_id);
+
+    install_ctrlc_handler();
+
+    println!(
+        "{} {} {}",
+        "Chat with".bold(),
+        hand_name.cyan().bold(),
+        "(type /quit to exit)".dimmed()
+    );
+    println!();
+
+    loop {
+        print!("{} ", "you >".green().bold());
+        io::stdout().flush().unwrap();
+        let mut line = String::new();
+        if io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 {
+            break; // EOF
+        }
+        let msg = line.trim();
+        if msg.is_empty() {
+            continue;
+        }
+        if msg == "/quit" || msg == "/exit" || msg == "/q" {
+            break;
+        }
+
+        let resp = client
+            .post(format!("{base}/api/hands/instances/{instance_id}/message"))
+            .json(&serde_json::json!({"message": msg}))
+            .send();
+
+        let body = daemon_json(resp);
+        if let Some(err) = body["error"].as_str() {
+            ui::error(err);
+            continue;
+        }
+        let reply = body["response"]
+            .as_str()
+            .or_else(|| body["reply"].as_str())
+            .unwrap_or("[no response]");
+        println!("{} {}\n", format!("{hand_name} >").cyan().bold(), reply);
+    }
 }
 
 fn fetch_active_hand_instances(
