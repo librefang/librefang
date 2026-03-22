@@ -3,15 +3,15 @@
 
 use super::AppState;
 
-/// 构建系统杂项领域的路由（审计、日志、工具、会话、审批、配对等）。
+/// Build routes for the system miscellaneous domain (audit, logs, tools, sessions, approvals, pairing, etc.).
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
-        // 配置文件与模板
+        // Profiles and templates
         .route("/profiles", axum::routing::get(list_profiles))
         .route("/profiles/{name}", axum::routing::get(get_profile))
         .route("/templates", axum::routing::get(list_agent_templates))
         .route("/templates/{name}", axum::routing::get(get_agent_template))
-        // Agent KV 存储
+        // Agent KV storage
         .route(
             "/memory/agents/{id}/kv",
             axum::routing::get(get_agent_kv),
@@ -30,15 +30,15 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/agents/{id}/memory/import",
             axum::routing::post(import_agent_memory),
         )
-        // 审计
+        // Audit
         .route("/audit/recent", axum::routing::get(audit_recent))
         .route("/audit/verify", axum::routing::get(audit_verify))
-        // 日志流
+        // Log streaming
         .route("/logs/stream", axum::routing::get(logs_stream))
-        // 工具
+        // Tools
         .route("/tools", axum::routing::get(list_tools))
         .route("/tools/{name}", axum::routing::get(get_tool))
-        // 会话管理
+        // Session management
         .route("/sessions", axum::routing::get(list_sessions))
         .route("/sessions/search", axum::routing::get(search_sessions))
         .route("/sessions/cleanup", axum::routing::post(session_cleanup))
@@ -54,7 +54,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/agents/{id}/sessions/by-label/{label}",
             axum::routing::get(find_session_by_label),
         )
-        // 审批
+        // Approvals
         .route(
             "/approvals",
             axum::routing::get(list_approvals).post(create_approval),
@@ -68,13 +68,13 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/approvals/{id}/reject",
             axum::routing::post(reject_request),
         )
-        // Webhook 触发（外部事件注入）
+        // Webhook triggers (external event injection)
         .route("/hooks/wake", axum::routing::post(webhook_wake))
         .route("/hooks/agent", axum::routing::post(webhook_agent))
-        // 聊天命令端点
+        // Chat command endpoints
         .route("/commands", axum::routing::get(list_commands))
         .route("/commands/{name}", axum::routing::get(get_command))
-        // 绑定
+        // Bindings
         .route(
             "/bindings",
             axum::routing::get(list_bindings).post(add_binding),
@@ -83,7 +83,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/bindings/{index}",
             axum::routing::delete(remove_binding),
         )
-        // 配对
+        // Pairing
         .route("/pairing/request", axum::routing::post(pairing_request))
         .route(
             "/pairing/complete",
@@ -95,7 +95,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::delete(pairing_remove_device),
         )
         .route("/pairing/notify", axum::routing::post(pairing_notify))
-        // 备份 / 恢复
+        // Backup / restore
         .route("/backup", axum::routing::post(create_backup))
         .route("/backups", axum::routing::get(list_backups))
         .route(
@@ -103,9 +103,9 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             axum::routing::delete(delete_backup),
         )
         .route("/restore", axum::routing::post(restore_backup))
-        // 队列状态
+        // Queue status
         .route("/queue/status", axum::routing::get(queue_status))
-        // 任务队列管理
+        // Task queue management
         .route("/tasks/status", axum::routing::get(task_queue_status))
         .route("/tasks/list", axum::routing::get(task_queue_list))
         .route(
@@ -116,7 +116,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/tasks/{id}/retry",
             axum::routing::post(task_queue_retry),
         )
-        // 事件 Webhook 订阅
+        // Event webhook subscriptions
         .route(
             "/webhooks/events",
             axum::routing::get(list_event_webhooks).post(create_event_webhook),
@@ -125,7 +125,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/webhooks/events/{id}",
             axum::routing::put(update_event_webhook).delete(delete_event_webhook),
         )
-        // 出站 Webhook 管理
+        // Outbound webhook management
         .route(
             "/webhooks",
             axum::routing::get(list_webhooks).post(create_webhook),
