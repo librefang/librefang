@@ -2533,6 +2533,8 @@ pub struct ChannelsConfig {
     pub webhook: OneOrMany<WebhookConfig>,
     /// LinkedIn messaging configuration(s).
     pub linkedin: OneOrMany<LinkedInConfig>,
+    /// WeChat personal account (iLink) configuration(s).
+    pub wechat: OneOrMany<WeChatConfig>,
     /// WeCom/WeChat Work configuration(s).
     pub wecom: OneOrMany<WeComConfig>,
 }
@@ -3462,6 +3464,38 @@ impl Default for WeComConfig {
             webhook_port: 8454,
             token_env: None,
             encoding_aes_key_env: None,
+            account_id: None,
+            default_agent: None,
+            overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+/// WeChat personal account (iLink protocol) adapter configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WeChatConfig {
+    /// Env var name holding the bot token from a previous QR login session.
+    /// If the env var is set and non-empty, the adapter skips QR login.
+    pub bot_token_env: String,
+    /// Allowed user IDs (empty = allow all). Format: `{hash}@im.wechat`.
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+    /// Unique identifier for this bot instance (used for multi-bot routing).
+    #[serde(default)]
+    pub account_id: Option<String>,
+    /// Default agent name to route messages to.
+    pub default_agent: Option<String>,
+    /// Per-channel behavior overrides.
+    #[serde(default)]
+    pub overrides: ChannelOverrides,
+}
+
+impl Default for WeChatConfig {
+    fn default() -> Self {
+        Self {
+            bot_token_env: "WECHAT_BOT_TOKEN".to_string(),
+            allowed_users: vec![],
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
