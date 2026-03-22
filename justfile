@@ -113,9 +113,9 @@ bench *ARGS:
 migrate *ARGS:
     cargo xtask migrate {{ARGS}}
 
-# Check formatting (Rust + web)
+# Check/fix formatting (Rust + web)
 fmt-all *ARGS:
-    cargo xtask fmt-check {{ARGS}}
+    cargo xtask fmt {{ARGS}}
 
 # Clean all build artifacts
 clean-all *ARGS:

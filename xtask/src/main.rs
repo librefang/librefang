@@ -12,7 +12,7 @@ mod deps;
 mod dist;
 mod docker;
 mod doctor;
-mod fmt_check;
+mod fmt;
 mod integration_test;
 mod migrate;
 mod publish_sdks;
@@ -79,8 +79,8 @@ enum Command {
     /// Migrate agents from other frameworks (OpenClaw, OpenFang)
     Migrate(migrate::MigrateArgs),
 
-    /// Check formatting (Rust + web)
-    FmtCheck(fmt_check::FmtCheckArgs),
+    /// Check or fix formatting (Rust + web)
+    Fmt(fmt::FmtCheckArgs),
 
     /// Clean all build artifacts (target/, node_modules/, dist/, .next/)
     CleanAll(clean_all::CleanAllArgs),
@@ -108,7 +108,7 @@ fn main() {
         Command::CheckLinks(args) => check_links::run(args),
         Command::Bench(args) => bench::run(args),
         Command::Migrate(args) => migrate::run(args),
-        Command::FmtCheck(args) => fmt_check::run(args),
+        Command::Fmt(args) => fmt::run(args),
         Command::CleanAll(args) => clean_all::run(args),
         Command::Doctor(args) => doctor::run(args),
     };

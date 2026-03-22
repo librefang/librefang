@@ -248,15 +248,15 @@ cargo xtask migrate --source openclaw --source-dir ./data --target-dir ~/.libref
 
 Supported sources: `openclaw`, `openfang`.
 
-### `fmt-check` — Format Check
+### `fmt` — Format Check
 
 Unified formatting check across Rust and frontend code.
 
 ```bash
-cargo xtask fmt-check                  # check all
-cargo xtask fmt-check --fix            # auto-fix formatting
-cargo xtask fmt-check --no-web         # Rust only
-cargo xtask fmt-check --no-rust        # web only (prettier)
+cargo xtask fmt                        # check all
+cargo xtask fmt --fix                  # auto-fix formatting
+cargo xtask fmt --no-web               # Rust only
+cargo xtask fmt --no-rust              # web only (prettier)
 ```
 
 ### `clean-all` — Deep Clean
