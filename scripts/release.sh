@@ -102,50 +102,10 @@ if echo "$VERSION" | grep -qE -- '-(beta|rc)[0-9]'; then
     IS_PRERELEASE=true
 fi
 
-echo ""
-echo "  Version: $CURRENT → $VERSION"
-echo "  Tag:     $TAG"
-if [ "$IS_PRERELEASE" = true ]; then
-    echo "  Type:    pre-release"
-fi
-if [ -n "$PREV_TAG" ]; then
-    echo "  Review:  https://github.com/librefang/librefang/compare/${PREV_TAG}...main"
-fi
-echo ""
-read -rp "Confirm? [Y/n]: " confirm
-if [[ "$confirm" =~ ^[Nn] ]]; then
-    echo "Aborted."
-    exit 0
-fi
-
-# --- Check tag doesn't already exist ---
-
+# Check if tag already exists
+TAG_EXISTS=false
 if git -C "$REPO_ROOT" rev-parse "$TAG" &>/dev/null; then
-    echo ""
-    echo "Tag '$TAG' already exists."
-    read -rp "Delete and re-create it? [Y/n]: " overwrite_confirm
-    if [[ "$overwrite_confirm" =~ ^[Nn] ]]; then
-        echo "Aborted."
-        exit 0
-    fi
-    echo "Deleting existing tag '$TAG'..."
-    git -C "$REPO_ROOT" tag -d "$TAG"
-    git -C "$REPO_ROOT" push origin --delete "$TAG" 2>/dev/null || true
-
-    # Also delete existing release branch if present
-    RELEASE_BRANCH_CHECK="chore/bump-version-${VERSION}"
-    if git -C "$REPO_ROOT" rev-parse --verify "refs/heads/$RELEASE_BRANCH_CHECK" &>/dev/null; then
-        git -C "$REPO_ROOT" branch -D "$RELEASE_BRANCH_CHECK"
-    fi
-    git -C "$REPO_ROOT" push origin --delete "$RELEASE_BRANCH_CHECK" 2>/dev/null || true
-
-    # Delete existing GitHub release if gh is available
-    if command -v gh &>/dev/null; then
-        gh release delete "$TAG" --repo librefang/librefang --yes 2>/dev/null || true
-    fi
-
-    # Re-fetch PREV_TAG since we just deleted the old one
-    PREV_TAG=$(git -C "$REPO_ROOT" tag --sort=-creatordate | grep -E '^v[0-9]' | grep -vE '(alpha|beta|rc)' | head -1 || true)
+    TAG_EXISTS=true
 fi
 
 # --- Extract base version for CHANGELOG matching ---
@@ -157,6 +117,47 @@ if [ ${#PATCH_PART} -eq 4 ]; then
     CHANGELOG_VERSION="$(echo "$BASE_FOR_CHANGELOG" | cut -d. -f1,2).${PATCH_PART:0:2}"
 else
     CHANGELOG_VERSION="$BASE_FOR_CHANGELOG"
+fi
+
+# --- Final confirmation ---
+echo ""
+echo "=== Release Summary ==="
+echo "  Version: $CURRENT → $VERSION"
+echo "  Tag:     $TAG"
+if [ "$IS_PRERELEASE" = true ]; then
+    echo "  Type:    pre-release"
+fi
+if [ "$TAG_EXISTS" = true ]; then
+    echo "  Warning: tag $TAG already exists, will be overwritten"
+fi
+if [ -n "$PREV_TAG" ]; then
+    echo "  Review:  https://github.com/librefang/librefang/compare/${PREV_TAG}...main"
+fi
+echo ""
+read -rp "Release? [Y/n]: " confirm
+if [[ "$confirm" =~ ^[Nn] ]]; then
+    echo "Aborted."
+    exit 0
+fi
+
+# --- Clean up existing tag if re-releasing ---
+if [ "$TAG_EXISTS" = true ]; then
+    echo ""
+    echo "Cleaning up existing tag '$TAG'..."
+    git -C "$REPO_ROOT" tag -d "$TAG"
+    git -C "$REPO_ROOT" push origin --delete "$TAG" 2>/dev/null || true
+
+    RELEASE_BRANCH_CHECK="chore/bump-version-${VERSION}"
+    if git -C "$REPO_ROOT" rev-parse --verify "refs/heads/$RELEASE_BRANCH_CHECK" &>/dev/null; then
+        git -C "$REPO_ROOT" branch -D "$RELEASE_BRANCH_CHECK"
+    fi
+    git -C "$REPO_ROOT" push origin --delete "$RELEASE_BRANCH_CHECK" 2>/dev/null || true
+
+    if command -v gh &>/dev/null; then
+        gh release delete "$TAG" --repo librefang/librefang --yes 2>/dev/null || true
+    fi
+
+    PREV_TAG=$(git -C "$REPO_ROOT" tag --sort=-creatordate | grep -E '^v[0-9]' | grep -vE '(alpha|beta|rc)' | head -1 || true)
 fi
 
 # --- Generate changelog ---
@@ -298,14 +299,6 @@ RELEASE_BRANCH="chore/bump-version-${VERSION}"
 echo ""
 echo "Creating release branch '$RELEASE_BRANCH'..."
 git -C "$REPO_ROOT" checkout -b "$RELEASE_BRANCH"
-
-read -rp "Push and create PR? [Y/n]: " push_confirm
-if [[ "$push_confirm" =~ ^[Nn] ]]; then
-    echo "Skipped push. Run manually:"
-    echo "  git push -u origin $RELEASE_BRANCH"
-    echo "  gh pr create --title 'chore: bump version to $TAG'"
-    exit 0
-fi
 
 git -C "$REPO_ROOT" push -u origin "$RELEASE_BRANCH"
 git -C "$REPO_ROOT" push origin "$TAG" --force
