@@ -979,6 +979,13 @@ pub struct SessionConfig {
     /// context or instructions across all agents.
     #[serde(default)]
     pub reset_prompt: Option<String>,
+    /// Context injections applied to every new or reset session.
+    /// Each entry specifies content, a positional slot, and an optional condition.
+    #[serde(default)]
+    pub context_injection: Vec<ContextInjection>,
+    /// Optional shell script to run when a new session is created (fire-and-forget).
+    #[serde(default)]
+    pub on_session_start_script: Option<String>,
 }
 
 impl Default for SessionConfig {
@@ -988,8 +995,39 @@ impl Default for SessionConfig {
             max_sessions_per_agent: 0,
             cleanup_interval_hours: 24,
             reset_prompt: None,
+            context_injection: Vec::new(),
+            on_session_start_script: None,
         }
     }
+}
+
+/// Where a context injection should be placed in the session message list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectionPosition {
+    /// Prepended to the system prompt area.
+    #[default]
+    System,
+    /// Inserted right before the latest user message.
+    BeforeUser,
+    /// Placed immediately after the reset prompt (if any).
+    AfterReset,
+}
+
+/// A single context injection entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextInjection {
+    /// A short label for logging / debugging.
+    pub name: String,
+    /// The content to inject.
+    pub content: String,
+    /// Where in the message list this content should appear.
+    #[serde(default)]
+    pub position: InjectionPosition,
+    /// Optional condition expression (e.g. `"agent.tags contains 'chat'"`).
+    /// If `None`, the injection always applies.
+    #[serde(default)]
+    pub condition: Option<String>,
 }
 
 /// Message queue configuration.

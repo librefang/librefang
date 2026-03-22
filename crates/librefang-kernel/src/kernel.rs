@@ -4436,9 +4436,6 @@ system_prompt = "You are a helpful assistant."
         Ok(new_session.id)
     }
 
-    /// Inject the configured `session.reset_prompt` into a newly created session
-    /// as the first system message (if configured).
-    fn inject_reset_prompt(&self, session: &mut librefang_memory::session::Session) {
     /// Inject the configured `session.reset_prompt` and any `context_injection`
     /// entries into a newly created session. Also runs `on_session_start_script`
     /// if configured.
@@ -9415,6 +9412,8 @@ mod tests {
         );
 
         kernel.shutdown();
+    }
+
     #[test]
     fn test_evaluate_condition_none() {
         let tags = vec!["chat".to_string(), "dev".to_string()];
