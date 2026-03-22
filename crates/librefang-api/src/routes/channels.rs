@@ -1,6 +1,6 @@
 //! Channel configuration, status, and WhatsApp QR flow handlers.
 
-/// 构建 Channel 领域的路由。
+/// Build routes for the Channel domain.
 pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
     axum::Router::new()
         .route("/channels", axum::routing::get(list_channels))

@@ -1,13 +1,16 @@
 //! Route handlers for the LibreFang API.
 //!
-//! 每个领域子模块导出一个 `router()` 函数来构建自己的路由树。
-//! `server.rs` 通过 `.merge()` 组合所有子路由器，避免在单一函数中维护数百行路由注册。
+//! Each domain sub-module exports a `router()` function that builds its own route tree.
+//! `server.rs` combines all sub-routers via `.merge()`, avoiding hundreds of route
+//! registrations in a single function.
 //!
-//! 处理函数仍通过 glob re-export 暴露，以保持 `routes::handler_name` 的向后兼容性
-//! （特别是 openapi.rs 的 utoipa 宏需要此路径格式）。
+//! Handler functions are still exposed via glob re-export to maintain
+//! `routes::handler_name` backward compatibility (in particular, the utoipa macros
+//! in openapi.rs require this path format).
 
-// 各模块都导出 `router()` 函数，glob re-export 会产生同名歧义，
-// 但 `router()` 只通过限定路径访问（如 `routes::agents::router()`），不会实际冲突。
+// All modules export a `router()` function; glob re-export causes a name ambiguity
+// warning, but `router()` is only accessed via qualified paths (e.g.
+// `routes::agents::router()`), so there is no actual conflict.
 #![allow(ambiguous_glob_reexports)]
 
 pub mod agents;
@@ -23,15 +26,16 @@ pub mod skills;
 pub mod system;
 pub mod workflows;
 
-// 通过 glob re-export 保持 `routes::handler_name` 向后兼容
-// （openapi.rs 的 utoipa 宏、ws.rs 等都依赖此路径格式）。
+// Glob re-export to keep `routes::handler_name` backward compatible
+// (utoipa macros in openapi.rs, ws.rs, etc. all depend on this path format).
 //
-// 原先 system.rs 和 workflows.rs 都导出了 `list_templates` / `get_template`，
-// 导致 E0659 名称歧义。已将 workflows.rs 中的版本重命名为
-// `list_workflow_templates` / `get_workflow_template` 以消除冲突。
+// Previously both system.rs and workflows.rs exported `list_templates` / `get_template`,
+// causing E0659 name ambiguity. The workflows.rs versions have been renamed to
+// `list_workflow_templates` / `get_workflow_template` to resolve the conflict.
 //
-// 各模块都导出了 `router()` 函数，glob re-export 会产生歧义警告，
-// 但 `router()` 只通过限定路径（如 `routes::agents::router()`）访问，不会实际冲突。
+// All modules export a `router()` function; glob re-export produces an ambiguity
+// warning, but `router()` is only accessed via qualified paths (e.g.
+// `routes::agents::router()`), so there is no actual conflict.
 pub use agents::*;
 pub use budget::*;
 pub use channels::*;

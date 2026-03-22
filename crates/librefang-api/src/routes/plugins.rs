@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::AppState;
 
-/// 构建上下文引擎插件领域的路由。
+/// Build routes for the context engine plugin domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
         .route(

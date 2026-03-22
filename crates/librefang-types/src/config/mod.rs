@@ -1,17 +1,17 @@
 //! Configuration types for the LibreFang kernel.
 //!
-//! 此模块将配置相关代码按职责拆分为多个子模块：
-//! - `types`: 所有配置 struct 与 enum 定义
-//! - `serde_helpers`: 自定义序列化/反序列化辅助函数
-//! - `validation`: 配置验证与安全边界约束
-//! - `version`: 配置版本追踪
+//! This module splits configuration-related code into submodules by responsibility:
+//! - `types`: All configuration struct and enum definitions
+//! - `serde_helpers`: Custom serialization/deserialization helper functions
+//! - `validation`: Configuration validation and safety boundary constraints
+//! - `version`: Configuration version tracking
 
 mod serde_helpers;
 mod types;
 mod validation;
 mod version;
 
-// 保持向后兼容性：重新导出所有公共类型
+// Maintain backward compatibility: re-export all public types
 pub use serde_helpers::*;
 pub use types::*;
 pub use version::*;

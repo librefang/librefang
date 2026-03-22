@@ -61,7 +61,7 @@ export function LogsPage() {
       />
 
       <Card padding="none" className="flex-1 overflow-hidden">
-        {/* 搜索和筛选 */}
+        {/* Search and Filter */}
         <div className="bg-main border-b border-border-subtle px-3 sm:px-6 py-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-4">
           <div className="flex-1">
             <Input

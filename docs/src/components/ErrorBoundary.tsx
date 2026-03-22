@@ -19,27 +19,27 @@ interface ErrorFallbackProps {
 	resetError?: () => void;
 }
 
-// 文档站点专用的错误回退组件
+// Error fallback component for the docs site
 function DocsErrorFallback({ error, resetError }: ErrorFallbackProps) {
 	return (
 		<div className="flex min-h-[60vh] flex-col items-center justify-center p-8">
 			<div className="text-center">
 				<div className="mb-6 text-8xl"></div>
 				<h1 className="mb-3 text-3xl font-bold text-zinc-900 dark:text-white">
-					页面加载失败
+					Page Failed to Load
 				</h1>
 				<p className="mb-8 max-w-md text-lg text-zinc-600 dark:text-zinc-400">
-					文档页面遇到了问题这可能是 MDX 解析错误或组件渲染异常
+					The docs page encountered a problem. This may be an MDX parsing error or a component rendering issue.
 				</p>
 
 				{process.env.NODE_ENV === "development" && error && (
 					<div className="mb-8 max-w-2xl rounded-lg bg-red-50 p-4 dark:bg-red-950/20">
 						<h3 className="mb-2 font-semibold text-red-800 dark:text-red-200">
-							开发模式错误信息
+							Development Mode Error Info
 						</h3>
 						<details className="text-left">
 							<summary className="cursor-pointer text-sm text-red-600 dark:text-red-400">
-								点击查看详细错误
+								Click to view error details
 							</summary>
 							<pre className="mt-2 overflow-auto text-xs text-red-600 dark:text-red-400">
 								{error.name}: {error.message}
@@ -56,7 +56,7 @@ function DocsErrorFallback({ error, resetError }: ErrorFallbackProps) {
 							onClick={resetError}
 							className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
 						>
-							重新尝试
+							Try Again
 						</button>
 					)}
 					<button
@@ -66,14 +66,14 @@ function DocsErrorFallback({ error, resetError }: ErrorFallbackProps) {
 						}}
 						className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800"
 					>
-						返回首页
+						Back to Home
 					</button>
 					<button
 						type="button"
 						onClick={() => window.location.reload()}
 						className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 dark:border-gray-600 dark:text-gray-300 dark:hover:bg-gray-800"
 					>
-						刷新页面
+						Refresh Page
 					</button>
 				</div>
 			</div>
@@ -81,7 +81,7 @@ function DocsErrorFallback({ error, resetError }: ErrorFallbackProps) {
 	);
 }
 
-// MDX 错误边界组件
+// MDX error boundary component
 export class MDXErrorBoundary extends React.Component<
 	ErrorBoundaryProps,
 	ErrorBoundaryState
@@ -101,7 +101,7 @@ export class MDXErrorBoundary extends React.Component<
 	override componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
 		console.error("MDX ErrorBoundary caught an error:", error, errorInfo);
 
-		// 记录 MDX 相关错误
+		// Log MDX-related errors
 		this.reportMDXError(error, errorInfo);
 
 		this.props.onError?.(error, errorInfo);
@@ -118,12 +118,12 @@ export class MDXErrorBoundary extends React.Component<
 				typeof window !== "undefined" ? navigator.userAgent : undefined,
 			url: typeof window !== "undefined" ? window.location.href : undefined,
 
-			// MDX 特定信息
+			// MDX-specific information
 			isDevelopment: process.env.NODE_ENV === "development",
 			errorType: this.classifyMDXError(error),
 		};
 
-		// 开发环境下详细输出
+		// Verbose output in development
 		if (process.env.NODE_ENV === "development") {
 			console.group(" MDX Error Details");
 			console.error("Error:", error);
@@ -132,7 +132,7 @@ export class MDXErrorBoundary extends React.Component<
 			console.groupEnd();
 		}
 
-		// 生产环境发送错误报告
+		// Send error report in production
 		if (
 			typeof window !== "undefined" &&
 			process.env.NODE_ENV === "production"
@@ -184,7 +184,7 @@ export class MDXErrorBoundary extends React.Component<
 	}
 }
 
-// MDX 组件包装器用于捕获单个组件的错误
+// MDX component wrapper for catching errors in individual components
 export function MDXComponentWrapper({
 	children,
 	componentName,
@@ -197,15 +197,15 @@ export function MDXComponentWrapper({
 			fallback={({ error, resetError }) => (
 				<div className="my-4 rounded-lg border border-red-200 bg-red-50 p-4 dark:border-red-800 dark:bg-red-950/20">
 					<h4 className="mb-2 font-semibold text-red-800 dark:text-red-200">
-						组件渲染错误 {componentName && `(${componentName})`}
+						Component Render Error {componentName && `(${componentName})`}
 					</h4>
 					<p className="mb-3 text-sm text-red-600 dark:text-red-400">
-						这个组件无法正常显示可能是由于属性错误或组件代码问题
+						This component could not render properly. This may be due to incorrect props or a component code issue.
 					</p>
 					{process.env.NODE_ENV === "development" && error && (
 						<details className="mb-3">
 							<summary className="cursor-pointer text-sm text-red-600 dark:text-red-400">
-								查看错误详情
+								View error details
 							</summary>
 							<pre className="mt-1 text-xs text-red-500">{error.message}</pre>
 						</details>
@@ -215,7 +215,7 @@ export function MDXComponentWrapper({
 						onClick={resetError}
 						className="text-sm text-red-600 underline dark:text-red-400"
 					>
-						重试
+						Retry
 					</button>
 				</div>
 			)}
@@ -225,15 +225,15 @@ export function MDXComponentWrapper({
 	);
 }
 
-// 搜索错误处理
+// Search error handling
 export function useSearchErrorHandler() {
 	const [error, setError] = React.useState<string | null>(null);
 
 	const handleSearchError = React.useCallback((error: Error) => {
 		console.error("Search error:", error);
-		setError("搜索功能暂时不可用请稍后重试");
+		setError("Search is temporarily unavailable. Please try again later.");
 
-		// 5秒后自动清除错误
+		// Auto-clear the error after 5 seconds
 		setTimeout(() => setError(null), 5000);
 	}, []);
 
@@ -244,18 +244,18 @@ export function useSearchErrorHandler() {
 	return { searchError: error, handleSearchError, clearError };
 }
 
-// 导航错误处理
+// Navigation error handling
 export function useNavigationErrorHandler() {
 	const handleNavigationError = React.useCallback(
 		(href: string, error: Error) => {
 			console.error(`Navigation error for ${href}:`, error);
 
-			// 尝试使用原生导航作为后备
+			// Fall back to native navigation
 			try {
 				window.location.href = href;
 			} catch (fallbackError) {
 				console.error("Fallback navigation also failed:", fallbackError);
-				alert("页面跳转失败请检查链接是否正确");
+				alert("Navigation failed. Please check that the link is correct.");
 			}
 		},
 		[],
@@ -264,7 +264,7 @@ export function useNavigationErrorHandler() {
 	return { handleNavigationError };
 }
 
-// 内容加载错误处理
+// Content loading error handling
 export function useContentErrorHandler() {
 	const [loadingErrors, setLoadingErrors] = React.useState<Set<string>>(
 		new Set(),
@@ -296,15 +296,15 @@ export function useContentErrorHandler() {
 	return { handleContentError, retryContent, hasError };
 }
 
-// 全局错误处理器
+// Global error handler
 export const globalErrorHandler = {
-	// 处理未捕获的 Promise 拒绝
+	// Handle uncaught Promise rejections
 	setupGlobalHandlers: () => {
 		if (typeof window !== "undefined") {
 			window.addEventListener("unhandledrejection", (event) => {
 				console.error("Unhandled promise rejection:", event.reason);
 
-				// 发送错误报告
+				// Send error report
 				if (process.env.NODE_ENV === "production") {
 					fetch("/api/errors", {
 						method: "POST",
@@ -319,7 +319,7 @@ export const globalErrorHandler = {
 				}
 			});
 
-			// 处理全局错误
+			// Handle global errors
 			window.addEventListener("error", (event) => {
 				console.error("Global error:", event.error);
 
@@ -344,5 +344,5 @@ export const globalErrorHandler = {
 	},
 };
 
-// 默认导出主要的错误边界组件
+// Default export for the main error boundary component
 export { MDXErrorBoundary as ErrorBoundary };

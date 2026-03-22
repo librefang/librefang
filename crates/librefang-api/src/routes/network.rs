@@ -2,7 +2,7 @@
 
 use super::AppState;
 
-/// 构建网络/对等节点/A2A/通信领域的路由。
+/// Build routes for the network/peer/A2A/communication domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
         .route("/peers", axum::routing::get(list_peers))
@@ -16,7 +16,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
         .route("/comms/send", axum::routing::post(comms_send))
         .route("/comms/task", axum::routing::post(comms_task))
-        // 内部管理用 A2A 端点（版本化 API）
+        // Internal management A2A endpoints (versioned API)
         .route(
             "/a2a/agents",
             axum::routing::get(a2a_list_external_agents),
@@ -36,7 +36,7 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
         )
 }
 
-/// 构建协议级 A2A 路由（不受版本管理，挂载在根路径）。
+/// Build protocol-level A2A routes (not versioned, mounted at the root path).
 pub fn protocol_router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
         .route(

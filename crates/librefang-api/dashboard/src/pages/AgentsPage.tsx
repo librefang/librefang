@@ -50,7 +50,7 @@ export function AgentsPage() {
   const filteredAgents = agents
     .filter(a => a.name.toLowerCase().includes(search.toLowerCase()) || a.id.toLowerCase().includes(search.toLowerCase()))
     .sort((a, b) => {
-      // 1. Suspended last
+      // 1. Suspended agents last
       const aSusp = (a.state || "").toLowerCase() === "suspended" ? 1 : 0;
       const bSusp = (b.state || "").toLowerCase() === "suspended" ? 1 : 0;
       if (aSusp !== bSusp) return aSusp - bSusp;
@@ -62,7 +62,7 @@ export function AgentsPage() {
       return a.name.localeCompare(b.name);
     });
 
-  // 分组：core agents 和 hands
+  // Group: core agents and hands
   const coreAgents = filteredAgents.filter(a => !a.name.includes("-hand"));
   const handAgents = filteredAgents.filter(a => a.name.includes("-hand"));
 

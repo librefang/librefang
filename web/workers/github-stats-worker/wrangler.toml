@@ -7,6 +7,6 @@ account_id = "3ee9bb524a4fb2a9d685ce1f82b52581"
 binding = "KV"
 id = "5d12c668469a4dd39f3b2b378cc20036"
 
-# 每天 UTC 0点执行
+# Runs daily at UTC 00:00
 [triggers]
 crons = ["0 0 * * *"]
