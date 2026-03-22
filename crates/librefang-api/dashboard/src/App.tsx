@@ -283,6 +283,15 @@ export function App() {
     },
   ];
 
+  // Block rendering until auth check completes to prevent dashboard flash
+  if (!authChecked) {
+    return <div className="h-screen bg-main" />;
+  }
+
+  if (authNeeded) {
+    return <LoginScreen mode={authMode} onAuthenticated={() => setAuthNeeded(false)} />;
+  }
+
   return (
     <div className="flex h-screen flex-col bg-main text-slate-900 dark:text-slate-100 lg:flex-row transition-colors duration-300 overflow-hidden">
       {/* Sidebar Overlay (Mobile) */}
@@ -473,9 +482,6 @@ export function App() {
 
       <CommandPalette isOpen={isPaletteOpen} onClose={() => setPaletteOpen(false)} />
       <SkillOutputPanel />
-      {authChecked && authNeeded && (
-        <LoginScreen mode={authMode} onAuthenticated={() => setAuthNeeded(false)} />
-      )}
     </div>
   );
 }
