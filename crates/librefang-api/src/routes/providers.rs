@@ -601,7 +601,7 @@ pub async fn add_custom_model(
     }
 
     // Persist to disk
-    let custom_path = state.kernel.config.home_dir.join("custom_models.json");
+    let custom_path = state.kernel.home_dir().join("custom_models.json");
     if let Err(e) = catalog.save_custom_models(&custom_path) {
         tracing::warn!("Failed to persist custom models: {e}");
     }
@@ -635,7 +635,7 @@ pub async fn remove_custom_model(
         );
     }
 
-    let custom_path = state.kernel.config.home_dir.join("custom_models.json");
+    let custom_path = state.kernel.home_dir().join("custom_models.json");
     if let Err(e) = catalog.save_custom_models(&custom_path) {
         tracing::warn!("Failed to persist custom models: {e}");
     }
@@ -681,7 +681,7 @@ pub async fn set_provider_key(
     };
 
     // Write to secrets.env file
-    let secrets_path = state.kernel.config.home_dir.join("secrets.env");
+    let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = write_secret_env(&secrets_path, &env_var, &key) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -741,7 +741,7 @@ pub async fn set_provider_key(
         };
         if let Some(model_id) = default_model {
             // Update config.toml to persist the switch
-            let config_path = state.kernel.config.home_dir.join("config.toml");
+            let config_path = state.kernel.home_dir().join("config.toml");
             let update_toml = format!(
                 "\n[default_model]\nprovider = \"{}\"\nmodel = \"{}\"\napi_key_env = \"{}\"\n",
                 name, model_id, env_var
@@ -862,7 +862,7 @@ pub async fn delete_provider_key(
     }
 
     // Remove from secrets.env
-    let secrets_path = state.kernel.config.home_dir.join("secrets.env");
+    let secrets_path = state.kernel.home_dir().join("secrets.env");
     if let Err(e) = remove_secret_env(&secrets_path, &env_var) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1106,7 +1106,7 @@ pub async fn set_provider_url(
     }
 
     // Persist to config.toml [provider_urls] section
-    let config_path = state.kernel.config.home_dir.join("config.toml");
+    let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_provider_url(&config_path, &name, &base_url) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1295,7 +1295,7 @@ pub async fn copilot_oauth_poll(
         ),
         librefang_runtime::copilot_oauth::DeviceFlowStatus::Complete { access_token } => {
             // Save to secrets.env
-            let secrets_path = state.kernel.config.home_dir.join("secrets.env");
+            let secrets_path = state.kernel.home_dir().join("secrets.env");
             if let Err(e) = write_secret_env(&secrets_path, "GITHUB_TOKEN", &access_token) {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1365,7 +1365,7 @@ pub async fn copilot_oauth_poll(
 /// After syncing, the kernel's in-memory catalog is refreshed.
 #[utoipa::path(post, path = "/api/catalog/update", tag = "models", responses((status = 200, description = "Catalog updated", body = serde_json::Value)))]
 pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match librefang_runtime::catalog_sync::sync_catalog_to(&state.kernel.config.home_dir).await {
+    match librefang_runtime::catalog_sync::sync_catalog_to(&state.kernel.home_dir()).await {
         Ok(result) => {
             // Refresh the in-memory catalog so the new models are available immediately
             {
@@ -1374,7 +1374,7 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
                     .model_catalog
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
-                catalog.load_cached_catalog_for(&state.kernel.config.home_dir);
+                catalog.load_cached_catalog_for(&state.kernel.home_dir());
                 catalog.detect_auth();
             }
             (
@@ -1402,8 +1402,7 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
 /// GET /api/catalog/status — Check last catalog sync time.
 #[utoipa::path(get, path = "/api/catalog/status", tag = "models", responses((status = 200, description = "Catalog sync status", body = serde_json::Value)))]
 pub async fn catalog_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let last_sync =
-        librefang_runtime::catalog_sync::last_sync_time_for(&state.kernel.config.home_dir);
+    let last_sync = librefang_runtime::catalog_sync::last_sync_time_for(&state.kernel.home_dir());
     Json(serde_json::json!({
         "last_sync": last_sync,
     }))

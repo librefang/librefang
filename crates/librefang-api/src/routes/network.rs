@@ -1117,7 +1117,7 @@ pub async fn comms_events(
         .collect();
 
     // Secondary source: audit log (always populated, wider coverage)
-    let audit_entries = state.kernel.audit_log.recent(500);
+    let audit_entries = state.kernel.audit().recent(500);
     let seen_ids: std::collections::HashSet<String> =
         comms_events.iter().map(|e| e.id.clone()).collect();
 
@@ -1156,7 +1156,7 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
 
     tokio::spawn(async move {
         let mut last_seq: u64 = {
-            let entries = state.kernel.audit_log.recent(1);
+            let entries = state.kernel.audit().recent(1);
             entries.last().map(|e| e.seq).unwrap_or(0)
         };
 
@@ -1164,7 +1164,7 @@ pub async fn comms_events_stream(State(state): State<Arc<AppState>>) -> axum::re
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
             let agents = state.kernel.registry.list();
-            let entries = state.kernel.audit_log.recent(50);
+            let entries = state.kernel.audit().recent(50);
 
             for entry in &entries {
                 if entry.seq <= last_seq {
