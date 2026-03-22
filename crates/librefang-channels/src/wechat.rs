@@ -42,6 +42,9 @@ const ITEM_TYPE_FILE: u32 = 4;
 /// iLink item type: video.
 const ITEM_TYPE_VIDEO: u32 = 5;
 
+/// Maximum duration to wait for QR code scan before giving up.
+const QR_LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// WeChat personal account adapter using the iLink protocol.
 pub struct WeChatAdapter {
     /// Bot token obtained from QR login (or persisted from config).
@@ -56,6 +59,8 @@ pub struct WeChatAdapter {
     updates_cursor: Arc<RwLock<String>>,
     /// Typing ticket from getconfig.
     typing_ticket: Arc<RwLock<Option<String>>>,
+    /// Most recent context_token per user, for reply association.
+    user_context_tokens: Arc<RwLock<HashMap<String, String>>>,
     /// Shutdown signal.
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
@@ -76,21 +81,14 @@ pub struct WeChatAdapter {
 /// Generate a random UIN for the X-WECHAT-UIN header.
 ///
 /// The spec calls for `base64(String(randomUint32()))`.
+/// Uses UUID v4 random bytes to derive a u32, avoiding weak time-based PRNG.
 fn generate_wechat_uin() -> String {
     use base64::Engine;
-    let random_u32: u32 = rand_u32();
+    let uuid_bytes = uuid::Uuid::new_v4();
+    let bytes = uuid_bytes.as_bytes();
+    let random_u32 = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
     let num_str = random_u32.to_string();
     base64::engine::general_purpose::STANDARD.encode(num_str.as_bytes())
-}
-
-/// Simple pseudo-random u32 derived from current time.
-fn rand_u32() -> u32 {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
-    // Mix bits for better distribution
-    nanos.wrapping_mul(2654435761)
 }
 
 impl WeChatAdapter {
@@ -111,6 +109,7 @@ impl WeChatAdapter {
             account_id: None,
             updates_cursor: Arc::new(RwLock::new(String::new())),
             typing_ticket: Arc::new(RwLock::new(None)),
+            user_context_tokens: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
             connected: Arc::new(AtomicBool::new(false)),
@@ -169,12 +168,19 @@ impl WeChatAdapter {
         info!("WeChat: QR code ready — scan with your WeChat app to log in");
         debug!("WeChat: qrcode={}", qrcode);
 
-        // Step 2: Poll for confirmation
+        // Step 2: Poll for confirmation (with overall timeout)
         let mut backoff = INITIAL_BACKOFF;
+        let deadline = tokio::time::Instant::now() + QR_LOGIN_TIMEOUT;
+        let mut shutdown_rx = self.shutdown_rx.clone();
+        let encoded_qr: String = url::form_urlencoded::byte_serialize(qrcode.as_bytes()).collect();
         loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err("WeChat: QR login timed out (5 minutes) — restart to try again".into());
+            }
+
             let status_url = format!(
                 "{}/ilink/bot/get_qrcode_status?qrcode={}",
-                ILINK_BASE, qrcode
+                ILINK_BASE, encoded_qr
             );
             let resp = self.client.get(&status_url).send().await;
             match resp {
@@ -207,7 +213,12 @@ impl WeChatAdapter {
                 }
             }
 
-            tokio::time::sleep(backoff).await;
+            tokio::select! {
+                _ = tokio::time::sleep(backoff) => {}
+                _ = shutdown_rx.changed() => {
+                    return Err("WeChat: QR login cancelled by shutdown".into());
+                }
+            }
             backoff = (backoff * 2).min(Duration::from_secs(5));
         }
     }
@@ -510,8 +521,8 @@ impl ChannelAdapter for WeChatAdapter {
         let allowed_users = self.allowed_users.clone();
         let connected = self.connected.clone();
         let messages_received = self.messages_received.clone();
-        let _started_at = self.started_at.clone();
         let last_error = self.last_error.clone();
+        let user_context_tokens = self.user_context_tokens.clone();
         let mut shutdown_rx = self.shutdown_rx.clone();
         let wechat_uin = self.wechat_uin.clone();
 
@@ -586,6 +597,17 @@ impl ChannelAdapter for WeChatAdapter {
                                         );
                                         continue;
                                     }
+                                    // Track latest context_token per user for reply association
+                                    if let Some(ctx) = channel_msg
+                                        .metadata
+                                        .get("context_token")
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        user_context_tokens.write().await.insert(
+                                            channel_msg.sender.platform_id.clone(),
+                                            ctx.to_string(),
+                                        );
+                                    }
                                     messages_received.fetch_add(1, Ordering::Relaxed);
                                     if tx.send(channel_msg).await.is_err() {
                                         info!("WeChat: message channel closed, stopping poll");
@@ -635,10 +657,16 @@ impl ChannelAdapter for WeChatAdapter {
         user: &ChannelUser,
         content: ChannelContent,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // The context_token is required for sending replies via iLink.
-        // It's stored in message metadata by the polling loop.
-        // For proactive messages (no inbound context), use an empty token.
-        let context_token = String::new();
+        // Look up the most recent context_token for this user.
+        // The polling loop tracks it per user_id for reply association.
+        // For proactive messages (no prior inbound), falls back to empty.
+        let context_token = self
+            .user_context_tokens
+            .read()
+            .await
+            .get(&user.platform_id)
+            .cloned()
+            .unwrap_or_default();
 
         match content {
             ChannelContent::Text(text) => {
