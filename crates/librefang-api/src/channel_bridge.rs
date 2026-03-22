@@ -2530,7 +2530,8 @@ pub async fn start_channel_bridge_with_config(
         started_at: Instant::now(),
     });
     let router = Arc::new(router);
-    let mut manager = BridgeManager::with_sanitizer(bridge_handle, router, &kernel.config.sanitize);
+    let mut manager =
+        BridgeManager::with_sanitizer(bridge_handle, router, &kernel.config_ref().sanitize);
 
     let mut started_names = Vec::new();
     for (adapter, _, _account_id) in adapters {
