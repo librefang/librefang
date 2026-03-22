@@ -6,6 +6,7 @@ use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmErr
 use crate::think_filter::{FilterAction, StreamingThinkFilter};
 use async_trait::async_trait;
 use futures::StreamExt;
+use librefang_types::config::ResponseFormat;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
 use serde::{Deserialize, Serialize};
@@ -111,6 +112,34 @@ struct OaiRequest {
     /// Moonshot Kimi K2.5: disable thinking so multi-turn with tool_calls works without preserving reasoning_content.
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
+    /// Structured output: `response_format` field (json_object or json_schema).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    response_format: Option<serde_json::Value>,
+}
+
+/// Convert a [`ResponseFormat`] into the OpenAI `response_format` JSON value.
+fn oai_response_format(rf: &ResponseFormat) -> Option<serde_json::Value> {
+    match rf {
+        ResponseFormat::Text => None, // text is the default — omit the field
+        ResponseFormat::Json => Some(serde_json::json!({"type": "json_object"})),
+        ResponseFormat::JsonSchema {
+            name,
+            schema,
+            strict,
+        } => {
+            let mut js = serde_json::json!({
+                "name": name,
+                "schema": schema,
+            });
+            if let Some(s) = strict {
+                js["strict"] = serde_json::json!(s);
+            }
+            Some(serde_json::json!({
+                "type": "json_schema",
+                "json_schema": js,
+            }))
+        }
+    }
 }
 
 /// Returns true if a model uses `max_completion_tokens` instead of `max_tokens`.
@@ -478,6 +507,10 @@ impl LlmDriver for OpenAIDriver {
             } else {
                 None
             },
+            response_format: request
+                .response_format
+                .as_ref()
+                .and_then(oai_response_format),
         };
 
         let max_retries = 3;
@@ -981,6 +1014,10 @@ impl LlmDriver for OpenAIDriver {
             } else {
                 None
             },
+            response_format: request
+                .response_format
+                .as_ref()
+                .and_then(oai_response_format),
         };
 
         // Retry loop for the initial HTTP request
