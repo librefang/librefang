@@ -1,28 +1,13 @@
+use crate::common::repo_root;
 use clap::Parser;
 use regex::Regex;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Parser, Debug)]
 pub struct SyncVersionsArgs {
     /// Version to set (e.g. 2026.3.2114). If omitted, syncs other files to the current Cargo.toml version.
     pub version: Option<String>,
-}
-
-fn repo_root() -> PathBuf {
-    let mut dir = std::env::current_dir().expect("cannot get cwd");
-    loop {
-        let cargo_toml = dir.join("Cargo.toml");
-        if cargo_toml.exists() {
-            let content = fs::read_to_string(&cargo_toml).unwrap_or_default();
-            if content.contains("[workspace]") {
-                return dir;
-            }
-        }
-        if !dir.pop() {
-            panic!("could not find workspace root (no Cargo.toml with [workspace])");
-        }
-    }
 }
 
 fn read_workspace_version(root: &Path) -> Result<String, Box<dyn std::error::Error>> {

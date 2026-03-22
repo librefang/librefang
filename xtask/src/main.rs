@@ -1,5 +1,7 @@
 //! Build automation tasks for the LibreFang workspace.
 
+pub(crate) mod common;
+
 mod api_docs;
 mod bench;
 mod build_web;

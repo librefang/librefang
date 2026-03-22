@@ -1,7 +1,8 @@
+use crate::common::repo_root;
 use clap::Parser;
 use regex::Regex;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 #[derive(Parser, Debug)]
@@ -11,22 +12,6 @@ pub struct ChangelogArgs {
 
     /// Base tag to compare from (default: latest non-prerelease tag)
     pub base_tag: Option<String>,
-}
-
-fn repo_root() -> PathBuf {
-    let mut dir = std::env::current_dir().expect("cannot get cwd");
-    loop {
-        let cargo_toml = dir.join("Cargo.toml");
-        if cargo_toml.exists() {
-            let content = fs::read_to_string(&cargo_toml).unwrap_or_default();
-            if content.contains("[workspace]") {
-                return dir;
-            }
-        }
-        if !dir.pop() {
-            panic!("could not find workspace root (no Cargo.toml with [workspace])");
-        }
-    }
 }
 
 fn find_latest_stable_tag(root: &Path) -> Option<String> {
