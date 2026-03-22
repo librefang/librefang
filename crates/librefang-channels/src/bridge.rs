@@ -932,28 +932,60 @@ async fn dispatch_message(
         }
     }
 
-    // Route to agent (standard path) — use resolve_with_context to support account_id
-    let ctx = crate::router::BindingContext {
-        channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(&message.channel)),
-        account_id: message
-            .metadata
-            .get("account_id")
-            .and_then(|v| v.as_str())
-            .map(std::borrow::Cow::Borrowed),
-        peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
-        guild_id: message
-            .metadata
-            .get("guild_id")
-            .and_then(|v| v.as_str())
-            .map(std::borrow::Cow::Borrowed),
-        roles: smallvec::SmallVec::new(),
+    // Thread-based agent routing: if the adapter tagged this message with a
+    // thread_route_agent, resolve that agent name before falling through to
+    // the standard router. This allows Telegram forum threads (and similar)
+    // to route to different agents based on config.
+    let thread_route_agent_id = if let Some(agent_name) = message
+        .metadata
+        .get("thread_route_agent")
+        .and_then(|v| v.as_str())
+    {
+        match handle.find_agent_by_name(agent_name).await {
+            Ok(Some(id)) => Some(id),
+            Ok(None) => {
+                warn!(
+                    "Thread route agent '{agent_name}' not found, falling back to default routing"
+                );
+                None
+            }
+            Err(e) => {
+                warn!("Thread route agent lookup failed for '{agent_name}': {e}");
+                None
+            }
+        }
+    } else {
+        None
     };
-    let agent_id = router.resolve_with_context(
-        &message.channel,
-        &message.sender.platform_id,
-        message.sender.librefang_user.as_deref(),
-        &ctx,
-    );
+
+    // Route to agent (standard path) — use resolve_with_context to support account_id
+    let agent_id = if let Some(id) = thread_route_agent_id {
+        Some(id)
+    } else {
+        let ctx = crate::router::BindingContext {
+            channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(
+                &message.channel,
+            )),
+            account_id: message
+                .metadata
+                .get("account_id")
+                .and_then(|v| v.as_str())
+                .map(std::borrow::Cow::Borrowed),
+            peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
+            guild_id: message
+                .metadata
+                .get("guild_id")
+                .and_then(|v| v.as_str())
+                .map(std::borrow::Cow::Borrowed),
+            roles: smallvec::SmallVec::new(),
+        };
+        router.resolve_with_context(
+            &message.channel,
+            &message.sender.platform_id,
+            message.sender.librefang_user.as_deref(),
+            &ctx,
+        )
+    };
     let channel_key = format!("{:?}", message.channel);
 
     let agent_id = match agent_id {
@@ -1349,28 +1381,48 @@ async fn dispatch_with_blocks(
     thread_id: Option<&str>,
     output_format: OutputFormat,
 ) {
-    // Route to agent (same logic as text path) — use resolve_with_context for account_id
-    let ctx = crate::router::BindingContext {
-        channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(&message.channel)),
-        account_id: message
-            .metadata
-            .get("account_id")
-            .and_then(|v| v.as_str())
-            .map(std::borrow::Cow::Borrowed),
-        peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
-        guild_id: message
-            .metadata
-            .get("guild_id")
-            .and_then(|v| v.as_str())
-            .map(std::borrow::Cow::Borrowed),
-        roles: smallvec::SmallVec::new(),
+    // Thread-based agent routing (same as text path)
+    let thread_route_agent_id = if let Some(agent_name) = message
+        .metadata
+        .get("thread_route_agent")
+        .and_then(|v| v.as_str())
+    {
+        match handle.find_agent_by_name(agent_name).await {
+            Ok(Some(id)) => Some(id),
+            _ => None,
+        }
+    } else {
+        None
     };
-    let agent_id = router.resolve_with_context(
-        &message.channel,
-        &message.sender.platform_id,
-        message.sender.librefang_user.as_deref(),
-        &ctx,
-    );
+
+    // Route to agent (same logic as text path) — use resolve_with_context for account_id
+    let agent_id = if let Some(id) = thread_route_agent_id {
+        Some(id)
+    } else {
+        let ctx = crate::router::BindingContext {
+            channel: std::borrow::Cow::Borrowed(crate::router::channel_type_to_str(
+                &message.channel,
+            )),
+            account_id: message
+                .metadata
+                .get("account_id")
+                .and_then(|v| v.as_str())
+                .map(std::borrow::Cow::Borrowed),
+            peer_id: std::borrow::Cow::Borrowed(&message.sender.platform_id),
+            guild_id: message
+                .metadata
+                .get("guild_id")
+                .and_then(|v| v.as_str())
+                .map(std::borrow::Cow::Borrowed),
+            roles: smallvec::SmallVec::new(),
+        };
+        router.resolve_with_context(
+            &message.channel,
+            &message.sender.platform_id,
+            message.sender.librefang_user.as_deref(),
+            &ctx,
+        )
+    };
     let channel_key = format!("{:?}", message.channel);
 
     let agent_id = match agent_id {

@@ -2558,6 +2558,19 @@ pub struct TelegramConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Thread-based agent routing for forum topics.
+    ///
+    /// Maps Telegram `message_thread_id` (as string) to an agent name.
+    /// Messages in a matched thread are routed to that agent instead of
+    /// the `default_agent`. Unmatched threads fall back to normal routing.
+    ///
+    /// ```toml
+    /// [channels.telegram.thread_routes]
+    /// "12345" = "research-agent"
+    /// "67890" = "coding-agent"
+    /// ```
+    #[serde(default)]
+    pub thread_routes: std::collections::HashMap<String, String>,
 }
 
 impl Default for TelegramConfig {
@@ -2570,6 +2583,7 @@ impl Default for TelegramConfig {
             poll_interval_secs: 1,
             api_url: None,
             overrides: ChannelOverrides::default(),
+            thread_routes: std::collections::HashMap::new(),
         }
     }
 }

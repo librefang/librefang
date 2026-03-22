@@ -48,6 +48,8 @@ pub struct TelegramAdapter {
     bot_username: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Optional account identifier for multi-bot routing.
     account_id: Option<String>,
+    /// Thread-based agent routing: thread_id -> agent name.
+    thread_routes: HashMap<String, String>,
     shutdown_tx: Arc<watch::Sender<bool>>,
     shutdown_rx: watch::Receiver<bool>,
 }
@@ -77,6 +79,7 @@ impl TelegramAdapter {
             api_base_url,
             bot_username: Arc::new(tokio::sync::RwLock::new(None)),
             account_id: None,
+            thread_routes: HashMap::new(),
             shutdown_tx: Arc::new(shutdown_tx),
             shutdown_rx,
         }
@@ -85,6 +88,12 @@ impl TelegramAdapter {
     /// Set the account_id for multi-bot routing. Returns self for builder chaining.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Set thread-based agent routing. Returns self for builder chaining.
+    pub fn with_thread_routes(mut self, thread_routes: HashMap<String, String>) -> Self {
+        self.thread_routes = thread_routes;
         self
     }
 
@@ -602,6 +611,7 @@ impl ChannelAdapter for TelegramAdapter {
         let api_base_url = self.api_base_url.clone();
         let bot_username = self.bot_username.clone();
         let account_id = self.account_id.clone();
+        let thread_routes = self.thread_routes.clone();
         let mut shutdown = self.shutdown_rx.clone();
 
         tokio::spawn(async move {
@@ -744,6 +754,18 @@ impl ChannelAdapter for TelegramAdapter {
                     if let Some(ref aid) = account_id {
                         msg.metadata
                             .insert("account_id".to_string(), serde_json::json!(aid));
+                    }
+
+                    // Thread-based agent routing: if this message's thread_id
+                    // matches a configured route, tag it for the bridge dispatcher.
+                    if let Some(ref tid) = msg.thread_id {
+                        if let Some(agent_name) = thread_routes.get(tid) {
+                            msg.metadata.insert(
+                                "thread_route_agent".to_string(),
+                                serde_json::json!(agent_name),
+                            );
+                            debug!("Telegram thread {tid} routed to agent '{agent_name}'");
+                        }
                     }
 
                     debug!(

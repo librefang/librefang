@@ -123,6 +123,10 @@ debounce_ms = 500
 # bot_token_env = "TELEGRAM_BOT_TOKEN"
 # default_agent = "assistant"
 # allowed_users = []
+# # Route forum threads to specific agents:
+# [channels.telegram.thread_routes]
+# "12345" = "research-agent"
+# "67890" = "coding-agent"
 
 # [channels.discord]
 # bot_token_env = "DISCORD_BOT_TOKEN"

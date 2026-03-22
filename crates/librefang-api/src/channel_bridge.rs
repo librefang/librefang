@@ -1555,7 +1555,8 @@ pub async fn start_channel_bridge_with_config(
                     poll_interval,
                     tg_config.api_url.clone(),
                 )
-                .with_account_id(tg_config.account_id.clone()),
+                .with_account_id(tg_config.account_id.clone())
+                .with_thread_routes(tg_config.thread_routes.clone()),
             );
             adapters.push((
                 adapter,
