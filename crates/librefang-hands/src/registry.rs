@@ -45,6 +45,8 @@ pub struct HandRegistry {
     /// Serializes activate/deactivate to prevent race conditions where two
     /// concurrent requests both pass the "already active" check.
     activate_lock: Mutex<()>,
+    /// Guards concurrent writes to hand_state.json.
+    persist_lock: Mutex<()>,
 }
 
 impl HandRegistry {
@@ -54,6 +56,7 @@ impl HandRegistry {
             definitions: DashMap::new(),
             instances: DashMap::new(),
             activate_lock: Mutex::new(()),
+            persist_lock: Mutex::new(()),
         }
     }
 
@@ -63,6 +66,10 @@ impl HandRegistry {
     /// across daemon restarts. Error-state instances are also persisted so
     /// the user can see what went wrong after a restart.
     pub fn persist_state(&self, path: &std::path::Path) -> HandResult<()> {
+        let _guard = self
+            .persist_lock
+            .lock()
+            .map_err(|e| HandError::Config(format!("persist lock poisoned: {e}")))?;
         let entries: Vec<serde_json::Value> = self
             .instances
             .iter()
@@ -88,12 +95,18 @@ impl HandRegistry {
     }
 
     /// Load persisted hand state and re-activate hands.
-    /// Returns list of (hand_id, config, old_agent_id) that should be activated.
+    /// Returns list of (hand_id, config, old_agent_id, status) that should be restored.
     /// The `old_agent_id` is the agent UUID from before the restart, used to
     /// reassign cron jobs to the newly spawned agent (issue #402).
+    #[allow(clippy::type_complexity)]
     pub fn load_state(
         path: &std::path::Path,
-    ) -> Vec<(String, HashMap<String, serde_json::Value>, Option<AgentId>)> {
+    ) -> Vec<(
+        String,
+        HashMap<String, serde_json::Value>,
+        Option<AgentId>,
+        HandStatus,
+    )> {
         let data = match std::fs::read_to_string(path) {
             Ok(d) => d,
             Err(_) => return Vec::new(),
@@ -128,18 +141,23 @@ impl HandRegistry {
             .into_iter()
             .filter_map(|e| {
                 let hand_id = e["hand_id"].as_str()?.to_string();
+                let status = e
+                    .get("status")
+                    .and_then(|v| serde_json::from_value::<HandStatus>(v.clone()).ok())
+                    .unwrap_or(HandStatus::Active);
 
-                // Skip entries that were persisted as Paused or Error —
-                // only re-activate hands that were Active before shutdown.
-                if let Some(status) = e.get("status") {
-                    let status_str = status.as_str().unwrap_or("");
-                    if status_str == "Paused" || status_str.starts_with("Error") {
-                        info!(hand = %hand_id, status = %status_str, "Skipping non-active hand from persisted state");
+                match &status {
+                    HandStatus::Active | HandStatus::Paused => {}
+                    HandStatus::Error(message) => {
+                        info!(
+                            hand = %hand_id,
+                            error = %message,
+                            "Skipping errored hand from persisted state"
+                        );
                         return None;
                     }
-                    // Also handle {"Error": "msg"} shape from serde enum serialization
-                    if status.is_object() && status.get("Error").is_some() {
-                        info!(hand = %hand_id, "Skipping errored hand from persisted state");
+                    HandStatus::Inactive => {
+                        info!(hand = %hand_id, "Skipping inactive hand from persisted state");
                         return None;
                     }
                 }
@@ -149,7 +167,7 @@ impl HandRegistry {
                 let old_agent_id: Option<AgentId> = e
                     .get("agent_id")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
-                Some((hand_id, config, old_agent_id))
+                Some((hand_id, config, old_agent_id, status))
             })
             .collect()
     }
@@ -171,6 +189,32 @@ impl HandRegistry {
             }
         }
         count
+    }
+
+    /// Reload hand definitions from disk without restarting.
+    ///
+    /// Unlike `load_bundled` which uses the `OnceLock` cache, this reads
+    /// directly from disk so newly added or modified hands are picked up.
+    pub fn reload_from_disk(&self, home_dir: &std::path::Path) -> (usize, usize) {
+        let fresh = bundled::disk_hands(home_dir);
+        let mut added = 0usize;
+        let mut updated = 0usize;
+        for (id, toml_content, skill_content) in fresh {
+            match bundled::parse_bundled(&id, &toml_content, &skill_content) {
+                Ok(def) => {
+                    if self.definitions.contains_key(&def.id) {
+                        updated += 1;
+                    } else {
+                        added += 1;
+                    }
+                    self.definitions.insert(def.id.clone(), def);
+                }
+                Err(e) => {
+                    warn!(hand = %id, error = %e, "Failed to parse hand during reload");
+                }
+            }
+        }
+        (added, updated)
     }
 
     /// Install a hand from a directory containing HAND.toml (and optional SKILL.md).
@@ -737,6 +781,24 @@ system_prompt = "Test prompt"
     }
 
     #[test]
+    fn load_state_preserves_paused_instances() {
+        let reg = HandRegistry::new();
+        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+
+        let instance = reg.activate("clip", HashMap::new()).unwrap();
+        reg.pause(instance.instance_id).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("hand_state.json");
+        reg.persist_state(&state_path).unwrap();
+
+        let saved = HandRegistry::load_state(&state_path);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].0, "clip");
+        assert!(matches!(saved[0].3, HandStatus::Paused));
+    }
+
+    #[test]
     fn set_agent() {
         let reg = HandRegistry::new();
         reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
@@ -904,6 +966,32 @@ system_prompt = "Test prompt"
         assert!(!r.degraded);
 
         reg.deactivate(instance.instance_id).unwrap();
+    }
+
+    #[test]
+    fn load_state_preserves_paused_status() {
+        let path = std::env::temp_dir().join(format!("hand-state-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "version": 2,
+                "instances": [{
+                    "hand_id": "lead",
+                    "config": {},
+                    "agent_id": serde_json::Value::Null,
+                    "status": "Paused",
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let restored = HandRegistry::load_state(&path);
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].0, "lead");
+        assert!(matches!(restored[0].3, HandStatus::Paused));
     }
 
     #[test]

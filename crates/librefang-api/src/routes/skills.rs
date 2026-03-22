@@ -86,6 +86,19 @@ pub fn router() -> axum::Router<std::sync::Arc<super::AppState>> {
             "/hands/instances/{id}/browser",
             axum::routing::get(hand_instance_browser),
         )
+        .route(
+            "/hands/instances/{id}/message",
+            axum::routing::post(hand_send_message),
+        )
+        .route(
+            "/hands/instances/{id}/session",
+            axum::routing::get(hand_get_session),
+        )
+        .route(
+            "/hands/instances/{id}/status",
+            axum::routing::get(hand_instance_status),
+        )
+        .route("/hands/reload", axum::routing::post(reload_hands))
         // MCP server management
         .route(
             "/mcp/servers",
@@ -558,6 +571,7 @@ pub async fn clawhub_skill_detail(
                     "tags": detail.skill.tags,
                     "updated_at": detail.skill.updated_at,
                     "created_at": detail.skill.created_at,
+                    "is_installed": is_installed,
                     "installed": is_installed,
                 })),
             )
@@ -902,6 +916,7 @@ pub async fn skillhub_skill_detail(
                     "tags": detail.skill.tags,
                     "updated_at": detail.skill.updated_at,
                     "created_at": detail.skill.created_at,
+                    "is_installed": is_installed,
                     "installed": is_installed,
                     "source": "skillhub",
                 })),
@@ -1047,7 +1062,16 @@ fn server_platform() -> &'static str {
         (status = 200, description = "List all hand definitions", body = serde_json::Value)
     )
 )]
-pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn list_hands(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let lang = headers
+        .get("accept-language")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(&[',', ';', '-'][..]).next())
+        .unwrap_or("en");
+
     let defs = state.kernel.hands().list_definitions();
     let hands: Vec<serde_json::Value> = defs
         .iter()
@@ -1064,10 +1088,19 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 .unwrap_or(false);
             let active = readiness.as_ref().map(|r| r.active).unwrap_or(false);
             let degraded = readiness.as_ref().map(|r| r.degraded).unwrap_or(false);
+
+            let i18n_entry = d.i18n.get(lang);
+            let resolved_name = i18n_entry
+                .and_then(|l| l.name.as_deref())
+                .unwrap_or(&d.name);
+            let resolved_desc = i18n_entry
+                .and_then(|l| l.description.as_deref())
+                .unwrap_or(&d.description);
+
             serde_json::json!({
                 "id": d.id,
-                "name": d.name,
-                "description": d.description,
+                "name": resolved_name,
+                "description": resolved_desc,
                 "category": d.category,
                 "icon": d.icon,
                 "tools": d.tools,
@@ -1084,6 +1117,7 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
                 "has_settings": !d.settings.is_empty(),
                 "settings_count": d.settings.len(),
                 "metadata": d.metadata.clone().unwrap_or_default(),
+                "i18n": d.i18n,
             })
         })
         .collect();
@@ -1135,9 +1169,24 @@ pub async fn list_active_hands(State(state): State<Arc<AppState>>) -> impl IntoR
 pub async fn get_hand(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     match state.kernel.hands().get_definition(&hand_id) {
         Some(def) => {
+            let lang = headers
+                .get("accept-language")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.split(&[',', ';', '-'][..]).next())
+                .unwrap_or("en");
+
+            let i18n_entry = def.i18n.get(lang);
+            let resolved_name = i18n_entry
+                .and_then(|l| l.name.as_deref())
+                .unwrap_or(&def.name);
+            let resolved_desc = i18n_entry
+                .and_then(|l| l.description.as_deref())
+                .unwrap_or(&def.description);
+
             let reqs = state
                 .kernel
                 .hands()
@@ -1159,8 +1208,8 @@ pub async fn get_hand(
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "id": def.id,
-                    "name": def.name,
-                    "description": def.description,
+                    "name": resolved_name,
+                    "description": resolved_desc,
                     "category": def.category,
                     "icon": def.icon,
                     "tools": def.tools,
@@ -1188,12 +1237,12 @@ pub async fn get_hand(
                     "agent": {
                         "name": def.agent.name,
                         "description": def.agent.description,
-                        "provider": if def.agent.provider == "default" {
+                        "provider": if def.agent.model.provider == "default" {
                             &state.kernel.config_ref().default_model.provider
-                        } else { &def.agent.provider },
-                        "model": if def.agent.model == "default" {
+                        } else { &def.agent.model.provider },
+                        "model": if def.agent.model.model == "default" {
                             &state.kernel.config_ref().default_model.model
-                        } else { &def.agent.model },
+                        } else { &def.agent.model.model },
                     },
                     "dashboard": def.dashboard.metrics.iter().map(|m| serde_json::json!({
                         "label": m.label,
@@ -1202,6 +1251,7 @@ pub async fn get_hand(
                     })).collect::<Vec<_>>(),
                     "settings": settings_status,
                     "metadata": def.metadata.clone().unwrap_or_default(),
+                    "i18n": def.i18n,
                 })),
             )
         }
@@ -1794,15 +1844,18 @@ pub async fn update_hand_settings(
 
     match instance_id {
         Some(id) => match state.kernel.hands().update_config(id, config.clone()) {
-            Ok(()) => (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "ok",
-                    "hand_id": hand_id,
-                    "instance_id": id,
-                    "config": config,
-                })),
-            ),
+            Ok(()) => {
+                state.kernel.persist_hand_state();
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "ok",
+                        "hand_id": hand_id,
+                        "instance_id": id,
+                        "config": config,
+                    })),
+                )
+            }
             Err(e) => (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({"error": format!("{e}")})),
@@ -1815,6 +1868,29 @@ pub async fn update_hand_settings(
             ),
         ),
     }
+}
+
+/// POST /api/hands/reload — Reload hand definitions from disk.
+#[utoipa::path(
+    post,
+    path = "/api/hands/reload",
+    tag = "hands",
+    responses(
+        (status = 200, description = "Reload hand definitions from disk", body = serde_json::Value)
+    )
+)]
+pub async fn reload_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let (added, updated) = state.kernel.reload_hands();
+    let total = state.kernel.hands().list_definitions().len();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "added": added,
+            "updated": updated,
+            "total": total,
+        })),
+    )
 }
 
 /// GET /api/hands/instances/{id}/stats — Get dashboard stats for a hand instance.
@@ -2004,6 +2080,267 @@ pub async fn hand_instance_browser(
             "screenshot_base64": screenshot_base64,
         })),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Hand instance proxy endpoints — users interact with hands, not raw agents
+// ---------------------------------------------------------------------------
+
+/// Helper: resolve a hand instance UUID → its linked AgentId.
+/// Returns an error response tuple if the instance is missing or has no agent.
+fn resolve_hand_agent(
+    state: &AppState,
+    instance_id: uuid::Uuid,
+) -> Result<
+    (
+        librefang_hands::HandInstance,
+        librefang_types::agent::AgentId,
+    ),
+    (StatusCode, Json<serde_json::Value>),
+> {
+    let instance = state
+        .kernel
+        .hands()
+        .get_instance(instance_id)
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Hand instance not found"})),
+            )
+        })?;
+    let agent_id = instance.agent_id.ok_or_else(|| {
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"error": "Hand instance is not active", "active": false})),
+        )
+    })?;
+    Ok((instance, agent_id))
+}
+
+/// POST /api/hands/instances/:id/message — Send a message to a hand.
+///
+/// This is the primary user-facing chat endpoint.  Internally it proxies to
+/// the underlying agent, but users never need to know the agent ID.
+pub async fn hand_send_message(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<uuid::Uuid>,
+    Json(req): Json<MessageRequest>,
+) -> impl IntoResponse {
+    let (_instance, agent_id) = match resolve_hand_agent(&state, id) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    // Reject oversized messages
+    const MAX_MESSAGE_SIZE: usize = 64 * 1024;
+    if req.message.len() > MAX_MESSAGE_SIZE {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "Message too large (max 64KB)"})),
+        );
+    }
+
+    // Resolve file attachments
+    if !req.attachments.is_empty() {
+        let image_blocks = super::agents::resolve_attachments(&req.attachments);
+        if !image_blocks.is_empty() {
+            super::agents::inject_attachments_into_session(&state.kernel, agent_id, image_blocks);
+        }
+    }
+
+    // Detect ephemeral mode
+    let (effective_message, is_ephemeral) = if req.ephemeral {
+        (req.message.clone(), true)
+    } else if let Some(stripped) = req.message.strip_prefix("/btw ") {
+        (stripped.to_string(), true)
+    } else {
+        (req.message.clone(), false)
+    };
+
+    let result = if is_ephemeral {
+        state
+            .kernel
+            .send_message_ephemeral(agent_id, &effective_message)
+            .await
+    } else {
+        let kernel_handle: Arc<dyn librefang_runtime::kernel_handle::KernelHandle> =
+            state.kernel.clone() as Arc<dyn librefang_runtime::kernel_handle::KernelHandle>;
+        state
+            .kernel
+            .send_message_with_handle(agent_id, &effective_message, Some(kernel_handle))
+            .await
+    };
+
+    match result {
+        Ok(result) => {
+            let cleaned = crate::ws::strip_think_tags(&result.response);
+            let response = if cleaned.trim().is_empty() {
+                format!(
+                    "[Hand completed processing but returned no text. ({} in / {} out | {} iter)]",
+                    result.total_usage.input_tokens,
+                    result.total_usage.output_tokens,
+                    result.iterations,
+                )
+            } else {
+                cleaned
+            };
+            (
+                StatusCode::OK,
+                Json(serde_json::json!(MessageResponse {
+                    response,
+                    input_tokens: result.total_usage.input_tokens,
+                    output_tokens: result.total_usage.output_tokens,
+                    iterations: result.iterations,
+                    cost_usd: result.cost_usd,
+                    decision_traces: result.decision_traces,
+                    memories_saved: result.memories_saved,
+                    memories_used: result.memories_used,
+                    memory_conflicts: result.memory_conflicts,
+                })),
+            )
+        }
+        Err(e) => {
+            tracing::warn!("hand_send_message failed for instance {id}: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("Message delivery failed: {e}")})),
+            )
+        }
+    }
+}
+
+/// GET /api/hands/instances/:id/session — Get hand conversation history.
+pub async fn hand_get_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<uuid::Uuid>,
+) -> impl IntoResponse {
+    let (_instance, agent_id) = match resolve_hand_agent(&state, id) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    // Delegate to the existing agent session logic
+    let entry = match state.kernel.agent_registry().get(agent_id) {
+        Some(e) => e,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Linked agent not found"})),
+            );
+        }
+    };
+
+    match state
+        .kernel
+        .memory_substrate()
+        .get_session(entry.session_id)
+    {
+        Ok(Some(session)) => {
+            let messages: Vec<serde_json::Value> = session
+                .messages
+                .iter()
+                .map(|m| {
+                    let content = match &m.content {
+                        librefang_types::message::MessageContent::Text(t) => t.clone(),
+                        librefang_types::message::MessageContent::Blocks(blocks) => blocks
+                            .iter()
+                            .filter_map(|b| match b {
+                                librefang_types::message::ContentBlock::Text { text, .. } => {
+                                    Some(text.clone())
+                                }
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    };
+                    serde_json::json!({
+                        "role": format!("{:?}", m.role).to_lowercase(),
+                        "content": content,
+                    })
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "messages": messages })),
+            )
+        }
+        Ok(None) => (StatusCode::OK, Json(serde_json::json!({ "messages": [] }))),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to load session: {e}")})),
+        ),
+    }
+}
+
+/// GET /api/hands/instances/:id/status — Combined hand + agent status.
+///
+/// Returns everything the dashboard needs in one call: hand metadata,
+/// activation state, agent runtime info, and model details.
+pub async fn hand_instance_status(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<uuid::Uuid>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let lang = headers
+        .get("accept-language")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(&[',', ';', '-'][..]).next())
+        .unwrap_or("en");
+
+    let instance = match state.kernel.hands().get_instance(id) {
+        Some(i) => i,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Hand instance not found"})),
+            );
+        }
+    };
+
+    // Hand-level info (always available)
+    let hand_def = state
+        .kernel
+        .hands()
+        .list_definitions()
+        .into_iter()
+        .find(|d| d.id == instance.hand_id);
+
+    let resolved_name: Option<String> = hand_def.as_ref().map(|d| {
+        d.i18n
+            .get(lang)
+            .and_then(|l| l.name.as_deref())
+            .unwrap_or(&d.name)
+            .to_string()
+    });
+
+    let mut resp = serde_json::json!({
+        "instance_id": instance.instance_id,
+        "hand_id": instance.hand_id,
+        "hand_name": resolved_name,
+        "hand_icon": hand_def.as_ref().map(|d| d.icon.as_str()),
+        "status": format!("{:?}", instance.status),
+        "activated_at": instance.activated_at.to_rfc3339(),
+        "config": instance.config,
+    });
+
+    // Agent-level info (only when active)
+    if let Some(agent_id) = instance.agent_id {
+        if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+            resp["agent"] = serde_json::json!({
+                "id": agent_id.to_string(),
+                "name": entry.manifest.name,
+                "state": format!("{:?}", entry.state),
+                "model": {
+                    "provider": entry.manifest.model.provider,
+                    "model": entry.manifest.model.model,
+                },
+                "iterations_total": entry.manifest.autonomous.as_ref().map(|a| a.max_iterations),
+                "session_id": entry.session_id.to_string(),
+            });
+        }
+    }
+
+    (StatusCode::OK, Json(resp))
 }
 
 // ---------------------------------------------------------------------------

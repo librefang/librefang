@@ -147,7 +147,10 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
         plan.restart_reasons.push("api_key changed".to_string());
     }
 
-    if old.dashboard_user != new.dashboard_user || old.dashboard_pass != new.dashboard_pass {
+    if old.dashboard_user != new.dashboard_user
+        || old.dashboard_pass != new.dashboard_pass
+        || old.dashboard_pass_hash != new.dashboard_pass_hash
+    {
         plan.noop_changes
             .push("dashboard credentials changed (hot-reloaded)".to_string());
     }
@@ -275,6 +278,11 @@ pub fn build_reload_plan(old: &KernelConfig, new: &KernelConfig) -> ReloadPlan {
 
     if field_changed(&old.proactive_memory, &new.proactive_memory) {
         plan.hot_actions.push(HotAction::UpdateProactiveMemory);
+    }
+
+    if field_changed(&old.sanitize, &new.sanitize) {
+        plan.noop_changes
+            .push("sanitize config changed (applied at bridge startup)".to_string());
     }
 
     if field_changed(&old.provider_api_keys, &new.provider_api_keys) {

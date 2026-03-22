@@ -1160,8 +1160,12 @@ impl LibreFangKernel {
             .clone()
             .unwrap_or_else(|| config.data_dir.join("librefang.db"));
         let memory = Arc::new(
-            MemorySubstrate::open(&db_path, config.memory.decay_rate)
-                .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?,
+            MemorySubstrate::open_with_chunking(
+                &db_path,
+                config.memory.decay_rate,
+                config.memory.chunking.clone(),
+            )
+            .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?,
         );
 
         // Create LLM driver.
@@ -2138,12 +2142,12 @@ system_prompt = "You are a helpful assistant."
 
         info!(agent = %name, id = %agent_id, parent = ?parent, "Spawning agent");
 
-        // Create session and inject reset prompt if configured
+        // Create the backing session now; prompt injection happens after
+        // registration so agent-scoped metadata is visible.
         let mut session = self
             .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
-        self.inject_reset_prompt(&mut session);
 
         // Inherit kernel exec_policy as fallback if agent manifest doesn't have one
         let mut manifest = manifest;
@@ -2239,6 +2243,10 @@ system_prompt = "You are a helpful assistant."
         self.registry
             .register(entry.clone())
             .map_err(KernelError::LibreFang)?;
+
+        // Inject reset/context prompts only after the agent is registered so
+        // agent-scoped injections and tag-gated global injections are visible.
+        self.inject_reset_prompt(&mut session, agent_id);
 
         // Update parent's children list
         if let Some(parent_id) = parent {
@@ -3459,6 +3467,7 @@ system_prompt = "You are a helpful assistant."
             system: Some(classify_prompt),
             thinking: None,
             prompt_caching: false,
+            response_format: None,
         };
 
         let result = match tokio::time::timeout(
@@ -3930,6 +3939,7 @@ system_prompt = "You are a helpful assistant."
                 system: Some(manifest.model.system_prompt.clone()),
                 thinking: None,
                 prompt_caching: false,
+                response_format: None,
             };
             let (complexity, routed_model) = router.select_model(&probe);
             info!(
@@ -4175,7 +4185,7 @@ system_prompt = "You are a helpful assistant."
             .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
-        self.inject_reset_prompt(&mut new_session);
+        self.inject_reset_prompt(&mut new_session, agent_id);
 
         // Update registry with new session ID
         self.registry
@@ -4238,7 +4248,7 @@ system_prompt = "You are a helpful assistant."
             .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
-        self.inject_reset_prompt(&mut new_session);
+        self.inject_reset_prompt(&mut new_session, agent_id);
 
         // Update registry with new session ID
         self.registry
@@ -4291,7 +4301,7 @@ system_prompt = "You are a helpful assistant."
             .memory
             .create_session_with_label(agent_id, label)
             .map_err(KernelError::LibreFang)?;
-        self.inject_reset_prompt(&mut session);
+        self.inject_reset_prompt(&mut session, agent_id);
 
         // Switch to the new session
         self.registry
@@ -4436,21 +4446,158 @@ system_prompt = "You are a helpful assistant."
         Ok(new_session.id)
     }
 
-    /// Inject the configured `session.reset_prompt` into a newly created session
-    /// as the first system message (if configured).
-    fn inject_reset_prompt(&self, session: &mut librefang_memory::session::Session) {
+    /// Inject the configured `session.reset_prompt` and any `context_injection`
+    /// entries into a newly created session. Also runs `on_session_start_script`
+    /// if configured.
+    ///
+    /// Injection order:
+    /// 1. `InjectionPosition::System` entries (global then agent-level)
+    /// 2. `reset_prompt` (if set)
+    /// 3. `InjectionPosition::AfterReset` entries (global then agent-level)
+    /// 4. `InjectionPosition::BeforeUser` entries are stored but only matter
+    ///    relative to future user messages — appended at the end for now.
+    fn inject_reset_prompt(
+        &self,
+        session: &mut librefang_memory::session::Session,
+        agent_id: AgentId,
+    ) {
+        use librefang_types::config::InjectionPosition;
+        use librefang_types::message::Message;
+
+        // Collect agent-level injections (if the agent is registered).
+        let agent_injections: Vec<librefang_types::config::ContextInjection> = self
+            .registry
+            .get(agent_id)
+            .map(|entry| entry.manifest.context_injection.clone())
+            .unwrap_or_default();
+
+        // Collect agent tags for condition evaluation.
+        let agent_tags: Vec<String> = self
+            .registry
+            .get(agent_id)
+            .map(|entry| entry.manifest.tags.clone())
+            .unwrap_or_default();
+
+        // Merge global + agent injections (global first).
+        let all_injections: Vec<&librefang_types::config::ContextInjection> = self
+            .config
+            .session
+            .context_injection
+            .iter()
+            .chain(agent_injections.iter())
+            .collect();
+
+        // Helper: check if a condition is satisfied.
+        let condition_met =
+            |cond: &Option<String>| -> bool { Self::evaluate_condition(cond, &agent_tags) };
+
+        // Phase 1: System-position injections.
+        for inj in &all_injections {
+            if inj.position == InjectionPosition::System && condition_met(&inj.condition) {
+                session.messages.push(Message::system(inj.content.clone()));
+                debug!(
+                    session_id = %session.id.0,
+                    injection = %inj.name,
+                    "Injected context (system position)"
+                );
+            }
+        }
+
+        // Phase 2: Legacy reset_prompt.
         if let Some(ref prompt) = self.config.session.reset_prompt {
             if !prompt.is_empty() {
-                session
-                    .messages
-                    .push(librefang_types::message::Message::system(prompt.clone()));
-                let _ = self.memory.save_session(session);
+                session.messages.push(Message::system(prompt.clone()));
                 debug!(
                     session_id = %session.id.0,
                     "Injected session reset prompt"
                 );
             }
         }
+
+        // Phase 3: AfterReset-position injections.
+        for inj in &all_injections {
+            if inj.position == InjectionPosition::AfterReset && condition_met(&inj.condition) {
+                session.messages.push(Message::system(inj.content.clone()));
+                debug!(
+                    session_id = %session.id.0,
+                    injection = %inj.name,
+                    "Injected context (after_reset position)"
+                );
+            }
+        }
+
+        // Phase 4: BeforeUser-position injections (appended; they logically
+        // precede user messages that haven't arrived yet).
+        for inj in &all_injections {
+            if inj.position == InjectionPosition::BeforeUser && condition_met(&inj.condition) {
+                session.messages.push(Message::system(inj.content.clone()));
+                debug!(
+                    session_id = %session.id.0,
+                    injection = %inj.name,
+                    "Injected context (before_user position)"
+                );
+            }
+        }
+
+        // Persist if anything was injected.
+        if !session.messages.is_empty() {
+            let _ = self.memory.save_session(session);
+        }
+
+        // Run on_session_start_script if configured (fire-and-forget).
+        if let Some(ref script) = self.config.session.on_session_start_script {
+            if !script.is_empty() {
+                let script = script.clone();
+                let aid = agent_id.to_string();
+                let sid = session.id.0.to_string();
+                std::thread::spawn(move || {
+                    match std::process::Command::new(&script)
+                        .arg(&aid)
+                        .arg(&sid)
+                        .output()
+                    {
+                        Ok(output) => {
+                            if !output.status.success() {
+                                tracing::warn!(
+                                    script = %script,
+                                    status = %output.status,
+                                    "on_session_start_script exited with non-zero status"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                script = %script,
+                                error = %e,
+                                "Failed to run on_session_start_script"
+                            );
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// Evaluate a simple condition expression against agent tags.
+    ///
+    /// Currently supports:
+    /// - `"agent.tags contains '<tag>'"` — true if the agent has the given tag
+    /// - `None` or empty string — always true
+    fn evaluate_condition(condition: &Option<String>, agent_tags: &[String]) -> bool {
+        let cond = match condition {
+            Some(c) if !c.is_empty() => c,
+            _ => return true,
+        };
+
+        // Parse "agent.tags contains 'value'"
+        if let Some(rest) = cond.strip_prefix("agent.tags contains ") {
+            let tag = rest.trim().trim_matches('\'').trim_matches('"');
+            return agent_tags.iter().any(|t| t == tag);
+        }
+
+        // Unknown condition format — default to false (strict). Prevents accidental injection.
+        tracing::warn!(condition = %cond, "Unknown condition format, skipping injection");
+        false
     }
 
     /// Save a summary of the current session to agent memory before reset.
@@ -5049,6 +5196,21 @@ system_prompt = "You are a helpful assistant."
             })?
             .clone();
 
+        // Check that all requirements (API keys, etc.) are satisfied before activating
+        if let Ok(results) = self.hand_registry.check_requirements(hand_id) {
+            let missing: Vec<_> = results
+                .iter()
+                .filter(|(_, satisfied)| !satisfied)
+                .map(|(req, _)| req.label.clone())
+                .collect();
+            if !missing.is_empty() {
+                return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
+                    "Hand '{hand_id}' has unsatisfied requirements: {}",
+                    missing.join(", ")
+                ))));
+            }
+        }
+
         // Create the instance in the registry
         let instance = self
             .hand_registry
@@ -5060,88 +5222,59 @@ system_prompt = "You are a helpful assistant."
                 other => KernelError::LibreFang(LibreFangError::Internal(other.to_string())),
             })?;
 
-        // Build an agent manifest from the hand definition.
-        // If the hand declares provider/model as "default", inherit the kernel's configured LLM.
-        let hand_provider = if def.agent.provider == "default" {
-            self.config.default_model.provider.clone()
-        } else {
-            def.agent.provider.clone()
-        };
-        let hand_model = if def.agent.model == "default" {
-            self.config.default_model.model.clone()
-        } else {
-            def.agent.model.clone()
-        };
-        // When using default provider, also inherit the default api_key_env and base_url
-        let hand_api_key_env = if def.agent.provider == "default" && def.agent.api_key_env.is_none()
-        {
-            Some(self.config.default_model.api_key_env.clone())
-        } else {
-            def.agent.api_key_env.clone()
-        };
-        let hand_base_url = if def.agent.provider == "default" && def.agent.base_url.is_none() {
-            self.config.default_model.base_url.clone()
-        } else {
-            def.agent.base_url.clone()
-        };
+        // Start from the embedded AgentManifest (auto-converted from legacy format
+        // at TOML parse time) and apply Hand-specific overrides.
+        let mut manifest = def.agent.clone();
 
-        let mut manifest = AgentManifest {
-            name: def.agent.name.clone(),
-            description: def.agent.description.clone(),
-            module: def.agent.module.clone(),
-            model: ModelConfig {
-                provider: hand_provider,
-                model: hand_model,
-                max_tokens: def.agent.max_tokens,
-                temperature: def.agent.temperature,
-                system_prompt: def.agent.system_prompt.clone(),
-                api_key_env: hand_api_key_env,
-                base_url: hand_base_url,
-            },
-            capabilities: ManifestCapabilities {
-                tools: def.tools.clone(),
-                ..Default::default()
-            },
-            tags: vec![
-                format!("hand:{hand_id}"),
-                format!("hand_instance:{}", instance.instance_id),
-            ],
-            autonomous: def.agent.max_iterations.map(|max_iter| AutonomousConfig {
-                max_iterations: max_iter,
-                ..Default::default()
-            }),
-            // Autonomous hands must run in Continuous mode so the background loop picks them up.
-            // Reactive (default) only fires on incoming messages, so autonomous hands would be inert.
-            schedule: if def.agent.max_iterations.is_some() {
-                ScheduleMode::Continuous {
-                    check_interval_secs: 60,
-                }
-            } else {
-                ScheduleMode::default()
-            },
-            skills: def.skills.clone(),
-            mcp_servers: def.mcp_servers.clone(),
-            // Hands are curated packages — if they declare shell_exec, grant full exec access
-            exec_policy: if def.tools.iter().any(|t| t == "shell_exec") {
-                Some(librefang_types::config::ExecPolicy {
-                    mode: librefang_types::config::ExecSecurityMode::Full,
-                    timeout_secs: 300, // hands may run long commands (ffmpeg, yt-dlp)
-                    no_output_timeout_secs: 120,
-                    ..Default::default()
-                })
-            } else {
-                None
-            },
-            tool_blocklist: Vec::new(),
-            // Custom profile avoids ToolProfile-based expansion overriding the
-            // explicit tool list.
-            profile: if !def.tools.is_empty() {
-                Some(ToolProfile::Custom)
-            } else {
-                None
-            },
+        // Inherit kernel defaults when hand declares "default" provider/model.
+        if manifest.model.provider == "default" {
+            manifest.model.provider = self.config.default_model.provider.clone();
+            if manifest.model.api_key_env.is_none() {
+                manifest.model.api_key_env = Some(self.config.default_model.api_key_env.clone());
+            }
+            if manifest.model.base_url.is_none() {
+                manifest.model.base_url = self.config.default_model.base_url.clone();
+            }
+        }
+        if manifest.model.model == "default" {
+            manifest.model.model = self.config.default_model.model.clone();
+        }
+
+        // Hand-specific capability, tagging, and scheduling overrides.
+        manifest.capabilities = ManifestCapabilities {
+            tools: def.tools.clone(),
             ..Default::default()
         };
+        manifest.tags = vec![
+            format!("hand:{hand_id}"),
+            format!("hand_instance:{}", instance.instance_id),
+        ];
+        manifest.skills = def.skills.clone();
+        manifest.mcp_servers = def.mcp_servers.clone();
+
+        // Autonomous hands must run in Continuous mode so the background loop
+        // picks them up. Reactive (default) only fires on incoming messages.
+        if manifest.autonomous.is_some() {
+            manifest.schedule = ScheduleMode::Continuous {
+                check_interval_secs: 60,
+            };
+        }
+
+        // Hands are curated packages — if they declare shell_exec, grant full exec access.
+        if def.tools.iter().any(|t| t == "shell_exec") {
+            manifest.exec_policy = Some(librefang_types::config::ExecPolicy {
+                mode: librefang_types::config::ExecSecurityMode::Full,
+                timeout_secs: 300,
+                no_output_timeout_secs: 120,
+                ..Default::default()
+            });
+        }
+
+        // Custom profile avoids ToolProfile-based expansion overriding the
+        // explicit tool list.
+        if !def.tools.is_empty() {
+            manifest.profile = Some(ToolProfile::Custom);
+        }
 
         // Resolve hand settings → prompt block + env vars
         let resolved = librefang_hands::resolve_settings(&def.settings, &instance.config);
@@ -5193,7 +5326,9 @@ system_prompt = "You are a helpful assistant."
             .unwrap_or_default();
         if let Some(old) = existing {
             info!(agent = %old.name, id = %old.id, "Removing existing hand agent for reactivation");
-            let _ = self.kill_agent(old.id);
+            if let Err(e) = self.kill_agent(old.id) {
+                warn!(agent = %old.name, id = %old.id, error = %e, "Failed to kill old hand agent, proceeding with reactivation");
+            }
         }
 
         // Spawn the agent
@@ -5298,26 +5433,49 @@ system_prompt = "You are a helpful assistant."
         Ok(())
     }
 
+    /// Reload hand definitions from disk (hot reload).
+    pub fn reload_hands(&self) -> (usize, usize) {
+        let (added, updated) = self.hand_registry.reload_from_disk(&self.config.home_dir);
+        info!(added, updated, "Reloaded hand definitions from disk");
+        (added, updated)
+    }
+
     /// Persist active hand state to disk.
-    fn persist_hand_state(&self) {
+    pub fn persist_hand_state(&self) {
         let state_path = self.config.home_dir.join("hand_state.json");
         if let Err(e) = self.hand_registry.persist_state(&state_path) {
             warn!(error = %e, "Failed to persist hand state");
         }
     }
 
-    /// Pause a hand (marks it paused; agent stays alive but won't receive new work).
+    /// Pause a hand (marks it paused and suspends background loop ticks).
     pub fn pause_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
+        // Pause the background loop for this hand's agent
+        if let Some(instance) = self.hand_registry.get_instance(instance_id) {
+            if let Some(agent_id) = instance.agent_id {
+                self.background.pause_agent(agent_id);
+            }
+        }
         self.hand_registry
             .pause(instance_id)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))
+            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+        self.persist_hand_state();
+        Ok(())
     }
 
-    /// Resume a paused hand.
+    /// Resume a paused hand (restores background loop ticks).
     pub fn resume_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
         self.hand_registry
             .resume(instance_id)
-            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))
+            .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
+        // Resume the background loop for this hand's agent
+        if let Some(instance) = self.hand_registry.get_instance(instance_id) {
+            if let Some(agent_id) = instance.agent_id {
+                self.background.resume_agent(agent_id);
+            }
+        }
+        self.persist_hand_state();
+        Ok(())
     }
 
     /// Set the weak self-reference for trigger dispatch.
@@ -5706,7 +5864,7 @@ system_prompt = "You are a helpful assistant."
         let saved_hands = librefang_hands::registry::HandRegistry::load_state(&state_path);
         if !saved_hands.is_empty() {
             info!("Restoring {} persisted hand(s)", saved_hands.len());
-            for (hand_id, config, old_agent_id) in saved_hands {
+            for (hand_id, config, old_agent_id, status) in saved_hands {
                 // Check if hand's agent.toml has enabled=false — skip reactivation
                 let hand_agent_name = format!("{}-hand", hand_id);
                 let hand_toml = self
@@ -5726,7 +5884,15 @@ system_prompt = "You are a helpful assistant."
                 }
                 match self.activate_hand(&hand_id, config) {
                     Ok(inst) => {
-                        info!(hand = %hand_id, instance = %inst.instance_id, "Hand restored");
+                        if matches!(status, librefang_hands::HandStatus::Paused) {
+                            if let Err(e) = self.pause_hand(inst.instance_id) {
+                                warn!(hand = %hand_id, error = %e, "Failed to restore paused state");
+                            } else {
+                                info!(hand = %hand_id, instance = %inst.instance_id, "Hand restored (paused)");
+                            }
+                        } else {
+                            info!(hand = %hand_id, instance = %inst.instance_id, status = %status, "Hand restored");
+                        }
                         // Reassign cron jobs and triggers from the pre-restart
                         // agent ID to the newly spawned agent so scheduled tasks
                         // and event triggers survive daemon restarts (issues
@@ -5772,20 +5938,42 @@ system_prompt = "You are a helpful assistant."
                 }
             }
         } else if !state_path.exists() {
-            // First boot: activate default hands for out-of-the-box experience
-            info!(
-                "First boot detected — activating {} default hand(s)",
-                Self::DEFAULT_HANDS.len()
-            );
-            for hand_id in Self::DEFAULT_HANDS {
-                match self.activate_hand(hand_id, std::collections::HashMap::new()) {
-                    Ok(inst) => {
-                        info!(hand = %hand_id, instance = %inst.instance_id, "Default hand activated");
+            // First boot
+            if Self::DEFAULT_HANDS.is_empty() {
+                // No default hands — show available hands so users know what's there
+                let defs = self.hand_registry.list_definitions();
+                if !defs.is_empty() {
+                    info!("First boot detected — no hands activated by default");
+                    info!(
+                        "Available hands ({}) — activate with: librefang hand activate <id>",
+                        defs.len()
+                    );
+                    for def in &defs {
+                        let icon = if def.icon.is_empty() {
+                            "".to_string()
+                        } else {
+                            format!("{} ", def.icon)
+                        };
+                        info!("  {icon}{id}: {desc}", id = def.id, desc = def.description);
                     }
-                    Err(e) => warn!(hand = %hand_id, error = %e, "Failed to activate default hand"),
                 }
+            } else {
+                info!(
+                    "First boot detected — activating {} default hand(s)",
+                    Self::DEFAULT_HANDS.len()
+                );
+                for hand_id in Self::DEFAULT_HANDS {
+                    match self.activate_hand(hand_id, std::collections::HashMap::new()) {
+                        Ok(inst) => {
+                            info!(hand = %hand_id, instance = %inst.instance_id, "Default hand activated");
+                        }
+                        Err(e) => {
+                            warn!(hand = %hand_id, error = %e, "Failed to activate default hand");
+                        }
+                    }
+                }
+                self.persist_hand_state();
             }
-            self.persist_hand_state();
         }
 
         // Context-engine bootstrap is async; run it at daemon startup so hook
@@ -5894,6 +6082,9 @@ system_prompt = "You are a helpful assistant."
 
         // Start heartbeat monitor for agent health checking
         self.start_heartbeat_monitor();
+
+        // Start file inbox watcher if enabled
+        crate::inbox::start_inbox_watcher(Arc::clone(self));
 
         // Start OFP peer node if network is enabled
         if self.config.network_enabled && !self.config.network.shared_secret.is_empty() {
@@ -9034,14 +9225,20 @@ mod tests {
         };
 
         let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
-        let instance = kernel
-            .activate_hand("browser", HashMap::new())
-            .expect("browser hand should activate");
-        let agent_id = instance.agent_id.expect("browser hand agent id");
+        let instance = match kernel.activate_hand("apitester", HashMap::new()) {
+            Ok(inst) => inst,
+            Err(e) if e.to_string().contains("unsatisfied requirements") => {
+                eprintln!("Skipping test: {e}");
+                kernel.shutdown();
+                return;
+            }
+            Err(e) => panic!("apitester hand should activate: {e}"),
+        };
+        let agent_id = instance.agent_id.expect("apitester hand agent id");
         let entry = kernel
             .registry
             .get(agent_id)
-            .expect("browser hand agent entry");
+            .expect("apitester hand agent entry");
 
         assert!(
             entry.manifest.tool_allowlist.is_empty(),
@@ -9069,28 +9266,40 @@ mod tests {
 
         let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
 
-        let first_instance = kernel
-            .activate_hand("browser", HashMap::new())
-            .expect("browser hand should activate the first time");
-        let first_agent_id = first_instance.agent_id.expect("first browser agent id");
+        let first_instance = match kernel.activate_hand("apitester", HashMap::new()) {
+            Ok(inst) => inst,
+            Err(e) if e.to_string().contains("unsatisfied requirements") => {
+                eprintln!("Skipping test: {e}");
+                kernel.shutdown();
+                return;
+            }
+            Err(e) => panic!("apitester hand should activate the first time: {e}"),
+        };
+        let first_agent_id = first_instance.agent_id.expect("first apitester agent id");
         let first_entry = kernel
             .registry
             .get(first_agent_id)
-            .expect("first browser hand agent entry");
+            .expect("first apitester hand agent entry");
         let first_manifest = first_entry.manifest.clone();
 
         kernel
             .deactivate_hand(first_instance.instance_id)
-            .expect("browser hand should deactivate cleanly");
+            .expect("apitester hand should deactivate cleanly");
 
-        let second_instance = kernel
-            .activate_hand("browser", HashMap::new())
-            .expect("browser hand should activate the second time");
-        let second_agent_id = second_instance.agent_id.expect("second browser agent id");
+        let second_instance = match kernel.activate_hand("apitester", HashMap::new()) {
+            Ok(inst) => inst,
+            Err(e) if e.to_string().contains("unsatisfied requirements") => {
+                eprintln!("Skipping test (second activation): {e}");
+                kernel.shutdown();
+                return;
+            }
+            Err(e) => panic!("apitester hand should activate the second time: {e}"),
+        };
+        let second_agent_id = second_instance.agent_id.expect("second apitester agent id");
         let second_entry = kernel
             .registry
             .get(second_agent_id)
-            .expect("second browser hand agent entry");
+            .expect("second apitester hand agent entry");
         let second_manifest = second_entry.manifest.clone();
 
         assert_eq!(
@@ -9275,5 +9484,48 @@ mod tests {
         );
 
         kernel.shutdown();
+    }
+
+    #[test]
+    fn test_evaluate_condition_none() {
+        let tags = vec!["chat".to_string(), "dev".to_string()];
+        assert!(LibreFangKernel::evaluate_condition(&None, &tags));
+    }
+
+    #[test]
+    fn test_evaluate_condition_empty() {
+        let tags = vec!["chat".to_string()];
+        assert!(LibreFangKernel::evaluate_condition(
+            &Some(String::new()),
+            &tags
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_condition_tag_match() {
+        let tags = vec!["chat".to_string(), "dev".to_string()];
+        assert!(LibreFangKernel::evaluate_condition(
+            &Some("agent.tags contains 'chat'".to_string()),
+            &tags,
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_condition_tag_no_match() {
+        let tags = vec!["dev".to_string()];
+        assert!(!LibreFangKernel::evaluate_condition(
+            &Some("agent.tags contains 'chat'".to_string()),
+            &tags,
+        ));
+    }
+
+    #[test]
+    fn test_evaluate_condition_unknown_format() {
+        let tags = vec!["chat".to_string()];
+        // Unknown condition format defaults to false (strict — prevents accidental injection).
+        assert!(!LibreFangKernel::evaluate_condition(
+            &Some("some.unknown.expression".to_string()),
+            &tags,
+        ));
     }
 }

@@ -1427,6 +1427,19 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         }
         msg
     }
+
+    async fn send_channel_push(
+        &self,
+        channel_type: &str,
+        recipient: &str,
+        message: &str,
+        thread_id: Option<&str>,
+    ) -> Result<String, String> {
+        use librefang_runtime::kernel_handle::KernelHandle;
+        self.kernel
+            .send_channel_message(channel_type, recipient, message, thread_id)
+            .await
+    }
 }
 
 /// Parse a trigger pattern string from chat into a `TriggerPattern`.
@@ -2530,7 +2543,8 @@ pub async fn start_channel_bridge_with_config(
         started_at: Instant::now(),
     });
     let router = Arc::new(router);
-    let mut manager = BridgeManager::new(bridge_handle, router);
+    let mut manager =
+        BridgeManager::with_sanitizer(bridge_handle, router, &kernel.config_ref().sanitize);
 
     let mut started_names = Vec::new();
     for (adapter, _, _account_id) in adapters {

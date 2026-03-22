@@ -366,11 +366,12 @@ jobs:
       - name: Publish CLI binaries to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
         run: |
-          export VERSION="${GITHUB_REF#refs/tags/v}"
-          bash scripts/publish-npm-binaries.sh
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          cargo xtask publish-npm-binaries \
+            --version "$VERSION" \
+            --repo "${{ github.repository }}" \
+            --tag "${{ github.ref_name }}"
 
   # ── CLI Binary → PyPI ──────────────────────────────────────────────────
   cli_pypi:
@@ -388,11 +389,12 @@ jobs:
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ github.ref_name }}
         run: |
-          export VERSION="${GITHUB_REF#refs/tags/v}"
-          bash scripts/publish-pypi-binaries.sh
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          cargo xtask publish-pypi-binaries \
+            --version "$VERSION" \
+            --repo "${{ github.repository }}" \
+            --tag "${{ github.ref_name }}"
 
   # ── Sync to Homebrew Tap ──────────────────────────────────────────────
   sync_homebrew:

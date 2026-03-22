@@ -8,7 +8,7 @@ pub mod bundled;
 pub mod registry;
 
 use chrono::{DateTime, Utc};
-use librefang_types::agent::AgentId;
+use librefang_types::agent::{AgentId, AgentManifest, AutonomousConfig, ModelConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -271,28 +271,80 @@ pub struct HandDashboard {
     pub metrics: Vec<HandMetric>,
 }
 
-/// Agent configuration embedded in a Hand definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HandAgentConfig {
-    pub name: String,
-    pub description: String,
+/// Legacy flat agent config from HAND.toml — kept for backward compatibility.
+///
+/// New HAND.toml files can use the full `[agent]` / `[agent.model]` nested format
+/// from `AgentManifest`.  Legacy files with flat fields (provider, model, max_tokens,
+/// temperature, system_prompt at the top level of `[agent]`) are auto-converted.
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyHandAgentConfig {
+    name: String,
+    #[serde(default)]
+    description: String,
     #[serde(default = "default_module")]
-    pub module: String,
+    module: String,
     #[serde(default = "default_provider")]
-    pub provider: String,
+    provider: String,
     #[serde(default = "default_model")]
-    pub model: String,
+    model: String,
     #[serde(default)]
-    pub api_key_env: Option<String>,
+    api_key_env: Option<String>,
     #[serde(default)]
-    pub base_url: Option<String>,
+    base_url: Option<String>,
     #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
+    max_tokens: u32,
     #[serde(default = "default_temperature")]
-    pub temperature: f32,
-    pub system_prompt: String,
+    temperature: f32,
     #[serde(default)]
-    pub max_iterations: Option<u32>,
+    system_prompt: String,
+    #[serde(default)]
+    max_iterations: Option<u32>,
+}
+
+impl From<LegacyHandAgentConfig> for AgentManifest {
+    fn from(legacy: LegacyHandAgentConfig) -> Self {
+        AgentManifest {
+            name: legacy.name,
+            description: legacy.description,
+            module: legacy.module,
+            model: ModelConfig {
+                provider: legacy.provider,
+                model: legacy.model,
+                max_tokens: legacy.max_tokens,
+                temperature: legacy.temperature,
+                system_prompt: legacy.system_prompt,
+                api_key_env: legacy.api_key_env,
+                base_url: legacy.base_url,
+            },
+            autonomous: legacy.max_iterations.map(|max_iter| AutonomousConfig {
+                max_iterations: max_iter,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+}
+
+/// Serde helper: accepts both full `AgentManifest` (nested `[agent.model]`) and
+/// legacy flat format, converting the latter on the fly.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AgentSection {
+    /// New format: `[agent.model]` table with full AgentManifest fields.
+    Full(Box<AgentManifest>),
+    /// Legacy format: flat provider/model/max_tokens/temperature/system_prompt.
+    Legacy(LegacyHandAgentConfig),
+}
+
+fn deserialize_agent_section<'de, D>(deserializer: D) -> Result<AgentManifest, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let section = AgentSection::deserialize(deserializer)?;
+    Ok(match section {
+        AgentSection::Full(m) => *m,
+        AgentSection::Legacy(l) => l.into(),
+    })
 }
 
 fn default_module() -> String {
@@ -309,6 +361,20 @@ fn default_max_tokens() -> u32 {
 }
 fn default_temperature() -> f32 {
     0.7
+}
+
+/// Localized strings for a Hand definition.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HandI18n {
+    /// Localized name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Localized description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Localized category display name.
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 /// Complete Hand definition — parsed from HAND.toml.
@@ -340,8 +406,9 @@ pub struct HandDefinition {
     /// Configurable settings (shown in activation modal).
     #[serde(default)]
     pub settings: Vec<HandSetting>,
-    /// Agent manifest template.
-    pub agent: HandAgentConfig,
+    /// Agent manifest — deserialized from either full `AgentManifest` or legacy flat format.
+    #[serde(deserialize_with = "deserialize_agent_section")]
+    pub agent: AgentManifest,
     /// Dashboard metrics schema.
     #[serde(default)]
     pub dashboard: HandDashboard,
@@ -354,6 +421,9 @@ pub struct HandDefinition {
     /// Token consumption and activation metadata.
     #[serde(default)]
     pub metadata: Option<HandMetadata>,
+    /// Localized strings keyed by language code (e.g. "zh", "ja").
+    #[serde(default)]
+    pub i18n: HashMap<String, HandI18n>,
 }
 
 /// Token consumption and activation metadata for user awareness.

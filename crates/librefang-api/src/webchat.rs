@@ -1,7 +1,7 @@
 //! Dashboard pages and static assets served by the API daemon.
 //!
 //! The React dashboard is served at `/` and static build assets are served
-//! from `/react-assets/*`.
+//! from `/dashboard/*`.
 
 use axum::extract::Path;
 use axum::http::{header, StatusCode};
@@ -96,7 +96,7 @@ pub async fn webchat_page() -> impl IntoResponse {
     }
 }
 
-/// GET /react-assets/{*path} — Serve React build assets.
+/// GET /dashboard/{*path} — Serve React build assets.
 pub async fn react_asset(Path(path): Path<String>) -> Response {
     if path.contains("..") {
         return (StatusCode::BAD_REQUEST, "invalid asset path").into_response();

@@ -1515,10 +1515,88 @@ pub fn load_workflow_definitions(dir: &Path) -> Vec<Workflow> {
 }
 
 // ---------------------------------------------------------------------------
-// WorkflowTemplateRegistry — in-memory store for workflow templates
+// Workflow -> Template conversion
 // ---------------------------------------------------------------------------
 
-use librefang_types::workflow_template::WorkflowTemplate;
+use librefang_types::workflow_template::{
+    ParameterType, TemplateParameter, WorkflowTemplate, WorkflowTemplateStep,
+};
+use regex_lite::Regex;
+use std::collections::HashSet;
+
+impl WorkflowEngine {
+    /// Convert an existing workflow into a reusable [`WorkflowTemplate`].
+    ///
+    /// Each `WorkflowStep` is mapped to a `WorkflowTemplateStep`. The method
+    /// auto-detects parameters by scanning `prompt_template` fields for
+    /// `{{var}}` placeholders and creates a [`TemplateParameter`] for each
+    /// unique variable found.
+    pub fn workflow_to_template(workflow: &Workflow) -> WorkflowTemplate {
+        // Slugify workflow name -> template ID
+        let id = workflow
+            .name
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric() && c != '-', "-")
+            .trim_matches('-')
+            .to_string();
+
+        // Collect all {{var}} placeholders across all steps
+        let re = Regex::new(r"\{\{(\w+)\}\}").expect("valid regex");
+        let mut seen_params = HashSet::new();
+        let mut parameters = Vec::new();
+
+        let steps: Vec<WorkflowTemplateStep> = workflow
+            .steps
+            .iter()
+            .map(|step| {
+                // Extract parameters from this step's prompt_template
+                for cap in re.captures_iter(&step.prompt_template) {
+                    let var_name = cap[1].to_string();
+                    if seen_params.insert(var_name.clone()) {
+                        parameters.push(TemplateParameter {
+                            name: var_name.clone(),
+                            description: Some(format!(
+                                "Parameter '{}' used in step '{}'",
+                                var_name, step.name
+                            )),
+                            param_type: ParameterType::String,
+                            default: None,
+                            required: true,
+                        });
+                    }
+                }
+
+                // Map agent to optional string name
+                let agent = match &step.agent {
+                    StepAgent::ByName { name } => Some(name.clone()),
+                    StepAgent::ById { id } => Some(id.clone()),
+                };
+
+                WorkflowTemplateStep {
+                    name: step.name.clone(),
+                    prompt_template: step.prompt_template.clone(),
+                    agent,
+                    depends_on: step.depends_on.clone(),
+                }
+            })
+            .collect();
+
+        WorkflowTemplate {
+            id,
+            name: workflow.name.clone(),
+            description: workflow.description.clone(),
+            category: None,
+            parameters,
+            steps,
+            tags: vec![],
+            created_at: Some(chrono::Utc::now().to_rfc3339()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorkflowTemplateRegistry — in-memory store for workflow templates
+// ---------------------------------------------------------------------------
 
 /// Convert a `serde_json::Value` to a plain string for template substitution.
 fn value_to_string(val: &serde_json::Value) -> String {
@@ -2697,7 +2775,7 @@ id = "{id}"
         };
         let wf_id = engine.register(wf).await;
         let run_id = engine
-            .create_run(wf_id, "test input".to_string())
+            .create_run(wf_id, "raw data".to_string())
             .await
             .unwrap();
 
@@ -2721,7 +2799,6 @@ id = "{id}"
         // so no context should be injected
         assert!(!prompts[1].contains("[Parent workflow context]"));
     }
-
     // ---- DAG execution tests ----
 
     #[test]
@@ -3048,6 +3125,67 @@ id = "{id}"
         let result = WorkflowEngine::topological_sort(&steps);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Cycle detected"));
+    }
+
+    #[test]
+    fn test_workflow_to_template_preserves_depends_on_graph() {
+        let workflow = Workflow {
+            id: WorkflowId::new(),
+            name: "dag template".to_string(),
+            description: "preserve dependencies".to_string(),
+            steps: vec![
+                WorkflowStep {
+                    name: "A".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "a".to_string(),
+                    },
+                    prompt_template: "step a".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 10,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                },
+                WorkflowStep {
+                    name: "B".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "b".to_string(),
+                    },
+                    prompt_template: "step b".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 10,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec![],
+                },
+                WorkflowStep {
+                    name: "C".to_string(),
+                    agent: StepAgent::ByName {
+                        name: "c".to_string(),
+                    },
+                    prompt_template: "step c".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 10,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: None,
+                    depends_on: vec!["A".to_string(), "B".to_string()],
+                },
+            ],
+            created_at: Utc::now(),
+            layout: None,
+        };
+
+        let template = WorkflowEngine::workflow_to_template(&workflow);
+
+        assert!(template.steps[0].depends_on.is_empty());
+        assert!(template.steps[1].depends_on.is_empty());
+        assert_eq!(
+            template.steps[2].depends_on,
+            vec!["A".to_string(), "B".to_string()]
+        );
     }
 
     #[tokio::test]
