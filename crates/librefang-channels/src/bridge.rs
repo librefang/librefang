@@ -542,6 +542,7 @@ impl BridgeManager {
             .send_channel_push(channel_type, recipient, message, thread_id)
             .await
     }
+
     /// Stop all adapters and wait for dispatch tasks to finish.
     pub async fn stop(&mut self) {
         let _ = self.shutdown_tx.send(true);

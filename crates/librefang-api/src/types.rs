@@ -257,15 +257,6 @@ pub struct PushMessageRequest {
     pub thread_id: Option<String>,
 }
 
-/// Response from a push message operation.
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct PushMessageResponse {
-    /// Whether the message was sent successfully.
-    pub success: bool,
-    /// Human-readable result or error message.
-    pub detail: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
