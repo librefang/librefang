@@ -280,7 +280,7 @@ pub async fn auth(
     };
 
     // SECURITY: Use constant-time comparison to prevent timing attacks.
-    let header_auth = api_token.map(|token| matches_any(token));
+    let header_auth = api_token.map(&matches_any);
 
     // Also check ?token= query parameter (for EventSource/SSE clients that
     // cannot set custom headers, same approach as WebSocket auth).
@@ -290,7 +290,7 @@ pub async fn auth(
         .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")));
 
     // SECURITY: Use constant-time comparison to prevent timing attacks.
-    let query_auth = query_token.map(|token| matches_any(token));
+    let query_auth = query_token.map(&matches_any);
 
     // Accept if either auth method matches
     if header_auth == Some(true) || query_auth == Some(true) {
