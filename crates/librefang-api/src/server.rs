@@ -793,7 +793,11 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
 }
 
 /// Resolve a dashboard credential from: 1) env var, 2) vault:KEY syntax, 3) literal value.
-fn resolve_dashboard_credential(config_value: &str, env_var: &str, home_dir: &std::path::Path) -> String {
+fn resolve_dashboard_credential(
+    config_value: &str,
+    env_var: &str,
+    home_dir: &std::path::Path,
+) -> String {
     // 1. Environment variable takes priority
     if let Ok(val) = std::env::var(env_var) {
         if !val.trim().is_empty() {
@@ -833,11 +837,15 @@ async fn dashboard_login(
 ) -> axum::response::Response {
     let cfg = &state.kernel.config;
     let cfg_user = resolve_dashboard_credential(
-        &cfg.dashboard_user, "LIBREFANG_DASHBOARD_USER", &cfg.home_dir,
+        &cfg.dashboard_user,
+        "LIBREFANG_DASHBOARD_USER",
+        &cfg.home_dir,
     );
     let cfg_user = cfg_user.trim();
     let cfg_pass = resolve_dashboard_credential(
-        &cfg.dashboard_pass, "LIBREFANG_DASHBOARD_PASS", &cfg.home_dir,
+        &cfg.dashboard_pass,
+        "LIBREFANG_DASHBOARD_PASS",
+        &cfg.home_dir,
     );
     let cfg_pass = cfg_pass.trim();
 
@@ -861,11 +869,15 @@ async fn dashboard_login(
         // Generate a deterministic token from credentials so no server-side state needed
         use hmac::{Hmac, Mac};
         use sha2::Sha256;
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(cfg_pass.as_bytes()).expect("HMAC key");
+        let mut mac = Hmac::<Sha256>::new_from_slice(cfg_pass.as_bytes()).expect("HMAC key");
         mac.update(cfg_user.as_bytes());
         mac.update(b"librefang-dashboard-session");
-        let token = mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let token = mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
 
         axum::response::Json(serde_json::json!({
             "ok": true,
@@ -890,10 +902,14 @@ async fn dashboard_auth_check(
 ) -> axum::response::Json<serde_json::Value> {
     let cfg = &state.kernel.config;
     let du = resolve_dashboard_credential(
-        &cfg.dashboard_user, "LIBREFANG_DASHBOARD_USER", &cfg.home_dir,
+        &cfg.dashboard_user,
+        "LIBREFANG_DASHBOARD_USER",
+        &cfg.home_dir,
     );
     let dp = resolve_dashboard_credential(
-        &cfg.dashboard_pass, "LIBREFANG_DASHBOARD_PASS", &cfg.home_dir,
+        &cfg.dashboard_pass,
+        "LIBREFANG_DASHBOARD_PASS",
+        &cfg.home_dir,
     );
     let has_credentials = !du.trim().is_empty() && !dp.trim().is_empty();
     let has_api_key = !cfg.api_key.trim().is_empty();
@@ -987,7 +1003,11 @@ pub async fn build_router(
         let mut mac = Hmac::<Sha256>::new_from_slice(dp.as_bytes()).expect("HMAC key");
         mac.update(du.as_bytes());
         mac.update(b"librefang-dashboard-session");
-        mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect::<String>()
+        mac.finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     } else {
         String::new()
     };

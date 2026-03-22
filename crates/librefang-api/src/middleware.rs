@@ -155,7 +155,9 @@ pub async fn api_version_headers(request: Request<Body>, next: Next) -> Response
 /// If the key is empty or whitespace-only, auth is disabled entirely
 /// (public/local development mode).
 pub async fn auth(
-    axum::extract::State(api_key_lock): axum::extract::State<std::sync::Arc<tokio::sync::RwLock<String>>>,
+    axum::extract::State(api_key_lock): axum::extract::State<
+        std::sync::Arc<tokio::sync::RwLock<String>>,
+    >,
     request: Request<Body>,
     next: Next,
 ) -> Response<Body> {
@@ -274,9 +276,9 @@ pub async fn auth(
     // Helper: constant-time check against any valid key
     let matches_any = |token: &str| -> bool {
         use subtle::ConstantTimeEq;
-        valid_keys.iter().any(|key| {
-            key.len() == token.len() && token.as_bytes().ct_eq(key.as_bytes()).into()
-        })
+        valid_keys
+            .iter()
+            .any(|key| key.len() == token.len() && token.as_bytes().ct_eq(key.as_bytes()).into())
     };
 
     // SECURITY: Use constant-time comparison to prevent timing attacks.
