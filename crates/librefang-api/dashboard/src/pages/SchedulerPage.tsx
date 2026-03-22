@@ -108,36 +108,36 @@ export function SchedulerPage() {
             {schedules.map(s => {
               const agent = agentMap.get(s.agent_id || "");
               return (
-                <div key={s.id} className="flex items-center gap-4 p-4 rounded-2xl border border-border-subtle hover:border-brand/30 transition-all">
-                  <div className="w-10 h-10 rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
-                    <Clock className="w-5 h-5 text-brand" />
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2">
-                      <h3 className="text-sm font-bold truncate">{s.name || s.description || s.id.slice(0, 8)}</h3>
-                      {s.enabled !== false && <Badge variant="success">{t("common.active")}</Badge>}
+                <div key={s.id} className="p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle hover:border-brand/30 transition-all space-y-1.5">
+                  {/* Row 1: icon + name + badge + actions — all same line */}
+                  <div className="flex items-center gap-2 sm:gap-3">
+                    <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-brand/10 flex items-center justify-center shrink-0">
+                      <Clock className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-brand" />
                     </div>
-                    <div className="flex items-center gap-3 mt-1 text-[10px] text-text-dim/60">
-                      <span className="font-mono bg-main px-1.5 py-0.5 rounded">{s.cron}</span>
-                      <span className="text-text-dim">{cronHint(s.cron || "")}</span>
-                      {agent && <span className="font-bold text-brand">{agent.name}</span>}
-                      {!agent && s.agent && <span className="font-bold text-brand">{s.agent}</span>}
+                    <h3 className="text-xs sm:text-sm font-bold truncate flex-1 min-w-0">{s.name || s.description || s.id.slice(0, 8)}</h3>
+                    {s.enabled !== false && <Badge variant="success">{t("common.active")}</Badge>}
+                    <div className="flex items-center gap-1 shrink-0">
+                      <Button variant="secondary" size="sm" onClick={() => runMut.mutate(s.id)} disabled={runMut.isPending}>
+                        {runMut.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                      </Button>
+                      {confirmDeleteId === s.id ? (
+                        <div className="flex items-center gap-1">
+                          <button onClick={() => handleDelete(s.id)} className="px-2 py-1 rounded-lg bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
+                          <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-lg bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
+                        </div>
+                      ) : (
+                        <button onClick={() => handleDelete(s.id)} className="p-1.5 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <Button variant="secondary" size="sm" onClick={() => runMut.mutate(s.id)} disabled={runMut.isPending}>
-                      {runMut.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                    </Button>
-                    {confirmDeleteId === s.id ? (
-                      <div className="flex items-center gap-1">
-                        <button onClick={() => handleDelete(s.id)} className="px-2 py-1 rounded-lg bg-error text-white text-[10px] font-bold">{t("common.confirm")}</button>
-                        <button onClick={() => setConfirmDeleteId(null)} className="px-2 py-1 rounded-lg bg-main text-text-dim text-[10px] font-bold">{t("common.cancel")}</button>
-                      </div>
-                    ) : (
-                      <button onClick={() => handleDelete(s.id)} className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    )}
+                  {/* Row 2: cron + agent name */}
+                  <div className="flex items-center gap-2 sm:gap-3 pl-9 sm:pl-11 text-[9px] sm:text-[10px] text-text-dim/60 flex-wrap">
+                    <span className="font-mono bg-main px-1 sm:px-1.5 py-0.5 rounded">{s.cron}</span>
+                    <span className="text-text-dim hidden sm:inline">{cronHint(s.cron || "")}</span>
+                    {agent && <span className="font-bold text-brand truncate">{agent.name}</span>}
+                    {!agent && s.agent && <span className="font-bold text-brand truncate">{s.agent}</span>}
                   </div>
                 </div>
               );
@@ -200,8 +200,8 @@ export function SchedulerPage() {
 
       {/* Create Modal */}
       {showCreate && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setShowCreate(false)}>
-          <div className="bg-surface rounded-2xl shadow-2xl border border-border-subtle w-[440px] max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/30 backdrop-blur-xl backdrop-saturate-150" onClick={() => setShowCreate(false)}>
+          <div className="bg-surface rounded-t-2xl sm:rounded-2xl shadow-2xl border border-border-subtle w-full sm:w-[440px] sm:max-w-[90vw] animate-fade-in-scale" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border-subtle">
               <h3 className="text-sm font-bold">{t("scheduler.create_job")}</h3>
               <button onClick={() => setShowCreate(false)} className="p-1 rounded hover:bg-main"><X className="w-4 h-4" /></button>

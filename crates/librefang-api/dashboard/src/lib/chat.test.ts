@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { asText, formatMeta, normalizeRole } from "./chat";
+import { asText, formatMeta, normalizeRole, normalizeToolOutput } from "./chat";
 
 describe("chat utilities", () => {
   it("normalizes API message roles", () => {
@@ -22,5 +22,33 @@ describe("chat utilities", () => {
         cost_usd: 0.00123
       })
     ).toBe("12 in / 34 out | 2 iter | $0.0012");
+  });
+
+  it("normalizes tool output events for persistent display", () => {
+    const output = normalizeToolOutput({
+      tool: "display_device_id",
+      result: "Device ID: abc-123",
+      is_error: false,
+    });
+
+    expect(output).not.toBeNull();
+    expect(output?.tool).toBe("display_device_id");
+    expect(output?.content).toContain("Device ID");
+    expect(output?.isError).toBe(false);
+  });
+
+  it("ignores malformed tool output events", () => {
+    expect(normalizeToolOutput({ result: "hello" })).toBeNull();
+    expect(normalizeToolOutput({})).toBeNull();
+    expect(normalizeToolOutput({ tool: "" })).toBeNull();
+  });
+
+  it("handles error tool outputs", () => {
+    const output = normalizeToolOutput({
+      tool: "shell_exec",
+      is_error: true,
+    });
+    expect(output?.isError).toBe(true);
+    expect(output?.content).toBe("Tool failed without a preview.");
   });
 });

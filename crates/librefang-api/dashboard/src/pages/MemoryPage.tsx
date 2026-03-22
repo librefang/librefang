@@ -31,8 +31,8 @@ function AddMemoryDialog({ onClose }: { onClose: () => void }) {
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
-      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-md max-w-[90vw] p-6 shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
+      <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-md p-4 sm:p-6 rounded-t-2xl sm:rounded-2xl shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-black">{t("memory.add_memory")}</h3>
           <button onClick={onClose} className="p-1 hover:bg-main/30 rounded-lg">
@@ -105,8 +105,8 @@ function EditMemoryDialog({ memory, onClose }: { memory: { id: string; content?:
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
-      <div className="bg-surface rounded-2xl border border-border-subtle w-full max-w-md max-w-[90vw] p-6 shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center p-0 sm:p-4 bg-black/50 backdrop-blur-xl backdrop-saturate-150" onClick={onClose}>
+      <div className="bg-surface rounded-2xl border border-border-subtle w-full sm:max-w-md p-4 sm:p-6 rounded-t-2xl sm:rounded-2xl shadow-2xl animate-fade-in-scale" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
           <h3 className="text-lg font-black">{t("memory.edit_memory")}</h3>
           <button onClick={onClose} className="p-1 hover:bg-main/30 rounded-lg">
@@ -221,21 +221,21 @@ export function MemoryPage() {
         onRefresh={() => void memoryQuery.refetch()}
         icon={<Database className="h-4 w-4" />}
         actions={
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1 sm:gap-2 flex-wrap">
             <Button variant="secondary" size="sm" onClick={() => setShowStats(!showStats)}>
               <BarChart3 className="w-4 h-4" />
             </Button>
             <Button variant="secondary" size="sm" onClick={() => cleanupMutation.mutate()} disabled={cleanupMutation.isPending}>
               {cleanupMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
-              {t("memory.cleanup")}
+              <span className="hidden sm:inline">{t("memory.cleanup")}</span>
             </Button>
             <Button variant="secondary" size="sm" onClick={() => decayMutation.mutate()} disabled={decayMutation.isPending}>
               {decayMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
-              {t("memory.decay")}
+              <span className="hidden sm:inline">{t("memory.decay")}</span>
             </Button>
             <Button variant="primary" size="sm" onClick={() => setShowAddDialog(true)}>
-              <Plus className="w-4 h-4 mr-1" />
-              {t("memory.add")}
+              <Plus className="w-4 h-4" />
+              <span className="hidden sm:inline ml-1">{t("memory.add")}</span>
             </Button>
           </div>
         }
@@ -297,19 +297,19 @@ export function MemoryPage() {
         <div className="grid gap-4">
           {filteredMemories.map((m) => (
             <Card key={m.id} hover padding="md">
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <h2 className="text-sm font-black truncate font-mono">{m.id}</h2>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-1 sm:gap-2 mb-2">
+                <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                  <h2 className="text-xs sm:text-sm font-black truncate font-mono max-w-[180px] sm:max-w-none">{m.id}</h2>
                   <Badge variant={m.level === "episodic" ? "success" : m.level === "semantic" ? "warning" : "info"}>
                     {m.level || "Vector"}
                   </Badge>
                   {(m as any).importance !== undefined && (
                     <Badge variant={(m as any).importance > 0.7 ? "error" : (m as any).importance > 0.3 ? "warning" : "default"}>
-                      {t("memory.importance")}: {Math.round((m as any).importance * 100)}%
+                      {Math.round((m as any).importance * 100)}%
                     </Badge>
                   )}
                 </div>
-                <div className="flex items-center gap-1 shrink-0">
+                <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto">
                   <Button variant="ghost" size="sm" onClick={() => setEditingMemory(m)}>
                     <Edit2 className="h-3.5 w-3.5" />
                   </Button>
