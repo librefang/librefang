@@ -156,3 +156,15 @@ pre-commit *ARGS:
 # Generate API docs from OpenAPI spec
 api-docs *ARGS:
     cargo xtask api-docs {{ARGS}}
+
+# Generate contributors + star history SVGs
+contributors *ARGS:
+    cargo xtask contributors {{ARGS}}
+
+# Publish CLI binaries to npm
+publish-npm-binaries *ARGS:
+    cargo xtask publish-npm-binaries {{ARGS}}
+
+# Publish CLI wheels to PyPI
+publish-pypi-binaries *ARGS:
+    cargo xtask publish-pypi-binaries {{ARGS}}

@@ -8,6 +8,7 @@ mod check_links;
 mod ci;
 mod clean_all;
 mod codegen;
+mod contributors;
 mod coverage;
 mod db;
 mod deps;
@@ -21,6 +22,8 @@ mod license_check;
 mod loc;
 mod migrate;
 mod pre_commit;
+mod publish_npm_binaries;
+mod publish_pypi_binaries;
 mod publish_sdks;
 mod release;
 mod setup;
@@ -119,6 +122,15 @@ enum Command {
 
     /// Generate API documentation from OpenAPI spec
     ApiDocs(api_docs::ApiDocsArgs),
+
+    /// Generate contributors SVG and star history SVG
+    Contributors(contributors::ContributorsArgs),
+
+    /// Publish platform-specific CLI binaries to npm
+    PublishNpmBinaries(publish_npm_binaries::PublishNpmBinariesArgs),
+
+    /// Publish platform-specific CLI wheels to PyPI
+    PublishPypiBinaries(publish_pypi_binaries::PublishPypiBinariesArgs),
 }
 
 fn main() {
@@ -151,6 +163,9 @@ fn main() {
         Command::ValidateConfig(args) => validate_config::run(args),
         Command::PreCommit(args) => pre_commit::run(args),
         Command::ApiDocs(args) => api_docs::run(args),
+        Command::Contributors(args) => contributors::run(args),
+        Command::PublishNpmBinaries(args) => publish_npm_binaries::run(args),
+        Command::PublishPypiBinaries(args) => publish_pypi_binaries::run(args),
     };
     if let Err(e) = result {
         eprintln!("Error: {e}");
