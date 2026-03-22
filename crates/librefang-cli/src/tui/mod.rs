@@ -2166,7 +2166,9 @@ impl App {
                         for i in &instances {
                             msg.push_str(&format!(
                                 "  {} — {} ({})\n",
-                                i.agent_name, i.hand_id, i.status
+                                i.agent_name(),
+                                i.hand_id,
+                                i.status
                             ));
                         }
                     }

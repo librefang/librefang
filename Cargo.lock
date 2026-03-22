@@ -4127,13 +4127,9 @@ dependencies = [
 name = "librefang-telemetry"
 version = "2026.3.2201"
 dependencies = [
- "dashmap",
- "lazy_static",
- "parking_lot",
- "serde",
- "serde_json",
+ "librefang-types",
+ "metrics",
  "tokio-test",
- "tracing",
 ]
 
 [[package]]
