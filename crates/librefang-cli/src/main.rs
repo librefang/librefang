@@ -799,6 +799,39 @@ enum HandCommands {
         /// Hand ID or instance ID.
         id: String,
     },
+    /// Show current settings for a hand.
+    #[command(
+        long_about = "Show the current settings/configuration for a hand.\n\nExamples:\n  librefang hand settings clip"
+    )]
+    Settings {
+        /// Hand ID.
+        id: String,
+    },
+    /// Set a configuration value for a hand.
+    #[command(
+        long_about = "Set a configuration key-value pair for a hand.\n\nExamples:\n  librefang hand set clip interval 30m\n  librefang hand set researcher max_results 20"
+    )]
+    Set {
+        /// Hand ID.
+        id: String,
+        /// Configuration key.
+        key: String,
+        /// Configuration value.
+        value: String,
+    },
+    /// Reload hand definitions from disk.
+    #[command(
+        long_about = "Reload all hand definitions from ~/.librefang/hands/ without restarting.\n\nPicks up newly added or modified HAND.toml files.\n\nExamples:\n  librefang hand reload"
+    )]
+    Reload,
+    /// Chat with an active hand interactively.
+    #[command(
+        long_about = "Start an interactive chat session with an active hand.\n\nThe hand must be activated first. Type your messages and press Enter.\nType /quit or Ctrl+C to exit.\n\nExamples:\n  librefang hand chat clip\n  librefang hand chat researcher"
+    )]
+    Chat {
+        /// Hand ID (e.g. "clip", "researcher").
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1566,6 +1599,10 @@ fn main() {
             HandCommands::InstallDeps { id } => cmd_hand_install_deps(&id),
             HandCommands::Pause { id } => cmd_hand_pause(&id),
             HandCommands::Resume { id } => cmd_hand_resume(&id),
+            HandCommands::Settings { id } => cmd_hand_settings(&id),
+            HandCommands::Set { id, key, value } => cmd_hand_set(&id, &key, &value),
+            HandCommands::Reload => cmd_hand_reload(),
+            HandCommands::Chat { id } => cmd_hand_chat(&id),
         },
         Some(Commands::Config(sub)) => match sub {
             ConfigCommands::Show => cmd_config_show(),
@@ -5812,6 +5849,138 @@ fn cmd_hand_resume(id: &str) {
             "hand-resumed",
             &[("id", &format!("{hand_label} (instance: {instance_id})"))],
         ));
+    }
+}
+
+fn cmd_hand_settings(id: &str) {
+    let base = require_daemon("hand settings");
+    let client = daemon_client();
+    let body = daemon_json(client.get(format!("{base}/api/hands/{id}/settings")).send());
+    if body.get("error").is_some() {
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
+        ));
+        std::process::exit(1);
+    }
+    if let Some(config) = body.get("config").and_then(|c| c.as_object()) {
+        if config.is_empty() {
+            ui::step(&format!("Hand '{id}' has no configurable settings."));
+        } else {
+            ui::section(&format!("Settings for '{id}'"));
+            for (k, v) in config {
+                println!("  {}: {}", k.bold(), v);
+            }
+        }
+    } else {
+        ui::step(&format!("Hand '{id}' has no configurable settings."));
+    }
+}
+
+fn cmd_hand_set(id: &str, key: &str, value: &str) {
+    let base = require_daemon("hand set");
+    let client = daemon_client();
+    let mut config = serde_json::Map::new();
+    config.insert(
+        key.to_string(),
+        serde_json::Value::String(value.to_string()),
+    );
+    let body = daemon_json(
+        client
+            .put(format!("{base}/api/hands/{id}/settings"))
+            .json(&serde_json::json!({ "config": config }))
+            .send(),
+    );
+    if body.get("error").is_some() {
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
+        ));
+        std::process::exit(1);
+    }
+    ui::success(&format!("Set {key}={value} for hand '{id}'."));
+}
+
+fn cmd_hand_reload() {
+    let base = require_daemon("hand reload");
+    let client = daemon_client();
+    let body = daemon_json(client.post(format!("{base}/api/hands/reload")).send());
+    if body.get("error").is_some() {
+        ui::error(&format!(
+            "Failed: {}",
+            body["error"].as_str().unwrap_or("?")
+        ));
+        std::process::exit(1);
+    }
+    let added = body["added"].as_u64().unwrap_or(0);
+    let updated = body["updated"].as_u64().unwrap_or(0);
+    let total = body["total"].as_u64().unwrap_or(0);
+    ui::success(&format!(
+        "Reloaded hands: {added} added, {updated} updated, {total} total."
+    ));
+}
+
+fn cmd_hand_chat(id: &str) {
+    let base = require_daemon("hand chat");
+    let client = daemon_client();
+    let active = fetch_active_hand_instances(&base, &client);
+    let resolved = match resolve_hand_instance(&active, id) {
+        Some(instance) => instance,
+        None => {
+            ui::error(&format!("No active hand instance found for '{id}'."));
+            ui::hint("Activate it first: librefang hand activate");
+            std::process::exit(1);
+        }
+    };
+    let instance_id = resolved["instance_id"]
+        .as_str()
+        .expect("instance_id missing");
+    let hand_id = resolved["hand_id"].as_str().unwrap_or(id);
+    let hand_name = resolved["hand_name"]
+        .as_str()
+        .or_else(|| resolved["name"].as_str())
+        .unwrap_or(hand_id);
+
+    install_ctrlc_handler();
+
+    println!(
+        "{} {} {}",
+        "Chat with".bold(),
+        hand_name.cyan().bold(),
+        "(type /quit to exit)".dimmed()
+    );
+    println!();
+
+    loop {
+        print!("{} ", "you >".green().bold());
+        io::stdout().flush().unwrap();
+        let mut line = String::new();
+        if io::stdin().lock().read_line(&mut line).unwrap_or(0) == 0 {
+            break; // EOF
+        }
+        let msg = line.trim();
+        if msg.is_empty() {
+            continue;
+        }
+        if msg == "/quit" || msg == "/exit" || msg == "/q" {
+            break;
+        }
+
+        let resp = client
+            .post(format!("{base}/api/hands/instances/{instance_id}/message"))
+            .json(&serde_json::json!({"message": msg}))
+            .send();
+
+        let body = daemon_json(resp);
+        if let Some(err) = body["error"].as_str() {
+            ui::error(err);
+            continue;
+        }
+        let reply = body["response"]
+            .as_str()
+            .or_else(|| body["reply"].as_str())
+            .unwrap_or("[no response]");
+        println!("{} {}\n", format!("{hand_name} >").cyan().bold(), reply);
     }
 }
 

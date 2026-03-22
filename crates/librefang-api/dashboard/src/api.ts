@@ -486,8 +486,13 @@ export function setOnUnauthorized(fn: (() => void) | null) {
 }
 
 function authHeader(): HeadersInit {
+  const lang = localStorage.getItem("i18nextLng") || navigator.language || "en";
   const token = localStorage.getItem("librefang-api-key") || "";
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  const headers: HeadersInit = { "Accept-Language": lang };
+  if (token) {
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+  return headers;
 }
 
 async function parseError(response: Response): Promise<Error> {
@@ -1189,6 +1194,81 @@ export async function deactivateHand(instanceId: string): Promise<ApiActionRespo
 
 export async function getHandStats(instanceId: string): Promise<HandStatsResponse> {
   return get<HandStatsResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/stats`);
+}
+
+export interface HandSettingOptionStatus {
+  value?: string;
+  label?: string;
+  provider_env?: string | null;
+  binary?: string | null;
+  available?: boolean;
+}
+
+export interface HandSettingStatus {
+  key?: string;
+  label?: string;
+  description?: string;
+  setting_type?: string;
+  default?: string;
+  options?: HandSettingOptionStatus[];
+}
+
+export interface HandSettingsResponse {
+  hand_id?: string;
+  settings?: HandSettingStatus[];
+  current_values?: Record<string, unknown>;
+}
+
+export async function getHandDetail(handId: string): Promise<HandDefinitionItem> {
+  return get<HandDefinitionItem>(`/api/hands/${encodeURIComponent(handId)}`);
+}
+
+export async function getHandSettings(handId: string): Promise<HandSettingsResponse> {
+  return get<HandSettingsResponse>(`/api/hands/${encodeURIComponent(handId)}/settings`);
+}
+
+export interface HandMessageResponse {
+  response: string;
+  input_tokens?: number;
+  output_tokens?: number;
+  iterations?: number;
+  cost_usd?: number;
+}
+
+export interface HandSessionMessage {
+  role: string;
+  content: string;
+  timestamp?: string;
+}
+
+export async function sendHandMessage(instanceId: string, message: string): Promise<HandMessageResponse> {
+  return post<HandMessageResponse>(`/api/hands/instances/${encodeURIComponent(instanceId)}/message`, { message });
+}
+
+export async function getHandSession(instanceId: string): Promise<{ messages: HandSessionMessage[] }> {
+  return get<{ messages: HandSessionMessage[] }>(`/api/hands/instances/${encodeURIComponent(instanceId)}/session`);
+}
+
+export interface HandInstanceStatus {
+  instance_id: string;
+  hand_id: string;
+  hand_name?: string;
+  hand_icon?: string;
+  status: string;
+  activated_at: string;
+  config: Record<string, unknown>;
+  agent?: {
+    id: string;
+    name: string;
+    state: string;
+    model: { provider: string; model: string };
+    iterations_total?: number;
+    session_id: string;
+  };
+}
+
+export async function getHandInstanceStatus(instanceId: string): Promise<HandInstanceStatus> {
+  return get<HandInstanceStatus>(`/api/hands/instances/${encodeURIComponent(instanceId)}/status`);
 }
 
 export async function listGoals(): Promise<GoalItem[]> {

@@ -1,5 +1,5 @@
 const CACHE_NAME = "librefang-v1";
-const PRECACHE = ["/react-assets/"];
+const PRECACHE = ["/dashboard/"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(
