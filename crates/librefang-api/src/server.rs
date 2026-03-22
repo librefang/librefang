@@ -130,7 +130,7 @@ async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
-    let cfg = &state.kernel.config;
+    let cfg = &state.kernel.config_ref();
     let cfg_user = resolve_dashboard_credential(
         &cfg.dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
@@ -195,7 +195,7 @@ async fn dashboard_login(
 async fn dashboard_auth_check(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
 ) -> axum::response::Json<serde_json::Value> {
-    let cfg = &state.kernel.config;
+    let cfg = &state.kernel.config_ref();
     let du = resolve_dashboard_credential(
         &cfg.dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
@@ -228,18 +228,18 @@ pub async fn build_router(
     // Start channel bridges (Telegram, etc.)
     let bridge = channel_bridge::start_channel_bridge(kernel.clone()).await;
 
-    let channels_config = kernel.config.channels.clone();
+    let channels_config = kernel.config_ref().channels.clone();
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
-        peer_registry: kernel.peer_registry.get().map(|r| Arc::new(r.clone())),
+        peer_registry: kernel.peer_registry_ref().map(|r| Arc::new(r.clone())),
         bridge_manager: tokio::sync::Mutex::new(bridge),
         channels_config: tokio::sync::RwLock::new(channels_config),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
         webhook_store: crate::webhook_store::WebhookStore::load(
-            kernel.config.home_dir.join("webhooks.json"),
+            kernel.config_ref().home_dir.join("webhooks.json"),
         ),
     });
 
@@ -263,7 +263,7 @@ pub async fn build_router(
             }
         }
         // Add explicitly configured CORS origins from config.toml
-        for origin in &state.kernel.config.cors_origin {
+        for origin in &state.kernel.config_ref().cors_origin {
             if let Ok(v) = origin.parse::<axum::http::HeaderValue>() {
                 origins.push(v);
             } else {
@@ -277,18 +277,18 @@ pub async fn build_router(
     };
 
     // Trim whitespace so `api_key = ""` or `api_key = "  "` both disable auth.
-    let explicit_api_key = state.kernel.config.api_key.trim().to_string();
+    let explicit_api_key = state.kernel.config_ref().api_key.trim().to_string();
 
     // Derive dashboard session token from credentials (if configured).
     let du_val = resolve_dashboard_credential(
-        &state.kernel.config.dashboard_user,
+        &state.kernel.config_ref().dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
-        &state.kernel.config.home_dir,
+        state.kernel.home_dir(),
     );
     let dp_val = resolve_dashboard_credential(
-        &state.kernel.config.dashboard_pass,
+        &state.kernel.config_ref().dashboard_pass,
         "LIBREFANG_DASHBOARD_PASS",
-        &state.kernel.config.home_dir,
+        state.kernel.home_dir(),
     );
     let du = du_val.trim();
     let dp = dp_val.trim();
@@ -409,7 +409,7 @@ pub async fn run_daemon(
     // Config file hot-reload watcher (polls every 30 seconds)
     {
         let k = kernel.clone();
-        let config_path = kernel.config.home_dir.join("config.toml");
+        let config_path = kernel.config_ref().home_dir.join("config.toml");
         tokio::spawn(async move {
             let mut last_modified = std::fs::metadata(&config_path)
                 .and_then(|m| m.modified())
@@ -490,16 +490,18 @@ pub async fn run_daemon(
         let kernel = state.kernel.clone();
         tokio::spawn(async move {
             loop {
-                match librefang_runtime::catalog_sync::sync_catalog_to(&kernel.config.home_dir)
-                    .await
+                match librefang_runtime::catalog_sync::sync_catalog_to(
+                    &kernel.config_ref().home_dir,
+                )
+                .await
                 {
                     Ok(result) => {
                         info!(
                             "Model catalog synced: {} files downloaded",
                             result.files_downloaded
                         );
-                        if let Ok(mut catalog) = kernel.model_catalog.write() {
-                            catalog.load_cached_catalog_for(&kernel.config.home_dir);
+                        if let Ok(mut catalog) = kernel.model_catalog_ref().write() {
+                            catalog.load_cached_catalog_for(&kernel.config_ref().home_dir);
                             catalog.detect_auth();
                         }
                     }

@@ -489,8 +489,8 @@ fn describe_event(event: &Event) -> String {
         },
         EventPayload::ApprovalRequested(ar) => {
             format!(
-                "Approval requested: tool '{}' by agent {} (risk: {})",
-                ar.tool_name, ar.agent_id, ar.risk_level
+                "Approval requested: agent {} wants to use tool '{}' (risk: {}): {}",
+                ar.agent_id, ar.tool_name, ar.risk_level, ar.description
             )
         }
         EventPayload::Custom(data) => {

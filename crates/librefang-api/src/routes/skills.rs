@@ -140,7 +140,7 @@ use std::time::Instant;
     )
 )]
 pub async fn list_skills(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let skills_dir = state.kernel.config.home_dir.join("skills");
+    let skills_dir = state.kernel.home_dir().join("skills");
     let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
     if let Err(e) = registry.load_all() {
         tracing::warn!("Failed to reload skill registry: {e}");
@@ -198,7 +198,7 @@ pub async fn install_skill(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillInstallRequest>,
 ) -> impl IntoResponse {
-    let skills_dir = state.kernel.config.home_dir.join("skills");
+    let skills_dir = state.kernel.home_dir().join("skills");
     let config = librefang_skills::marketplace::MarketplaceConfig::default();
     let client = librefang_skills::marketplace::MarketplaceClient::new(config);
 
@@ -239,7 +239,7 @@ pub async fn uninstall_skill(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SkillUninstallRequest>,
 ) -> impl IntoResponse {
-    let skills_dir = state.kernel.config.home_dir.join("skills");
+    let skills_dir = state.kernel.home_dir().join("skills");
     let mut registry = librefang_skills::registry::SkillRegistry::new(skills_dir);
     if let Err(e) = registry.load_all() {
         tracing::warn!("Failed to reload skill registry: {e}");
@@ -351,7 +351,7 @@ pub async fn clawhub_search(
         }
     }
 
-    let cache_dir = state.kernel.config.home_dir.join(".cache").join("clawhub");
+    let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub");
     let client = librefang_skills::clawhub::ClawHubClient::new(cache_dir);
 
     match client.search(&query, limit).await {
@@ -439,7 +439,7 @@ pub async fn clawhub_browse(
         }
     }
 
-    let cache_dir = state.kernel.config.home_dir.join(".cache").join("clawhub");
+    let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub");
     let client = librefang_skills::clawhub::ClawHubClient::new(cache_dir);
 
     match client.browse(sort, limit, cursor).await {
@@ -490,10 +490,10 @@ pub async fn clawhub_skill_detail(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
 ) -> impl IntoResponse {
-    let cache_dir = state.kernel.config.home_dir.join(".cache").join("clawhub");
+    let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub");
     let client = librefang_skills::clawhub::ClawHubClient::new(cache_dir);
 
-    let skills_dir = state.kernel.config.home_dir.join("skills");
+    let skills_dir = state.kernel.home_dir().join("skills");
     let is_installed = client.is_installed(&slug, &skills_dir);
 
     match client.get_skill(&slug).await {
@@ -565,7 +565,7 @@ pub async fn clawhub_skill_code(
     State(state): State<Arc<AppState>>,
     Path(slug): Path<String>,
 ) -> impl IntoResponse {
-    let cache_dir = state.kernel.config.home_dir.join(".cache").join("clawhub");
+    let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub");
     let client = librefang_skills::clawhub::ClawHubClient::new(cache_dir);
 
     // Try to fetch SKILL.md first, then fallback to package.json
@@ -617,8 +617,8 @@ pub async fn clawhub_install(
     State(state): State<Arc<AppState>>,
     Json(req): Json<crate::types::ClawHubInstallRequest>,
 ) -> impl IntoResponse {
-    let skills_dir = state.kernel.config.home_dir.join("skills");
-    let cache_dir = state.kernel.config.home_dir.join(".cache").join("clawhub");
+    let skills_dir = state.kernel.home_dir().join("skills");
+    let cache_dir = state.kernel.home_dir().join(".cache").join("clawhub");
     let client = librefang_skills::clawhub::ClawHubClient::new(cache_dir);
 
     // Check if already installed
@@ -727,16 +727,16 @@ fn server_platform() -> &'static str {
     )
 )]
 pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let defs = state.kernel.hand_registry.list_definitions();
+    let defs = state.kernel.hands().list_definitions();
     let hands: Vec<serde_json::Value> = defs
         .iter()
         .map(|d| {
             let reqs = state
                 .kernel
-                .hand_registry
+                .hands()
                 .check_requirements(&d.id)
                 .unwrap_or_default();
-            let readiness = state.kernel.hand_registry.readiness(&d.id);
+            let readiness = state.kernel.hands().readiness(&d.id);
             let requirements_met = readiness
                 .as_ref()
                 .map(|r| r.requirements_met)
@@ -780,7 +780,7 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
     )
 )]
 pub async fn list_active_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let instances = state.kernel.hand_registry.list_instances();
+    let instances = state.kernel.hands().list_instances();
     let items: Vec<serde_json::Value> = instances
         .iter()
         .map(|i| {
@@ -815,14 +815,14 @@ pub async fn get_hand(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.kernel.hand_registry.get_definition(&hand_id) {
+    match state.kernel.hands().get_definition(&hand_id) {
         Some(def) => {
             let reqs = state
                 .kernel
-                .hand_registry
+                .hands()
                 .check_requirements(&hand_id)
                 .unwrap_or_default();
-            let readiness = state.kernel.hand_registry.readiness(&hand_id);
+            let readiness = state.kernel.hands().readiness(&hand_id);
             let requirements_met = readiness
                 .as_ref()
                 .map(|r| r.requirements_met)
@@ -831,7 +831,7 @@ pub async fn get_hand(
             let degraded = readiness.as_ref().map(|r| r.degraded).unwrap_or(false);
             let settings_status = state
                 .kernel
-                .hand_registry
+                .hands()
                 .check_settings_availability(&hand_id)
                 .unwrap_or_default();
             (
@@ -868,10 +868,10 @@ pub async fn get_hand(
                         "name": def.agent.name,
                         "description": def.agent.description,
                         "provider": if def.agent.provider == "default" {
-                            &state.kernel.config.default_model.provider
+                            &state.kernel.config_ref().default_model.provider
                         } else { &def.agent.provider },
                         "model": if def.agent.model == "default" {
-                            &state.kernel.config.default_model.model
+                            &state.kernel.config_ref().default_model.model
                         } else { &def.agent.model },
                     },
                     "dashboard": def.dashboard.metrics.iter().map(|m| serde_json::json!({
@@ -907,14 +907,14 @@ pub async fn check_hand_deps(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.kernel.hand_registry.get_definition(&hand_id) {
+    match state.kernel.hands().get_definition(&hand_id) {
         Some(def) => {
             let reqs = state
                 .kernel
-                .hand_registry
+                .hands()
                 .check_requirements(&hand_id)
                 .unwrap_or_default();
-            let readiness = state.kernel.hand_registry.readiness(&hand_id);
+            let readiness = state.kernel.hands().readiness(&hand_id);
             let requirements_met = readiness
                 .as_ref()
                 .map(|r| r.requirements_met)
@@ -972,7 +972,7 @@ pub async fn install_hand_deps(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
 ) -> impl IntoResponse {
-    let def = match state.kernel.hand_registry.get_definition(&hand_id) {
+    let def = match state.kernel.hands().get_definition(&hand_id) {
         Some(d) => d.clone(),
         None => {
             return (
@@ -984,7 +984,7 @@ pub async fn install_hand_deps(
 
     let reqs = state
         .kernel
-        .hand_registry
+        .hands()
         .check_requirements(&hand_id)
         .unwrap_or_default();
 
@@ -1181,7 +1181,7 @@ pub async fn install_hand_deps(
     // Re-check requirements after installation
     let reqs_after = state
         .kernel
-        .hand_registry
+        .hands()
         .check_requirements(&hand_id)
         .unwrap_or_default();
     let all_satisfied = reqs_after.iter().all(|(_, ok)| *ok);
@@ -1227,8 +1227,8 @@ pub async fn install_hand(
         );
     }
 
-    match state.kernel.hand_registry.install_from_content_persisted(
-        &state.kernel.config.home_dir,
+    match state.kernel.hands().install_from_content_persisted(
+        state.kernel.home_dir(),
         toml_content,
         skill_content,
     ) {
@@ -1278,7 +1278,7 @@ pub async fn activate_hand(
             if let Some(agent_id) = instance.agent_id {
                 let entry = state
                     .kernel
-                    .registry
+                    .agent_registry()
                     .list()
                     .into_iter()
                     .find(|e| e.id == agent_id);
@@ -1414,11 +1414,7 @@ pub async fn get_hand_settings(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
 ) -> impl IntoResponse {
-    let settings_status = match state
-        .kernel
-        .hand_registry
-        .check_settings_availability(&hand_id)
-    {
+    let settings_status = match state.kernel.hands().check_settings_availability(&hand_id) {
         Ok(s) => s,
         Err(_) => {
             return (
@@ -1431,7 +1427,7 @@ pub async fn get_hand_settings(
     // Find active instance config values (if any)
     let instance_config: std::collections::HashMap<String, serde_json::Value> = state
         .kernel
-        .hand_registry
+        .hands()
         .list_instances()
         .iter()
         .find(|i| i.hand_id == hand_id)
@@ -1469,14 +1465,14 @@ pub async fn update_hand_settings(
     // Find active instance for this hand
     let instance_id = state
         .kernel
-        .hand_registry
+        .hands()
         .list_instances()
         .iter()
         .find(|i| i.hand_id == hand_id)
         .map(|i| i.instance_id);
 
     match instance_id {
-        Some(id) => match state.kernel.hand_registry.update_config(id, config.clone()) {
+        Some(id) => match state.kernel.hands().update_config(id, config.clone()) {
             Ok(()) => (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -1516,7 +1512,7 @@ pub async fn hand_stats(
     State(state): State<Arc<AppState>>,
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
-    let instance = match state.kernel.hand_registry.get_instance(id) {
+    let instance = match state.kernel.hands().get_instance(id) {
         Some(i) => i,
         None => {
             return (
@@ -1526,7 +1522,7 @@ pub async fn hand_stats(
         }
     };
 
-    let def = match state.kernel.hand_registry.get_definition(&instance.hand_id) {
+    let def = match state.kernel.hands().get_definition(&instance.hand_id) {
         Some(d) => d,
         None => {
             return (
@@ -1555,7 +1551,7 @@ pub async fn hand_stats(
     for metric in &def.dashboard.metrics {
         let value = state
             .kernel
-            .memory
+            .memory_substrate()
             .structured_get(agent_id, &metric.memory_key)
             .ok()
             .flatten()
@@ -1598,7 +1594,7 @@ pub async fn hand_instance_browser(
     Path(id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
     // 1. Look up instance
-    let instance = match state.kernel.hand_registry.get_instance(id) {
+    let instance = match state.kernel.hands().get_instance(id) {
         Some(i) => i,
         None => {
             return (
@@ -1619,7 +1615,7 @@ pub async fn hand_instance_browser(
     let agent_id_str = agent_id.to_string();
 
     // 3. Check if a browser session exists (without creating one)
-    if !state.kernel.browser_ctx.has_session(&agent_id_str) {
+    if !state.kernel.browser().has_session(&agent_id_str) {
         return (StatusCode::OK, Json(serde_json::json!({"active": false})));
     }
 
@@ -1630,7 +1626,7 @@ pub async fn hand_instance_browser(
 
     match state
         .kernel
-        .browser_ctx
+        .browser()
         .send_command(
             &agent_id_str,
             librefang_runtime::browser::BrowserCommand::ReadPage,
@@ -1660,7 +1656,7 @@ pub async fn hand_instance_browser(
 
     match state
         .kernel
-        .browser_ctx
+        .browser()
         .send_command(
             &agent_id_str,
             librefang_runtime::browser::BrowserCommand::Screenshot,
@@ -1774,7 +1770,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
     // Get configured servers from config
     let config_servers: Vec<serde_json::Value> = state
         .kernel
-        .config
+        .config_ref()
         .mcp_servers
         .iter()
         .map(|s| {
@@ -1789,7 +1785,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         .collect();
 
     // Get connected servers and their tools from the live MCP connections
-    let connections = state.kernel.mcp_connections.lock().await;
+    let connections = state.kernel.mcp_connections_ref().lock().await;
     let connected: Vec<serde_json::Value> = connections
         .iter()
         .map(|conn| {
@@ -1843,7 +1839,7 @@ pub async fn get_mcp_server(
     // Find the configured entry by name
     let entry = state
         .kernel
-        .config
+        .config_ref()
         .mcp_servers
         .iter()
         .find(|s| s.name == name);
@@ -1869,7 +1865,7 @@ pub async fn get_mcp_server(
     });
 
     // Check live connection status
-    let connections = state.kernel.mcp_connections.lock().await;
+    let connections = state.kernel.mcp_connections_ref().lock().await;
     if let Some(conn) = connections.iter().find(|c| c.name() == name) {
         let tools: Vec<serde_json::Value> = conn
             .tools()
@@ -1940,7 +1936,7 @@ pub async fn add_mcp_server(
     // Check for duplicate name
     if state
         .kernel
-        .config
+        .config_ref()
         .mcp_servers
         .iter()
         .any(|s| s.name == name)
@@ -1952,7 +1948,7 @@ pub async fn add_mcp_server(
     }
 
     // Persist to config.toml
-    let config_path = state.kernel.config.home_dir.join("config.toml");
+    let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1972,7 +1968,7 @@ pub async fn add_mcp_server(
         Err(_) => "saved_reload_failed",
     };
 
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("mcp_server added: {name}"),
@@ -2016,7 +2012,7 @@ pub async fn update_mcp_server(
     // Ensure the entry exists
     if !state
         .kernel
-        .config
+        .config_ref()
         .mcp_servers
         .iter()
         .any(|s| s.name == name)
@@ -2055,7 +2051,7 @@ pub async fn update_mcp_server(
     };
 
     // Persist — upsert replaces an existing entry with the same name
-    let config_path = state.kernel.config.home_dir.join("config.toml");
+    let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = upsert_mcp_server_config(&config_path, &entry) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2076,7 +2072,7 @@ pub async fn update_mcp_server(
         Err(_) => "saved_reload_failed",
     };
 
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("mcp_server updated: {name}"),
@@ -2114,7 +2110,7 @@ pub async fn delete_mcp_server(
     // Ensure the entry exists
     if !state
         .kernel
-        .config
+        .config_ref()
         .mcp_servers
         .iter()
         .any(|s| s.name == name)
@@ -2127,7 +2123,7 @@ pub async fn delete_mcp_server(
         );
     }
 
-    let config_path = state.kernel.config.home_dir.join("config.toml");
+    let config_path = state.kernel.home_dir().join("config.toml");
     if let Err(e) = remove_mcp_server_config(&config_path, &name) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -2148,7 +2144,7 @@ pub async fn delete_mcp_server(
         Err(_) => "saved_reload_failed",
     };
 
-    state.kernel.audit_log.record(
+    state.kernel.audit().record(
         "system",
         librefang_runtime::audit::AuditAction::ConfigChange,
         format!("mcp_server removed: {name}"),
@@ -2317,7 +2313,7 @@ pub async fn create_skill(
     }
 
     // Write skill.toml to ~/.librefang/skills/{name}/
-    let skill_dir = state.kernel.config.home_dir.join("skills").join(&name);
+    let skill_dir = state.kernel.home_dir().join("skills").join(&name);
     if skill_dir.exists() {
         return (
             StatusCode::CONFLICT,
@@ -2620,10 +2616,10 @@ fn integration_status_str(
 pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let registry = state
         .kernel
-        .extension_registry
+        .extensions()
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let health = &state.kernel.extension_health;
+    let health = &state.kernel.extension_monitor();
 
     let mut entries = Vec::new();
     for info in registry.list_all_info() {
@@ -2668,10 +2664,10 @@ pub async fn get_integration(
 ) -> impl IntoResponse {
     let registry = state
         .kernel
-        .extension_registry
+        .extensions()
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let health = &state.kernel.extension_health;
+    let health = &state.kernel.extension_monitor();
 
     // Look up the template first
     let template = match registry.get_template(&id) {
@@ -2736,7 +2732,7 @@ pub async fn get_integration(
 pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let registry = state
         .kernel
-        .extension_registry
+        .extensions()
         .read()
         .unwrap_or_else(|e| e.into_inner());
     let templates: Vec<serde_json::Value> = registry
@@ -2799,7 +2795,7 @@ pub async fn add_integration(
     let install_err = {
         let mut registry = state
             .kernel
-            .extension_registry
+            .extensions()
             .write()
             .unwrap_or_else(|e| e.into_inner());
 
@@ -2832,7 +2828,7 @@ pub async fn add_integration(
         return (status, Json(serde_json::json!({"error": error})));
     }
 
-    state.kernel.extension_health.register(&id);
+    state.kernel.extension_monitor().register(&id);
 
     // Hot-connect the new MCP server
     let connected = state.kernel.reload_extension_mcps().await.unwrap_or(0);
@@ -2868,7 +2864,7 @@ pub async fn remove_integration(
     let uninstall_err = {
         let mut registry = state
             .kernel
-            .extension_registry
+            .extensions()
             .write()
             .unwrap_or_else(|e| e.into_inner());
         registry.uninstall(&id).err()
@@ -2881,7 +2877,7 @@ pub async fn remove_integration(
         );
     }
 
-    state.kernel.extension_health.unregister(&id);
+    state.kernel.extension_monitor().unregister(&id);
 
     // Hot-disconnect the removed MCP server
     if let Err(e) = state.kernel.reload_extension_mcps().await {
@@ -2916,7 +2912,7 @@ pub async fn reconnect_integration(
     let is_installed = {
         let registry = state
             .kernel
-            .extension_registry
+            .extensions()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         registry.is_installed(&id)
@@ -2959,7 +2955,7 @@ pub async fn reconnect_integration(
     )
 )]
 pub async fn integrations_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let health_entries = state.kernel.extension_health.all_health();
+    let health_entries = state.kernel.extension_monitor().all_health();
     let entries: Vec<serde_json::Value> = health_entries
         .iter()
         .map(|h| {
@@ -3024,10 +3020,10 @@ pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl Int
 pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let registry = state
         .kernel
-        .extension_registry
+        .extensions()
         .read()
         .unwrap_or_else(|e| e.into_inner());
-    let health = &state.kernel.extension_health;
+    let health = &state.kernel.extension_monitor();
 
     let mut extensions = Vec::new();
     for info in registry.list_all_info() {
@@ -3079,7 +3075,7 @@ pub async fn get_extension(
 ) -> impl IntoResponse {
     let registry = state
         .kernel
-        .extension_registry
+        .extensions()
         .read()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -3094,7 +3090,7 @@ pub async fn get_extension(
     };
 
     let installed = registry.get_installed(&name).cloned();
-    let health = state.kernel.extension_health.get_health(&name);
+    let health = state.kernel.extension_monitor().get_health(&name);
 
     let status = match &installed {
         Some(inst) if !inst.enabled => "disabled",
@@ -3164,7 +3160,7 @@ pub async fn install_extension(
     let install_err = {
         let mut registry = state
             .kernel
-            .extension_registry
+            .extensions()
             .write()
             .unwrap_or_else(|e| e.into_inner());
 
@@ -3197,7 +3193,7 @@ pub async fn install_extension(
         return (status, Json(serde_json::json!({"error": error})));
     }
 
-    state.kernel.extension_health.register(&name);
+    state.kernel.extension_monitor().register(&name);
 
     // Hot-connect the new MCP server
     let connected = state.kernel.reload_extension_mcps().await.unwrap_or(0);
@@ -3238,7 +3234,7 @@ pub async fn uninstall_extension(
     let uninstall_err = {
         let mut registry = state
             .kernel
-            .extension_registry
+            .extensions()
             .write()
             .unwrap_or_else(|e| e.into_inner());
         registry.uninstall(&name).err()
@@ -3251,7 +3247,7 @@ pub async fn uninstall_extension(
         );
     }
 
-    state.kernel.extension_health.unregister(&name);
+    state.kernel.extension_monitor().unregister(&name);
 
     // Hot-disconnect the removed MCP server
     if let Err(e) = state.kernel.reload_extension_mcps().await {

@@ -34,7 +34,7 @@ pub fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     // Informational items (disabled — display only)
     let agent_count = if let Some(ks) = app.try_state::<crate::KernelState>() {
-        ks.kernel.registry.list().len()
+        ks.kernel.agent_registry().list().len()
     } else {
         0
     };

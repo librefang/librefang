@@ -233,7 +233,7 @@ impl AgentSelectState {
     /// Load in-process agents from the kernel.
     pub fn load_inprocess_agents(&mut self, kernel: &librefang_kernel::LibreFangKernel) {
         self.inprocess_agents.clear();
-        for entry in kernel.registry.list() {
+        for entry in kernel.agent_registry().list() {
             self.inprocess_agents.push(InProcessAgent {
                 id: entry.id,
                 name: entry.name.clone(),

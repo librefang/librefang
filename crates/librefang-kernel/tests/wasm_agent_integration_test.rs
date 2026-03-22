@@ -350,7 +350,7 @@ async fn test_multiple_wasm_agents() {
     assert!(echo_result.response.contains("test data"));
 
     // Verify agent list shows both + default assistant
-    let agents = kernel.registry.list();
+    let agents = kernel.agent_registry().list();
     assert_eq!(agents.len(), 3);
 
     kernel.shutdown();
@@ -392,7 +392,7 @@ memory_write = ["self.*"]
     let llm_id = kernel.spawn_agent(llm_manifest).unwrap();
 
     // Verify both agents exist + default assistant
-    let agents = kernel.registry.list();
+    let agents = kernel.agent_registry().list();
     assert_eq!(agents.len(), 3);
 
     // WASM agent should work
@@ -400,11 +400,11 @@ memory_write = ["self.*"]
     assert_eq!(result.response, "hello from wasm");
 
     // LLM agent exists but we won't send it a message (no real LLM)
-    assert!(kernel.registry.get(llm_id).is_some());
+    assert!(kernel.agent_registry().get(llm_id).is_some());
 
     // Kill WASM agent
     kernel.kill_agent(wasm_id).unwrap();
-    assert_eq!(kernel.registry.list().len(), 2);
+    assert_eq!(kernel.agent_registry().list().len(), 2);
 
     kernel.shutdown();
 }

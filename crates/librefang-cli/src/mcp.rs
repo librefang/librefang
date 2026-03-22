@@ -53,7 +53,7 @@ impl McpBackend {
                 }
             }
             McpBackend::InProcess { kernel, .. } => kernel
-                .registry
+                .agent_registry()
                 .list()
                 .iter()
                 .map(|e| {
