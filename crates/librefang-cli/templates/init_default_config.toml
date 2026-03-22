@@ -1,38 +1,63 @@
-# LibreFang Agent OS configuration
-# See https://github.com/librefang/librefang for documentation
+# ══════════════════════════════════════════════════════════════
+# LibreFang Agent OS — Configuration
+# Docs: https://docs.librefang.ai/configuration
+# ══════════════════════════════════════════════════════════════
 
-# For Docker, change to "0.0.0.0:4545" or set LIBREFANG_LISTEN env var.
+# ── Server ────────────────────────────────────────────────────
+# For Docker/remote access, use "0.0.0.0:4545".
+# For local-only, use "127.0.0.1:4545".
 api_listen = "0.0.0.0:4545"
 
-# Dashboard login credentials (change the defaults!)
-# Recommended: store password in vault instead of plaintext:
-#   librefang vault set dashboard_password
-#   dashboard_pass = "vault:dashboard_password"
+# ── Dashboard Login ───────────────────────────────────────────
+# Default credentials — CHANGE THE PASSWORD after first login!
+# Secure options:
+#   1. Vault:    librefang vault set dashboard_password
+#                dashboard_pass = "vault:dashboard_password"
+#   2. Env var:  LIBREFANG_DASHBOARD_PASS=your-secret
 dashboard_user = "librefang"
 dashboard_pass = "librefang"
 
+# ── Default LLM ──────────────────────────────────────────────
 [default_model]
 provider = "{{provider}}"
 model = "{{model}}"
 api_key_env = "{{api_key_env}}"
 
+# ── Memory ───────────────────────────────────────────────────
 [memory]
 decay_rate = 0.05
 
-# Proactive memory (mem0-style auto-memorize / auto-retrieve)
+# ── Proactive Memory (auto-memorize & auto-retrieve) ─────────
 [proactive_memory]
 enabled = true
 auto_memorize = true
 auto_retrieve = true
 max_retrieve = 10
-# extraction_model = ""  # defaults to your default_model
-# extraction_threshold = 0.7
-# session_ttl_hours = 24
-# duplicate_threshold = 0.5
-# confidence_decay_rate = 0.01
-# max_memories_per_agent = 1000
 
-# Regional endpoint selection for multi-region providers.
+# ── Performance ──────────────────────────────────────────────
+prompt_caching = true           # Reduce LLM costs (Anthropic/OpenAI)
+stable_prefix_mode = true       # Improve prompt cache hit rate
+usage_footer = "tokens"         # Show token usage: "off" | "tokens" | "cost" | "full"
+
+# ── Provider Regions (uncomment to use regional endpoints) ───
 # [provider_regions]
-# qwen = "intl"        # Use Qwen international endpoint
-# minimax = "china"    # Use MiniMax China endpoint (MINIMAX_CN_API_KEY)
+# qwen = "intl"                 # Qwen international endpoint
+# minimax = "china"             # MiniMax China endpoint
+
+# ── Channels (uncomment to enable) ───────────────────────────
+# [channels.telegram]
+# bot_token_env = "TELEGRAM_BOT_TOKEN"
+# default_agent = "assistant"
+# allowed_users = []            # Empty = allow all
+
+# [channels.discord]
+# bot_token_env = "DISCORD_BOT_TOKEN"
+# default_agent = "assistant"
+
+# ── MCP Servers (uncomment to add external tools) ────────────
+# [[mcp_servers]]
+# name = "filesystem"
+# [mcp_servers.transport]
+# type = "stdio"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
