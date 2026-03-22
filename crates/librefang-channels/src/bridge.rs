@@ -844,7 +844,9 @@ async fn dispatch_message(
                     let _ = adapter
                         .send(
                             &message.sender,
-                            ChannelContent::Text(format!("Message blocked: {reason}")),
+                            ChannelContent::Text(
+                                "Your message could not be processed.".to_string(),
+                            ),
                         )
                         .await;
                     return;
