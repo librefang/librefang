@@ -1,12 +1,15 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState, useCallback } from "react";
 import Markdown from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
 import { useTranslation } from "react-i18next";
 import { useSearch } from "@tanstack/react-router";
 import { listAgents, sendAgentMessage, loadAgentSession } from "../api";
 import { MessageCircle, Send, Bot, User, RefreshCw, AlertCircle, Wifi, Sparkles, X, ArrowRight, Zap } from "lucide-react";
 import { Badge } from "../components/ui/Badge";
+import "katex/dist/katex.min.css";
 
 interface ChatMessage {
   id: string;
@@ -72,7 +75,15 @@ function Typewriter({ text, speed = 15 }: { text: string; speed?: number }) {
   }, [text, speed]);
 
   if (done) {
-    return <Markdown remarkPlugins={[remarkGfm]} components={mdComponents}>{text}</Markdown>;
+    return (
+      <Markdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex]}
+        components={mdComponents}
+      >
+        {text}
+      </Markdown>
+    );
   }
   return <span>{displayed}</span>;
 }
