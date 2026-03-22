@@ -716,7 +716,12 @@ pub async fn save_workflow_as_template(
         }
     });
 
-    let workflow = match state.kernel.workflows.get_workflow(workflow_id).await {
+    let workflow = match state
+        .kernel
+        .workflow_engine()
+        .get_workflow(workflow_id)
+        .await
+    {
         Some(w) => w,
         None => {
             return (
