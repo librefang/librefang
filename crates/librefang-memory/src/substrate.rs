@@ -255,6 +255,15 @@ impl MemorySubstrate {
         self.sessions.cleanup_excess_sessions(max_per_agent)
     }
 
+    /// Full-text search across session content using FTS5.
+    pub fn search_sessions(
+        &self,
+        query: &str,
+        agent_id: Option<&AgentId>,
+    ) -> LibreFangResult<Vec<crate::session::SessionSearchResult>> {
+        self.sessions.search_sessions(query, agent_id)
+    }
+
     /// Load canonical session context for cross-channel memory.
     ///
     /// Returns the compacted summary (if any) and recent messages from the

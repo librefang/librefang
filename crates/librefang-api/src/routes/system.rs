@@ -1003,6 +1003,56 @@ pub async fn session_cleanup(
     )
 }
 
+/// GET /api/sessions/search?q=...&agent_id=... — Full-text search across session content.
+#[utoipa::path(
+    get,
+    path = "/api/sessions/search",
+    tag = "sessions",
+    params(
+        ("q" = String, Query, description = "FTS5 search query"),
+        ("agent_id" = Option<String>, Query, description = "Optional agent ID filter"),
+    ),
+    responses(
+        (status = 200, description = "Search results", body = serde_json::Value),
+        (status = 400, description = "Missing query parameter"),
+    )
+)]
+pub async fn search_sessions(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let query = match params.get("q") {
+        Some(q) if !q.is_empty() => q.clone(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing or empty 'q' parameter"})),
+            );
+        }
+    };
+
+    let agent_id = params.get("agent_id").and_then(|id| {
+        uuid::Uuid::parse_str(id)
+            .ok()
+            .map(librefang_types::agent::AgentId)
+    });
+
+    match state
+        .kernel
+        .memory
+        .search_sessions(&query, agent_id.as_ref())
+    {
+        Ok(results) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"results": results})),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": e.to_string()})),
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Execution Approval System — backed by kernel.approval_manager
 // ---------------------------------------------------------------------------
