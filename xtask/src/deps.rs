@@ -16,6 +16,10 @@ pub struct DepsArgs {
     /// Include frontend (pnpm audit)
     #[arg(long)]
     pub web: bool,
+
+    /// Ignore specific RUSTSEC advisories (can be repeated)
+    #[arg(long = "ignore", value_name = "RUSTSEC_ID")]
+    pub ignore_ids: Vec<String>,
 }
 
 fn repo_root() -> PathBuf {
@@ -54,7 +58,10 @@ fn has_cargo_subcommand(sub: &str) -> bool {
         .unwrap_or(false)
 }
 
-fn run_cargo_audit(root: &PathBuf) -> Result<bool, Box<dyn std::error::Error>> {
+fn run_cargo_audit(
+    root: &PathBuf,
+    ignore_ids: &[String],
+) -> Result<bool, Box<dyn std::error::Error>> {
     if !has_cargo_subcommand("audit") {
         println!("  Installing cargo-audit...");
         let status = Command::new("cargo")
@@ -66,10 +73,12 @@ fn run_cargo_audit(root: &PathBuf) -> Result<bool, Box<dyn std::error::Error>> {
     }
 
     println!("=== cargo audit ===");
-    let status = Command::new("cargo")
-        .args(["audit"])
-        .current_dir(root)
-        .status()?;
+    let mut cmd = Command::new("cargo");
+    cmd.arg("audit").current_dir(root);
+    for id in ignore_ids {
+        cmd.args(["--ignore", id]);
+    }
+    let status = cmd.status()?;
     println!();
 
     Ok(status.success())
@@ -119,7 +128,7 @@ pub fn run(args: DepsArgs) -> Result<(), Box<dyn std::error::Error>> {
     let mut issues = 0;
 
     if run_all || args.audit {
-        match run_cargo_audit(&root) {
+        match run_cargo_audit(&root, &args.ignore_ids) {
             Ok(true) => println!("Cargo audit: no vulnerabilities found"),
             Ok(false) => {
                 println!("Cargo audit: vulnerabilities found!");
