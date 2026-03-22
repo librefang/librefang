@@ -225,8 +225,7 @@ impl ChannelToolRule {
         }
         if self.channel.len() > MAX_CHANNEL_NAME_LEN {
             return Err(format!(
-                "channel name too long ({} chars, max {MAX_CHANNEL_NAME_LEN})",
-                self.channel.len()
+                "channel name too long (max {MAX_CHANNEL_NAME_LEN} chars)"
             ));
         }
         if self.allowed_tools.len() > MAX_CHANNEL_RULE_TOOLS {
@@ -236,8 +235,7 @@ impl ChannelToolRule {
         }
         if self.denied_tools.len() > MAX_CHANNEL_RULE_TOOLS {
             return Err(format!(
-                "denied_tools list too long (max {MAX_CHANNEL_RULE_TOOLS})",
-                self.denied_tools.len()
+                "denied_tools list too long (max {MAX_CHANNEL_RULE_TOOLS})"
             ));
         }
         for (i, name) in self.allowed_tools.iter().enumerate() {
