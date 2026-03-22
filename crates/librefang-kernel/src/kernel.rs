@@ -251,6 +251,8 @@ pub struct LibreFangKernel {
     pub workflows: WorkflowEngine,
     /// Workflow template registry.
     pub template_registry: WorkflowTemplateRegistry,
+    /// Workflow template registry for reusable workflow blueprints.
+    pub workflow_template_registry: crate::workflow::WorkflowTemplateRegistry,
     /// Event-driven trigger engine.
     pub triggers: TriggerEngine,
     /// Background agent executor.
@@ -1390,6 +1392,7 @@ impl LibreFangKernel {
             supervisor,
             workflows: WorkflowEngine::new(),
             template_registry: WorkflowTemplateRegistry::new(),
+            workflow_template_registry: crate::workflow::WorkflowTemplateRegistry::new(),
             triggers: TriggerEngine::new(),
             background,
             audit_log: Arc::new(AuditLog::with_db(memory.usage_conn())),

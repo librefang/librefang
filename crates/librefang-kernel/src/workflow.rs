@@ -1147,10 +1147,96 @@ pub fn load_workflow_definitions(dir: &Path) -> Vec<Workflow> {
 }
 
 // ---------------------------------------------------------------------------
-// WorkflowTemplateRegistry — in-memory store for workflow templates
+// Workflow → Template conversion
 // ---------------------------------------------------------------------------
 
-use librefang_types::workflow_template::WorkflowTemplate;
+use librefang_types::workflow_template::{
+    ParameterType, TemplateParameter, WorkflowTemplate, WorkflowTemplateStep,
+};
+use regex_lite::Regex;
+use std::collections::HashSet;
+
+impl WorkflowEngine {
+    /// Convert an existing workflow into a reusable [`WorkflowTemplate`].
+    ///
+    /// Each `WorkflowStep` is mapped to a `WorkflowTemplateStep`. The method
+    /// auto-detects parameters by scanning `prompt_template` fields for
+    /// `{{var}}` placeholders and creates a [`TemplateParameter`] for each
+    /// unique variable found.
+    pub fn workflow_to_template(workflow: &Workflow) -> WorkflowTemplate {
+        // Slugify workflow name → template ID
+        let id = workflow
+            .name
+            .to_lowercase()
+            .replace(|c: char| !c.is_alphanumeric() && c != '-', "-")
+            .trim_matches('-')
+            .to_string();
+
+        // Collect all {{var}} placeholders across all steps
+        let re = Regex::new(r"\{\{(\w+)\}\}").expect("valid regex");
+        let mut seen_params = HashSet::new();
+        let mut parameters = Vec::new();
+
+        let steps: Vec<WorkflowTemplateStep> = workflow
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, step)| {
+                // Extract parameters from this step's prompt_template
+                for cap in re.captures_iter(&step.prompt_template) {
+                    let var_name = cap[1].to_string();
+                    if seen_params.insert(var_name.clone()) {
+                        parameters.push(TemplateParameter {
+                            name: var_name.clone(),
+                            description: Some(format!(
+                                "Parameter '{}' used in step '{}'",
+                                var_name, step.name
+                            )),
+                            param_type: ParameterType::String,
+                            default: None,
+                            required: true,
+                        });
+                    }
+                }
+
+                // Map agent to optional string name
+                let agent = match &step.agent {
+                    StepAgent::ByName { name } => Some(name.clone()),
+                    StepAgent::ById { id } => Some(id.clone()),
+                };
+
+                // Build depends_on: sequential steps depend on the previous step
+                let depends_on = if i > 0 {
+                    vec![workflow.steps[i - 1].name.clone()]
+                } else {
+                    vec![]
+                };
+
+                WorkflowTemplateStep {
+                    name: step.name.clone(),
+                    prompt_template: step.prompt_template.clone(),
+                    agent,
+                    depends_on,
+                }
+            })
+            .collect();
+
+        WorkflowTemplate {
+            id,
+            name: workflow.name.clone(),
+            description: workflow.description.clone(),
+            category: None,
+            parameters,
+            steps,
+            tags: vec![],
+            created_at: Some(chrono::Utc::now().to_rfc3339()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorkflowTemplateRegistry — in-memory store for workflow templates
+// ---------------------------------------------------------------------------
 
 /// Convert a `serde_json::Value` to a plain string for template substitution.
 fn value_to_string(val: &serde_json::Value) -> String {

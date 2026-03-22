@@ -841,6 +841,10 @@ export async function listWorkflowRuns(workflowId: string): Promise<WorkflowRunI
   return get<WorkflowRunItem[]>(`/api/workflows/${encodeURIComponent(workflowId)}/runs`);
 }
 
+export async function saveWorkflowAsTemplate(workflowId: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/workflows/${encodeURIComponent(workflowId)}/save-as-template`, {});
+}
+
 export async function listSchedules(): Promise<ScheduleItem[]> {
   const data = await get<{ schedules?: ScheduleItem[]; total?: number }>("/api/schedules");
   return data.schedules ?? [];
