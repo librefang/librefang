@@ -214,7 +214,11 @@ impl LlmDriver for AnthropicDriver {
             system,
             messages: api_messages,
             tools: api_tools,
-            temperature: if request.thinking.is_some() { None } else { Some(request.temperature) },
+            temperature: if request.thinking.is_some() {
+                None
+            } else {
+                Some(request.temperature)
+            },
             stream: false,
             thinking: thinking_value,
         };
@@ -331,7 +335,11 @@ impl LlmDriver for AnthropicDriver {
             system,
             messages: api_messages,
             tools: api_tools,
-            temperature: if request.thinking.is_some() { None } else { Some(request.temperature) },
+            temperature: if request.thinking.is_some() {
+                None
+            } else {
+                Some(request.temperature)
+            },
             stream: true,
             thinking: thinking_value,
         };
