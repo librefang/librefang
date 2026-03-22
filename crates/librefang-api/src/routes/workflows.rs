@@ -11,6 +11,7 @@ use librefang_kernel::workflow::{
 };
 use librefang_runtime::kernel_handle::KernelHandle;
 use librefang_types::agent::AgentId;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::warn;
@@ -235,6 +236,7 @@ pub async fn create_workflow(
             timeout_secs: s["timeout_secs"].as_u64().unwrap_or(120),
             error_mode,
             output_var: s["output_var"].as_str().map(String::from),
+            inherit_context: s["inherit_context"].as_bool(),
         });
     }
 
@@ -420,6 +422,7 @@ pub async fn update_workflow(
                 timeout_secs: s["timeout_secs"].as_u64().unwrap_or(120),
                 error_mode,
                 output_var: s["output_var"].as_str().map(String::from),
+                inherit_context: s["inherit_context"].as_bool(),
             });
         }
         parsed_steps
@@ -626,17 +629,29 @@ pub async fn create_trigger(
         .to_string();
     let max_fires = req["max_fires"].as_u64().unwrap_or(0);
 
-    match state
-        .kernel
-        .register_trigger(agent_id, pattern, prompt_template, max_fires)
-    {
-        Ok(trigger_id) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({
+    // Optional cross-session target: route triggered message to a different agent.
+    let target_agent: Option<AgentId> = req
+        .get("target_agent_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok());
+
+    match state.kernel.register_trigger_with_target(
+        agent_id,
+        pattern,
+        prompt_template,
+        max_fires,
+        target_agent,
+    ) {
+        Ok(trigger_id) => {
+            let mut resp = serde_json::json!({
                 "trigger_id": trigger_id.to_string(),
                 "agent_id": agent_id.to_string(),
-            })),
-        ),
+            });
+            if let Some(target) = target_agent {
+                resp["target_agent_id"] = serde_json::json!(target.to_string());
+            }
+            (StatusCode::CREATED, Json(resp))
+        }
         Err(e) => {
             tracing::warn!("Trigger registration failed: {e}");
             (
@@ -670,7 +685,7 @@ pub async fn list_triggers(
     let list: Vec<serde_json::Value> = triggers
         .iter()
         .map(|t| {
-            serde_json::json!({
+            let mut v = serde_json::json!({
                 "id": t.id.to_string(),
                 "agent_id": t.agent_id.to_string(),
                 "pattern": serde_json::to_value(&t.pattern).unwrap_or_default(),
@@ -679,7 +694,11 @@ pub async fn list_triggers(
                 "fire_count": t.fire_count,
                 "max_fires": t.max_fires,
                 "created_at": t.created_at.to_rfc3339(),
-            })
+            });
+            if let Some(target) = &t.target_agent {
+                v["target_agent_id"] = serde_json::json!(target.to_string());
+            }
+            v
         })
         .collect();
     let total = list.len();
@@ -1370,6 +1389,153 @@ pub async fn cron_job_status(
             Json(serde_json::json!({"error": "Invalid job ID"})),
         ),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Workflow template routes
+// ---------------------------------------------------------------------------
+
+/// Query parameters for listing workflow templates.
+#[derive(Debug, Deserialize)]
+pub struct TemplateListParams {
+    /// Free-text search across name, description, and tags.
+    pub q: Option<String>,
+    /// Filter by category (exact match).
+    pub category: Option<String>,
+}
+
+/// GET /api/workflow-templates — List all workflow templates with optional search/filter.
+#[utoipa::path(
+    get,
+    path = "/api/workflow-templates",
+    tag = "workflows",
+    params(
+        ("q" = Option<String>, Query, description = "Search name, description, tags"),
+        ("category" = Option<String>, Query, description = "Filter by category"),
+    ),
+    responses(
+        (status = 200, description = "List of workflow templates", body = Vec<serde_json::Value>)
+    )
+)]
+pub async fn list_templates(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<TemplateListParams>,
+) -> impl IntoResponse {
+    let all = state.kernel.template_registry.list().await;
+
+    let filtered: Vec<_> = all
+        .into_iter()
+        .filter(|t| {
+            // Category filter (exact match).
+            if let Some(ref cat) = params.category {
+                match &t.category {
+                    Some(tc) if tc == cat => {}
+                    _ => return false,
+                }
+            }
+            // Free-text search across name, description, tags.
+            if let Some(ref q) = params.q {
+                let q_lower = q.to_lowercase();
+                let matches_name = t.name.to_lowercase().contains(&q_lower);
+                let matches_desc = t.description.to_lowercase().contains(&q_lower);
+                let matches_tags = t
+                    .tags
+                    .iter()
+                    .any(|tag| tag.to_lowercase().contains(&q_lower));
+                if !matches_name && !matches_desc && !matches_tags {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    let list: Vec<serde_json::Value> = filtered
+        .iter()
+        .filter_map(|t| serde_json::to_value(t).ok())
+        .collect();
+
+    Json(serde_json::json!({ "templates": list }))
+}
+
+/// GET /api/workflow-templates/:id — Get full template details.
+#[utoipa::path(
+    get,
+    path = "/api/workflow-templates/{id}",
+    tag = "workflows",
+    params(("id" = String, Path, description = "Template ID")),
+    responses(
+        (status = 200, description = "Template details", body = serde_json::Value),
+        (status = 404, description = "Template not found")
+    )
+)]
+pub async fn get_template(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match state.kernel.template_registry.get(&id).await {
+        Some(t) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(&t).unwrap_or_default()),
+        ),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("Template '{}' not found", id)})),
+        ),
+    }
+}
+
+/// POST /api/workflow-templates/:id/instantiate — Create a live workflow from a template.
+#[utoipa::path(
+    post,
+    path = "/api/workflow-templates/{id}/instantiate",
+    tag = "workflows",
+    params(("id" = String, Path, description = "Template ID")),
+    request_body = HashMap<String, serde_json::Value>,
+    responses(
+        (status = 201, description = "Workflow created from template", body = serde_json::Value),
+        (status = 400, description = "Invalid parameters"),
+        (status = 404, description = "Template not found")
+    )
+)]
+pub async fn instantiate_template(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(params): Json<HashMap<String, serde_json::Value>>,
+) -> impl IntoResponse {
+    let template = match state.kernel.template_registry.get(&id).await {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("Template '{}' not found", id)})),
+            );
+        }
+    };
+
+    let workflow = match state
+        .kernel
+        .template_registry
+        .instantiate(&template, &params)
+    {
+        Ok(w) => w,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            );
+        }
+    };
+
+    let workflow_id = state.kernel.register_workflow(workflow).await;
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "workflow_id": workflow_id.to_string(),
+            "template_id": id,
+            "status": "instantiated",
+        })),
+    )
 }
 
 #[cfg(test)]

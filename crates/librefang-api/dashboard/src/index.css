@@ -69,6 +69,17 @@ body {
   @apply text-slate-900 dark:text-slate-100 transition-colors duration-300;
 }
 
+.katex-display {
+  margin: 0.75rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 0.25rem;
+}
+
+.katex {
+  font-size: 1em;
+}
+
 .dark body {
   background:
     radial-gradient(circle at top, rgba(30, 64, 175, 0.15) 0%, rgba(2, 6, 23, 1) 80%),

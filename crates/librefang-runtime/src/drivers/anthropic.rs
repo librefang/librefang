@@ -48,6 +48,10 @@ struct ApiRequest {
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     stream: bool,
+    /// Extended thinking configuration.
+    /// Anthropic API expects: `{"type": "enabled", "budget_tokens": N}`
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,14 +201,40 @@ impl LlmDriver for AnthropicDriver {
             })
             .collect();
 
+        // Anthropic requires budget_tokens >= 1024 for extended thinking.
+        // Skip thinking if budget is too low.
+        let thinking_value = request
+            .thinking
+            .as_ref()
+            .filter(|tc| tc.budget_tokens >= 1024)
+            .map(|tc| {
+                serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": tc.budget_tokens
+                })
+            });
+
+        // When thinking is enabled, max_tokens must be > budget_tokens.
+        let effective_max_tokens = if let Some(ref tv) = thinking_value {
+            let budget = tv["budget_tokens"].as_u64().unwrap_or(0) as u32;
+            request.max_tokens.max(budget + 1024)
+        } else {
+            request.max_tokens
+        };
+
         let api_request = ApiRequest {
             model: request.model.clone(),
-            max_tokens: request.max_tokens,
+            max_tokens: effective_max_tokens,
             system,
             messages: api_messages,
             tools: api_tools,
-            temperature: Some(request.temperature),
+            temperature: if thinking_value.is_some() {
+                None
+            } else {
+                Some(request.temperature)
+            },
             stream: false,
+            thinking: thinking_value,
         };
 
         // Retry loop for rate limits and overloads
@@ -306,14 +336,40 @@ impl LlmDriver for AnthropicDriver {
             })
             .collect();
 
+        // Anthropic requires budget_tokens >= 1024 for extended thinking.
+        // Skip thinking if budget is too low.
+        let thinking_value = request
+            .thinking
+            .as_ref()
+            .filter(|tc| tc.budget_tokens >= 1024)
+            .map(|tc| {
+                serde_json::json!({
+                    "type": "enabled",
+                    "budget_tokens": tc.budget_tokens
+                })
+            });
+
+        // When thinking is enabled, max_tokens must be > budget_tokens.
+        let effective_max_tokens = if let Some(ref tv) = thinking_value {
+            let budget = tv["budget_tokens"].as_u64().unwrap_or(0) as u32;
+            request.max_tokens.max(budget + 1024)
+        } else {
+            request.max_tokens
+        };
+
         let api_request = ApiRequest {
             model: request.model.clone(),
-            max_tokens: request.max_tokens,
+            max_tokens: effective_max_tokens,
             system,
             messages: api_messages,
             tools: api_tools,
-            temperature: Some(request.temperature),
+            temperature: if thinking_value.is_some() {
+                None
+            } else {
+                Some(request.temperature)
+            },
             stream: true,
+            thinking: thinking_value,
         };
 
         // Retry loop for the initial HTTP request
@@ -576,15 +632,33 @@ impl LlmDriver for AnthropicDriver {
 
 /// Ensure a `serde_json::Value` is an object.  The Anthropic API requires the
 /// `input` field of `tool_use` blocks to be a JSON object (`{}`), never `null`.
-/// When a tool has no parameters the value may be `null` (e.g. from
-/// `Value::default()` or a missing field); this helper normalises it to `{}`.
+///
+/// Handles several malformed-input scenarios that occur when models hallucinate
+/// or return non-standard tool calls:
+///
+/// - `null` → `{}`
+/// - A JSON string that parses as an object → use the parsed object
+/// - Any other type (string, number, array, bool) → `{"raw_input": <value>}`
+///   so the original value is preserved for debugging rather than silently lost.
 fn ensure_object(v: serde_json::Value) -> serde_json::Value {
-    match &v {
+    match v {
         serde_json::Value::Object(_) => v,
         serde_json::Value::Null => serde_json::json!({}),
+        serde_json::Value::String(ref s) => {
+            // The model may return a JSON-encoded string instead of a proper
+            // object — attempt to parse it.
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+                if parsed.is_object() {
+                    warn!("Tool input was a JSON string instead of an object, parsed successfully");
+                    return parsed;
+                }
+            }
+            warn!(value = %s, "Tool input was a non-parseable string, wrapping in raw_input");
+            serde_json::json!({"raw_input": v})
+        }
         other => {
-            warn!(value = ?other, "Tool input was not an object or null, replacing with empty object");
-            serde_json::json!({})
+            warn!(value = ?other, "Tool input was not an object, wrapping in raw_input");
+            serde_json::json!({"raw_input": other})
         }
     }
 }
@@ -787,15 +861,41 @@ mod tests {
     }
 
     #[test]
-    fn test_ensure_object_non_object_becomes_empty_object() {
+    fn test_ensure_object_non_object_wraps_in_raw_input() {
         assert_eq!(
-            ensure_object(serde_json::json!("string")),
-            serde_json::json!({})
+            ensure_object(serde_json::json!("plain string")),
+            serde_json::json!({"raw_input": "plain string"})
         );
-        assert_eq!(ensure_object(serde_json::json!(42)), serde_json::json!({}));
+        assert_eq!(
+            ensure_object(serde_json::json!(42)),
+            serde_json::json!({"raw_input": 42})
+        );
         assert_eq!(
             ensure_object(serde_json::json!([1, 2, 3])),
-            serde_json::json!({})
+            serde_json::json!({"raw_input": [1, 2, 3]})
+        );
+    }
+
+    #[test]
+    fn test_ensure_object_string_containing_json_object_is_parsed() {
+        let input = serde_json::json!(r#"{"query": "rust lang"}"#);
+        let result = ensure_object(input);
+        assert_eq!(result, serde_json::json!({"query": "rust lang"}));
+    }
+
+    #[test]
+    fn test_ensure_object_string_containing_json_array_wraps() {
+        // A string that parses as JSON but not as an object should be wrapped
+        let input = serde_json::json!(r#"[1, 2, 3]"#);
+        let result = ensure_object(input);
+        assert_eq!(result, serde_json::json!({"raw_input": "[1, 2, 3]"}));
+    }
+
+    #[test]
+    fn test_ensure_object_bool_wraps_in_raw_input() {
+        assert_eq!(
+            ensure_object(serde_json::json!(true)),
+            serde_json::json!({"raw_input": true})
         );
     }
 

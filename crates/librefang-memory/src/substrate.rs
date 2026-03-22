@@ -88,6 +88,20 @@ impl MemorySubstrate {
         Arc::clone(&self.conn)
     }
 
+    /// Run time-based memory decay, deleting stale memories based on scope TTL.
+    ///
+    /// - USER scope: never decays
+    /// - SESSION scope: decays after `session_ttl_days` of no access
+    /// - AGENT scope: decays after `agent_ttl_days` of no access
+    ///
+    /// Returns the number of memories deleted.
+    pub fn run_decay(
+        &self,
+        config: &librefang_types::config::MemoryDecayConfig,
+    ) -> LibreFangResult<usize> {
+        crate::decay::run_decay(&self.conn, config)
+    }
+
     /// Save an agent entry to persistent storage.
     pub fn save_agent(&self, entry: &AgentEntry) -> LibreFangResult<()> {
         self.structured.save_agent(entry)
@@ -239,6 +253,15 @@ impl MemorySubstrate {
     /// For each agent, keep only the newest `max_per_agent` sessions. Returns count deleted.
     pub fn cleanup_excess_sessions(&self, max_per_agent: u32) -> LibreFangResult<u64> {
         self.sessions.cleanup_excess_sessions(max_per_agent)
+    }
+
+    /// Full-text search across session content using FTS5.
+    pub fn search_sessions(
+        &self,
+        query: &str,
+        agent_id: Option<&AgentId>,
+    ) -> LibreFangResult<Vec<crate::session::SessionSearchResult>> {
+        self.sessions.search_sessions(query, agent_id)
     }
 
     /// Load canonical session context for cross-channel memory.

@@ -5,9 +5,24 @@ use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+
+/// Result from a full-text session search.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionSearchResult {
+    /// The session that matched.
+    pub session_id: String,
+    /// The owning agent ID.
+    pub agent_id: String,
+    /// A text snippet showing the matching context.
+    pub snippet: String,
+    /// FTS5 rank score (lower is better match).
+    pub rank: f64,
+}
 
 /// A conversation session with message history.
 #[derive(Debug, Clone)]
@@ -22,6 +37,33 @@ pub struct Session {
     pub context_window_tokens: u64,
     /// Optional human-readable session label.
     pub label: Option<String>,
+}
+
+/// Portable session export for hibernation / session state transfer.
+///
+/// Contains everything needed to reconstruct a session on another instance
+/// or after a context window hibernation cycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionExport {
+    /// Schema version for forward compatibility.
+    pub version: u32,
+    /// Human-readable agent name at export time.
+    pub agent_name: String,
+    /// Agent ID that owned the session.
+    pub agent_id: String,
+    /// Original session ID.
+    pub session_id: String,
+    /// Full conversation messages.
+    pub messages: Vec<Message>,
+    /// Estimated token count at export time.
+    pub context_window_tokens: u64,
+    /// Optional human-readable session label.
+    pub label: Option<String>,
+    /// ISO-8601 timestamp when the export was created.
+    pub exported_at: String,
+    /// Extensible metadata (model name, provider, custom tags, etc.).
+    #[serde(default)]
+    pub metadata: HashMap<String, serde_json::Value>,
 }
 
 /// Session store backed by SQLite.
@@ -119,7 +161,7 @@ impl SessionStore {
         }
     }
 
-    /// Save a session to the database.
+    /// Save a session to the database and update the FTS5 index.
     pub fn save_session(&self, session: &Session) -> LibreFangResult<()> {
         let conn = self
             .conn
@@ -142,34 +184,72 @@ impl SessionStore {
             ],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+        // Update FTS5 index — extract text from all messages.
+        let content = Self::extract_text_content(&session.messages);
+        let session_id_str = session.id.0.to_string();
+        let agent_id_str = session.agent_id.0.to_string();
+
+        // Delete existing FTS entry, then insert fresh content.
+        let _ = conn.execute(
+            "DELETE FROM sessions_fts WHERE session_id = ?1",
+            rusqlite::params![session_id_str],
+        );
+        if !content.is_empty() {
+            let _ = conn.execute(
+                "INSERT INTO sessions_fts (session_id, agent_id, content) VALUES (?1, ?2, ?3)",
+                rusqlite::params![session_id_str, agent_id_str, content],
+            );
+        }
+
         Ok(())
     }
 
-    /// Delete a session from the database.
+    /// Extract concatenated text content from a list of messages.
+    fn extract_text_content(messages: &[Message]) -> String {
+        messages
+            .iter()
+            .map(|m| m.content.text_content())
+            .filter(|t| !t.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Delete a session from the database and its FTS5 index entry.
     pub fn delete_session(&self, session_id: SessionId) -> LibreFangResult<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let id_str = session_id.0.to_string();
         conn.execute(
             "DELETE FROM sessions WHERE id = ?1",
-            rusqlite::params![session_id.0.to_string()],
+            rusqlite::params![id_str],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let _ = conn.execute(
+            "DELETE FROM sessions_fts WHERE session_id = ?1",
+            rusqlite::params![id_str],
+        );
         Ok(())
     }
 
-    /// Delete all sessions belonging to an agent.
+    /// Delete all sessions belonging to an agent and their FTS5 index entries.
     pub fn delete_agent_sessions(&self, agent_id: AgentId) -> LibreFangResult<()> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+        let agent_id_str = agent_id.0.to_string();
         conn.execute(
             "DELETE FROM sessions WHERE agent_id = ?1",
-            rusqlite::params![agent_id.0.to_string()],
+            rusqlite::params![agent_id_str],
         )
         .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+        let _ = conn.execute(
+            "DELETE FROM sessions_fts WHERE agent_id = ?1",
+            rusqlite::params![agent_id_str],
+        );
         Ok(())
     }
 
@@ -435,6 +515,88 @@ impl SessionStore {
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
 
         Ok(deleted as u64)
+    }
+}
+
+impl SessionStore {
+    /// Full-text search across session content using FTS5.
+    ///
+    /// Returns matching sessions ranked by relevance. Optionally filter by agent.
+    pub fn search_sessions(
+        &self,
+        query: &str,
+        agent_id: Option<&AgentId>,
+    ) -> LibreFangResult<Vec<SessionSearchResult>> {
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Sanitize FTS5 query: escape special characters to prevent injection.
+        // FTS5 treats `*`, `"`, `NEAR`, `OR`, `AND`, `NOT` as operators.
+        // Wrap each word in double quotes to treat as literal phrase tokens.
+        let sanitized: String = query
+            .split_whitespace()
+            .map(|word| {
+                let escaped = word.replace('"', "\"\"");
+                format!("\"{escaped}\"")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| LibreFangError::Internal(e.to_string()))?;
+
+        let results = if let Some(aid) = agent_id {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT session_id, agent_id, snippet(sessions_fts, 2, '<b>', '</b>', '...', 32), rank
+                     FROM sessions_fts
+                     WHERE content MATCH ?1 AND agent_id = ?2
+                     ORDER BY rank
+                     LIMIT 50",
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+            let rows = stmt
+                .query_map(rusqlite::params![sanitized, aid.0.to_string()], |row| {
+                    Ok(SessionSearchResult {
+                        session_id: row.get(0)?,
+                        agent_id: row.get(1)?,
+                        snippet: row.get(2)?,
+                        rank: row.get(3)?,
+                    })
+                })
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+            rows.filter_map(|r| r.ok()).collect()
+        } else {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT session_id, agent_id, snippet(sessions_fts, 2, '<b>', '</b>', '...', 32), rank
+                     FROM sessions_fts
+                     WHERE content MATCH ?1
+                     ORDER BY rank
+                     LIMIT 50",
+                )
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+            let rows = stmt
+                .query_map(rusqlite::params![sanitized], |row| {
+                    Ok(SessionSearchResult {
+                        session_id: row.get(0)?,
+                        agent_id: row.get(1)?,
+                        snippet: row.get(2)?,
+                        rank: row.get(3)?,
+                    })
+                })
+                .map_err(|e| LibreFangError::Memory(e.to_string()))?;
+
+            rows.filter_map(|r| r.ok()).collect()
+        };
+
+        Ok(results)
     }
 }
 
@@ -995,5 +1157,85 @@ mod tests {
         assert_eq!(line2["role"], "assistant");
         assert_eq!(line2["content"], "Hi there!");
         assert!(line2.get("tool_use").is_none());
+    }
+
+    #[test]
+    fn test_fts_search_sessions() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        session
+            .messages
+            .push(Message::user("The quick brown fox jumps over the lazy dog"));
+        session
+            .messages
+            .push(Message::assistant("That is a classic pangram!"));
+        store.save_session(&session).unwrap();
+
+        // Search for existing content
+        let results = store.search_sessions("fox", None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].session_id, session.id.0.to_string());
+
+        // Search with agent filter
+        let results = store.search_sessions("pangram", Some(&agent_id)).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Search with wrong agent should return nothing
+        let other_agent = AgentId::new();
+        let results = store.search_sessions("fox", Some(&other_agent)).unwrap();
+        assert!(results.is_empty());
+
+        // Search for non-existent content
+        let results = store.search_sessions("elephant", None).unwrap();
+        assert!(results.is_empty());
+
+        // Empty query should return nothing
+        let results = store.search_sessions("", None).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_fts_updates_on_save() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        session.messages.push(Message::user("alpha beta gamma"));
+        store.save_session(&session).unwrap();
+
+        let results = store.search_sessions("alpha", None).unwrap();
+        assert_eq!(results.len(), 1);
+
+        // Update session with different content
+        session.messages.clear();
+        session.messages.push(Message::user("delta epsilon zeta"));
+        store.save_session(&session).unwrap();
+
+        // Old content should no longer match
+        let results = store.search_sessions("alpha", None).unwrap();
+        assert!(results.is_empty());
+
+        // New content should match
+        let results = store.search_sessions("delta", None).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_fts_cleaned_on_delete() {
+        let store = setup();
+        let agent_id = AgentId::new();
+        let mut session = store.create_session(agent_id).unwrap();
+        session
+            .messages
+            .push(Message::user("searchable content here"));
+        store.save_session(&session).unwrap();
+
+        let results = store.search_sessions("searchable", None).unwrap();
+        assert_eq!(results.len(), 1);
+
+        store.delete_session(session.id).unwrap();
+
+        let results = store.search_sessions("searchable", None).unwrap();
+        assert!(results.is_empty());
     }
 }

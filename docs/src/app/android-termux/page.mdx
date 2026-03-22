@@ -1,0 +1,120 @@
+# Running LibreFang on Android (Termux)
+
+LibreFang provides pre-built `aarch64-linux-android` binaries in every release, making it possible to run the full Agent OS on Android devices via [Termux](https://termux.dev/).
+
+## Prerequisites
+
+- An Android device with an ARM64 (aarch64) processor (most modern Android phones)
+- [Termux](https://f-droid.org/en/packages/com.termux/) installed from F-Droid (recommended over Play Store)
+
+## Installation
+
+### 1. Install system dependencies
+
+Open Termux and install the required packages:
+
+```bash
+pkg update && pkg upgrade
+pkg install openssl curl tar
+```
+
+### 2. Download the binary
+
+Download the latest `aarch64-linux-android` binary from [GitHub Releases](https://github.com/librefang/librefang/releases):
+
+```bash
+# Replace vX.Y.Z with the latest version tag
+curl -fsSL https://github.com/librefang/librefang/releases/download/vX.Y.Z/librefang-aarch64-linux-android.tar.gz -o librefang.tar.gz
+tar xzf librefang.tar.gz
+chmod +x librefang
+```
+
+Move it to a directory in your PATH:
+
+```bash
+mv librefang $PREFIX/bin/
+```
+
+### 3. Verify the installation
+
+```bash
+librefang --version
+```
+
+## Configuration
+
+Create the default config directory and file:
+
+```bash
+mkdir -p ~/.librefang
+cat > ~/.librefang/config.toml << 'EOF'
+[providers.groq]
+api_key = "your-groq-api-key"
+EOF
+```
+
+See the [Configuration](/configuration) docs for the full list of options.
+
+## Usage
+
+### Start the daemon
+
+```bash
+librefang start
+```
+
+The API server will be available at `http://127.0.0.1:4545` by default.
+
+### Run in the foreground
+
+For Termux sessions that may be interrupted, you can start in the foreground and use Termux's notification bar to keep the session alive:
+
+```bash
+# Acquire a Termux wake lock to prevent the process from being killed
+termux-wake-lock
+
+# Start the daemon
+librefang start
+```
+
+### Access the dashboard
+
+Open a browser on the device and navigate to `http://127.0.0.1:4545` to access the web dashboard.
+
+## Troubleshooting
+
+### Binary fails to start
+
+Make sure the binary has execute permissions:
+
+```bash
+chmod +x $PREFIX/bin/librefang
+```
+
+### OpenSSL errors
+
+Install or update OpenSSL in Termux:
+
+```bash
+pkg install openssl
+```
+
+### Process killed in background
+
+Android aggressively kills background processes. Use `termux-wake-lock` or run LibreFang inside a `tmux` or `screen` session:
+
+```bash
+pkg install tmux
+tmux new -s librefang
+librefang start
+# Detach with Ctrl+B, then D
+```
+
+### Port already in use
+
+If port 4545 is already occupied, configure a different port in your config:
+
+```toml
+[server]
+port = 4546
+```

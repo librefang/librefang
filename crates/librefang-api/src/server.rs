@@ -91,6 +91,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::post(routes::send_message),
         )
         .route(
+            "/agents/{id}/inject",
+            axum::routing::post(routes::inject_message),
+        )
+        .route(
             "/agents/{id}/message/stream",
             axum::routing::post(routes::send_message_stream),
         )
@@ -105,6 +109,14 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .route(
             "/agents/{id}/sessions/{session_id}/switch",
             axum::routing::post(routes::switch_agent_session),
+        )
+        .route(
+            "/agents/{id}/sessions/{session_id}/export",
+            axum::routing::get(routes::export_session),
+        )
+        .route(
+            "/agents/{id}/sessions/import",
+            axum::routing::post(routes::import_session),
         )
         .route(
             "/agents/{id}/session/reset",
@@ -334,6 +346,18 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/workflows/{id}/runs",
             axum::routing::get(routes::list_workflow_runs),
         )
+        .route(
+            "/workflow-templates",
+            axum::routing::get(routes::list_templates),
+        )
+        .route(
+            "/workflow-templates/{id}",
+            axum::routing::get(routes::get_template),
+        )
+        .route(
+            "/workflow-templates/{id}/instantiate",
+            axum::routing::post(routes::instantiate_template),
+        )
         .route("/skills", axum::routing::get(routes::list_skills))
         .route(
             "/skills/install",
@@ -478,6 +502,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::get(routes::agent_budget_status).put(routes::update_agent_budget),
         )
         .route("/sessions", axum::routing::get(routes::list_sessions))
+        .route(
+            "/sessions/search",
+            axum::routing::get(routes::search_sessions),
+        )
         .route(
             "/sessions/cleanup",
             axum::routing::post(routes::session_cleanup),

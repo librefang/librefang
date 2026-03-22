@@ -1,0 +1,120 @@
+# 在 Android 上运行 LibreFang (Termux)
+
+LibreFang 在每个版本中提供预构建的 `aarch64-linux-android` 二进制文件，可以通过 [Termux](https://termux.dev/) 在 Android 设备上运行完整的 Agent OS。
+
+## 前置要求
+
+- 具有 ARM64 (aarch64) 处理器的 Android 设备（大多数现代 Android 手机）
+- 从 F-Droid 安装的 [Termux](https://f-droid.org/en/packages/com.termux/)（推荐，而非 Play Store 版本）
+
+## 安装
+
+### 1. 安装系统依赖
+
+打开 Termux 并安装所需的包：
+
+```bash
+pkg update && pkg upgrade
+pkg install openssl curl tar
+```
+
+### 2. 下载二进制文件
+
+从 [GitHub Releases](https://github.com/librefang/librefang/releases) 下载最新的 `aarch64-linux-android` 二进制文件：
+
+```bash
+# 将 vX.Y.Z 替换为最新版本标签
+curl -fsSL https://github.com/librefang/librefang/releases/download/vX.Y.Z/librefang-aarch64-linux-android.tar.gz -o librefang.tar.gz
+tar xzf librefang.tar.gz
+chmod +x librefang
+```
+
+将其移动到 PATH 中的目录：
+
+```bash
+mv librefang $PREFIX/bin/
+```
+
+### 3. 验证安装
+
+```bash
+librefang --version
+```
+
+## 配置
+
+创建默认配置目录和文件：
+
+```bash
+mkdir -p ~/.librefang
+cat > ~/.librefang/config.toml << 'EOF'
+[providers.groq]
+api_key = "your-groq-api-key"
+EOF
+```
+
+完整配置选项请参见[配置文档](/zh/configuration)。
+
+## 使用
+
+### 启动守护进程
+
+```bash
+librefang start
+```
+
+API 服务器默认在 `http://127.0.0.1:4545` 上可用。
+
+### 前台运行
+
+对于可能被中断的 Termux 会话，可以在前台启动并使用 Termux 通知栏保持会话活跃：
+
+```bash
+# 获取 Termux 唤醒锁以防止进程被终止
+termux-wake-lock
+
+# 启动守护进程
+librefang start
+```
+
+### 访问仪表板
+
+在设备上打开浏览器，访问 `http://127.0.0.1:4545` 即可使用 Web 仪表板。
+
+## 故障排除
+
+### 二进制文件无法启动
+
+确保二进制文件有执行权限：
+
+```bash
+chmod +x $PREFIX/bin/librefang
+```
+
+### OpenSSL 错误
+
+在 Termux 中安装或更新 OpenSSL：
+
+```bash
+pkg install openssl
+```
+
+### 后台进程被终止
+
+Android 会积极终止后台进程。使用 `termux-wake-lock` 或在 `tmux`/`screen` 会话中运行 LibreFang：
+
+```bash
+pkg install tmux
+tmux new -s librefang
+librefang start
+# 按 Ctrl+B 然后 D 分离会话
+```
+
+### 端口被占用
+
+如果 4545 端口已被占用，在配置中更改端口：
+
+```toml
+[server]
+port = 4546
+```

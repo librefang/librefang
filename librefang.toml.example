@@ -38,6 +38,14 @@ usage_footer = "tokens"         # off | tokens | cost | full
 decay_rate = 0.05               # Memory confidence decay per cycle
 # embedding_model = "all-MiniLM-L6-v2"
 
+# ── Memory Decay (time-based expiry) ────────────────────────
+# [memory.decay]
+# enabled = false               # Enable time-based memory decay
+# session_ttl_days = 7          # SESSION memories expire after N days of no access
+# agent_ttl_days = 30           # AGENT memories expire after N days of no access
+# decay_interval_hours = 1      # How often to run the decay sweep
+# Note: USER memories never decay.
+
 # ── Proactive Memory (auto-memorize & auto-retrieve) ─────────
 [proactive_memory]
 enabled = true
@@ -64,6 +72,14 @@ readability = true              # Clean HTML → readable text
 main_lane = 3                   # Concurrent user messages
 cron_lane = 2                   # Concurrent scheduled jobs
 subagent_lane = 3               # Concurrent child agents
+# Heartbeat monitor (global defaults for autonomous agents)
+# [heartbeat]
+# check_interval_secs = 30               # How often to check agent health
+# default_timeout_secs = 60              # Seconds of inactivity before agent is unresponsive
+# keep_recent = 10                       # Heartbeat turns to keep in session context
+
+# Prompt caching — reduces LLM costs by caching system prompts (default: true)
+# prompt_caching = true                   # Anthropic cache_control + OpenAI auto-cache
 
 # ── Shell Execution Policy ───────────────────────────────────
 [exec_policy]
@@ -77,6 +93,14 @@ mode = "hybrid"                 # off | restart | hot | hybrid
 debounce_ms = 500
 
 # ── Provider Regions (uncomment to use) ──────────────────────
+# Extended thinking — enable chain-of-thought for supported models (Claude, DeepSeek, etc.)
+# [thinking]
+# budget_tokens = 10000                   # Max tokens the model can use for thinking
+# stream_thinking = false                 # Stream thinking tokens to the client
+
+# Provider region selection (provider ID → region name)
+# Some providers offer region-specific endpoints defined in registry TOML files.
+# Selecting a region overrides the provider's base_url (and optionally api_key_env).
 # [provider_regions]
 # qwen = "intl"                # Qwen international endpoint
 # minimax = "china"            # MiniMax China endpoint
@@ -123,6 +147,10 @@ debounce_ms = 500
 # bot_token_env = "TELEGRAM_BOT_TOKEN"
 # default_agent = "assistant"
 # allowed_users = []
+# # Route forum threads to specific agents:
+# [channels.telegram.thread_routes]
+# "12345" = "research-agent"
+# "67890" = "coding-agent"
 
 # [channels.discord]
 # bot_token_env = "DISCORD_BOT_TOKEN"
@@ -139,6 +167,12 @@ debounce_ms = 500
 # default_agent = "assistant"
 
 # ── MCP Servers (external tool integration) ──────────────────
+# PII privacy controls — filter personal data before sending to LLM providers
+# [privacy]
+# mode = "pseudonymize"                  # "off" (default), "redact", or "pseudonymize"
+# redact_patterns = ["\\bCUST-\\d{6}\\b"]  # Additional regex patterns to filter
+
+# MCP server connections
 # [[mcp_servers]]
 # name = "filesystem"
 # timeout_secs = 30

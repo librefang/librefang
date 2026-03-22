@@ -194,6 +194,7 @@ export interface WorkflowStep {
   agent_name?: string;
   prompt: string;
   timeout_secs?: number;
+  inherit_context?: boolean;
 }
 
 export interface WorkflowItem {
@@ -749,6 +750,43 @@ export async function clawhubGetSkill(slug: string): Promise<ClawHubSkillDetail>
 export async function clawhubInstall(slug: string, version?: string): Promise<ApiActionResponse> {
   // Use default timeout for install - ClawHub can be slow
   return post<ApiActionResponse>("/api/clawhub/install", { slug, version: version || "latest" });
+}
+
+// ── Workflow Templates ────────────────────────────────
+
+export interface TemplateParameter {
+  name: string;
+  description?: string;
+  param_type?: string;
+  default?: unknown;
+  required?: boolean;
+}
+
+export interface WorkflowTemplate {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  tags?: string[];
+  parameters?: TemplateParameter[];
+  steps?: WorkflowStep[];
+}
+
+export async function listWorkflowTemplates(q?: string, category?: string): Promise<WorkflowTemplate[]> {
+  const params = new URLSearchParams();
+  if (q) params.set("q", q);
+  if (category) params.set("category", category);
+  const qs = params.toString();
+  const data = await get<{ templates?: WorkflowTemplate[] }>(`/api/workflow-templates${qs ? `?${qs}` : ""}`);
+  return data.templates ?? [];
+}
+
+export async function getWorkflowTemplate(id: string): Promise<WorkflowTemplate> {
+  return get<WorkflowTemplate>(`/api/workflow-templates/${encodeURIComponent(id)}`);
+}
+
+export async function instantiateTemplate(id: string, params: Record<string, unknown>): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>(`/api/workflow-templates/${encodeURIComponent(id)}/instantiate`, params);
 }
 
 export async function listWorkflows(): Promise<WorkflowItem[]> {

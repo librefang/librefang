@@ -477,6 +477,23 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(result.response)
     }
 
+    async fn send_message_ephemeral(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> Result<String, String> {
+        let result = self
+            .kernel
+            .send_message_ephemeral(agent_id, message)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        if result.silent {
+            Ok(String::new())
+        } else {
+            Ok(result.response)
+        }
+    }
+
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
         Ok(self.kernel.registry.find_by_name(name).map(|e| e.id))
     }
@@ -711,11 +728,13 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                     librefang_kernel::workflow::StepAgent::ById { id } => {
                         let aid: AgentId = id.parse().ok()?;
                         let entry = registry_ref.get(aid)?;
-                        Some((aid, entry.name.clone()))
+                        let inherit = entry.manifest.inherit_parent_context;
+                        Some((aid, entry.name.clone(), inherit))
                     }
                     librefang_kernel::workflow::StepAgent::ByName { name } => {
                         let entry = registry_ref.find_by_name(name)?;
-                        Some((entry.id, entry.name.clone()))
+                        let inherit = entry.manifest.inherit_parent_context;
+                        Some((entry.id, entry.name.clone(), inherit))
                     }
                 },
                 |agent_id, message| {
@@ -1555,7 +1574,8 @@ pub async fn start_channel_bridge_with_config(
                     poll_interval,
                     tg_config.api_url.clone(),
                 )
-                .with_account_id(tg_config.account_id.clone()),
+                .with_account_id(tg_config.account_id.clone())
+                .with_thread_routes(tg_config.thread_routes.clone()),
             );
             adapters.push((
                 adapter,

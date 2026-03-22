@@ -30,7 +30,89 @@ use librefang_types::model_catalog::{
     VOLCENGINE_CODING_BASE_URL, XAI_BASE_URL, ZAI_BASE_URL, ZAI_CODING_BASE_URL, ZHIPU_BASE_URL,
     ZHIPU_CODING_BASE_URL,
 };
+use dashmap::DashMap;
 use std::sync::Arc;
+
+// ── Driver Cache ────────────────────────────────────────────────
+
+/// Thread-safe, lazy-initializing cache for LLM drivers.
+///
+/// Instead of creating a new HTTP-client-bearing driver on every agent message,
+/// `DriverCache` keeps one `Arc<dyn LlmDriver>` per unique
+/// `(provider, api_key, base_url)` tuple and returns a clone of the `Arc` on
+/// subsequent calls. This eliminates redundant TLS handshakes and connection-pool
+/// setup during startup and steady-state operation.
+pub struct DriverCache {
+    cache: DashMap<String, Arc<dyn LlmDriver>>,
+}
+
+impl Default for DriverCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DriverCache {
+    /// Create an empty driver cache.
+    pub fn new() -> Self {
+        Self {
+            cache: DashMap::new(),
+        }
+    }
+
+    /// Return a cached driver for the given config, or create (and cache) one.
+    ///
+    /// The cache key is derived from `(provider, api_key, base_url)` so that
+    /// different credentials or endpoints produce distinct drivers.
+    pub fn get_or_create(
+        &self,
+        config: &DriverConfig,
+    ) -> Result<Arc<dyn LlmDriver>, LlmError> {
+        let key = Self::cache_key(config);
+        if let Some(driver) = self.cache.get(&key) {
+            return Ok(Arc::clone(driver.value()));
+        }
+        let driver = create_driver(config)?;
+        self.cache.insert(key, Arc::clone(&driver));
+        Ok(driver)
+    }
+
+    /// Invalidate all cached drivers (e.g. after a config hot-reload).
+    pub fn clear(&self) {
+        self.cache.clear();
+    }
+
+    /// Number of cached drivers (useful for metrics / debugging).
+    pub fn len(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// Whether the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.cache.is_empty()
+    }
+
+    /// Build a deterministic cache key from the driver config fields that
+    /// affect which concrete driver instance is produced.
+    fn cache_key(config: &DriverConfig) -> String {
+        // We include provider, api_key hash (not the raw key), and base_url.
+        // Hashing the api_key avoids storing secrets as map keys while still
+        // distinguishing configs that differ only by credential.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        config.api_key.as_deref().unwrap_or("").hash(&mut hasher);
+        let key_hash = hasher.finish();
+
+        format!(
+            "{}|{}|{}",
+            config.provider,
+            key_hash,
+            config.base_url.as_deref().unwrap_or("")
+        )
+    }
+}
 
 // ── Registry Types ───────────────────────────────────────────────
 
@@ -1157,5 +1239,64 @@ mod tests {
             "Error should mention endpoint: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_driver_cache_returns_same_arc() {
+        let cache = DriverCache::new();
+        let config = DriverConfig {
+            provider: "ollama".to_string(),
+            api_key: None,
+            base_url: Some("http://localhost:11434/v1".to_string()),
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
+            skip_permissions: true,
+        };
+        let d1 = cache.get_or_create(&config).unwrap();
+        let d2 = cache.get_or_create(&config).unwrap();
+        assert!(Arc::ptr_eq(&d1, &d2), "Cache should return the same Arc");
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn test_driver_cache_different_keys_produce_different_drivers() {
+        let cache = DriverCache::new();
+        let config_a = DriverConfig {
+            provider: "ollama".to_string(),
+            api_key: Some("key-a".to_string()),
+            base_url: Some("http://localhost:11434/v1".to_string()),
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
+            skip_permissions: true,
+        };
+        let config_b = DriverConfig {
+            provider: "ollama".to_string(),
+            api_key: Some("key-b".to_string()),
+            base_url: Some("http://localhost:11434/v1".to_string()),
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
+            skip_permissions: true,
+        };
+        let d_a = cache.get_or_create(&config_a).unwrap();
+        let d_b = cache.get_or_create(&config_b).unwrap();
+        assert!(!Arc::ptr_eq(&d_a, &d_b), "Different keys should produce different drivers");
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn test_driver_cache_clear() {
+        let cache = DriverCache::new();
+        let config = DriverConfig {
+            provider: "ollama".to_string(),
+            api_key: None,
+            base_url: Some("http://localhost:11434/v1".to_string()),
+            vertex_ai: librefang_types::config::VertexAiConfig::default(),
+            azure_openai: librefang_types::config::AzureOpenAiConfig::default(),
+            skip_permissions: true,
+        };
+        cache.get_or_create(&config).unwrap();
+        assert_eq!(cache.len(), 1);
+        cache.clear();
+        assert!(cache.is_empty());
     }
 }

@@ -44,7 +44,10 @@
     "template_hint": "模板从 ~/.librefang/agents/{name}/agent.toml 加载",
     "manifest_toml": "智能体清单 (TOML)",
     "suspend": "暂停", "resume": "恢复", "core_agents": "核心智能体", "hands": "Hands",
-    "hand_badge": "HAND", "tools_cap": "工具", "network": "网络"
+    "hand_badge": "HAND", "tools_cap": "工具", "network": "网络",
+    "thinking": "思考模式", "thinking_enabled": "启用深度思考", "budget_tokens": "思考令牌预算",
+    "stream_thinking": "流式输出思考过程", "thinking_hint": "预算越高推理越深，花费越多",
+    "thinking_toml_hint": "添加 [thinking] 配置段以启用此智能体的深度思考能力"
   },
   "providers": {
     "title": "供应商", "subtitle": "管理大模型 API 连接和配置。",
@@ -142,6 +145,7 @@
     "collapse_sidebar": "折叠侧栏", "expand_sidebar": "展开侧栏",
     "ctx_edit": "编辑节点", "ctx_copy": "复制", "ctx_duplicate": "复制节点", "ctx_add_agent": "添加智能体节点", "ctx_paste": "粘贴", "ctx_select_all": "全选", "ctx_auto_layout": "自动排列",
     "click_to_assign": "点击绑定智能体", "saved": "已保存", "exported": "已导出", "imported": "已导入", "import_error": "无效的工作流文件",
+    "templates": "模板", "browse_templates": "浏览模板", "use_template": "使用模板", "template_params": "模板参数", "no_templates": "暂无模板", "template_search": "搜索模板...", "template_instantiate_error": "从模板创建工作流失败",
     "shortcuts_title": "快捷键",
     "sc_undo": "撤销", "sc_redo": "重做", "sc_copy": "复制", "sc_paste": "粘贴", "sc_duplicate": "复制节点",
     "sc_select_all": "全选", "sc_group": "创建分组", "sc_ungroup": "解散分组", "sc_fit_view": "适配视口",

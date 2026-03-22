@@ -78,6 +78,15 @@ pub struct AutonomousConfig {
     pub max_restarts: u32,
     /// Heartbeat interval in seconds.
     pub heartbeat_interval_secs: u64,
+    /// Per-agent heartbeat timeout override in seconds.
+    /// When set, the agent is considered unresponsive after this many seconds
+    /// of inactivity, instead of using `heartbeat_interval_secs * 2`.
+    #[serde(default)]
+    pub heartbeat_timeout_secs: Option<u32>,
+    /// Per-agent override for how many recent heartbeat turns to keep
+    /// when pruning NO_REPLY heartbeat messages from session context.
+    #[serde(default)]
+    pub heartbeat_keep_recent: Option<usize>,
     /// Channel to send heartbeat status to (e.g., "telegram", "discord").
     pub heartbeat_channel: Option<String>,
 }
@@ -89,6 +98,8 @@ impl Default for AutonomousConfig {
             max_iterations: 50,
             max_restarts: 10,
             heartbeat_interval_secs: 30,
+            heartbeat_timeout_secs: None,
+            heartbeat_keep_recent: None,
             heartbeat_channel: None,
         }
     }
@@ -513,6 +524,15 @@ pub struct AgentManifest {
     /// for this agent. When empty (default), all installed plugins are available.
     #[serde(default, deserialize_with = "crate::serde_compat::vec_lenient")]
     pub allowed_plugins: Vec<String>,
+    /// Whether this agent inherits context from the parent workflow when
+    /// executed as a subagent. When true (default), previous step outputs
+    /// are prepended to the prompt. Set to false to run steps in isolation.
+    #[serde(default = "default_true")]
+    pub inherit_parent_context: bool,
+    /// Per-agent extended thinking configuration.
+    /// Overrides the global `[thinking]` config when set.
+    #[serde(default)]
+    pub thinking: Option<crate::config::ThinkingConfig>,
 }
 
 fn default_true() -> bool {
@@ -551,6 +571,8 @@ impl Default for AgentManifest {
             tools_disabled: false,
             enabled: true,
             allowed_plugins: Vec::new(),
+            inherit_parent_context: true,
+            thinking: None,
         }
     }
 }
@@ -1376,5 +1398,52 @@ model = "llama-3.3-70b-versatile"
             back.allowed_plugins,
             vec!["qdrant-recall".to_string(), "web-search".to_string()]
         );
+    }
+
+    #[test]
+    fn test_manifest_thinking_config_default_is_none() {
+        let manifest = AgentManifest::default();
+        assert!(manifest.thinking.is_none());
+    }
+
+    #[test]
+    fn test_manifest_thinking_config_roundtrip_json() {
+        let manifest = AgentManifest {
+            thinking: Some(crate::config::ThinkingConfig {
+                budget_tokens: 5000,
+                stream_thinking: true,
+            }),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&manifest).unwrap();
+        let back: AgentManifest = serde_json::from_str(&json).unwrap();
+        let tc = back.thinking.unwrap();
+        assert_eq!(tc.budget_tokens, 5000);
+        assert!(tc.stream_thinking);
+    }
+
+    #[test]
+    fn test_per_agent_thinking_overrides_global() {
+        let global = crate::config::ThinkingConfig {
+            budget_tokens: 10_000,
+            stream_thinking: false,
+        };
+        let per_agent = crate::config::ThinkingConfig {
+            budget_tokens: 5_000,
+            stream_thinking: true,
+        };
+
+        let mut manifest = AgentManifest::default();
+
+        // Per-agent is None → should fall back to global
+        assert!(manifest.thinking.is_none());
+        let resolved = manifest.thinking.clone().unwrap_or_else(|| global.clone());
+        assert_eq!(resolved.budget_tokens, 10_000);
+
+        // Per-agent is set → should override global
+        manifest.thinking = Some(per_agent);
+        let resolved = manifest.thinking.clone().unwrap_or(global);
+        assert_eq!(resolved.budget_tokens, 5_000);
+        assert!(resolved.stream_thinking);
     }
 }

@@ -36,8 +36,12 @@ pub struct HeartbeatConfig {
     /// How often to run the heartbeat check (seconds).
     pub check_interval_secs: u64,
     /// Default threshold for unresponsiveness (seconds).
-    /// Overridden per-agent by AutonomousConfig.heartbeat_interval_secs.
+    /// Overridden per-agent by AutonomousConfig.heartbeat_timeout_secs,
+    /// or computed from AutonomousConfig.heartbeat_interval_secs * 2.
     pub default_timeout_secs: u64,
+    /// How many recent heartbeat turns to keep when pruning session context.
+    /// Overridden per-agent by AutonomousConfig.heartbeat_keep_recent.
+    pub keep_recent: usize,
 }
 
 impl Default for HeartbeatConfig {
@@ -45,6 +49,18 @@ impl Default for HeartbeatConfig {
         Self {
             check_interval_secs: DEFAULT_CHECK_INTERVAL_SECS,
             default_timeout_secs: DEFAULT_CHECK_INTERVAL_SECS * UNRESPONSIVE_MULTIPLIER,
+            keep_recent: 10,
+        }
+    }
+}
+
+impl HeartbeatConfig {
+    /// Create a `HeartbeatConfig` from the TOML-level `HeartbeatTomlConfig`.
+    pub fn from_toml(toml: &librefang_types::config::HeartbeatTomlConfig) -> Self {
+        Self {
+            check_interval_secs: toml.check_interval_secs,
+            default_timeout_secs: toml.default_timeout_secs,
+            keep_recent: toml.keep_recent,
         }
     }
 }
@@ -65,12 +81,16 @@ pub fn check_agents(registry: &AgentRegistry, config: &HeartbeatConfig) -> Vec<H
 
         let inactive_secs = (now - entry_ref.last_active).num_seconds();
 
-        // Determine timeout: use agent's autonomous config if set, else default
+        // Determine timeout: per-agent heartbeat_timeout_secs > interval*2 > global default
         let timeout_secs = entry_ref
             .manifest
             .autonomous
             .as_ref()
-            .map(|a| a.heartbeat_interval_secs * UNRESPONSIVE_MULTIPLIER)
+            .and_then(|a| {
+                a.heartbeat_timeout_secs
+                    .map(|t| t as u64)
+                    .or(Some(a.heartbeat_interval_secs * UNRESPONSIVE_MULTIPLIER))
+            })
             .unwrap_or(config.default_timeout_secs) as i64;
 
         let unresponsive = inactive_secs > timeout_secs;

@@ -1451,9 +1451,15 @@ pub struct KernelConfig {
     /// Health check configuration.
     #[serde(default)]
     pub health_check: HealthCheckConfig,
+    /// Heartbeat monitor configuration (global defaults for autonomous agents).
+    #[serde(default)]
+    pub heartbeat: HeartbeatTomlConfig,
     /// Plugin registry configuration.
     #[serde(default)]
     pub plugins: PluginsConfig,
+    /// PII privacy controls for LLM context filtering.
+    #[serde(default)]
+    pub privacy: PrivacyConfig,
     /// Strict config mode: when `true`, the daemon refuses to start if the
     /// config file contains unknown or unrecognised fields. When `false`
     /// (the default), unknown fields are logged as warnings but the daemon
@@ -1947,6 +1953,56 @@ impl Default for AuditConfig {
     }
 }
 
+/// PII privacy mode for LLM context filtering.
+///
+/// Controls how personally identifiable information is handled before
+/// messages are sent to LLM providers.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrivacyMode {
+    /// No PII filtering — messages are sent as-is.
+    #[default]
+    Off,
+    /// Replace detected PII with `[REDACTED]`.
+    Redact,
+    /// Replace detected PII with stable pseudonyms (User-A, User-B, etc.).
+    /// Pseudonym mappings are stable within a session.
+    Pseudonymize,
+}
+
+/// PII privacy controls for LLM context.
+///
+/// When enabled, the runtime filters personally identifiable information
+/// (emails, phone numbers, credit card numbers, SSNs) from user messages
+/// and sender context before they are sent to LLM providers.
+///
+/// Configure in config.toml:
+/// ```toml
+/// [privacy]
+/// mode = "pseudonymize"  # off | redact | pseudonymize
+/// redact_patterns = ["\\b(CUSTOM_ID_\\d+)\\b"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PrivacyConfig {
+    /// Privacy mode: off, redact, or pseudonymize.
+    #[serde(default)]
+    pub mode: PrivacyMode,
+    /// Additional regex patterns to match and redact/pseudonymize.
+    /// These are applied in addition to the built-in PII patterns.
+    #[serde(default)]
+    pub redact_patterns: Vec<String>,
+}
+
+impl Default for PrivacyConfig {
+    fn default() -> Self {
+        Self {
+            mode: PrivacyMode::Off,
+            redact_patterns: Vec::new(),
+        }
+    }
+}
+
 /// Health check configuration.
 ///
 /// Configure in config.toml:
@@ -1965,6 +2021,36 @@ impl Default for HealthCheckConfig {
     fn default() -> Self {
         Self {
             health_check_interval_secs: 60,
+        }
+    }
+}
+
+/// Heartbeat monitor configuration (global defaults).
+///
+/// Configure in config.toml:
+/// ```toml
+/// [heartbeat]
+/// check_interval_secs = 30
+/// default_timeout_secs = 60
+/// keep_recent = 10
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HeartbeatTomlConfig {
+    /// How often to run the heartbeat check (seconds). Default: 30.
+    pub check_interval_secs: u64,
+    /// Default threshold for unresponsiveness (seconds). Default: 60.
+    pub default_timeout_secs: u64,
+    /// How many recent heartbeat turns to keep when pruning session context. Default: 10.
+    pub keep_recent: usize,
+}
+
+impl Default for HeartbeatTomlConfig {
+    fn default() -> Self {
+        Self {
+            check_interval_secs: 30,
+            default_timeout_secs: 60,
+            keep_recent: 10,
         }
     }
 }
@@ -2205,8 +2291,10 @@ impl Default for KernelConfig {
             context_engine: ContextEngineTomlConfig::default(),
             audit: AuditConfig::default(),
             health_check: HealthCheckConfig::default(),
+            heartbeat: HeartbeatTomlConfig::default(),
             plugins: PluginsConfig::default(),
             cors_origin: Vec::new(),
+            privacy: PrivacyConfig::default(),
             strict_config: false,
             qwen_code_path: None,
             sanitize: SanitizeConfig::default(),
@@ -2343,6 +2431,7 @@ impl std::fmt::Debug for KernelConfig {
                 "external_auth",
                 &format!("enabled={}", self.external_auth.enabled),
             )
+            .field("privacy", &format!("{:?}", self.privacy.mode))
             .field("strict_config", &self.strict_config)
             .field("qwen_code_path", &self.qwen_code_path)
             .finish()
@@ -2414,6 +2503,9 @@ pub struct MemoryConfig {
     /// vector similarity. Eliminates the need for an external embedding provider.
     #[serde(default)]
     pub fts_only: Option<bool>,
+    /// Time-based memory decay configuration.
+    #[serde(default)]
+    pub decay: MemoryDecayConfig,
 }
 
 fn default_consolidation_interval() -> u64 {
@@ -2432,6 +2524,35 @@ impl Default for MemoryConfig {
             embedding_dimensions: None,
             consolidation_interval_hours: default_consolidation_interval(),
             fts_only: None,
+            decay: MemoryDecayConfig::default(),
+        }
+    }
+}
+
+/// Time-based memory decay configuration.
+///
+/// When enabled, memories that have not been accessed within their scope's TTL
+/// are automatically deleted during periodic decay runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryDecayConfig {
+    /// Whether time-based decay is enabled.
+    pub enabled: bool,
+    /// SESSION-scope memories expire after this many days of no access.
+    pub session_ttl_days: u32,
+    /// AGENT-scope memories expire after this many days of no access.
+    pub agent_ttl_days: u32,
+    /// How often to run the decay sweep (hours).
+    pub decay_interval_hours: u32,
+}
+
+impl Default for MemoryDecayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            session_ttl_days: 7,
+            agent_ttl_days: 30,
+            decay_interval_hours: 1,
         }
     }
 }
@@ -2604,6 +2725,19 @@ pub struct TelegramConfig {
     /// Per-channel behavior overrides.
     #[serde(default)]
     pub overrides: ChannelOverrides,
+    /// Thread-based agent routing for forum topics.
+    ///
+    /// Maps Telegram `message_thread_id` (as string) to an agent name.
+    /// Messages in a matched thread are routed to that agent instead of
+    /// the `default_agent`. Unmatched threads fall back to normal routing.
+    ///
+    /// ```toml
+    /// [channels.telegram.thread_routes]
+    /// "12345" = "research-agent"
+    /// "67890" = "coding-agent"
+    /// ```
+    #[serde(default)]
+    pub thread_routes: std::collections::HashMap<String, String>,
 }
 
 impl Default for TelegramConfig {
@@ -2616,6 +2750,7 @@ impl Default for TelegramConfig {
             poll_interval_secs: 1,
             api_url: None,
             overrides: ChannelOverrides::default(),
+            thread_routes: std::collections::HashMap::new(),
         }
     }
 }
@@ -5610,5 +5745,34 @@ mod tests {
                 "default config should have valid log_level"
             );
         }
+    }
+
+    #[test]
+    fn test_thinking_config_deserialization() {
+        let toml_str = r#"
+            [thinking]
+            budget_tokens = 20000
+            stream_thinking = true
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        let tc = config.thinking.unwrap();
+        assert_eq!(tc.budget_tokens, 20000);
+        assert!(tc.stream_thinking);
+    }
+
+    #[test]
+    fn test_thinking_config_defaults() {
+        let tc = ThinkingConfig::default();
+        assert_eq!(tc.budget_tokens, 10_000);
+        assert!(!tc.stream_thinking);
+    }
+
+    #[test]
+    fn test_thinking_config_absent_is_none() {
+        let toml_str = r#"
+            log_level = "info"
+        "#;
+        let config: KernelConfig = toml::from_str(toml_str).unwrap();
+        assert!(config.thinking.is_none());
     }
 }
