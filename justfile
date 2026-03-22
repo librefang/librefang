@@ -36,6 +36,10 @@ ci:
 doc:
     cargo doc --workspace --no-deps --open
 
+# Build frontend targets (dashboard, web, docs)
+build-web *ARGS:
+    cargo xtask build-web {{ARGS}}
+
 # Build the React dashboard assets used by librefang-api
 dashboard-build:
     cargo xtask build-web --dashboard
