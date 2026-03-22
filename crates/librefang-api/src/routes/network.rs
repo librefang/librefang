@@ -819,15 +819,15 @@ pub async fn mcp_http(
             None,
             None,
             Some(&skill_snapshot),
-            Some(&state.kernel.mcp_connections_ref()),
-            Some(&state.kernel.web_tools()),
-            Some(&state.kernel.browser()),
+            Some(state.kernel.mcp_connections_ref()),
+            Some(state.kernel.web_tools()),
+            Some(state.kernel.browser()),
             None,
             None,
-            Some(&state.kernel.media()),
+            Some(state.kernel.media()),
             None, // exec_policy
             if state.kernel.config_ref().tts.enabled {
-                Some(&state.kernel.tts())
+                Some(state.kernel.tts())
             } else {
                 None
             },
@@ -836,7 +836,7 @@ pub async fn mcp_http(
             } else {
                 None
             },
-            Some(&*state.kernel.processes()),
+            Some(state.kernel.processes()),
         )
         .await;
 

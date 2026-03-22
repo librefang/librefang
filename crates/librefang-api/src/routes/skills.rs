@@ -1228,7 +1228,7 @@ pub async fn install_hand(
     }
 
     match state.kernel.hands().install_from_content_persisted(
-        &state.kernel.home_dir(),
+        state.kernel.home_dir(),
         toml_content,
         skill_content,
     ) {

@@ -283,12 +283,12 @@ pub async fn build_router(
     let du_val = resolve_dashboard_credential(
         &state.kernel.config_ref().dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
-        &state.kernel.home_dir(),
+        state.kernel.home_dir(),
     );
     let dp_val = resolve_dashboard_credential(
         &state.kernel.config_ref().dashboard_pass,
         "LIBREFANG_DASHBOARD_PASS",
-        &state.kernel.home_dir(),
+        state.kernel.home_dir(),
     );
     let du = du_val.trim();
     let dp = dp_val.trim();
