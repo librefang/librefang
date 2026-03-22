@@ -780,11 +780,11 @@ pub struct TelemetryConfig {
 impl Default for TelemetryConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             otlp_endpoint: "http://localhost:4317".to_string(),
             service_name: "librefang".to_string(),
             sample_rate: 1.0,
-            prometheus_enabled: false,
+            prometheus_enabled: true,
         }
     }
 }
