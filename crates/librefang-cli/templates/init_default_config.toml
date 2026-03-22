@@ -115,6 +115,11 @@ debounce_ms = 500
 # app_token_env = "SLACK_APP_TOKEN"
 # default_agent = "assistant"
 
+# [channels.wechat]                   # Personal WeChat via iLink protocol
+# bot_token_env = "WECHAT_BOT_TOKEN"  # optional: skip QR login on restart
+# default_agent = "assistant"
+# allowed_users = []                  # format: "hash@im.wechat"
+
 # ── MCP Servers (external tool integration) ──────────────────
 # [[mcp_servers]]
 # name = "filesystem"

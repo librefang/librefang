@@ -90,6 +90,7 @@ channel-linkedin = ["librefang-channels/channel-linkedin"]
 channel-mumble = ["librefang-channels/channel-mumble"]
 channel-ntfy = ["librefang-channels/channel-ntfy"]
 channel-qq = ["librefang-channels/channel-qq"]
+channel-wechat = ["librefang-channels/channel-wechat"]
 channel-wecom = ["librefang-channels/channel-wecom"]
 
 all-channels = [
@@ -103,7 +104,7 @@ all-channels = [
     "channel-nostr", "channel-pumble", "channel-threema", "channel-twist",
     "channel-webex", "channel-dingtalk", "channel-discourse", "channel-gitter",
     "channel-gotify", "channel-linkedin", "channel-mumble", "channel-ntfy",
-    "channel-qq", "channel-wecom",
+    "channel-qq", "channel-wechat", "channel-wecom",
 ]
 
 # Mini: 12 core channels

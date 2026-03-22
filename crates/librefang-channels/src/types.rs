@@ -22,6 +22,7 @@ pub enum ChannelType {
     Email,
     Teams,
     Mattermost,
+    WeChat,
     WebChat,
     CLI,
     Custom(String),

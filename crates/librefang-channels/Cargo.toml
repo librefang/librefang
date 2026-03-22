@@ -48,6 +48,7 @@ default = [
     "channel-mumble",
     "channel-ntfy",
     "channel-qq",
+    "channel-wechat",
     "channel-wecom",
 ]
 
@@ -93,6 +94,7 @@ all-channels = [
     "channel-mumble",
     "channel-ntfy",
     "channel-qq",
+    "channel-wechat",
     "channel-wecom",
     "channel-mqtt",
 ]
@@ -139,6 +141,7 @@ channel-linkedin = []
 channel-mumble = []
 channel-ntfy = []
 channel-qq = []
+channel-wechat = []
 channel-wecom = ["dep:roxmltree", "dep:aes", "dep:cbc"]
 channel-mqtt = ["dep:rumqttc"]
 
