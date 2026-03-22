@@ -108,8 +108,8 @@ export function SchedulerPage() {
             {schedules.map(s => {
               const agent = agentMap.get(s.agent_id || "");
               return (
-                <div key={s.id} className="flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle hover:border-brand/30 transition-all">
-                  <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-brand/10 flex items-center justify-center shrink-0">
+                <div key={s.id} className="flex items-start gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border border-border-subtle hover:border-brand/30 transition-all">
+                  <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl bg-brand/10 flex items-center justify-center shrink-0 mt-0.5">
                     <Clock className="w-4 h-4 sm:w-5 sm:h-5 text-brand" />
                   </div>
                   <div className="min-w-0 flex-1">
@@ -120,11 +120,11 @@ export function SchedulerPage() {
                     <div className="flex items-center gap-2 sm:gap-3 mt-0.5 sm:mt-1 text-[9px] sm:text-[10px] text-text-dim/60 flex-wrap">
                       <span className="font-mono bg-main px-1 sm:px-1.5 py-0.5 rounded">{s.cron}</span>
                       <span className="text-text-dim hidden sm:inline">{cronHint(s.cron || "")}</span>
-                      {agent && <span className="font-bold text-brand">{agent.name}</span>}
-                      {!agent && s.agent && <span className="font-bold text-brand">{s.agent}</span>}
+                      {agent && <span className="font-bold text-brand truncate">{agent.name}</span>}
+                      {!agent && s.agent && <span className="font-bold text-brand truncate">{s.agent}</span>}
                     </div>
                   </div>
-                  <div className="flex items-center gap-1 shrink-0">
+                  <div className="flex items-center gap-1 shrink-0 mt-0.5">
                     <Button variant="secondary" size="sm" onClick={() => runMut.mutate(s.id)} disabled={runMut.isPending}>
                       {runMut.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
                     </Button>
