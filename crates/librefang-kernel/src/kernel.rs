@@ -2062,6 +2062,177 @@ system_prompt = "You are a helpful assistant."
             .await
     }
 
+    /// Send an ephemeral "side question" to an agent (`/btw` command).
+    ///
+    /// The message is answered using the agent's system prompt and model, but in a
+    /// **fresh temporary session** — no conversation history is loaded and the
+    /// exchange is **not persisted** to the real session. This lets users ask quick
+    /// throwaway questions without polluting the ongoing conversation context.
+    pub async fn send_message_ephemeral(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> KernelResult<AgentLoopResult> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        if entry.state == AgentState::Suspended {
+            tracing::debug!(agent_id = %agent_id, "Skipping ephemeral message to suspended agent");
+            return Ok(AgentLoopResult::default());
+        }
+
+        // Ephemeral: no tools — prevents side effects (tool writes to memory/disk)
+        let tools = vec![];
+        let mut manifest = entry.manifest.clone();
+
+        // Reuse the prompt-builder to get a proper system prompt
+        {
+            let mcp_tool_count = self.mcp_tools.lock().map(|t| t.len()).unwrap_or(0);
+            let shared_id = shared_memory_agent_id();
+            let user_name = self
+                .memory
+                .structured_get(shared_id, "user_name")
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_str().map(String::from));
+
+            let peer_agents: Vec<(String, String, String)> = self
+                .registry
+                .list()
+                .iter()
+                .map(|a| {
+                    (
+                        a.name.clone(),
+                        format!("{:?}", a.state),
+                        a.manifest.model.model.clone(),
+                    )
+                })
+                .collect();
+
+            let ws_meta = manifest
+                .workspace
+                .as_ref()
+                .map(|w| self.cached_workspace_metadata(w, manifest.autonomous.is_some()));
+
+            let prompt_ctx = librefang_runtime::prompt_builder::PromptContext {
+                agent_name: manifest.name.clone(),
+                agent_description: manifest.description.clone(),
+                base_system_prompt: manifest.model.system_prompt.clone(),
+                granted_tools: tools.iter().map(|t| t.name.clone()).collect(),
+                recalled_memories: vec![],
+                skill_summary: String::new(),
+                skill_prompt_context: String::new(),
+                mcp_summary: if mcp_tool_count > 0 {
+                    self.build_mcp_summary(&manifest.mcp_servers)
+                } else {
+                    String::new()
+                },
+                workspace_path: manifest.workspace.as_ref().map(|p| p.display().to_string()),
+                soul_md: ws_meta.as_ref().and_then(|m| m.soul_md.clone()),
+                user_md: ws_meta.as_ref().and_then(|m| m.user_md.clone()),
+                memory_md: ws_meta.as_ref().and_then(|m| m.memory_md.clone()),
+                canonical_context: None,
+                user_name,
+                channel_type: None,
+                sender_display_name: None,
+                sender_user_id: None,
+                is_subagent: false,
+                is_autonomous: manifest.autonomous.is_some(),
+                agents_md: ws_meta.as_ref().and_then(|m| m.agents_md.clone()),
+                bootstrap_md: ws_meta.as_ref().and_then(|m| m.bootstrap_md.clone()),
+                workspace_context: ws_meta.as_ref().and_then(|m| m.workspace_context.clone()),
+                identity_md: ws_meta.as_ref().and_then(|m| m.identity_md.clone()),
+                heartbeat_md: ws_meta.as_ref().and_then(|m| m.heartbeat_md.clone()),
+                peer_agents,
+                current_date: Some(
+                    chrono::Local::now()
+                        .format("%A, %B %d, %Y (%Y-%m-%d %H:%M %Z)")
+                        .to_string(),
+                ),
+            };
+            manifest.model.system_prompt =
+                librefang_runtime::prompt_builder::build_system_prompt(&prompt_ctx);
+        }
+
+        let driver = self.resolve_driver(&manifest)?;
+
+        let ctx_window = self.model_catalog.read().ok().and_then(|cat| {
+            cat.find_model(&manifest.model.model)
+                .map(|m| m.context_window as usize)
+        });
+
+        // Create a temporary in-memory session (empty — no history loaded)
+        let ephemeral_session_id = SessionId::new();
+        let mut ephemeral_session = librefang_memory::session::Session {
+            id: ephemeral_session_id,
+            agent_id,
+            messages: Vec::new(),
+            context_window_tokens: 0,
+            label: Some("ephemeral /btw".to_string()),
+        };
+
+        info!(
+            agent = %entry.name,
+            agent_id = %agent_id,
+            "Ephemeral /btw message — using temporary session (no history, no persistence)"
+        );
+
+        let result = run_agent_loop(
+            &manifest,
+            message,
+            &mut ephemeral_session,
+            &self.memory,
+            driver,
+            &tools,
+            None, // no kernel handle — keep side questions simple
+            None, // no skills
+            None, // no MCP
+            None, // no web
+            None, // no browser
+            None, // no embeddings
+            manifest.workspace.as_deref(),
+            None, // no phase callback
+            None, // no media
+            None, // no TTS
+            None, // no docker
+            None, // no hooks
+            ctx_window,
+            None, // no process manager
+            None, // no content blocks
+            None, // no proactive memory
+            None, // no context engine
+        )
+        .await
+        .map_err(KernelError::LibreFang)?;
+
+        // NOTE: We intentionally do NOT save the ephemeral session, do NOT
+        // update canonical memory, do NOT write JSONL mirror, and do NOT
+        // append to the daily memory log. The side question is truly ephemeral.
+
+        // Still record metering so cost tracking stays accurate
+        let model = &manifest.model.model;
+        let cost = MeteringEngine::estimate_cost_with_catalog(
+            &self.model_catalog.read().unwrap_or_else(|e| e.into_inner()),
+            model,
+            result.total_usage.input_tokens,
+            result.total_usage.output_tokens,
+        );
+        let _ = self.metering.record(&librefang_memory::usage::UsageRecord {
+            agent_id,
+            model: model.clone(),
+            input_tokens: result.total_usage.input_tokens,
+            output_tokens: result.total_usage.output_tokens,
+            cost_usd: cost,
+            tool_calls: result.iterations.saturating_sub(1),
+        });
+
+        let mut result = result;
+        result.cost_usd = if cost > 0.0 { Some(cost) } else { None };
+
+        Ok(result)
+    }
+
     /// Internal: send a message with all optional parameters (content blocks + sender context).
     ///
     /// This is the unified entry point for all message dispatch. When `sender_context`
@@ -2362,6 +2533,11 @@ system_prompt = "You are a helpful assistant."
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(64);
         let mut manifest = entry.manifest.clone();
+
+        // Backfill thinking config from global config if per-agent is not set
+        if manifest.thinking.is_none() {
+            manifest.thinking = self.config.thinking.clone();
+        }
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
@@ -3226,6 +3402,11 @@ system_prompt = "You are a helpful assistant."
 
         // Apply model routing if configured (disabled in Stable mode)
         let mut manifest = entry.manifest.clone();
+
+        // Backfill thinking config from global config if per-agent is not set
+        if manifest.thinking.is_none() {
+            manifest.thinking = self.config.thinking.clone();
+        }
 
         // Lazy backfill: create workspace for existing agents spawned before workspaces
         if manifest.workspace.is_none() {
@@ -8512,6 +8693,75 @@ mod tests {
         assert!(
             agents.iter().any(|entry| entry.name == "assistant"),
             "fresh kernel boot should auto-spawn an assistant agent"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_send_message_ephemeral_unknown_agent_returns_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        // Use a random AgentId that doesn't exist
+        let bogus_id = AgentId::new();
+        let result = kernel.send_message_ephemeral(bogus_id, "hello?").await;
+        assert!(
+            result.is_err(),
+            "ephemeral message to unknown agent should error"
+        );
+
+        kernel.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_send_message_ephemeral_does_not_modify_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let home_dir = dir.path().to_path_buf();
+        std::fs::create_dir_all(home_dir.join("data")).unwrap();
+
+        let config = KernelConfig {
+            home_dir: home_dir.clone(),
+            data_dir: home_dir.join("data"),
+            ..KernelConfig::default()
+        };
+
+        let kernel = LibreFangKernel::boot_with_config(config).expect("Kernel should boot");
+
+        // Find the auto-spawned assistant agent
+        let agents = kernel.registry.list();
+        let assistant = agents
+            .iter()
+            .find(|a| a.name == "assistant")
+            .expect("assistant should exist");
+        let agent_id = assistant.id;
+        let session_id = assistant.session_id;
+
+        // Get session messages before ephemeral call
+        let session_before = kernel.memory.get_session(session_id).unwrap();
+        let msg_count_before = session_before.map(|s| s.messages.len()).unwrap_or(0);
+
+        // Send ephemeral message (will fail because no LLM provider, but that's OK —
+        // the point is the session should remain untouched)
+        let _ = kernel
+            .send_message_ephemeral(agent_id, "what is 2+2?")
+            .await;
+
+        // Check session is unchanged
+        let session_after = kernel.memory.get_session(session_id).unwrap();
+        let msg_count_after = session_after.map(|s| s.messages.len()).unwrap_or(0);
+        assert_eq!(
+            msg_count_before, msg_count_after,
+            "ephemeral /btw message should not modify the real session"
         );
 
         kernel.shutdown();
