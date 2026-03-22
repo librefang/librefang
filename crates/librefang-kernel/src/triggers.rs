@@ -496,6 +496,12 @@ fn describe_event(event: &Event) -> String {
         EventPayload::Custom(data) => {
             format!("Custom event ({} bytes)", data.len())
         }
+        EventPayload::ApprovalRequested(approval) => {
+            format!(
+                "Approval requested for agent {}: tool '{}', risk {}",
+                approval.agent_id, approval.tool_name, approval.risk_level
+            )
+        }
     }
 }
 

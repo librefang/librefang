@@ -150,6 +150,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/agents/{id}/update",
             axum::routing::put(update_agent),
         )
+        .route(
+            "/agents/{id}/push",
+            axum::routing::post(push_message),
+        )
 }
 use crate::middleware::RequestLanguage;
 use crate::types::*;
@@ -4121,6 +4125,41 @@ pub async fn inject_message(
     Path(id): Path<String>,
     Json(req): Json<InjectMessageRequest>,
 ) -> impl IntoResponse {
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "invalid agent ID"})),
+            );
+        }
+    };
+
+    // Reject oversized injection messages
+    const MAX_INJECT_SIZE: usize = 16 * 1024; // 16KB
+    if req.message.len() > MAX_INJECT_SIZE {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "injection message too large"})),
+        );
+    }
+
+    match state.kernel.inject_message(agent_id, &req.message).await {
+        Ok(injected) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"injected": injected})),
+        ),
+        Err(e) => {
+            let status = if e.to_string().contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (status, Json(serde_json::json!({"error": e.to_string()})))
+        }
+    }
+}
+
 // Push message — proactive outbound messaging via channel adapters
 // ---------------------------------------------------------------------------
 
@@ -4150,34 +4189,11 @@ pub async fn push_message(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": "invalid agent ID"})),
                 Json(serde_json::json!({"error": err_invalid_id})),
             );
         }
     };
 
-    // Reject oversized injection messages
-    const MAX_INJECT_SIZE: usize = 16 * 1024; // 16KB
-    if req.message.len() > MAX_INJECT_SIZE {
-        return (
-            StatusCode::PAYLOAD_TOO_LARGE,
-            Json(serde_json::json!({"error": "injection message too large"})),
-        );
-    }
-
-    match state.kernel.inject_message(agent_id, &req.message).await {
-        Ok(injected) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"injected": injected})),
-        ),
-        Err(e) => {
-            let status = if e.to_string().contains("not found") {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::INTERNAL_SERVER_ERROR
-            };
-            (status, Json(serde_json::json!({"error": e.to_string()})))
-        }
     // Validate agent exists
     if state.kernel.registry.get(agent_id).is_none() {
         return (
