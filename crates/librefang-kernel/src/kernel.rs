@@ -814,8 +814,12 @@ impl LibreFangKernel {
             .clone()
             .unwrap_or_else(|| config.data_dir.join("librefang.db"));
         let memory = Arc::new(
-            MemorySubstrate::open(&db_path, config.memory.decay_rate)
-                .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?,
+            MemorySubstrate::open_with_chunking(
+                &db_path,
+                config.memory.decay_rate,
+                config.memory.chunking.clone(),
+            )
+            .map_err(|e| KernelError::BootFailed(format!("Memory init failed: {e}")))?,
         );
 
         // Create LLM driver.
