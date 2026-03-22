@@ -51,7 +51,18 @@ import { ListSkeleton } from "../components/ui/Skeleton";
 
 const REFRESH_MS = 15000;
 
-/* ── Category icon map ───────────────────────────────────── */
+/* ── Inject slideInRight keyframes once at module level ──── */
+if (typeof document !== "undefined" && !document.getElementById("hands-keyframes")) {
+  const style = document.createElement("style");
+  style.id = "hands-keyframes";
+  style.textContent = `
+    @keyframes slideInRight {
+      from { transform: translateX(100%); opacity: 0; }
+      to   { transform: translateX(0);    opacity: 1; }
+    }
+  `;
+  document.head.appendChild(style);
+}
 
 /* ── Markdown components for chat ─────────────────────────── */
 const mdComponents = {
@@ -471,6 +482,7 @@ function HandDetailPanel({
                     size="sm"
                     onClick={() => instance && onResume(instance.instance_id)}
                     disabled={isPending}
+                    title={t("hands.resume")}
                   >
                     {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
                   </Button>
@@ -480,6 +492,7 @@ function HandDetailPanel({
                     size="sm"
                     onClick={() => instance && onPause(instance.instance_id)}
                     disabled={isPending}
+                    title={t("hands.pause")}
                   >
                     {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Pause className="w-3.5 h-3.5" />}
                   </Button>
@@ -489,6 +502,7 @@ function HandDetailPanel({
                   size="sm"
                   onClick={() => instance && onDeactivate(instance.instance_id)}
                   disabled={isPending}
+                  title={t("hands.deactivate")}
                 >
                   {isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <PowerOff className="w-3.5 h-3.5" />}
                 </Button>
@@ -554,7 +568,7 @@ function HandDetailPanel({
                 {statsQuery.isLoading ? (
                   <div className="flex items-center gap-2 text-text-dim/50 text-[10px]">
                     <Loader2 className="w-3 h-3 animate-spin" />
-                    Loading...
+                    {t("common.loading")}
                   </div>
                 ) : stats.metrics && Object.keys(stats.metrics).length > 0 ? (
                   <div className="grid grid-cols-2 gap-2">
@@ -593,7 +607,7 @@ function HandDetailPanel({
               {settingsQuery.isLoading ? (
                 <div className="flex items-center gap-2 text-text-dim/50 text-[10px]">
                   <Loader2 className="w-3 h-3 animate-spin" />
-                  Loading...
+                  {t("common.loading")}
                 </div>
               ) : settings.settings && settings.settings.length > 0 ? (
                 <div className="rounded-xl border border-border-subtle overflow-hidden divide-y divide-border-subtle/50">
@@ -692,13 +706,6 @@ function HandDetailPanel({
         </div>
       </div>
 
-      {/* CSS animation */}
-      <style>{`
-        @keyframes slideInRight {
-          from { transform: translateX(100%); opacity: 0; }
-          to   { transform: translateX(0);    opacity: 1; }
-        }
-      `}</style>
     </div>
   );
 }
@@ -980,10 +987,12 @@ export function HandsPage() {
     [instances, hands],
   );
 
-  // Filtered inactive hands for the grid
+  // Filtered hands for the grid — exclude hands already shown in active strip
   const filtered = useMemo(() => {
     return hands
       .filter((h) => {
+        // Exclude hands already displayed in the active strip
+        if (activeHandIds.has(h.id)) return false;
         // Category filter
         if (selectedCategory !== "all" && h.category !== selectedCategory) return false;
         // Search filter
@@ -997,11 +1006,7 @@ export function HandsPage() {
         }
         return true;
       })
-      .sort((a, b) => {
-        const aActive = activeHandIds.has(a.id) ? 0 : 1;
-        const bActive = activeHandIds.has(b.id) ? 0 : 1;
-        return aActive - bActive || (a.name || a.id).localeCompare(b.name || b.id);
-      });
+      .sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id));
   }, [hands, search, selectedCategory, activeHandIds]);
 
   async function handleActivate(id: string) {
