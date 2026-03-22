@@ -36,8 +36,22 @@ pub fn resolve_inbox_dir(config: &InboxConfig, home_dir: &Path) -> PathBuf {
     config
         .directory
         .as_deref()
-        .map(PathBuf::from)
+        .map(expand_home_dir)
         .unwrap_or_else(|| home_dir.join("inbox"))
+}
+
+fn expand_home_dir(path: &str) -> PathBuf {
+    if path == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from(path));
+    }
+
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(rest);
+        }
+    }
+
+    PathBuf::from(path)
 }
 
 /// Collect current inbox status (sync — reads fs metadata only).
@@ -434,6 +448,20 @@ mod tests {
             resolve_inbox_dir(&config, &home),
             PathBuf::from("/custom/inbox")
         );
+    }
+
+    #[test]
+    fn test_resolve_inbox_dir_expands_tilde() {
+        let config = InboxConfig {
+            directory: Some("~/.librefang/inbox".to_string()),
+            ..Default::default()
+        };
+        let home = PathBuf::from("/home/user/.librefang");
+        let expected = dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("~"))
+            .join(".librefang")
+            .join("inbox");
+        assert_eq!(resolve_inbox_dir(&config, &home), expected);
     }
 
     #[test]
