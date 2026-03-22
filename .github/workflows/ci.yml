@@ -40,9 +40,9 @@ jobs:
             librsvg2-dev \
             patchelf
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo xtask fmt
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo xtask ci --no-test --no-web
 
   # ── Security audit (independent) ─────────────────────────────────────────────────────
   security:
@@ -52,8 +52,6 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
       - name: Run security audit
         run: |
           # Ignore known vulnerabilities without fix:
@@ -61,7 +59,7 @@ jobs:
           # - lexical-core: transitive through imap (imap 3.x is alpha, nom 8+ required)
           # - rsa: Marvin Attack timing side-channel, no fix available (transitive from librefang-channels)
           # - rustls-webpki 0.102.x: transitive from rumqttc, no compatible upgrade available
-          cargo audit \
+          cargo xtask deps --audit \
             --ignore RUSTSEC-2024-0384 \
             --ignore RUSTSEC-2024-0385 \
             --ignore RUSTSEC-2024-0412 \
