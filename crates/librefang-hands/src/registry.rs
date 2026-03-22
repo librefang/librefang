@@ -142,11 +142,12 @@ impl HandRegistry {
             .filter_map(|e| {
                 let hand_id = e["hand_id"].as_str()?.to_string();
 
-                // Skip entries that were persisted as Paused or Error —
-                // only re-activate hands that were Active before shutdown.
+                let mut was_paused = false;
                 if let Some(status) = e.get("status") {
                     let status_str = status.as_str().unwrap_or("");
-                    if status_str == "Paused" || status_str.starts_with("Error") {
+                    if status_str == "Paused" {
+                        was_paused = true;
+                    } else if status_str.starts_with("Error") {
                         info!(hand = %hand_id, status = %status_str, "Skipping non-active hand from persisted state");
                         return None;
                     }
@@ -162,7 +163,6 @@ impl HandRegistry {
                 let old_agent_id: Option<AgentId> = e
                     .get("agent_id")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
-                let was_paused = e.get("paused").and_then(|v| v.as_bool()).unwrap_or(false);
                 Some((hand_id, config, old_agent_id, was_paused))
             })
             .collect()
@@ -774,6 +774,24 @@ system_prompt = "Test prompt"
         assert_eq!(resumed.status, HandStatus::Active);
 
         reg.deactivate(id).unwrap();
+    }
+
+    #[test]
+    fn load_state_preserves_paused_instances() {
+        let reg = HandRegistry::new();
+        reg.load_bundled(&librefang_runtime::registry_sync::resolve_home_dir_for_tests());
+
+        let instance = reg.activate("clip", HashMap::new()).unwrap();
+        reg.pause(instance.instance_id).unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state_path = tmp.path().join("hand_state.json");
+        reg.persist_state(&state_path).unwrap();
+
+        let saved = HandRegistry::load_state(&state_path);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].0, "clip");
+        assert!(saved[0].3);
     }
 
     #[test]
