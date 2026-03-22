@@ -477,6 +477,23 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         Ok(result.response)
     }
 
+    async fn send_message_ephemeral(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> Result<String, String> {
+        let result = self
+            .kernel
+            .send_message_ephemeral(agent_id, message)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        if result.silent {
+            Ok(String::new())
+        } else {
+            Ok(result.response)
+        }
+    }
+
     async fn find_agent_by_name(&self, name: &str) -> Result<Option<AgentId>, String> {
         Ok(self.kernel.registry.find_by_name(name).map(|e| e.id))
     }
