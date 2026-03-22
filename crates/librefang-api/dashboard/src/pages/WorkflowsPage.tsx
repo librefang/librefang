@@ -136,7 +136,7 @@ export function WorkflowsPage() {
         }
       />
 
-      {/* 模板推荐区 — 从 API 加载 */}
+      {/* Template Recommendations — loaded from API */}
       {apiTemplates.length > 0 && (
       <div>
         <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-3">{t("workflows.templates")}</h2>
@@ -168,22 +168,22 @@ export function WorkflowsPage() {
       </div>
       )}
 
-      {/* 搜索栏 */}
+      {/* Search Bar */}
       {hasWorkflows && (
         <Input value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
           placeholder={t("workflows.search_placeholder")}
           leftIcon={<Search className="h-4 w-4" />} />
       )}
 
-      {/* 加载骨架 */}
+      {/* Loading Skeleton */}
       {workflowsQuery.isLoading && (
         <ListSkeleton rows={3} />
       )}
 
-      {/* 主内容区 */}
+      {/* Main Content Area */}
       {hasWorkflows ? (
         <div className="grid gap-6 lg:grid-cols-[1fr_300px] xl:grid-cols-[1fr_340px]">
-          {/* 工作流列表 */}
+          {/* Workflow List */}
           <div className="space-y-2">
             <h2 className="text-xs font-bold uppercase tracking-widest text-text-dim/50 mb-1">
               {t("workflows.all_workflows")} ({workflows.length})
@@ -197,13 +197,13 @@ export function WorkflowsPage() {
                     ? "border-brand bg-brand/5 shadow-sm"
                     : "border-border-subtle bg-surface hover:border-brand/30 hover:shadow-sm"
                 }`}>
-                {/* 图标 */}
+                {/* Icon */}
                 <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
                   selectedWorkflowId === wf.id ? "bg-brand text-white" : "bg-main text-brand"
                 }`}>
                   <Layers className="w-5 h-5" />
                 </div>
-                {/* 信息 */}
+                {/* Info */}
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <h3 className="text-sm font-bold truncate">{wf.name}</h3>
@@ -217,7 +217,7 @@ export function WorkflowsPage() {
                     <span>{new Date(wf.created_at || "").toLocaleDateString()}</span>
                   </div>
                 </div>
-                {/* 操作 */}
+                {/* Actions */}
                 <div className="flex items-center gap-1 shrink-0" onClick={e => e.stopPropagation()}>
                   <button onClick={() => openWorkflow(wf.id)}
                     className="p-2 rounded-lg text-text-dim/40 hover:text-brand hover:bg-brand/10 transition-all"
@@ -240,7 +240,7 @@ export function WorkflowsPage() {
             ))}
           </div>
 
-          {/* 右侧面板：选中工作流后显示 */}
+          {/* Right Panel: shown when a workflow is selected */}
           {selectedWorkflowId && (
             <div className="space-y-4">
               <Card padding="lg" className="sticky top-4">
@@ -253,7 +253,7 @@ export function WorkflowsPage() {
                   {t("canvas.run_now")}
                 </Button>
 
-                {/* 运行结果 */}
+                {/* Run Result */}
                 {runMutation.data && (
                   <div className="mt-4 p-3 rounded-xl bg-success/5 border border-success/20">
                     <p className="text-[10px] font-bold text-success mb-1">{t("canvas.run_result")}</p>
@@ -272,7 +272,7 @@ export function WorkflowsPage() {
           )}
         </div>
       ) : (
-        /* 空状态 */
+        /* Empty State */
         !workflowsQuery.isLoading && (
           <div className="text-center py-16">
             <div className="w-16 h-16 rounded-2xl bg-brand/10 flex items-center justify-center mx-auto mb-4">

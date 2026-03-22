@@ -1,4 +1,4 @@
-//! 配置验证逻辑：未知字段检测、结构验证和安全边界约束。
+//! Configuration validation logic: unknown field detection, structural validation, and safety boundary constraints.
 
 use super::types::*;
 
