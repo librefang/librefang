@@ -12,3 +12,4 @@ serde_json = "1"
 toml_edit = "0.22"
 regex = "1"
 chrono = "0.4"
+librefang-migrate = { path = "../crates/librefang-migrate" }
