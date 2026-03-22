@@ -2386,6 +2386,7 @@ impl Default for MemoryConfig {
             consolidation_interval_hours: default_consolidation_interval(),
             fts_only: None,
             decay: MemoryDecayConfig::default(),
+            chunking: ChunkConfig::default(),
         }
     }
 }
@@ -2414,7 +2415,6 @@ impl Default for MemoryDecayConfig {
             session_ttl_days: 7,
             agent_ttl_days: 30,
             decay_interval_hours: 1,
-            chunking: ChunkConfig::default(),
         }
     }
 }
