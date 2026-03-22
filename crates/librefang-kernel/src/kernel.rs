@@ -2056,9 +2056,8 @@ system_prompt = "You are a helpful assistant."
             return Ok(AgentLoopResult::default());
         }
 
-        // Build manifest + system prompt (same as execute_llm_agent)
-        let tools = self.available_tools(agent_id);
-        let tools = entry.mode.filter_tools(tools);
+        // Ephemeral: no tools — prevents side effects (tool writes to memory/disk)
+        let tools = vec![];
         let mut manifest = entry.manifest.clone();
 
         // Reuse the prompt-builder to get a proper system prompt
