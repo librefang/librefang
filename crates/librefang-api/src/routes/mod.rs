@@ -18,13 +18,14 @@ pub mod budget;
 pub mod channels;
 pub mod config;
 pub mod goals;
+pub mod inbox;
 pub mod memory;
 pub mod network;
 pub mod plugins;
 pub mod providers;
 pub mod skills;
 pub mod system;
-pub mod workflows;
+pub mod workflows; 65f9be04 (feat: file-based input inbox for async external commands (#907))
 
 // Glob re-export to keep `routes::handler_name` backward compatible
 // (utoipa macros in openapi.rs, ws.rs, etc. all depend on this path format).
@@ -41,6 +42,7 @@ pub use budget::*;
 pub use channels::*;
 pub use config::*;
 pub use goals::*;
+pub use inbox::*;
 pub use memory::*;
 pub use network::*;
 pub use plugins::*;

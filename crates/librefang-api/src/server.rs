@@ -56,6 +56,7 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         .merge(routes::providers::router())
         .merge(routes::budget::router())
         .merge(routes::goals::router())
+        .merge(routes::inbox::router())
         // Dashboard credential login (handler defined locally in server.rs)
         .route(
             "/auth/dashboard-login",
