@@ -8379,6 +8379,16 @@ impl KernelHandle for LibreFangKernel {
             .requires_approval_with_context(tool_name, sender_id, channel)
     }
 
+    fn is_tool_denied_with_context(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        self.approval_manager
+            .is_tool_denied_with_context(tool_name, sender_id, channel)
+    }
+
     async fn request_approval(
         &self,
         agent_id: &str,

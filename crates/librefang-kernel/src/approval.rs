@@ -49,6 +49,30 @@ impl ApprovalManager {
         policy.require_approval.iter().any(|t| t == tool_name)
     }
 
+    /// Check whether a tool is hard-denied in the current sender/channel context.
+    pub fn is_tool_denied_with_context(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        let policy = self.policy.read().unwrap_or_else(|e| e.into_inner());
+
+        if let Some(sid) = sender_id {
+            if policy.is_trusted_sender(sid) {
+                debug!(
+                    sender_id = sid,
+                    tool_name, "Trusted sender — channel deny bypassed"
+                );
+                return false;
+            }
+        }
+
+        channel
+            .and_then(|ch| policy.check_channel_tool(ch, tool_name))
+            .is_some_and(|allowed| !allowed)
+    }
+
     /// Check if a tool requires approval, taking sender and channel context
     /// into account.
     ///
@@ -83,12 +107,7 @@ impl ApprovalManager {
         if let Some(ch) = channel {
             if let Some(allowed) = policy.check_channel_tool(ch, tool_name) {
                 if !allowed {
-                    // Channel rule explicitly denies this tool — require approval
-                    // (which will effectively block it since there's no auto-approve path).
-                    debug!(
-                        channel = ch,
-                        tool_name, "Channel rule denies tool — approval required"
-                    );
+                    debug!(channel = ch, tool_name, "Channel rule denies tool");
                     return true;
                 }
                 // Channel rule explicitly allows — bypass approval.
@@ -598,9 +617,11 @@ mod tests {
         let mgr = ApprovalManager::new(policy);
 
         // file_write is not in require_approval, but telegram channel denies it
+        assert!(mgr.is_tool_denied_with_context("file_write", None, Some("telegram")));
         assert!(mgr.requires_approval_with_context("file_write", None, Some("telegram")));
 
         // file_write from other channels is not gated
+        assert!(!mgr.is_tool_denied_with_context("file_write", None, Some("discord")));
         assert!(!mgr.requires_approval_with_context("file_write", None, Some("discord")));
     }
 
@@ -639,6 +660,11 @@ mod tests {
         let mgr = ApprovalManager::new(policy);
 
         // Trusted sender bypasses even channel deny rules
+        assert!(!mgr.is_tool_denied_with_context(
+            "shell_exec",
+            Some("admin_123"),
+            Some("telegram")
+        ));
         assert!(!mgr.requires_approval_with_context(
             "shell_exec",
             Some("admin_123"),
@@ -646,6 +672,11 @@ mod tests {
         ));
 
         // Untrusted sender from telegram is denied
+        assert!(mgr.is_tool_denied_with_context(
+            "shell_exec",
+            Some("random_user"),
+            Some("telegram")
+        ));
         assert!(mgr.requires_approval_with_context(
             "shell_exec",
             Some("random_user"),

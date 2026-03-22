@@ -141,6 +141,17 @@ pub async fn execute_tool(
     // Approval gate: check if this tool requires human approval before execution.
     // Uses sender/channel context for per-sender trust and channel-specific policies.
     if let Some(kh) = kernel {
+        if kh.is_tool_denied_with_context(tool_name, sender_id, channel) {
+            warn!(tool_name, channel, "Execution denied by channel policy");
+            return ToolResult {
+                tool_use_id: tool_use_id.to_string(),
+                content: format!(
+                    "Execution denied: '{tool_name}' is blocked by the active channel policy."
+                ),
+                is_error: true,
+            };
+        }
+
         if !skip_approval_for_full_exec
             && kh.requires_approval_with_context(tool_name, sender_id, channel)
         {
