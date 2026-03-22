@@ -424,7 +424,7 @@ impl MemorySubstrate {
         embedding: Option<&[f32]>,
     ) -> LibreFangResult<MemoryId> {
         let should_chunk =
-            self.chunk_config.enabled && content.len() > self.chunk_config.max_chunk_size;
+            self.chunk_config.enabled && content.chars().count() > self.chunk_config.max_chunk_size;
 
         if !should_chunk {
             return self
@@ -460,18 +460,13 @@ impl MemorySubstrate {
                 );
             }
 
-            // Only the first chunk can reuse the caller-provided embedding.
-            // Subsequent chunks get None — the caller can embed them later via
-            // `update_embedding`.
-            let emb = if idx == 0 { embedding } else { None };
-
             let id = self.semantic.remember_with_embedding(
                 agent_id,
                 chunk,
                 source.clone(),
                 scope,
                 chunk_meta,
-                emb,
+                embedding,
             )?;
 
             if parent_id.is_none() {
@@ -535,7 +530,8 @@ impl MemorySubstrate {
         let embedding_owned = embedding.map(|e| e.to_vec());
         let chunk_config = self.chunk_config.clone();
         tokio::task::spawn_blocking(move || {
-            let should_chunk = chunk_config.enabled && content.len() > chunk_config.max_chunk_size;
+            let should_chunk =
+                chunk_config.enabled && content.chars().count() > chunk_config.max_chunk_size;
 
             if !should_chunk {
                 return store.remember_with_embedding(
@@ -571,19 +567,13 @@ impl MemorySubstrate {
                     );
                 }
 
-                let emb = if idx == 0 {
-                    embedding_owned.as_deref()
-                } else {
-                    None
-                };
-
                 let id = store.remember_with_embedding(
                     agent_id,
                     chunk,
                     source.clone(),
                     &scope,
                     chunk_meta,
-                    emb,
+                    embedding_owned.as_deref(),
                 )?;
 
                 if parent_id.is_none() {
@@ -1071,6 +1061,39 @@ mod tests {
                 "chunk should have total_chunks metadata"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_chunking_reuses_embedding_for_all_chunks() {
+        let config = ChunkConfig {
+            enabled: true,
+            max_chunk_size: 100,
+            overlap: 20,
+        };
+        let substrate = MemorySubstrate::open_in_memory_with_chunking(0.1, config).unwrap();
+        let agent_id = AgentId::new();
+        let embedding = vec![0.1, 0.2, 0.3];
+        let long_text = "The quick brown fox jumps over the lazy dog. ".repeat(10);
+
+        substrate
+            .remember_with_embedding_async(
+                agent_id,
+                &long_text,
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+                Some(&embedding),
+            )
+            .await
+            .unwrap();
+
+        let results = substrate
+            .recall_with_embedding_async("", 20, None, Some(&embedding))
+            .await
+            .unwrap();
+
+        assert!(results.len() > 1);
+        assert!(results.iter().all(|result| result.embedding.is_some()));
     }
 
     #[tokio::test]

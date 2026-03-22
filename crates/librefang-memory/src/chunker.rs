@@ -21,7 +21,7 @@ pub fn chunk_text(text: &str, max_size: usize, overlap: usize) -> Vec<String> {
     }
 
     // If text fits in a single chunk, return as-is.
-    if text.len() <= max_size {
+    if char_len(text) <= max_size {
         return vec![text.to_string()];
     }
 
@@ -44,21 +44,15 @@ fn build_segments(text: &str, max_size: usize) -> Vec<String> {
         if trimmed.is_empty() {
             continue;
         }
-        if trimmed.len() <= max_size {
+        if char_len(trimmed) <= max_size {
             segments.push(trimmed.to_string());
         } else {
             // Split paragraph into sentences.
             for sentence in split_sentences(trimmed) {
-                if sentence.len() <= max_size {
+                if char_len(&sentence) <= max_size {
                     segments.push(sentence);
                 } else {
-                    // Hard-split oversized sentences.
-                    let mut start = 0;
-                    while start < sentence.len() {
-                        let end = (start + max_size).min(sentence.len());
-                        segments.push(sentence[start..end].to_string());
-                        start = end;
-                    }
+                    segments.extend(split_by_char_limit(&sentence, max_size));
                 }
             }
         }
@@ -119,7 +113,7 @@ fn pack_with_overlap(segments: &[String], max_size: usize, overlap: usize) -> Ve
             current = seg.clone();
         } else {
             // Would adding this segment (with a paragraph separator) exceed the limit?
-            let candidate_len = current.len() + 2 + seg.len(); // "\n\n" separator
+            let candidate_len = char_len(&current) + 2 + char_len(seg); // "\n\n" separator
             if candidate_len <= max_size {
                 current.push_str("\n\n");
                 current.push_str(seg);
@@ -128,10 +122,10 @@ fn pack_with_overlap(segments: &[String], max_size: usize, overlap: usize) -> Ve
                 chunks.push(current.clone());
 
                 // Start new chunk with overlap from previous
-                let overlap_text = if overlap > 0 && current.len() > overlap {
-                    &current[current.len() - overlap..]
+                let overlap_text = if overlap > 0 && char_len(&current) > overlap {
+                    suffix_by_chars(&current, overlap)
                 } else if overlap > 0 {
-                    &current
+                    current.as_str()
                 } else {
                     ""
                 };
@@ -141,7 +135,7 @@ fn pack_with_overlap(segments: &[String], max_size: usize, overlap: usize) -> Ve
                 } else {
                     current = format!("{}\n\n{}", overlap_text, seg);
                     // If the overlap + new segment exceeds max_size, drop the overlap
-                    if current.len() > max_size {
+                    if char_len(&current) > max_size {
                         current = seg.clone();
                     }
                 }
@@ -155,6 +149,38 @@ fn pack_with_overlap(segments: &[String], max_size: usize, overlap: usize) -> Ve
     }
 
     chunks
+}
+
+fn char_len(text: &str) -> usize {
+    text.chars().count()
+}
+
+fn char_boundaries(text: &str) -> Vec<usize> {
+    let mut boundaries: Vec<usize> = text.char_indices().map(|(idx, _)| idx).collect();
+    boundaries.push(text.len());
+    boundaries
+}
+
+fn split_by_char_limit(text: &str, max_size: usize) -> Vec<String> {
+    let boundaries = char_boundaries(text);
+    let total_chars = boundaries.len().saturating_sub(1);
+    let mut chunks = Vec::new();
+    let mut start = 0;
+
+    while start < total_chars {
+        let end = (start + max_size).min(total_chars);
+        chunks.push(text[boundaries[start]..boundaries[end]].to_string());
+        start = end;
+    }
+
+    chunks
+}
+
+fn suffix_by_chars(text: &str, count: usize) -> &str {
+    let boundaries = char_boundaries(text);
+    let total_chars = boundaries.len().saturating_sub(1);
+    let start = total_chars.saturating_sub(count);
+    &text[boundaries[start]..]
 }
 
 #[cfg(test)]
@@ -183,7 +209,11 @@ mod tests {
         assert!(chunks.len() >= 2);
         // Each chunk should be within the limit
         for chunk in &chunks {
-            assert!(chunk.len() <= 60, "chunk too long: {} chars", chunk.len());
+            assert!(
+                chunk.chars().count() <= 60,
+                "chunk too long: {} chars",
+                chunk.chars().count()
+            );
         }
     }
 
@@ -214,7 +244,11 @@ mod tests {
         let chunks = chunk_text(long_para, 50, 0);
         assert!(chunks.len() >= 2);
         for chunk in &chunks {
-            assert!(chunk.len() <= 50, "chunk too long: {} chars", chunk.len());
+            assert!(
+                chunk.chars().count() <= 50,
+                "chunk too long: {} chars",
+                chunk.chars().count()
+            );
         }
     }
 
@@ -224,7 +258,19 @@ mod tests {
         let chunks = chunk_text(&text, 50, 0);
         assert_eq!(chunks.len(), 4);
         for chunk in &chunks {
-            assert!(chunk.len() <= 50);
+            assert!(chunk.chars().count() <= 50);
+        }
+    }
+
+    #[test]
+    fn test_hard_split_unicode_text_uses_char_boundaries() {
+        let text = "日本語🙂".repeat(40);
+        let chunks = chunk_text(&text, 9, 3);
+
+        assert!(chunks.len() > 1);
+        for chunk in &chunks {
+            assert!(chunk.chars().count() <= 9);
+            assert!(!chunk.is_empty());
         }
     }
 
