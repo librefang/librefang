@@ -5295,6 +5295,38 @@ system_prompt = "You are a helpful assistant."
             }
         }
 
+        // Periodic memory decay (deletes stale SESSION/AGENT memories by TTL)
+        {
+            let decay_config = self.config.memory.decay.clone();
+            if decay_config.enabled && decay_config.decay_interval_hours > 0 {
+                let kernel = Arc::clone(self);
+                let interval_hours = decay_config.decay_interval_hours;
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(
+                        u64::from(interval_hours) * 3600,
+                    ));
+                    interval.tick().await; // Skip first immediate tick
+                    loop {
+                        interval.tick().await;
+                        if kernel.supervisor.is_shutting_down() {
+                            break;
+                        }
+                        match kernel.memory.run_decay(&decay_config) {
+                            Ok(n) => {
+                                if n > 0 {
+                                    info!(deleted = n, "Memory decay sweep completed");
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Memory decay sweep failed: {e}");
+                            }
+                        }
+                    }
+                });
+                info!("Memory decay scheduled every {interval_hours} hour(s)");
+            }
+        }
+
         // Connect to configured + extension MCP servers
         let has_mcp = self
             .effective_mcp_servers

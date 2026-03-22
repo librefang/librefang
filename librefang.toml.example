@@ -38,6 +38,14 @@ usage_footer = "tokens"         # off | tokens | cost | full
 decay_rate = 0.05               # Memory confidence decay per cycle
 # embedding_model = "all-MiniLM-L6-v2"
 
+# ── Memory Decay (time-based expiry) ────────────────────────
+# [memory.decay]
+# enabled = false               # Enable time-based memory decay
+# session_ttl_days = 7          # SESSION memories expire after N days of no access
+# agent_ttl_days = 30           # AGENT memories expire after N days of no access
+# decay_interval_hours = 1      # How often to run the decay sweep
+# Note: USER memories never decay.
+
 # ── Proactive Memory (auto-memorize & auto-retrieve) ─────────
 [proactive_memory]
 enabled = true

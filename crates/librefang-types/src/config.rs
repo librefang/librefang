@@ -2368,6 +2368,9 @@ pub struct MemoryConfig {
     /// vector similarity. Eliminates the need for an external embedding provider.
     #[serde(default)]
     pub fts_only: Option<bool>,
+    /// Time-based memory decay configuration.
+    #[serde(default)]
+    pub decay: MemoryDecayConfig,
 }
 
 fn default_consolidation_interval() -> u64 {
@@ -2386,6 +2389,35 @@ impl Default for MemoryConfig {
             embedding_dimensions: None,
             consolidation_interval_hours: default_consolidation_interval(),
             fts_only: None,
+            decay: MemoryDecayConfig::default(),
+        }
+    }
+}
+
+/// Time-based memory decay configuration.
+///
+/// When enabled, memories that have not been accessed within their scope's TTL
+/// are automatically deleted during periodic decay runs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryDecayConfig {
+    /// Whether time-based decay is enabled.
+    pub enabled: bool,
+    /// SESSION-scope memories expire after this many days of no access.
+    pub session_ttl_days: u32,
+    /// AGENT-scope memories expire after this many days of no access.
+    pub agent_ttl_days: u32,
+    /// How often to run the decay sweep (hours).
+    pub decay_interval_hours: u32,
+}
+
+impl Default for MemoryDecayConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            session_ttl_days: 7,
+            agent_ttl_days: 30,
+            decay_interval_hours: 1,
         }
     }
 }

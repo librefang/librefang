@@ -15,6 +15,7 @@
 //! - `ProactiveMemoryStore`: Implementation on top of MemorySubstrate
 
 pub mod consolidation;
+pub mod decay;
 pub mod knowledge;
 pub mod migration;
 pub mod proactive;
