@@ -76,6 +76,31 @@ max_retrieve = 10               # Max memories per retrieval
 [web]
 search_provider = "auto"        # Tavily → Brave → DuckDuckGo (auto-detect)
 # cache_ttl_minutes = 15
+# Session retention & context injection
+# [session]
+# retention_days = 30                        # Auto-cleanup idle sessions (0 = unlimited)
+# max_sessions_per_agent = 100               # Max sessions per agent (0 = unlimited)
+# cleanup_interval_hours = 24                # Cleanup job interval
+# reset_prompt = "You are a helpful assistant."  # Injected on every session start/reset
+# on_session_start_script = "/path/to/hook.sh"   # Script run on session start (args: agent_id session_id)
+#
+# # Context injections — multiple named entries injected at different positions
+# [[session.context_injection]]
+# name = "project-rules"
+# content = "Always follow the project coding standards."
+# position = "system"                        # "system", "before_user", or "after_reset"
+#
+# [[session.context_injection]]
+# name = "user-prefs"
+# content = "The user prefers concise answers."
+# position = "after_reset"
+# condition = "agent.tags contains 'chat'"   # Only inject for agents with this tag
+
+# Session compaction (LLM-based context management)
+# [compaction]
+# threshold = 80                          # Compact when messages exceed this count
+# keep_recent = 20                        # Keep this many recent messages after compaction
+# max_summary_tokens = 1024               # Max tokens for LLM summary
 
 [web.fetch]
 max_chars = 50000               # Max chars extracted from web pages
@@ -112,6 +137,23 @@ debounce_ms = 500
 # [thinking]
 # budget_tokens = 10000                   # Max tokens the model can use for thinking
 # stream_thinking = false                 # Stream thinking tokens to the client
+# Structured output — constrain agent responses to JSON or a JSON Schema.
+# Set per-agent in [[agents]] tables. Values: "text" (default), "json", or json_schema.
+#
+# Example: force JSON output
+# [agents.my_agent.response_format]
+# type = "json"
+#
+# Example: enforce a specific JSON Schema (OpenAI native; Anthropic via prompt injection)
+# [agents.my_agent.response_format]
+# type = "json_schema"
+# name = "weather_report"
+# strict = true
+# [agents.my_agent.response_format.schema]
+# type = "object"
+# properties.location.type = "string"
+# properties.temperature.type = "number"
+# required = ["location", "temperature"]
 
 # Provider region selection (provider ID → region name)
 # Some providers offer region-specific endpoints defined in registry TOML files.

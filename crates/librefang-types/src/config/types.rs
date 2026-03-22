@@ -952,6 +952,37 @@ impl Default for ThinkingConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Gap 8: Structured output / response format
+// ---------------------------------------------------------------------------
+
+/// Desired response format from the LLM.
+///
+/// - `Text` — default free-form text (no constraint).
+/// - `Json` — ask the model to respond with valid JSON (`json_object` mode).
+/// - `JsonSchema` — constrain output to a specific JSON Schema (OpenAI
+///   `json_schema` mode; for providers without native support the schema is
+///   injected into the system prompt).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseFormat {
+    /// Free-form text (default behaviour).
+    #[default]
+    Text,
+    /// Valid JSON object (no schema constraint).
+    Json,
+    /// JSON output that must conform to the supplied schema.
+    JsonSchema {
+        /// Schema name (sent to OpenAI as `json_schema.name`).
+        name: String,
+        /// The JSON Schema definition.
+        schema: serde_json::Value,
+        /// Whether to enable strict schema adherence (OpenAI).
+        #[serde(default)]
+        strict: Option<bool>,
+    },
+}
+
 /// Configuration for a sidecar channel adapter (external process-based).
 ///
 /// Sidecar adapters allow external processes written in any language to act as
@@ -1008,6 +1039,13 @@ pub struct SessionConfig {
     /// context or instructions across all agents.
     #[serde(default)]
     pub reset_prompt: Option<String>,
+    /// Context injections applied to every new or reset session.
+    /// Each entry specifies content, a positional slot, and an optional condition.
+    #[serde(default)]
+    pub context_injection: Vec<ContextInjection>,
+    /// Optional shell script to run when a new session is created (fire-and-forget).
+    #[serde(default)]
+    pub on_session_start_script: Option<String>,
 }
 
 impl Default for SessionConfig {
@@ -1017,8 +1055,39 @@ impl Default for SessionConfig {
             max_sessions_per_agent: 0,
             cleanup_interval_hours: 24,
             reset_prompt: None,
+            context_injection: Vec::new(),
+            on_session_start_script: None,
         }
     }
+}
+
+/// Where a context injection should be placed in the session message list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectionPosition {
+    /// Prepended to the system prompt area.
+    #[default]
+    System,
+    /// Inserted right before the latest user message.
+    BeforeUser,
+    /// Placed immediately after the reset prompt (if any).
+    AfterReset,
+}
+
+/// A single context injection entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextInjection {
+    /// A short label for logging / debugging.
+    pub name: String,
+    /// The content to inject.
+    pub content: String,
+    /// Where in the message list this content should appear.
+    #[serde(default)]
+    pub position: InjectionPosition,
+    /// Optional condition expression (e.g. `"agent.tags contains 'chat'"`).
+    /// If `None`, the injection always applies.
+    #[serde(default)]
+    pub condition: Option<String>,
 }
 
 /// Message queue configuration.
@@ -2429,6 +2498,31 @@ pub struct MemoryConfig {
     /// Time-based memory decay configuration.
     #[serde(default)]
     pub decay: MemoryDecayConfig,
+    /// Chunking configuration for long documents.
+    #[serde(default)]
+    pub chunking: ChunkConfig,
+}
+
+/// Configuration for splitting long documents into overlapping chunks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChunkConfig {
+    /// Whether chunking is enabled. When false, text is stored as a single blob.
+    pub enabled: bool,
+    /// Maximum chunk size in characters.
+    pub max_chunk_size: usize,
+    /// Overlap between consecutive chunks in characters.
+    pub overlap: usize,
+}
+
+impl Default for ChunkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_chunk_size: 1500,
+            overlap: 200,
+        }
+    }
 }
 
 fn default_consolidation_interval() -> u64 {
@@ -2448,6 +2542,7 @@ impl Default for MemoryConfig {
             consolidation_interval_hours: default_consolidation_interval(),
             fts_only: None,
             decay: MemoryDecayConfig::default(),
+            chunking: ChunkConfig::default(),
         }
     }
 }
@@ -4210,6 +4305,182 @@ impl Default for LinkedInConfig {
             account_id: None,
             default_agent: None,
             overrides: ChannelOverrides::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_session_config_defaults_backward_compatible() {
+        let sc = SessionConfig::default();
+        assert!(sc.reset_prompt.is_none());
+        assert!(sc.context_injection.is_empty());
+        assert!(sc.on_session_start_script.is_none());
+    }
+
+    #[test]
+    fn test_session_config_with_context_injection() {
+        let toml_str = r#"
+            reset_prompt = "Hello"
+
+            [[context_injection]]
+            name = "rules"
+            content = "Follow the rules."
+            position = "system"
+
+            [[context_injection]]
+            name = "prefs"
+            content = "Be concise."
+            position = "after_reset"
+            condition = "agent.tags contains 'chat'"
+        "#;
+        let sc: SessionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(sc.reset_prompt.as_deref(), Some("Hello"));
+        assert_eq!(sc.context_injection.len(), 2);
+
+        assert_eq!(sc.context_injection[0].name, "rules");
+        assert_eq!(sc.context_injection[0].position, InjectionPosition::System);
+        assert!(sc.context_injection[0].condition.is_none());
+
+        assert_eq!(sc.context_injection[1].name, "prefs");
+        assert_eq!(
+            sc.context_injection[1].position,
+            InjectionPosition::AfterReset
+        );
+        assert_eq!(
+            sc.context_injection[1].condition.as_deref(),
+            Some("agent.tags contains 'chat'")
+        );
+    }
+
+    #[test]
+    fn test_session_config_empty_injection_list() {
+        let toml_str = r#"
+            retention_days = 7
+        "#;
+        let sc: SessionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(sc.retention_days, 7);
+        assert!(sc.context_injection.is_empty());
+        assert!(sc.on_session_start_script.is_none());
+    }
+
+    #[test]
+    fn test_injection_position_default() {
+        assert_eq!(InjectionPosition::default(), InjectionPosition::System);
+    }
+
+    #[test]
+    fn test_injection_position_deserialization() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            pos: InjectionPosition,
+        }
+        let w: Wrapper = toml::from_str(r#"pos = "system""#).unwrap();
+        assert_eq!(w.pos, InjectionPosition::System);
+
+        let w: Wrapper = toml::from_str(r#"pos = "before_user""#).unwrap();
+        assert_eq!(w.pos, InjectionPosition::BeforeUser);
+
+        let w: Wrapper = toml::from_str(r#"pos = "after_reset""#).unwrap();
+        assert_eq!(w.pos, InjectionPosition::AfterReset);
+    }
+
+    #[test]
+    fn test_session_config_with_start_script() {
+        let toml_str = r#"
+            on_session_start_script = "/usr/local/bin/on_start.sh"
+        "#;
+        let sc: SessionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            sc.on_session_start_script.as_deref(),
+            Some("/usr/local/bin/on_start.sh")
+        );
+    }
+
+    // ---- ResponseFormat tests ----
+
+    #[test]
+    fn test_response_format_default_is_text() {
+        assert_eq!(ResponseFormat::default(), ResponseFormat::Text);
+    }
+
+    #[test]
+    fn test_response_format_text_roundtrip() {
+        let rf = ResponseFormat::Text;
+        let json = serde_json::to_string(&rf).unwrap();
+        let back: ResponseFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ResponseFormat::Text);
+    }
+
+    #[test]
+    fn test_response_format_json_roundtrip() {
+        let rf = ResponseFormat::Json;
+        let json = serde_json::to_string(&rf).unwrap();
+        assert!(json.contains(r#""type":"json""#));
+        let back: ResponseFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, ResponseFormat::Json);
+    }
+
+    #[test]
+    fn test_response_format_json_schema_roundtrip() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"}
+            },
+            "required": ["name"]
+        });
+        let rf = ResponseFormat::JsonSchema {
+            name: "person".to_string(),
+            schema: schema.clone(),
+            strict: Some(true),
+        };
+        let json = serde_json::to_string(&rf).unwrap();
+        assert!(json.contains(r#""type":"json_schema""#));
+        assert!(json.contains(r#""name":"person""#));
+        let back: ResponseFormat = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, rf);
+    }
+
+    #[test]
+    fn test_response_format_json_schema_strict_none() {
+        let rf = ResponseFormat::JsonSchema {
+            name: "test".to_string(),
+            schema: serde_json::json!({}),
+            strict: None,
+        };
+        let json = serde_json::to_string(&rf).unwrap();
+        let back: ResponseFormat = serde_json::from_str(&json).unwrap();
+        match back {
+            ResponseFormat::JsonSchema { strict, .. } => assert_eq!(strict, None),
+            _ => panic!("Expected JsonSchema variant"),
+        }
+    }
+
+    #[test]
+    fn test_response_format_toml_roundtrip() {
+        // Simulate a TOML config fragment for json_schema
+        let toml_str = r#"
+type = "json_schema"
+name = "weather"
+strict = true
+
+[schema]
+type = "object"
+
+[schema.properties.temp]
+type = "number"
+"#;
+        let rf: ResponseFormat = toml::from_str(toml_str).unwrap();
+        match &rf {
+            ResponseFormat::JsonSchema { name, strict, .. } => {
+                assert_eq!(name, "weather");
+                assert_eq!(*strict, Some(true));
+            }
+            _ => panic!("Expected JsonSchema variant"),
         }
     }
 }
