@@ -1,12 +1,27 @@
-//! Registry sync — clone/pull the librefang-registry and copy content to
+//! Registry sync — download the librefang-registry tarball and copy content to
 //! `~/.librefang/`. Called automatically on kernel boot when the providers/
 //! directory is missing, ensuring a fresh install or upgrade gets content
 //! without requiring an explicit `librefang init`.
+//!
+//! Uses HTTP tarball download (no git dependency). Falls back to `git clone`
+//! if the HTTP download fails, for users behind proxies that block GitHub
+//! archive downloads.
 
 use std::path::Path;
 use std::process::Command;
 
+/// GitHub tarball URL for the registry (no auth required).
+const REGISTRY_TARBALL_URL: &str =
+    "https://github.com/librefang/librefang-registry/archive/refs/heads/main.tar.gz";
+
+/// Fallback: git clone URL.
 const REGISTRY_REPO: &str = "https://github.com/librefang/librefang-registry.git";
+
+/// Prefix inside the tarball (GitHub convention: `{repo}-{branch}/`).
+const TARBALL_PREFIX: &str = "librefang-registry-main/";
+
+/// How long (in seconds) before we re-download the registry.
+const CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60; // 24 hours
 
 /// Content directories to sync from the registry.
 const SYNC_DIRS: &[(&str, &str)] = &[
@@ -20,41 +35,20 @@ const SYNC_DIRS: &[(&str, &str)] = &[
 
 /// Sync all content from the registry to the local librefang home directory.
 ///
-/// Clones the registry (shallow) on first run, pulls on subsequent runs.
-/// Only copies items that don't already exist on disk (preserves user customization).
+/// Downloads the registry tarball via HTTP, extracts it, then copies items
+/// that don't already exist on disk (preserves user customization).
+/// Falls back to `git clone --depth 1` if the HTTP download fails.
 pub fn sync_registry(home_dir: &Path) {
     let registry_cache = home_dir.join("registry");
 
-    // Clone or pull the registry
-    if registry_cache.join(".git").exists() {
-        let status = Command::new("git")
-            .args(["pull", "--ff-only", "-q"])
-            .current_dir(&registry_cache)
-            .status();
-        if let Err(e) = status {
-            tracing::warn!("Failed to pull registry: {e}");
-        }
-    } else {
-        // If the directory exists but is not a git repo (e.g. stale or
-        // interrupted clone), remove it so the fresh clone can proceed.
-        if registry_cache.exists() {
-            let _ = std::fs::remove_dir_all(&registry_cache);
-        }
-        let status = Command::new("git")
-            .args([
-                "clone",
-                "--depth",
-                "1",
-                "-q",
-                REGISTRY_REPO,
-                &registry_cache.display().to_string(),
-            ])
-            .status();
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => tracing::warn!("git clone exited with {s}"),
-            Err(e) => {
-                tracing::warn!("Failed to clone registry (is git installed?): {e}");
+    if !should_refresh(&registry_cache) {
+        tracing::debug!("Registry cache is fresh, skipping download");
+    } else if let Err(e) = download_and_extract(&registry_cache) {
+        tracing::warn!("HTTP registry download failed: {e} — trying git fallback");
+        if let Err(e2) = git_clone_fallback(&registry_cache) {
+            tracing::warn!("Git fallback also failed: {e2}");
+            // If registry_cache doesn't exist at all, nothing to sync
+            if !registry_cache.exists() {
                 return;
             }
         }
@@ -82,6 +76,137 @@ pub fn sync_registry(home_dir: &Path) {
             let _ = std::fs::copy(&src, &dest);
         }
     }
+}
+
+/// Check whether we should re-download the registry.
+///
+/// Returns `false` if the cache exists and the marker file is younger than
+/// [`CACHE_MAX_AGE_SECS`].
+fn should_refresh(registry_cache: &Path) -> bool {
+    let marker = registry_cache.join(".sync_marker");
+    if !marker.exists() {
+        return true;
+    }
+    let Ok(meta) = marker.metadata() else {
+        return true;
+    };
+    let Ok(modified) = meta.modified() else {
+        return true;
+    };
+    let Ok(age) = modified.elapsed() else {
+        return true;
+    };
+    age.as_secs() > CACHE_MAX_AGE_SECS
+}
+
+/// Touch (create/update) the sync marker file.
+fn touch_marker(registry_cache: &Path) {
+    let marker = registry_cache.join(".sync_marker");
+    let _ = std::fs::create_dir_all(registry_cache);
+    let _ = std::fs::write(&marker, "");
+}
+
+/// Download the tarball via HTTP and extract it into `registry_cache`.
+fn download_and_extract(registry_cache: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    tracing::info!("Downloading registry from {REGISTRY_TARBALL_URL}");
+
+    let resp = ureq::get(REGISTRY_TARBALL_URL).call()?;
+    let reader = resp.into_reader();
+
+    // Decompress gzip
+    let gz = flate2::read::GzDecoder::new(reader);
+
+    // Extract tar
+    let mut archive = tar::Archive::new(gz);
+
+    // Extract to a temporary directory first, then swap — this avoids leaving
+    // a half-extracted directory on error.
+    let tmp_dir = registry_cache
+        .parent()
+        .unwrap_or_else(|| Path::new("/tmp"))
+        .join(".registry_tmp");
+
+    // Clean up any previous failed attempt
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir)?;
+    }
+    std::fs::create_dir_all(&tmp_dir)?;
+
+    // Extract, stripping the `librefang-registry-main/` prefix
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?;
+        let path_str = path.to_string_lossy();
+
+        // Strip the tarball prefix
+        let relative = match path_str.strip_prefix(TARBALL_PREFIX) {
+            Some(r) if !r.is_empty() => r.to_string(),
+            _ => continue,
+        };
+
+        let dest = tmp_dir.join(&relative);
+
+        // Create parent directories
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Only extract files and directories
+        if entry.header().entry_type().is_dir() {
+            std::fs::create_dir_all(&dest)?;
+        } else if entry.header().entry_type().is_file() {
+            entry.unpack(&dest)?;
+        }
+    }
+
+    // Swap: remove old cache, rename tmp to cache
+    if registry_cache.exists() {
+        std::fs::remove_dir_all(registry_cache)?;
+    }
+    std::fs::rename(&tmp_dir, registry_cache)?;
+
+    touch_marker(registry_cache);
+    tracing::info!("Registry downloaded and extracted successfully");
+
+    Ok(())
+}
+
+/// Fallback: clone the registry using git (for environments where HTTP tarball
+/// download fails but git is available).
+fn git_clone_fallback(registry_cache: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    tracing::info!("Attempting git clone fallback");
+
+    if registry_cache.join(".git").exists() {
+        // Already a git repo — try pull
+        let status = Command::new("git")
+            .args(["pull", "--ff-only", "-q"])
+            .current_dir(registry_cache)
+            .status()?;
+        if !status.success() {
+            return Err(format!("git pull exited with {status}").into());
+        }
+    } else {
+        // Clean slate
+        if registry_cache.exists() {
+            std::fs::remove_dir_all(registry_cache)?;
+        }
+        let status = Command::new("git")
+            .args([
+                "clone",
+                "--depth",
+                "1",
+                "-q",
+                REGISTRY_REPO,
+                &registry_cache.display().to_string(),
+            ])
+            .status()?;
+        if !status.success() {
+            return Err(format!("git clone exited with {status}").into());
+        }
+    }
+
+    touch_marker(registry_cache);
+    Ok(())
 }
 
 /// Check if the registry content appears to be populated.
@@ -221,5 +346,22 @@ mod tests {
         std::fs::create_dir_all(tmp.path().join("integrations")).unwrap();
 
         assert!(!needs_sync(tmp.path()));
+    }
+
+    #[test]
+    fn test_should_refresh_no_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("registry");
+        std::fs::create_dir_all(&cache).unwrap();
+        assert!(super::should_refresh(&cache));
+    }
+
+    #[test]
+    fn test_should_refresh_fresh_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("registry");
+        std::fs::create_dir_all(&cache).unwrap();
+        super::touch_marker(&cache);
+        assert!(!super::should_refresh(&cache));
     }
 }
