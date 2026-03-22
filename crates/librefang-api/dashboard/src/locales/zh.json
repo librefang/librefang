@@ -157,7 +157,7 @@
     "hand_badge": "HAND", "tools_cap": "工具", "network": "网络",
     "thinking": "思考模式", "thinking_enabled": "启用深度思考", "budget_tokens": "思考令牌预算",
     "stream_thinking": "流式输出思考过程", "thinking_hint": "预算越高推理越深，花费越多",
-    "thinking_toml_hint": "添加 [thinking] 配置段以启用此智能体的深度思考能力"
+    "thinking_toml_hint": "添加 [thinking] 配置段以启用此智能体的深度思考能力",
     "suspend": "暂停",
     "resume": "恢复",
     "core_agents": "核心智能体",

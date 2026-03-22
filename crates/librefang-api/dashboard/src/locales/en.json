@@ -160,7 +160,7 @@
     "hand_badge": "HAND", "tools_cap": "Tools", "network": "Network",
     "thinking": "Thinking", "thinking_enabled": "Enable Extended Thinking", "budget_tokens": "Token Budget",
     "stream_thinking": "Stream Thinking", "thinking_hint": "Higher budget = deeper reasoning, more cost",
-    "thinking_toml_hint": "Add [thinking] section to enable extended reasoning for this agent"
+    "thinking_toml_hint": "Add [thinking] section to enable extended reasoning for this agent",
     "suspend": "Suspend",
     "resume": "Resume",
     "core_agents": "Core Agents",
