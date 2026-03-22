@@ -143,6 +143,33 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "${GITHUB_REF#refs/tags/}" librefang-${{ matrix.target }}.* --clobber
 
+  # ── CLI Binary (Android / Termux) ───────────────────────────────────────
+  cli_android:
+    name: CLI / aarch64-linux-android
+    needs: [wait_for_release]
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install cross
+        run: cargo install cross --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cli-aarch64-linux-android-${{ github.ref_name }}
+      - name: Build CLI (Android aarch64)
+        run: cross build --release --target aarch64-linux-android --bin librefang
+      - name: Package
+        run: |
+          cd target/aarch64-linux-android/release
+          tar czf ../../../librefang-aarch64-linux-android.tar.gz librefang
+          cd ../../..
+          sha256sum librefang-aarch64-linux-android.tar.gz > librefang-aarch64-linux-android.tar.gz.sha256
+      - name: Upload to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${GITHUB_REF#refs/tags/}" librefang-aarch64-linux-android.* --clobber
+
   # ── CLI Binary (Linux) - Mini (12 channels) ───────────────────────────────
   cli_linux_mini:
     name: CLI / ${{ matrix.target }} (mini)

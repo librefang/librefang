@@ -3,3 +3,6 @@ pre-build = [
   "dpkg --add-architecture $CROSS_DEB_ARCH",
   "apt-get update && apt-get install --assume-yes libssl-dev:$CROSS_DEB_ARCH"
 ]
+
+[target.aarch64-linux-android]
+image = "ghcr.io/cross-rs/aarch64-linux-android:main"
