@@ -271,6 +271,8 @@ mod tests {
             risk_level: RiskLevel::High,
             requested_at: Utc::now(),
             timeout_secs,
+            sender_id: None,
+            channel: None,
         }
     }
 
@@ -292,6 +294,8 @@ mod tests {
             timeout_secs: 30,
             auto_approve_autonomous: false,
             auto_approve: false,
+            trusted_senders: Vec::new(),
+            channel_rules: Vec::new(),
         };
         let mgr = ApprovalManager::new(policy);
         assert!(mgr.requires_approval("file_write"));
@@ -371,6 +375,8 @@ mod tests {
             timeout_secs: 120,
             auto_approve_autonomous: true,
             auto_approve: false,
+            trusted_senders: Vec::new(),
+            channel_rules: Vec::new(),
         };
         mgr.update_policy(new_policy);
 
