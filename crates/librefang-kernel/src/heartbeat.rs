@@ -271,8 +271,10 @@ mod tests {
         registry.register(non_autonomous_entry).unwrap();
 
         // Register a running, autonomous agent that IS inactive.
-        let mut autonomous_manifest = AgentManifest::default();
-        autonomous_manifest.autonomous = Some(AutonomousConfig::default());
+        let autonomous_manifest = AgentManifest {
+            autonomous: Some(AutonomousConfig::default()),
+            ..Default::default()
+        };
         let autonomous_entry = AgentEntry {
             id: AgentId::new(),
             name: "autonomous-agent".to_string(),
