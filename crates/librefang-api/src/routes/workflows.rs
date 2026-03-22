@@ -752,11 +752,7 @@ pub async fn save_workflow_as_template(
     }
 
     // Register in the in-memory template registry
-    state
-        .kernel
-        .templates()
-        .register(template.clone())
-        .await;
+    state.kernel.templates().register(template.clone()).await;
 
     (
         StatusCode::OK,
