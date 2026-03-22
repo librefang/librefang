@@ -155,7 +155,17 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if !is_worktree_clean(&root) {
-        return Err("working tree is dirty. Commit or stash changes first.".into());
+        let status = Command::new("git")
+            .args(["status", "--short"])
+            .current_dir(&root)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
+        return Err(format!(
+            "working tree is dirty. Commit or stash changes first.\n{}",
+            status
+        )
+        .into());
     }
 
     println!("Pulling latest main...");
@@ -292,7 +302,14 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
 
         // Delete existing GitHub Release
         let _ = Command::new("gh")
-            .args(["release", "delete", &tag, "--yes"])
+            .args([
+                "release",
+                "delete",
+                &tag,
+                "--repo",
+                "librefang/librefang",
+                "--yes",
+            ])
             .current_dir(&root)
             .status();
 
@@ -335,18 +352,6 @@ pub fn run(args: ReleaseArgs) -> Result<(), Box<dyn std::error::Error>> {
     match lock_status {
         Ok(s) if s.success() => println!("  Cargo.lock updated"),
         _ => println!("  Warning: cargo update failed, continuing"),
-    }
-
-    // --- Build dashboard ---
-    println!();
-    println!("Building React dashboard...");
-    let build_result = build_web::run(build_web::BuildWebArgs {
-        dashboard: true,
-        web: false,
-        docs: false,
-    });
-    if let Err(e) = build_result {
-        println!("  Warning: dashboard build failed: {}", e);
     }
 
     // --- Generate Dev.to article (skip for pre-releases or --no-article) ---
@@ -412,6 +417,38 @@ pip install librefang-sdk
                         tag,
                     );
                     fs::write(&article, article_content)?;
+
+                    // Polish with Claude CLI if available
+                    if let Ok(output) = Command::new("claude")
+                        .args([
+                            "-p",
+                            "--model", "claude-haiku-4-5-20251001",
+                            "--output-format", "text",
+                            &format!(
+                                "You are writing a Dev.to release announcement for LibreFang, an open-source Agent OS built in Rust.\n\
+                                Rewrite the article body to be more engaging and developer-friendly.\n\
+                                Group related changes, highlight the most impactful ones, and add a brief intro.\n\
+                                Keep the same front matter (--- block), Install/Upgrade section, and Links section exactly as-is.\n\
+                                Only rewrite the content between the front matter and the Install section.\n\
+                                Output the COMPLETE article (front matter + body + install + links), ready to save as-is.\n\n\
+                                Current article:\n{}",
+                                fs::read_to_string(&article).unwrap_or_default()
+                            ),
+                        ])
+                        .env_remove("CLAUDECODE")
+                        .output()
+                    {
+                        if output.status.success() {
+                            let polished = String::from_utf8_lossy(&output.stdout).to_string();
+                            if !polished.trim().is_empty() {
+                                fs::write(&article, polished)?;
+                                println!("  AI polished");
+                            }
+                        } else {
+                            println!("  AI polish failed, using raw changelog");
+                        }
+                    }
+
                     println!("  Generated {}", article.display());
                 }
             }
@@ -426,6 +463,18 @@ pip install librefang-sdk
         }
         None
     };
+
+    // --- Build dashboard ---
+    println!();
+    println!("Building React dashboard...");
+    let build_result = build_web::run(build_web::BuildWebArgs {
+        dashboard: true,
+        web: false,
+        docs: false,
+    });
+    if let Err(e) = build_result {
+        println!("  Warning: dashboard build failed: {}", e);
+    }
 
     // --- Git add + commit + tag ---
     println!();
@@ -520,6 +569,8 @@ pip install librefang-sdk
                 .args([
                     "pr",
                     "create",
+                    "--repo",
+                    "librefang/librefang",
                     "--title",
                     &format!("release: {}", tag),
                     "--body",
@@ -540,7 +591,15 @@ pip install librefang-sdk
 
                 // Auto-merge
                 let _ = Command::new("gh")
-                    .args(["pr", "merge", &pr_url, "--auto", "--squash"])
+                    .args([
+                        "pr",
+                        "merge",
+                        &pr_url,
+                        "--auto",
+                        "--squash",
+                        "--repo",
+                        "librefang/librefang",
+                    ])
                     .current_dir(&root)
                     .status();
             } else {
