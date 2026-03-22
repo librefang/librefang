@@ -213,8 +213,8 @@ export function A2APage() {
 
           {/* Send task modal */}
           {taskAgent && (
-            <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setTaskAgent(null)}>
-              <div className="w-full max-w-lg mx-4 animate-fade-in-scale" onClick={(e) => e.stopPropagation()}>
+            <div className="fixed inset-0 z-[200] flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setTaskAgent(null)}>
+              <div className="w-full sm:max-w-lg sm:mx-4 animate-fade-in-scale" onClick={(e) => e.stopPropagation()}>
                 <Card padding="lg">
                   <h3 className="text-lg font-black mb-1">{t("a2a.send_task")}</h3>
                   <p className="text-xs text-text-dim mb-4">

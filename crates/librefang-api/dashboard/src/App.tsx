@@ -172,6 +172,14 @@ export function App() {
               <span className="text-[10px] font-semibold uppercase tracking-wider text-text-dim whitespace-nowrap">{t("common.infrastructure")}</span>
             </div>
           </div>
+          {/* Mobile close button */}
+          <button
+            onClick={() => setMobileMenuOpen(false)}
+            className="flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all lg:hidden"
+          >
+            <ChevronLeft className="h-5 w-5" />
+          </button>
+          {/* Desktop collapse button */}
           <button
             onClick={toggleSidebar}
             className="hidden lg:flex h-9 w-9 items-center justify-center rounded-xl text-text-dim hover:text-brand hover:bg-surface-hover transition-all"
