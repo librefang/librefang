@@ -1812,7 +1812,7 @@ pub async fn update_hand_settings(
 )]
 pub async fn reload_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let (added, updated) = state.kernel.reload_hands();
-    let total = state.kernel.hand_registry.list_definitions().len();
+    let total = state.kernel.hands().list_definitions().len();
     (
         StatusCode::OK,
         Json(serde_json::json!({
