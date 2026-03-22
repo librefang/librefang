@@ -325,6 +325,8 @@ health_check_interval_secs = 60
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `api_key` | String | `""` | Bearer 认证令牌，空时 API 不需要认证（仅限本地开发） |
+| `dashboard_user` | String | `""` | Dashboard 登录用户名，与 `dashboard_pass` 同时设置时启用登录页 |
+| `dashboard_pass` | String | `""` | Dashboard 登录密码，支持 `vault:KEY`、环境变量 `LIBREFANG_DASHBOARD_PASS`、明文 |
 | `api_listen` | String | `"127.0.0.1:4545"` | API 监听地址，也接受别名 `listen_addr` |
 | `cors_origin` | Array\<String\> | `[]` | 允许的 CORS 来源（追加到 localhost 之外） |
 | `mode` | Enum | `"default"` | 运行模式：`stable` / `default` / `dev` |
