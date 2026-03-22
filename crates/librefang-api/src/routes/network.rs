@@ -165,7 +165,7 @@ pub async fn network_status(State(state): State<Arc<AppState>>) -> impl IntoResp
         && !state.kernel.config_ref().network.shared_secret.is_empty();
 
     let (node_id, listen_address, connected_peers, total_peers) =
-        if let Some(peer_node) = state.kernel.peer_node.get() {
+        if let Some(peer_node) = state.kernel.peer_node_ref() {
             let registry = peer_node.registry();
             (
                 peer_node.node_id().to_string(),
@@ -325,7 +325,7 @@ pub async fn a2a_send_task(
         }],
         artifacts: vec![],
     };
-    state.kernel.a2a_task_store.insert(task);
+    state.kernel.a2a_tasks().insert(task);
 
     // Send message to agent
     match state.kernel.send_message(agent.id, &message_text).await {
@@ -340,7 +340,7 @@ pub async fn a2a_send_task(
                 .kernel
                 .a2a_task_store
                 .complete(&task_id, response_msg, vec![]);
-            match state.kernel.a2a_task_store.get(&task_id) {
+            match state.kernel.a2a_tasks().get(&task_id) {
                 Some(completed_task) => (
                     StatusCode::OK,
                     Json(serde_json::to_value(&completed_task).unwrap_or_default()),
@@ -358,8 +358,8 @@ pub async fn a2a_send_task(
                     text: format!("Error: {e}"),
                 }],
             };
-            state.kernel.a2a_task_store.fail(&task_id, error_msg);
-            match state.kernel.a2a_task_store.get(&task_id) {
+            state.kernel.a2a_tasks().fail(&task_id, error_msg);
+            match state.kernel.a2a_tasks().get(&task_id) {
                 Some(failed_task) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(serde_json::to_value(&failed_task).unwrap_or_default()),
@@ -389,7 +389,7 @@ pub async fn a2a_get_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
-    match state.kernel.a2a_task_store.get(&task_id) {
+    match state.kernel.a2a_tasks().get(&task_id) {
         Some(task) => (
             StatusCode::OK,
             Json(serde_json::to_value(&task).unwrap_or_default()),
@@ -417,8 +417,8 @@ pub async fn a2a_cancel_task(
     State(state): State<Arc<AppState>>,
     Path(task_id): Path<String>,
 ) -> impl IntoResponse {
-    if state.kernel.a2a_task_store.cancel(&task_id) {
-        match state.kernel.a2a_task_store.get(&task_id) {
+    if state.kernel.a2a_tasks().cancel(&task_id) {
+        match state.kernel.a2a_tasks().get(&task_id) {
             Some(task) => (
                 StatusCode::OK,
                 Json(serde_json::to_value(&task).unwrap_or_default()),
@@ -778,7 +778,7 @@ pub async fn mcp_http(
             });
         }
     }
-    if let Ok(mcp_tools) = state.kernel.mcp_tools.lock() {
+    if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
         tools.extend(mcp_tools.iter().cloned());
     }
 
@@ -819,15 +819,15 @@ pub async fn mcp_http(
             None,
             None,
             Some(&skill_snapshot),
-            Some(&state.kernel.mcp_connections),
-            Some(&state.kernel.web_ctx),
-            Some(&state.kernel.browser_ctx),
+            Some(&state.kernel.mcp_connections_ref()),
+            Some(&state.kernel.web_tools()),
+            Some(&state.kernel.browser()),
             None,
             None,
-            Some(&state.kernel.media_engine),
+            Some(&state.kernel.media()),
             None, // exec_policy
             if state.kernel.config_ref().tts.enabled {
-                Some(&state.kernel.tts_engine)
+                Some(&state.kernel.tts())
             } else {
                 None
             },
@@ -836,7 +836,7 @@ pub async fn mcp_http(
             } else {
                 None
             },
-            Some(&*state.kernel.process_manager),
+            Some(&*state.kernel.processes()),
         )
         .await;
 
@@ -899,7 +899,7 @@ pub async fn comms_topology(State(state): State<Arc<AppState>>) -> impl IntoResp
     }
 
     // Peer message edges from event bus history
-    let events = state.kernel.event_bus.history(500).await;
+    let events = state.kernel.event_bus_ref().history(500).await;
     let mut peer_pairs = std::collections::HashSet::new();
     for event in &events {
         if let librefang_types::event::EventPayload::Message(_) = &event.payload {
@@ -1111,7 +1111,7 @@ pub async fn comms_events(
     let agents = state.kernel.agent_registry().list();
 
     // Primary source: event bus (has full source/target context)
-    let bus_events = state.kernel.event_bus.history(500).await;
+    let bus_events = state.kernel.event_bus_ref().history(500).await;
     let mut comms_events: Vec<librefang_types::comms::CommsEvent> = bus_events
         .iter()
         .filter_map(|e| filter_to_comms_event(e, &agents))

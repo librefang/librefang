@@ -1619,7 +1619,7 @@ pub async fn hand_instance_browser(
     let agent_id_str = agent_id.to_string();
 
     // 3. Check if a browser session exists (without creating one)
-    if !state.kernel.browser_ctx.has_session(&agent_id_str) {
+    if !state.kernel.browser().has_session(&agent_id_str) {
         return (StatusCode::OK, Json(serde_json::json!({"active": false})));
     }
 
@@ -1789,7 +1789,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
         .collect();
 
     // Get connected servers and their tools from the live MCP connections
-    let connections = state.kernel.mcp_connections.lock().await;
+    let connections = state.kernel.mcp_connections_ref().lock().await;
     let connected: Vec<serde_json::Value> = connections
         .iter()
         .map(|conn| {
@@ -1869,7 +1869,7 @@ pub async fn get_mcp_server(
     });
 
     // Check live connection status
-    let connections = state.kernel.mcp_connections.lock().await;
+    let connections = state.kernel.mcp_connections_ref().lock().await;
     if let Some(conn) = connections.iter().find(|c| c.name() == name) {
         let tools: Vec<serde_json::Value> = conn
             .tools()

@@ -763,7 +763,7 @@ pub async fn list_agents(
     lang: Option<axum::Extension<RequestLanguage>>,
     Query(params): Query<AgentListQuery>,
 ) -> impl IntoResponse {
-    let catalog = state.kernel.model_catalog.read().ok();
+    let catalog = state.kernel.model_catalog_ref().read().ok();
     let dm = &state.kernel.config_ref().default_model;
 
     let mut agents: Vec<librefang_types::agent::AgentEntry> = state.kernel.agent_registry().list();
@@ -2563,7 +2563,7 @@ pub async fn get_agent_mcp_servers(
     };
     // Collect known MCP server names from connected tools
     let mut available: Vec<String> = Vec::new();
-    if let Ok(mcp_tools) = state.kernel.mcp_tools.lock() {
+    if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
         let configured_servers: Vec<String> = state
             .kernel
             .effective_mcp_servers
@@ -4087,7 +4087,7 @@ pub async fn get_agent_deliveries(
         .unwrap_or(50)
         .min(500);
 
-    let receipts = state.kernel.delivery_tracker.get_receipts(agent_id, limit);
+    let receipts = state.kernel.delivery().get_receipts(agent_id, limit);
     (
         StatusCode::OK,
         Json(serde_json::json!({

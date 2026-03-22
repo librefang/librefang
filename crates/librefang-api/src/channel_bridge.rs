@@ -687,7 +687,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     // ── Automation: workflows, triggers, schedules, approvals ──
 
     async fn list_workflows_text(&self) -> String {
-        let workflows = self.kernel.workflows.list_workflows().await;
+        let workflows = self.kernel.workflow_engine().list_workflows().await;
         if workflows.is_empty() {
             return "No workflows defined.".to_string();
         }
@@ -705,7 +705,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn run_workflow_text(&self, name: &str, input: &str) -> String {
-        let workflows = self.kernel.workflows.list_workflows().await;
+        let workflows = self.kernel.workflow_engine().list_workflows().await;
         let wf = match workflows.iter().find(|w| w.name.eq_ignore_ascii_case(name)) {
             Some(w) => w.clone(),
             None => return format!("Workflow '{name}' not found. Use /workflows to list."),
@@ -765,7 +765,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn list_triggers_text(&self) -> String {
-        let triggers = self.kernel.triggers.list_all();
+        let triggers = self.kernel.trigger_engine().list_all();
         if triggers.is_empty() {
             return "No triggers configured.".to_string();
         }
@@ -824,7 +824,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     }
 
     async fn delete_trigger_text(&self, id_prefix: &str) -> String {
-        let triggers = self.kernel.triggers.list_all();
+        let triggers = self.kernel.trigger_engine().list_all();
         let matched: Vec<_> = triggers
             .iter()
             .filter(|t| t.id.0.to_string().starts_with(id_prefix))
@@ -833,7 +833,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             0 => format!("No trigger found matching '{id_prefix}'."),
             1 => {
                 let t = matched[0];
-                if self.kernel.triggers.remove(t.id) {
+                if self.kernel.trigger_engine().remove(t.id) {
                     let id_str = t.id.0.to_string();
                     format!("Trigger [{}] removed.", safe_truncate_str(&id_str, 8))
                 } else {
@@ -998,7 +998,8 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                                 {
                                     Some(librefang_kernel::workflow::WorkflowId(uuid))
                                 } else {
-                                    let workflows = self.kernel.workflows.list_workflows().await;
+                                    let workflows =
+                                        self.kernel.workflow_engine().list_workflows().await;
                                     workflows
                                         .iter()
                                         .find(|w| w.name == *workflow_id)
@@ -1261,7 +1262,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         platform_id: &str,
         action: &str,
     ) -> Result<(), String> {
-        if !self.kernel.auth.is_enabled() {
+        if !self.kernel.auth_manager().is_enabled() {
             return Ok(()); // RBAC not configured — allow all
         }
 
@@ -1303,7 +1304,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
                 error.unwrap_or("Unknown error"),
             )
         };
-        self.kernel.delivery_tracker.record(agent_id, receipt);
+        self.kernel.delivery().record(agent_id, receipt);
 
         // Persist last channel for cron CronDelivery::LastChannel.
         // Include thread_id when present so forum-topic context survives restarts.
@@ -1339,7 +1340,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
     async fn budget_text(&self) -> String {
         let budget = &self.kernel.config_ref().budget;
-        let status = self.kernel.metering.budget_status(budget);
+        let status = self.kernel.metering_ref().budget_status(budget);
 
         let fmt_limit = |v: f64| -> String {
             if v > 0.0 {
@@ -1382,7 +1383,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             return "OFP peer network is disabled. Set network_enabled = true in config.toml."
                 .to_string();
         }
-        match self.kernel.peer_registry.get() {
+        match self.kernel.peer_registry_ref() {
             Some(registry) => {
                 let peers = registry.all_peers();
                 if peers.is_empty() {

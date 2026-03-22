@@ -912,7 +912,7 @@ async fn handle_command(
             })
         }
         "queue" => {
-            let is_running = state.kernel.running_tasks.contains_key(&agent_id);
+            let is_running = state.kernel.running_tasks_ref().contains_key(&agent_id);
             let msg = if is_running {
                 "Agent is processing a request..."
             } else {
@@ -922,7 +922,7 @@ async fn handle_command(
         }
         "budget" => {
             let budget = &state.kernel.config_ref().budget;
-            let status = state.kernel.metering.budget_status(budget);
+            let status = state.kernel.metering_ref().budget_status(budget);
             let fmt = |v: f64| -> String {
                 if v > 0.0 {
                     format!("${v:.2}")
@@ -945,7 +945,7 @@ async fn handle_command(
             let msg = if !state.kernel.config_ref().network_enabled {
                 "OFP network disabled.".to_string()
             } else {
-                match state.kernel.peer_registry.get() {
+                match state.kernel.peer_registry_ref() {
                     Some(registry) => {
                         let peers = registry.all_peers();
                         if peers.is_empty() {
