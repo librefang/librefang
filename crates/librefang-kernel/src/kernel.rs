@@ -5446,9 +5446,12 @@ system_prompt = "You are a helpful assistant."
             .deactivate(instance_id)
             .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
 
-        if let Some(agent_id) = instance.agent_id() {
-            if let Err(e) = self.kill_agent(agent_id) {
-                warn!(agent = %agent_id, error = %e, "Failed to kill hand agent (may already be dead)");
+        // Kill all agents spawned by this hand (multi-agent support)
+        if !instance.agent_ids.is_empty() {
+            for (&ref _role, &agent_id) in &instance.agent_ids {
+                if let Err(e) = self.kill_agent(agent_id) {
+                    warn!(agent = %agent_id, error = %e, "Failed to kill hand agent (may already be dead)");
+                }
             }
         } else {
             // Fallback: if agent_id was never set (incomplete activation), search by hand tag
@@ -5485,9 +5488,9 @@ system_prompt = "You are a helpful assistant."
 
     /// Pause a hand (marks it paused and suspends background loop ticks).
     pub fn pause_hand(&self, instance_id: uuid::Uuid) -> KernelResult<()> {
-        // Pause the background loop for this hand's agent
+        // Pause the background loop for all of this hand's agents
         if let Some(instance) = self.hand_registry.get_instance(instance_id) {
-            if let Some(agent_id) = instance.agent_id() {
+            for &agent_id in instance.agent_ids.values() {
                 self.background.pause_agent(agent_id);
             }
         }
@@ -5503,9 +5506,9 @@ system_prompt = "You are a helpful assistant."
         self.hand_registry
             .resume(instance_id)
             .map_err(|e| KernelError::LibreFang(LibreFangError::Internal(e.to_string())))?;
-        // Resume the background loop for this hand's agent
+        // Resume the background loop for all of this hand's agents
         if let Some(instance) = self.hand_registry.get_instance(instance_id) {
-            if let Some(agent_id) = instance.agent_id() {
+            for &agent_id in instance.agent_ids.values() {
                 self.background.resume_agent(agent_id);
             }
         }
