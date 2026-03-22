@@ -34,6 +34,21 @@ stable_prefix_mode = true       # Improve prompt cache hit rate
 usage_footer = "tokens"         # off | tokens | cost | full
 
 # ── Memory ───────────────────────────────────────────────────
+# Embedding configuration (for semantic memory)
+# [embedding]
+# provider = "openai"                     # "openai", "groq", "ollama", "bedrock", etc.
+# model = "text-embedding-3-small"        # Model identifier
+# api_key_env = "OPENAI_API_KEY"          # Env var holding API key (ignored for bedrock)
+# dimensions = 1536                       # Optional: override auto-detected dimensions
+
+# Amazon Bedrock embedding example:
+# [embedding]
+# provider = "bedrock"
+# model = "amazon.titan-embed-text-v2:0"  # Bedrock model ID
+# # Auth via AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION env vars
+# # Or override region:
+# # base_url = "eu-west-1"               # Region override (not a full URL for bedrock)
+
 [memory]
 decay_rate = 0.05               # Memory confidence decay per cycle
 # embedding_model = "all-MiniLM-L6-v2"
