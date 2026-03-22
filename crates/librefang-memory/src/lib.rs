@@ -14,6 +14,7 @@
 //! - `ProactiveMemoryHooks`: Auto-memorize and auto-retrieve hooks
 //! - `ProactiveMemoryStore`: Implementation on top of MemorySubstrate
 
+pub mod chunker;
 pub mod consolidation;
 pub mod decay;
 pub mod knowledge;
