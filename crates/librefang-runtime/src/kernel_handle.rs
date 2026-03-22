@@ -128,6 +128,18 @@ pub trait KernelHandle: Send + Sync {
         false
     }
 
+    /// Check if a tool requires approval, taking sender and channel context
+    /// into account.  Falls back to `requires_approval()` by default.
+    fn requires_approval_with_context(
+        &self,
+        tool_name: &str,
+        sender_id: Option<&str>,
+        channel: Option<&str>,
+    ) -> bool {
+        let _ = (sender_id, channel);
+        self.requires_approval(tool_name)
+    }
+
     /// Request approval for a tool execution. Blocks until approved/denied/timed out.
     /// Returns `Ok(true)` if approved, `Ok(false)` if denied or timed out.
     async fn request_approval(
