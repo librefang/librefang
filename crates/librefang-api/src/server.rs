@@ -124,8 +124,9 @@ fn resolve_dashboard_credential(
     config_value.to_string()
 }
 
-/// Dashboard credential login — validates username/password from config.toml
-/// and returns a session token (HMAC-derived from credentials).
+/// Dashboard credential login — validates username/password using Argon2id
+/// (with transparent fallback from legacy plaintext passwords) and returns
+/// a session token (HMAC-SHA256-derived from credentials).
 async fn dashboard_login(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
     axum::Json(body): axum::Json<serde_json::Value>,
@@ -136,16 +137,18 @@ async fn dashboard_login(
         "LIBREFANG_DASHBOARD_USER",
         &cfg.home_dir,
     );
-    let cfg_user = cfg_user.trim();
+    let cfg_user = cfg_user.trim().to_string();
     let cfg_pass = resolve_dashboard_credential(
         &cfg.dashboard_pass,
         "LIBREFANG_DASHBOARD_PASS",
         &cfg.home_dir,
     );
-    let cfg_pass = cfg_pass.trim();
+    let cfg_pass = cfg_pass.trim().to_string();
+    let pass_hash = cfg.dashboard_pass_hash.trim();
 
     // If not configured, login is not needed
-    if cfg_user.is_empty() || cfg_pass.is_empty() {
+    let has_password = !pass_hash.is_empty() || !cfg_pass.is_empty();
+    if cfg_user.is_empty() || !has_password {
         return axum::response::Json(serde_json::json!({
             "ok": true, "token": "", "message": "No credentials required"
         }))
@@ -155,39 +158,38 @@ async fn dashboard_login(
     let user = body.get("username").and_then(|v| v.as_str()).unwrap_or("");
     let pass = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
 
-    // Constant-time comparison
-    use subtle::ConstantTimeEq;
-    let user_ok = user.as_bytes().ct_eq(cfg_user.as_bytes());
-    let pass_ok = pass.as_bytes().ct_eq(cfg_pass.as_bytes());
+    match crate::password_hash::verify_dashboard_password(
+        user, pass, &cfg_user, &cfg_pass, pass_hash,
+    ) {
+        crate::password_hash::VerifyResult::Ok {
+            token,
+            upgrade_hash,
+        } => {
+            // If we successfully verified via legacy plaintext, log that an
+            // upgrade hash is available. The admin can persist it to config.
+            if let Some(ref hash) = upgrade_hash {
+                tracing::info!(
+                    "Dashboard password verified via legacy plaintext. \
+                     Set `dashboard_pass_hash = \"{}\"` in config.toml \
+                     and remove `dashboard_pass` to complete the migration.",
+                    hash
+                );
+            }
 
-    if user_ok.into() && pass_ok.into() {
-        // Generate a deterministic token from credentials so no server-side state needed
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        let mut mac = Hmac::<Sha256>::new_from_slice(cfg_pass.as_bytes()).expect("HMAC key");
-        mac.update(cfg_user.as_bytes());
-        mac.update(b"librefang-dashboard-session");
-        let token = mac
-            .finalize()
-            .into_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
-
-        axum::response::Json(serde_json::json!({
-            "ok": true,
-            "token": token,
-        }))
-        .into_response()
-    } else {
-        (
+            axum::response::Json(serde_json::json!({
+                "ok": true,
+                "token": token,
+            }))
+            .into_response()
+        }
+        crate::password_hash::VerifyResult::Denied => (
             axum::http::StatusCode::UNAUTHORIZED,
             axum::response::Json(serde_json::json!({
                 "ok": false,
                 "error": "Invalid username or password"
             })),
         )
-            .into_response()
+            .into_response(),
     }
 }
 
@@ -206,7 +208,8 @@ async fn dashboard_auth_check(
         "LIBREFANG_DASHBOARD_PASS",
         &cfg.home_dir,
     );
-    let has_credentials = !du.trim().is_empty() && !dp.trim().is_empty();
+    let has_pass_hash = !cfg.dashboard_pass_hash.trim().is_empty();
+    let has_credentials = !du.trim().is_empty() && (has_pass_hash || !dp.trim().is_empty());
     let has_api_key = !cfg.api_key.trim().is_empty();
 
     axum::response::Json(serde_json::json!({
@@ -281,6 +284,9 @@ pub async fn build_router(
     let explicit_api_key = state.kernel.config_ref().api_key.trim().to_string();
 
     // Derive dashboard session token from credentials (if configured).
+    // When only an Argon2id hash is stored (no plaintext password), we cannot
+    // pre-derive the session token at boot — the token is generated at login
+    // time instead. The pre-derived token only works with plaintext passwords.
     let du_val = resolve_dashboard_credential(
         &state.kernel.config_ref().dashboard_user,
         "LIBREFANG_DASHBOARD_USER",
@@ -294,16 +300,7 @@ pub async fn build_router(
     let du = du_val.trim();
     let dp = dp_val.trim();
     let dashboard_token = if !du.is_empty() && !dp.is_empty() {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        let mut mac = Hmac::<Sha256>::new_from_slice(dp.as_bytes()).expect("HMAC key");
-        mac.update(du.as_bytes());
-        mac.update(b"librefang-dashboard-session");
-        mac.finalize()
-            .into_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
+        crate::password_hash::derive_session_token(du, dp)
     } else {
         String::new()
     };
