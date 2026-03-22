@@ -558,6 +558,7 @@ pub async fn clawhub_skill_detail(
                     "tags": detail.skill.tags,
                     "updated_at": detail.skill.updated_at,
                     "created_at": detail.skill.created_at,
+                    "is_installed": is_installed,
                     "installed": is_installed,
                 })),
             )
@@ -902,6 +903,7 @@ pub async fn skillhub_skill_detail(
                     "tags": detail.skill.tags,
                     "updated_at": detail.skill.updated_at,
                     "created_at": detail.skill.created_at,
+                    "is_installed": is_installed,
                     "installed": is_installed,
                     "source": "skillhub",
                 })),
