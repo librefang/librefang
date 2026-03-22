@@ -2138,12 +2138,12 @@ system_prompt = "You are a helpful assistant."
 
         info!(agent = %name, id = %agent_id, parent = ?parent, "Spawning agent");
 
-        // Create session and inject reset prompt if configured
+        // Create the backing session now; prompt injection happens after
+        // registration so agent-scoped metadata is visible.
         let mut session = self
             .memory
             .create_session(agent_id)
             .map_err(KernelError::LibreFang)?;
-        self.inject_reset_prompt(&mut session, agent_id);
 
         // Inherit kernel exec_policy as fallback if agent manifest doesn't have one
         let mut manifest = manifest;
@@ -2239,6 +2239,10 @@ system_prompt = "You are a helpful assistant."
         self.registry
             .register(entry.clone())
             .map_err(KernelError::LibreFang)?;
+
+        // Inject reset/context prompts only after the agent is registered so
+        // agent-scoped injections and tag-gated global injections are visible.
+        self.inject_reset_prompt(&mut session, agent_id);
 
         // Update parent's children list
         if let Some(parent_id) = parent {
