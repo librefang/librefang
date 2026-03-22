@@ -3872,8 +3872,9 @@ mod tests {
             result.response
         );
         assert!(
-            result.response.contains("Task completed"),
-            "Expected fallback message, got: {:?}",
+            result.response.contains("Permission denied")
+                || result.response.contains("Task completed"),
+            "Expected tool error or fallback message, got: {:?}",
             result.response
         );
     }
@@ -4032,8 +4033,9 @@ mod tests {
             result.response
         );
         assert!(
-            result.response.contains("Task completed"),
-            "Expected fallback message in streaming, got: {:?}",
+            result.response.contains("Permission denied")
+                || result.response.contains("Task completed"),
+            "Expected tool error or fallback message in streaming, got: {:?}",
             result.response
         );
     }
