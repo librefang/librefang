@@ -200,12 +200,11 @@ pub async fn create_goal(
     }
 
     goals.push(entry.clone());
-    if let Err(e) =
-        state
-            .kernel
-            .memory
-            .structured_set(shared_id, GOALS_KEY, serde_json::Value::Array(goals))
-    {
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
+        shared_id,
+        GOALS_KEY,
+        serde_json::Value::Array(goals),
+    ) {
         tracing::warn!("Failed to save goal: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -372,12 +371,11 @@ pub async fn update_goal_by_id(
         );
     }
 
-    if let Err(e) =
-        state
-            .kernel
-            .memory
-            .structured_set(shared_id, GOALS_KEY, serde_json::Value::Array(goals))
-    {
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
+        shared_id,
+        GOALS_KEY,
+        serde_json::Value::Array(goals),
+    ) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Failed to update goal: {e}")})),
@@ -439,12 +437,11 @@ pub async fn delete_goal(
 
     let removed = before - goals.len();
 
-    if let Err(e) =
-        state
-            .kernel
-            .memory
-            .structured_set(shared_id, GOALS_KEY, serde_json::Value::Array(goals))
-    {
+    if let Err(e) = state.kernel.memory_substrate().structured_set(
+        shared_id,
+        GOALS_KEY,
+        serde_json::Value::Array(goals),
+    ) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Failed to delete goal: {e}")})),

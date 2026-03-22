@@ -961,18 +961,18 @@ pub async fn build_router(
     // Start channel bridges (Telegram, etc.)
     let bridge = channel_bridge::start_channel_bridge(kernel.clone()).await;
 
-    let channels_config = kernel.config.channels.clone();
+    let channels_config = kernel.config_ref().channels.clone();
     let state = Arc::new(AppState {
         kernel: kernel.clone(),
         started_at: Instant::now(),
-        peer_registry: kernel.peer_registry.get().map(|r| Arc::new(r.clone())),
+        peer_registry: kernel.peer_registry_ref().map(|r| Arc::new(r.clone())),
         bridge_manager: tokio::sync::Mutex::new(bridge),
         channels_config: tokio::sync::RwLock::new(channels_config),
         shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         clawhub_cache: dashmap::DashMap::new(),
         provider_probe_cache: librefang_runtime::provider_health::ProbeCache::new(),
         webhook_store: crate::webhook_store::WebhookStore::load(
-            kernel.config.home_dir.join("webhooks.json"),
+            kernel.config_ref().home_dir.join("webhooks.json"),
         ),
     });
 
@@ -1155,7 +1155,7 @@ pub async fn run_daemon(
     // Config file hot-reload watcher (polls every 30 seconds)
     {
         let k = kernel.clone();
-        let config_path = kernel.config.home_dir.join("config.toml");
+        let config_path = kernel.config_ref().home_dir.join("config.toml");
         tokio::spawn(async move {
             let mut last_modified = std::fs::metadata(&config_path)
                 .and_then(|m| m.modified())
@@ -1236,16 +1236,18 @@ pub async fn run_daemon(
         let kernel = state.kernel.clone();
         tokio::spawn(async move {
             loop {
-                match librefang_runtime::catalog_sync::sync_catalog_to(&kernel.config.home_dir)
-                    .await
+                match librefang_runtime::catalog_sync::sync_catalog_to(
+                    &kernel.config_ref().home_dir,
+                )
+                .await
                 {
                     Ok(result) => {
                         info!(
                             "Model catalog synced: {} files downloaded",
                             result.files_downloaded
                         );
-                        if let Ok(mut catalog) = kernel.model_catalog.write() {
-                            catalog.load_cached_catalog_for(&kernel.config.home_dir);
+                        if let Ok(mut catalog) = kernel.model_catalog_ref().write() {
+                            catalog.load_cached_catalog_for(&kernel.config_ref().home_dir);
                             catalog.detect_auth();
                         }
                     }

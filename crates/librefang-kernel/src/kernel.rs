@@ -232,107 +232,109 @@ fn collect_rotation_key_specs(
 
 pub struct LibreFangKernel {
     /// Kernel configuration.
-    pub config: KernelConfig,
+    pub(crate) config: KernelConfig,
     /// Agent registry.
-    pub registry: AgentRegistry,
+    pub(crate) registry: AgentRegistry,
     /// Capability manager.
-    pub capabilities: CapabilityManager,
+    pub(crate) capabilities: CapabilityManager,
     /// Event bus.
-    pub event_bus: EventBus,
+    pub(crate) event_bus: EventBus,
     /// Agent scheduler.
-    pub scheduler: AgentScheduler,
+    pub(crate) scheduler: AgentScheduler,
     /// Memory substrate.
-    pub memory: Arc<MemorySubstrate>,
+    pub(crate) memory: Arc<MemorySubstrate>,
     /// Proactive memory store (mem0-style auto_retrieve/auto_memorize).
-    pub proactive_memory: OnceLock<Arc<librefang_memory::ProactiveMemoryStore>>,
+    pub(crate) proactive_memory: OnceLock<Arc<librefang_memory::ProactiveMemoryStore>>,
     /// Process supervisor.
-    pub supervisor: Supervisor,
+    pub(crate) supervisor: Supervisor,
     /// Workflow engine.
-    pub workflows: WorkflowEngine,
+    pub(crate) workflows: WorkflowEngine,
     /// Workflow template registry.
-    pub template_registry: WorkflowTemplateRegistry,
+    pub(crate) template_registry: WorkflowTemplateRegistry,
     /// Event-driven trigger engine.
-    pub triggers: TriggerEngine,
+    pub(crate) triggers: TriggerEngine,
     /// Background agent executor.
-    pub background: BackgroundExecutor,
+    pub(crate) background: BackgroundExecutor,
     /// Merkle hash chain audit trail.
-    pub audit_log: Arc<AuditLog>,
+    pub(crate) audit_log: Arc<AuditLog>,
     /// Cost metering engine.
-    pub metering: Arc<MeteringEngine>,
+    pub(crate) metering: Arc<MeteringEngine>,
     /// Default LLM driver (from kernel config).
     default_driver: Arc<dyn LlmDriver>,
     /// WASM sandbox engine (shared across all WASM agent executions).
     wasm_sandbox: WasmSandbox,
     /// RBAC authentication manager.
-    pub auth: AuthManager,
+    pub(crate) auth: AuthManager,
     /// Model catalog registry (RwLock for auth status refresh from API).
-    pub model_catalog: std::sync::RwLock<librefang_runtime::model_catalog::ModelCatalog>,
+    pub(crate) model_catalog: std::sync::RwLock<librefang_runtime::model_catalog::ModelCatalog>,
     /// Skill registry for plugin skills (RwLock for hot-reload on install/uninstall).
-    pub skill_registry: std::sync::RwLock<librefang_skills::registry::SkillRegistry>,
+    pub(crate) skill_registry: std::sync::RwLock<librefang_skills::registry::SkillRegistry>,
     /// Tracks running agent tasks for cancellation support.
-    pub running_tasks: dashmap::DashMap<AgentId, tokio::task::AbortHandle>,
+    pub(crate) running_tasks: dashmap::DashMap<AgentId, tokio::task::AbortHandle>,
     /// MCP server connections (lazily initialized at start_background_agents).
-    pub mcp_connections: tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>>,
+    pub(crate) mcp_connections: tokio::sync::Mutex<Vec<librefang_runtime::mcp::McpConnection>>,
     /// MCP tool definitions cache (populated after connections are established).
-    pub mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
+    pub(crate) mcp_tools: std::sync::Mutex<Vec<ToolDefinition>>,
     /// A2A task store for tracking task lifecycle.
     pub a2a_task_store: librefang_runtime::a2a::A2aTaskStore,
     /// Discovered external A2A agent cards.
     pub a2a_external_agents: std::sync::Mutex<Vec<(String, librefang_runtime::a2a::AgentCard)>>,
     /// Web tools context (multi-provider search + SSRF-protected fetch + caching).
-    pub web_ctx: librefang_runtime::web_search::WebToolsContext,
+    pub(crate) web_ctx: librefang_runtime::web_search::WebToolsContext,
     /// Browser automation manager (Playwright bridge sessions).
-    pub browser_ctx: librefang_runtime::browser::BrowserManager,
+    pub(crate) browser_ctx: librefang_runtime::browser::BrowserManager,
     /// Media understanding engine (image description, audio transcription).
-    pub media_engine: librefang_runtime::media_understanding::MediaEngine,
+    pub(crate) media_engine: librefang_runtime::media_understanding::MediaEngine,
     /// Text-to-speech engine.
-    pub tts_engine: librefang_runtime::tts::TtsEngine,
+    pub(crate) tts_engine: librefang_runtime::tts::TtsEngine,
     /// Device pairing manager.
-    pub pairing: crate::pairing::PairingManager,
+    pub(crate) pairing: crate::pairing::PairingManager,
     /// Embedding driver for vector similarity search (None = text fallback).
-    pub embedding_driver:
+    pub(crate) embedding_driver:
         Option<Arc<dyn librefang_runtime::embedding::EmbeddingDriver + Send + Sync>>,
     /// Hand registry — curated autonomous capability packages.
-    pub hand_registry: librefang_hands::registry::HandRegistry,
+    pub(crate) hand_registry: librefang_hands::registry::HandRegistry,
     /// Extension/integration registry (bundled MCP templates + install state).
-    pub extension_registry: std::sync::RwLock<librefang_extensions::registry::IntegrationRegistry>,
+    pub(crate) extension_registry:
+        std::sync::RwLock<librefang_extensions::registry::IntegrationRegistry>,
     /// Integration health monitor.
-    pub extension_health: librefang_extensions::health::HealthMonitor,
+    pub(crate) extension_health: librefang_extensions::health::HealthMonitor,
     /// Effective MCP server list (manual config + extension-installed, merged at boot).
-    pub effective_mcp_servers:
+    pub(crate) effective_mcp_servers:
         std::sync::RwLock<Vec<librefang_types::config::McpServerConfigEntry>>,
     /// Delivery receipt tracker (bounded LRU, max 10K entries).
-    pub delivery_tracker: DeliveryTracker,
+    pub(crate) delivery_tracker: DeliveryTracker,
     /// Cron job scheduler.
-    pub cron_scheduler: crate::cron::CronScheduler,
+    pub(crate) cron_scheduler: crate::cron::CronScheduler,
     /// Execution approval manager.
-    pub approval_manager: crate::approval::ApprovalManager,
+    pub(crate) approval_manager: crate::approval::ApprovalManager,
     /// Agent bindings for multi-account routing (Mutex for runtime add/remove).
-    pub bindings: std::sync::Mutex<Vec<librefang_types::config::AgentBinding>>,
+    pub(crate) bindings: std::sync::Mutex<Vec<librefang_types::config::AgentBinding>>,
     /// Broadcast configuration.
-    pub broadcast: librefang_types::config::BroadcastConfig,
+    pub(crate) broadcast: librefang_types::config::BroadcastConfig,
     /// Auto-reply engine.
-    pub auto_reply_engine: crate::auto_reply::AutoReplyEngine,
+    pub(crate) auto_reply_engine: crate::auto_reply::AutoReplyEngine,
     /// Plugin lifecycle hook registry.
-    pub hooks: librefang_runtime::hooks::HookRegistry,
+    pub(crate) hooks: librefang_runtime::hooks::HookRegistry,
     /// Persistent process manager for interactive sessions (REPLs, servers).
-    pub process_manager: Arc<librefang_runtime::process_manager::ProcessManager>,
+    pub(crate) process_manager: Arc<librefang_runtime::process_manager::ProcessManager>,
     /// OFP peer registry — tracks connected peers (set once during OFP startup).
-    pub peer_registry: OnceLock<librefang_wire::PeerRegistry>,
+    pub(crate) peer_registry: OnceLock<librefang_wire::PeerRegistry>,
     /// OFP peer node — the local networking node (set once during OFP startup).
-    pub peer_node: OnceLock<Arc<librefang_wire::PeerNode>>,
+    pub(crate) peer_node: OnceLock<Arc<librefang_wire::PeerNode>>,
     /// Boot timestamp for uptime calculation.
-    pub booted_at: std::time::Instant,
+    pub(crate) booted_at: std::time::Instant,
     /// WhatsApp Web gateway child process PID (for shutdown cleanup).
-    pub whatsapp_gateway_pid: Arc<std::sync::Mutex<Option<u32>>>,
+    pub(crate) whatsapp_gateway_pid: Arc<std::sync::Mutex<Option<u32>>>,
     /// Channel adapters registered at bridge startup (for proactive `channel_send` tool).
-    pub channel_adapters:
+    pub(crate) channel_adapters:
         dashmap::DashMap<String, Arc<dyn librefang_channels::types::ChannelAdapter>>,
     /// Hot-reloadable default model override (set via config hot-reload, read at agent spawn).
-    pub default_model_override:
+    pub(crate) default_model_override:
         std::sync::RwLock<Option<librefang_types::config::DefaultModelConfig>>,
     /// Hot-reloadable tool policy override (set via config hot-reload, read in available_tools).
-    pub tool_policy_override: std::sync::RwLock<Option<librefang_types::tool_policy::ToolPolicy>>,
+    pub(crate) tool_policy_override:
+        std::sync::RwLock<Option<librefang_types::tool_policy::ToolPolicy>>,
     /// Per-agent message locks — serializes LLM calls for the same agent to prevent
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
@@ -340,7 +342,7 @@ pub struct LibreFangKernel {
     /// Per-agent mid-turn message injection senders (#956).
     /// When an agent loop is running, it holds the receiver; callers use the sender
     /// to inject messages between tool calls.
-    pub injection_senders: dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<String>>,
+    pub(crate) injection_senders: dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<String>>,
     /// Per-agent injection receivers, created alongside senders and consumed by the agent loop.
     injection_receivers:
         dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<String>>>>,
@@ -349,17 +351,18 @@ pub struct LibreFangKernel {
     assistant_routes: dashmap::DashMap<String, AssistantRouteTarget>,
     /// Per-agent decision traces from the most recent message exchange.
     /// Stored for retrieval via `/api/agents/{id}/traces`.
-    pub decision_traces: dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
+    pub(crate) decision_traces:
+        dashmap::DashMap<AgentId, Vec<librefang_types::tool::DecisionTrace>>,
     /// Command queue with lane-based concurrency control.
-    pub command_queue: librefang_runtime::command_lane::CommandQueue,
+    pub(crate) command_queue: librefang_runtime::command_lane::CommandQueue,
     /// Pluggable context engine for memory recall, assembly, and compaction.
-    pub context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>>,
+    pub(crate) context_engine: Option<Box<dyn librefang_runtime::context_engine::ContextEngine>>,
     /// Runtime config passed to context-engine lifecycle hooks.
     context_engine_config: librefang_runtime::context_engine::ContextEngineConfig,
     /// Weak self-reference for trigger dispatch (set after Arc wrapping).
     self_handle: OnceLock<Weak<LibreFangKernel>>,
     /// Whether we've already logged the "no provider" audit entry (prevents spam).
-    pub provider_unconfigured_logged: std::sync::atomic::AtomicBool,
+    pub(crate) provider_unconfigured_logged: std::sync::atomic::AtomicBool,
     /// Cache for workspace context, identity files, and skill metadata to avoid
     /// redundant filesystem I/O and registry scans on every message.
     prompt_metadata_cache: PromptMetadataCache,
@@ -1086,6 +1089,12 @@ impl LibreFangKernel {
     #[inline]
     pub fn peer_node_ref(&self) -> Option<&Arc<librefang_wire::PeerNode>> {
         self.peer_node.get()
+    }
+
+    /// Provider unconfigured log flag (atomic).
+    #[inline]
+    pub fn provider_unconfigured_flag(&self) -> &std::sync::atomic::AtomicBool {
+        &self.provider_unconfigured_logged
     }
 }
 

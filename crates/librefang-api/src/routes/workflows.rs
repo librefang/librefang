@@ -457,7 +457,7 @@ pub async fn update_workflow(
 
     if !state
         .kernel
-        .workflows
+        .workflow_engine()
         .update_workflow(workflow_id, updated)
         .await
     {
@@ -930,7 +930,7 @@ pub async fn create_schedule(
     } else {
         state
             .kernel
-            .registry
+            .agent_registry()
             .list()
             .iter()
             .any(|a| a.name == agent_id_str)
@@ -1140,7 +1140,7 @@ pub async fn run_schedule(
         } else {
             state
                 .kernel
-                .registry
+                .agent_registry()
                 .list()
                 .iter()
                 .find(|a| a.name == agent_id_str)
@@ -1551,11 +1551,7 @@ pub async fn instantiate_template(
         }
     };
 
-    let workflow = match state
-        .kernel
-        .template_registry
-        .instantiate(&template, &params)
-    {
+    let workflow = match state.kernel.templates().instantiate(&template, &params) {
         Ok(w) => w,
         Err(e) => {
             return (

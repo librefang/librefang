@@ -288,7 +288,7 @@ pub async fn a2a_send_task(
             };
             state
                 .kernel
-                .a2a_task_store
+                .a2a_tasks()
                 .complete(&task_id, response_msg, vec![]);
             match state.kernel.a2a_tasks().get(&task_id) {
                 Some(completed_task) => (
@@ -400,7 +400,7 @@ pub async fn a2a_cancel_task(
 pub async fn a2a_list_external_agents(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents = state
         .kernel
-        .a2a_external_agents
+        .a2a_agents()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let items: Vec<serde_json::Value> = agents
@@ -503,7 +503,7 @@ pub async fn a2a_get_external_agent(
 ) -> impl IntoResponse {
     let agents = state
         .kernel
-        .a2a_external_agents
+        .a2a_agents()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -580,7 +580,7 @@ pub async fn a2a_discover_external(
             {
                 let mut agents = state
                     .kernel
-                    .a2a_external_agents
+                    .a2a_agents()
                     .lock()
                     .unwrap_or_else(|e| e.into_inner());
                 // Update or add
@@ -717,7 +717,7 @@ pub async fn mcp_http(
     {
         let registry = state
             .kernel
-            .skill_registry
+            .skill_registry_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         for skill_tool in registry.all_tool_definitions() {
@@ -753,7 +753,7 @@ pub async fn mcp_http(
         // Snapshot skill registry before async call (RwLockReadGuard is !Send)
         let skill_snapshot = state
             .kernel
-            .skill_registry
+            .skill_registry_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .snapshot();
@@ -1266,7 +1266,7 @@ pub async fn comms_task(
 
     match state
         .kernel
-        .memory
+        .memory_substrate()
         .task_post(
             &req.title,
             &req.description,

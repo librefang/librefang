@@ -22,7 +22,7 @@ use std::sync::Arc;
 pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents: Vec<serde_json::Value> = state
         .kernel
-        .registry
+        .agent_registry()
         .list()
         .iter()
         .map(|e| {
@@ -159,7 +159,7 @@ pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoRespons
 pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let status = state
         .kernel
-        .metering
+        .metering_ref()
         .budget_status(&state.kernel.config_ref().budget);
     Json(serde_json::to_value(&status).unwrap_or_default())
 }
@@ -211,7 +211,7 @@ pub async fn update_budget(
 
     let status = state
         .kernel
-        .metering
+        .metering_ref()
         .budget_status(&state.kernel.config_ref().budget);
     Json(serde_json::to_value(&status).unwrap_or_default())
 }
@@ -302,7 +302,7 @@ pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl In
         librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().usage_conn());
     let agents: Vec<serde_json::Value> = state
         .kernel
-        .registry
+        .agent_registry()
         .list()
         .iter()
         .filter_map(|entry| {
@@ -365,7 +365,7 @@ pub async fn update_agent_budget(
 
     match state
         .kernel
-        .registry
+        .agent_registry()
         .update_resources(agent_id, hourly, daily, monthly, tokens)
     {
         Ok(()) => {

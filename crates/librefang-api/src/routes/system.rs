@@ -467,7 +467,7 @@ pub async fn import_agent_memory(
     for (key, value) in &kv {
         match state
             .kernel
-            .memory
+            .memory_substrate()
             .structured_set(agent_id, key, value.clone())
         {
             Ok(()) => imported += 1,
@@ -992,7 +992,7 @@ pub async fn session_cleanup(
     if cfg.retention_days > 0 {
         match state
             .kernel
-            .memory
+            .memory_substrate()
             .cleanup_expired_sessions(cfg.retention_days)
         {
             Ok(n) => total += n,
@@ -1010,7 +1010,7 @@ pub async fn session_cleanup(
     if cfg.max_sessions_per_agent > 0 {
         match state
             .kernel
-            .memory
+            .memory_substrate()
             .cleanup_excess_sessions(cfg.max_sessions_per_agent)
         {
             Ok(n) => total += n,
@@ -1067,7 +1067,7 @@ pub async fn search_sessions(
 
     match state
         .kernel
-        .memory
+        .memory_substrate()
         .search_sessions(&query, agent_id.as_ref())
     {
         Ok(results) => (
@@ -1082,7 +1082,7 @@ pub async fn search_sessions(
 }
 
 // ---------------------------------------------------------------------------
-// Execution Approval System — backed by kernel.approval_manager
+// Execution Approval System — backed by kernel.approvals()
 // ---------------------------------------------------------------------------
 
 /// Serialize an [`ApprovalRequest`] to the JSON shape expected by the dashboard.
@@ -1253,7 +1253,7 @@ pub async fn create_approval(
     // Spawn the request in the background (it will block until resolved or timed out)
     let kernel = Arc::clone(&state.kernel);
     tokio::spawn(async move {
-        kernel.approval_manager.request_approval(approval_req).await;
+        kernel.approvals().request_approval(approval_req).await;
     });
 
     (
@@ -1675,7 +1675,7 @@ pub async fn pairing_devices(
     }
     let devices: Vec<_> = state
         .kernel
-        .pairing
+        .pairing_ref()
         .list_devices()
         .into_iter()
         .map(|d| {

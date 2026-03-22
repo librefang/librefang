@@ -19,7 +19,7 @@ use std::sync::Arc;
 pub async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents: Vec<serde_json::Value> = state
         .kernel
-        .registry
+        .agent_registry()
         .list()
         .into_iter()
         .map(|e| {
@@ -126,7 +126,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ]));
     let db_ok = state
         .kernel
-        .memory
+        .memory_substrate()
         .structured_get(shared_id, "__health_check__")
         .is_ok();
 
@@ -155,7 +155,7 @@ pub async fn health_detail(State(state): State<Arc<AppState>>) -> impl IntoRespo
     ]));
     let db_ok = state
         .kernel
-        .memory
+        .memory_substrate()
         .structured_get(shared_id, "__health_check__")
         .is_ok();
 
@@ -1194,7 +1194,7 @@ pub async fn config_schema(State(state): State<Arc<AppState>>) -> impl IntoRespo
     // Build provider/model options from model catalog for dropdowns
     let catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .read()
         .unwrap_or_else(|e| e.into_inner());
     let provider_options: Vec<String> = catalog

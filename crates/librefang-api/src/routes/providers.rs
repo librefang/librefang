@@ -26,7 +26,7 @@ pub async fn list_models(
 ) -> impl IntoResponse {
     let catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .read()
         .unwrap_or_else(|e| e.into_inner());
     let provider_filter = params.get("provider").map(|s| s.to_lowercase());
@@ -100,7 +100,7 @@ pub async fn list_models(
 pub async fn list_aliases(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let aliases = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .list_aliases()
@@ -158,7 +158,7 @@ pub async fn create_alias(
 
     let mut catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -187,7 +187,7 @@ pub async fn delete_alias(
 ) -> impl IntoResponse {
     let mut catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -211,7 +211,7 @@ pub async fn get_model(
 ) -> impl IntoResponse {
     let catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .read()
         .unwrap_or_else(|e| e.into_inner());
     match catalog.find_model(&id) {
@@ -291,7 +291,7 @@ pub async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResp
     let provider_list: Vec<librefang_types::model_catalog::ProviderInfo> = {
         let catalog = state
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         catalog.list_providers().to_vec()
@@ -399,7 +399,7 @@ pub async fn get_provider(
     let (provider, models) = {
         let catalog = state
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         match catalog.get_provider(&name) {
@@ -542,7 +542,7 @@ pub async fn add_custom_model(
 
     let mut catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -579,7 +579,7 @@ pub async fn remove_custom_model(
 ) -> impl IntoResponse {
     let mut catalog = state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -623,7 +623,7 @@ pub async fn set_provider_key(
     let env_var = {
         let catalog = state
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         catalog
@@ -650,7 +650,7 @@ pub async fn set_provider_key(
     // Refresh auth detection
     state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .detect_auth();
@@ -665,7 +665,7 @@ pub async fn set_provider_key(
     let (current_provider, current_key_env) = {
         let guard = state
             .kernel
-            .default_model_override
+            .default_model_override_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         match guard.as_ref() {
@@ -689,7 +689,7 @@ pub async fn set_provider_key(
         let default_model = {
             let catalog = state
                 .kernel
-                .model_catalog
+                .model_catalog_ref()
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
             catalog.default_model_for_provider(&name)
@@ -724,7 +724,7 @@ pub async fn set_provider_key(
                 };
                 let mut guard = state
                     .kernel
-                    .default_model_override
+                    .default_model_override_ref()
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
                 *guard = Some(new_dm);
@@ -740,7 +740,7 @@ pub async fn set_provider_key(
         let needs_update = {
             let guard = state
                 .kernel
-                .default_model_override
+                .default_model_override_ref()
                 .read()
                 .unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
@@ -751,7 +751,7 @@ pub async fn set_provider_key(
         if needs_update {
             let mut guard = state
                 .kernel
-                .default_model_override
+                .default_model_override_ref()
                 .write()
                 .unwrap_or_else(|e| e.into_inner());
             let base = guard
@@ -770,7 +770,7 @@ pub async fn set_provider_key(
     // Reset log-once flag so future provider removal gets logged again
     state
         .kernel
-        .provider_unconfigured_logged
+        .provider_unconfigured_flag()
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
     // Trigger all active hands so they resume immediately
@@ -797,7 +797,7 @@ pub async fn delete_provider_key(
     let env_var = {
         let catalog = state
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         catalog
@@ -831,7 +831,7 @@ pub async fn delete_provider_key(
     // Refresh auth detection
     state
         .kernel
-        .model_catalog
+        .model_catalog_ref()
         .write()
         .unwrap_or_else(|e| e.into_inner())
         .detect_auth();
@@ -851,7 +851,7 @@ pub async fn test_provider(
     let (env_var, base_url, key_required) = {
         let catalog = state
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         match catalog.get_provider(&name) {
@@ -1054,7 +1054,7 @@ pub async fn set_provider_url(
     {
         let mut catalog = state
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .write()
             .unwrap_or_else(|e| e.into_inner());
         catalog.set_provider_url(&name, &base_url);
@@ -1266,7 +1266,7 @@ pub async fn copilot_oauth_poll(
             // Refresh auth detection
             state
                 .kernel
-                .model_catalog
+                .model_catalog_ref()
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .detect_auth();
@@ -1326,7 +1326,7 @@ pub async fn catalog_update(State(state): State<Arc<AppState>>) -> impl IntoResp
             {
                 let mut catalog = state
                     .kernel
-                    .model_catalog
+                    .model_catalog_ref()
                     .write()
                     .unwrap_or_else(|e| e.into_inner());
                 catalog.load_cached_catalog_for(&state.kernel.home_dir());
