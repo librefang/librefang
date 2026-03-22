@@ -333,6 +333,13 @@ pub struct LibreFangKernel {
     /// session corruption when multiple messages arrive concurrently (e.g. rapid voice
     /// messages via Telegram). Different agents can still run in parallel.
     agent_msg_locks: dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<()>>>,
+    /// Per-agent mid-turn message injection senders (#956).
+    /// When an agent loop is running, it holds the receiver; callers use the sender
+    /// to inject messages between tool calls.
+    pub injection_senders: dashmap::DashMap<AgentId, tokio::sync::mpsc::Sender<String>>,
+    /// Per-agent injection receivers, created alongside senders and consumed by the agent loop.
+    injection_receivers:
+        dashmap::DashMap<AgentId, Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<String>>>>,
     /// Sticky assistant routing per conversation (assistant + sender/thread).
     /// Preserves follow-up context for brief messages after a route to a specialist/hand.
     assistant_routes: dashmap::DashMap<String, AssistantRouteTarget>,
@@ -1415,6 +1422,8 @@ impl LibreFangKernel {
             default_model_override: std::sync::RwLock::new(None),
             tool_policy_override: std::sync::RwLock::new(None),
             agent_msg_locks: dashmap::DashMap::new(),
+            injection_senders: dashmap::DashMap::new(),
+            injection_receivers: dashmap::DashMap::new(),
             assistant_routes: dashmap::DashMap::new(),
             decision_traces: dashmap::DashMap::new(),
             command_queue,
@@ -2540,6 +2549,9 @@ system_prompt = "You are a helpful assistant."
                     let _ = phase_tx.try_send(event);
                 });
 
+            // Set up mid-turn injection channel (#956)
+            let injection_rx = kernel_clone.setup_injection_channel(agent_id);
+
             let result = run_agent_loop_streaming(
                 &manifest,
                 &message_owned,
@@ -2573,8 +2585,12 @@ system_prompt = "You are a helpful assistant."
                 None, // content_blocks (streaming path uses text only for now)
                 kernel_clone.proactive_memory.get().cloned(),
                 kernel_clone.context_engine_for_agent(&manifest),
+                Some(&injection_rx),
             )
             .await;
+
+            // Tear down injection channel after loop finishes
+            kernel_clone.teardown_injection_channel(agent_id);
 
             match result {
                 Ok(result) => {
@@ -3406,6 +3422,9 @@ system_prompt = "You are a helpful assistant."
 
         let proactive_memory = self.proactive_memory.get().cloned();
 
+        // Set up mid-turn injection channel (#956)
+        let injection_rx = self.setup_injection_channel(agent_id);
+
         let result = run_agent_loop(
             &manifest,
             &message_with_links,
@@ -3438,9 +3457,14 @@ system_prompt = "You are a helpful assistant."
             content_blocks,
             proactive_memory,
             self.context_engine_for_agent(&manifest),
+            Some(&injection_rx),
         )
-        .await
-        .map_err(KernelError::LibreFang)?;
+        .await;
+
+        // Tear down injection channel after loop finishes
+        self.teardown_injection_channel(agent_id);
+
+        let result = result.map_err(KernelError::LibreFang)?;
 
         // Append new messages to canonical session for cross-channel memory
         if session.messages.len() > messages_before {
@@ -3496,6 +3520,64 @@ system_prompt = "You are a helpful assistant."
         }
 
         Ok(result)
+    }
+
+    /// Inject a message into a running agent's tool-execution loop (#956).
+    ///
+    /// If the agent is currently executing tools (mid-turn), the message will be
+    /// picked up between tool calls and interrupt the remaining sequence.
+    /// Returns `Ok(true)` if the message was sent, `Ok(false)` if no active
+    /// loop is running for this agent, or `Err` if the agent doesn't exist.
+    pub async fn inject_message(
+        &self,
+        agent_id: AgentId,
+        message: &str,
+    ) -> KernelResult<bool> {
+        // Verify the agent exists
+        if self.registry.get(agent_id).is_none() {
+            return Err(KernelError::LibreFang(
+                LibreFangError::AgentNotFound(agent_id.to_string()),
+            ));
+        }
+        if let Some(tx) = self.injection_senders.get(&agent_id) {
+            match tx.try_send(message.to_string()) {
+                Ok(()) => {
+                    info!(agent_id = %agent_id, "Mid-turn message injected");
+                    Ok(true)
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    warn!(agent_id = %agent_id, "Injection channel full — message dropped");
+                    Ok(false)
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    // Receiver dropped — loop is no longer running
+                    self.injection_senders.remove(&agent_id);
+                    Ok(false)
+                }
+            }
+        } else {
+            // No active loop for this agent
+            Ok(false)
+        }
+    }
+
+    /// Set up the injection channel for an agent before running its loop.
+    /// Returns the receiver wrapped in a Mutex for the agent loop to consume.
+    fn setup_injection_channel(
+        &self,
+        agent_id: AgentId,
+    ) -> Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<String>>> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(8);
+        self.injection_senders.insert(agent_id, tx);
+        let rx = Arc::new(tokio::sync::Mutex::new(rx));
+        self.injection_receivers.insert(agent_id, Arc::clone(&rx));
+        rx
+    }
+
+    /// Tear down the injection channel after the agent loop finishes.
+    fn teardown_injection_channel(&self, agent_id: AgentId) {
+        self.injection_senders.remove(&agent_id);
+        self.injection_receivers.remove(&agent_id);
     }
 
     /// Resolve a module path relative to the kernel's home directory.
