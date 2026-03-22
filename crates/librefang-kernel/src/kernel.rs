@@ -3698,6 +3698,102 @@ system_prompt = "You are a helpful assistant."
         Ok(())
     }
 
+    /// Export a session to a portable JSON-serializable struct for hibernation.
+    pub fn export_session(
+        &self,
+        agent_id: AgentId,
+        session_id: SessionId,
+    ) -> KernelResult<librefang_memory::session::SessionExport> {
+        let entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        let session = self
+            .memory
+            .get_session(session_id)
+            .map_err(KernelError::LibreFang)?
+            .ok_or_else(|| {
+                KernelError::LibreFang(LibreFangError::Internal("Session not found".to_string()))
+            })?;
+
+        if session.agent_id != agent_id {
+            return Err(KernelError::LibreFang(LibreFangError::Internal(
+                "Session belongs to a different agent".to_string(),
+            )));
+        }
+
+        let export = librefang_memory::session::SessionExport {
+            version: 1,
+            agent_name: entry.name.clone(),
+            agent_id: agent_id.0.to_string(),
+            session_id: session_id.0.to_string(),
+            messages: session.messages.clone(),
+            context_window_tokens: session.context_window_tokens,
+            label: session.label.clone(),
+            exported_at: chrono::Utc::now().to_rfc3339(),
+            metadata: std::collections::HashMap::new(),
+        };
+
+        info!(agent_id = %agent_id, session_id = %session_id.0, "Exported session");
+        Ok(export)
+    }
+
+    /// Import a previously exported session, creating a new session under the given agent.
+    pub fn import_session(
+        &self,
+        agent_id: AgentId,
+        export: librefang_memory::session::SessionExport,
+    ) -> KernelResult<SessionId> {
+        // Verify agent exists
+        let _entry = self.registry.get(agent_id).ok_or_else(|| {
+            KernelError::LibreFang(LibreFangError::AgentNotFound(agent_id.to_string()))
+        })?;
+
+        // Validate version
+        if export.version != 1 {
+            return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
+                "Unsupported session export version: {}",
+                export.version
+            ))));
+        }
+
+        // Validate agent_id matches (prevent importing another agent's session)
+        if !export.agent_id.is_empty() && export.agent_id != agent_id.to_string() {
+            return Err(KernelError::LibreFang(LibreFangError::Internal(format!(
+                "Session was exported from agent '{}', cannot import into '{}'",
+                export.agent_id, agent_id
+            ))));
+        }
+
+        // Validate messages are not empty
+        if export.messages.is_empty() {
+            return Err(KernelError::LibreFang(LibreFangError::Internal(
+                "Cannot import session with no messages".to_string(),
+            )));
+        }
+
+        // Create a new session with imported data
+        let new_session = librefang_memory::session::Session {
+            id: SessionId::new(),
+            agent_id,
+            messages: export.messages,
+            context_window_tokens: export.context_window_tokens,
+            label: export.label,
+        };
+
+        self.memory
+            .save_session(&new_session)
+            .map_err(KernelError::LibreFang)?;
+
+        info!(
+            agent_id = %agent_id,
+            new_session_id = %new_session.id.0,
+            imported_messages = new_session.messages.len(),
+            "Imported session from export"
+        );
+        Ok(new_session.id)
+    }
+
     /// Inject the configured `session.reset_prompt` into a newly created session
     /// as the first system message (if configured).
     fn inject_reset_prompt(&self, session: &mut librefang_memory::session::Session) {

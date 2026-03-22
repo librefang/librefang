@@ -1696,6 +1696,113 @@ pub async fn switch_agent_session(
     }
 }
 
+// ── Session Export / Import (Hibernation) ───────────────────────────────
+
+/// GET /api/agents/{id}/sessions/{session_id}/export — Export a session for hibernation.
+#[utoipa::path(
+    get,
+    path = "/api/agents/{id}/sessions/{session_id}/export",
+    tag = "agents",
+    params(
+        ("id" = String, Path, description = "Agent ID"),
+        ("session_id" = String, Path, description = "Session ID to export"),
+    ),
+    responses(
+        (status = 200, description = "Exported session data", body = serde_json::Value)
+    )
+)]
+pub async fn export_session(
+    State(state): State<Arc<AppState>>,
+    Path((id, session_id_str)): Path<(String, String)>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    let session_id = match session_id_str.parse::<uuid::Uuid>() {
+        Ok(uuid) => librefang_types::agent::SessionId(uuid),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid session ID"})),
+            )
+        }
+    };
+    match state.kernel.export_session(agent_id, session_id) {
+        Ok(export) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(export).unwrap_or_default()),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
+        ),
+    }
+}
+
+/// POST /api/agents/{id}/sessions/import — Import a previously exported session.
+#[utoipa::path(
+    post,
+    path = "/api/agents/{id}/sessions/import",
+    tag = "agents",
+    params(("id" = String, Path, description = "Agent ID")),
+    request_body(content = serde_json::Value, description = "Exported session JSON"),
+    responses(
+        (status = 200, description = "Session imported successfully", body = serde_json::Value)
+    )
+)]
+pub async fn import_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let t = ErrorTranslator::new(super::resolve_lang(lang.as_ref()));
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": t.t("api-error-agent-invalid-id")})),
+            )
+        }
+    };
+    let export: librefang_memory::session::SessionExport = match serde_json::from_value(body) {
+        Ok(e) => e,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Invalid export format: {e}")})),
+            )
+        }
+    };
+    match state.kernel.import_session(agent_id, export) {
+        Ok(new_session_id) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "session_id": new_session_id.0.to_string(),
+                "message": "Session imported successfully"
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(
+                serde_json::json!({"error": t.t_args("api-error-generic", &[("error", &e.to_string())])}),
+            ),
+        ),
+    }
+}
+
 // ── Extended Chat Command API Endpoints ─────────────────────────────────
 
 /// POST /api/agents/{id}/session/reset — Reset an agent's session.

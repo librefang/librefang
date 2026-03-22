@@ -107,6 +107,14 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             axum::routing::post(routes::switch_agent_session),
         )
         .route(
+            "/agents/{id}/sessions/{session_id}/export",
+            axum::routing::get(routes::export_session),
+        )
+        .route(
+            "/agents/{id}/sessions/import",
+            axum::routing::post(routes::import_session),
+        )
+        .route(
             "/agents/{id}/session/reset",
             axum::routing::post(routes::reset_session),
         )

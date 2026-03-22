@@ -5,6 +5,8 @@ use librefang_types::agent::{AgentId, SessionId};
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::message::{ContentBlock, Message, MessageContent, Role};
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -22,6 +24,33 @@ pub struct Session {
     pub context_window_tokens: u64,
     /// Optional human-readable session label.
     pub label: Option<String>,
+}
+
+/// Portable session export for hibernation / session state transfer.
+///
+/// Contains everything needed to reconstruct a session on another instance
+/// or after a context window hibernation cycle.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionExport {
+    /// Schema version for forward compatibility.
+    pub version: u32,
+    /// Human-readable agent name at export time.
+    pub agent_name: String,
+    /// Agent ID that owned the session.
+    pub agent_id: String,
+    /// Original session ID.
+    pub session_id: String,
+    /// Full conversation messages.
+    pub messages: Vec<Message>,
+    /// Estimated token count at export time.
+    pub context_window_tokens: u64,
+    /// Optional human-readable session label.
+    pub label: Option<String>,
+    /// ISO-8601 timestamp when the export was created.
+    pub exported_at: String,
+    /// Extensible metadata (model name, provider, custom tags, etc.).
+    #[serde(default)]
+    pub metadata: HashMap<String, serde_json::Value>,
 }
 
 /// Session store backed by SQLite.
