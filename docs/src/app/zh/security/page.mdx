@@ -71,15 +71,44 @@ api_key = "your-bearer-token"
 
 ### Dashboard 登录认证
 
+当 `dashboard_user` 和 `dashboard_pass` 同时配置时，Dashboard 会显示登录页面，用户必须输入用户名和密码才能访问。
+
+#### 配置方式
+
 ```toml
 dashboard_user = "admin"
-dashboard_pass = "vault:dashboard_password"  # 推荐使用 vault 存储
+dashboard_pass = "vault:dashboard_password"
 ```
 
-密码来源优先级：
-1. 环境变量：`LIBREFANG_DASHBOARD_PASS`
-2. 加密 Vault：`vault:KEY_NAME`（通过 `librefang vault set KEY_NAME` 存储）
-3. 配置文件明文（不推荐）
+#### 凭据来源（优先级从高到低）
+
+| 优先级 | 来源 | 示例 |
+|--------|------|------|
+| 1 | 环境变量 | `LIBREFANG_DASHBOARD_PASS=secret` |
+| 2 | 加密 Vault | `dashboard_pass = "vault:dashboard_password"` |
+| 3 | 配置文件明文 | `dashboard_pass = "my-password"`（不推荐） |
+
+#### Vault 存储（推荐）
+
+```bash
+# 初始化 Vault（首次使用）
+librefang vault init
+
+# 存入密码
+librefang vault set dashboard_password
+
+# 在 config.toml 中引用
+dashboard_pass = "vault:dashboard_password"
+```
+
+Vault 使用 AES-256-GCM 加密，主密钥存储在操作系统密钥链中（macOS Keychain / Windows 凭据管理器 / Linux Secret Service），或通过 `LIBREFANG_VAULT_KEY` 环境变量指定。
+
+#### 安全特性
+
+- **恒定时间比较**：使用 `subtle::ConstantTimeEq` 验证凭据，防止时序攻击
+- **HMAC 会话令牌**：登录成功后，使用 HMAC-SHA256 从凭据派生确定性令牌，作为后续 API 请求的 Bearer token
+- **无服务端会话状态**：令牌是确定性的，服务端无需存储会话，重启后令牌仍然有效
+- **公开端点**：`/api/auth/dashboard-login` 和 `/api/auth/dashboard-check` 无需认证即可访问
 
 ### 网络配置
 
