@@ -150,6 +150,10 @@ pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
             "/agents/{id}/update",
             axum::routing::put(update_agent),
         )
+        .route(
+            "/agents/{id}/push",
+            axum::routing::post(push_message),
+        )
 }
 use crate::middleware::RequestLanguage;
 use crate::types::*;
@@ -4153,6 +4157,92 @@ pub async fn inject_message(
             };
             (status, Json(serde_json::json!({"error": e.to_string()})))
         }
+    }
+}
+
+// Push message — proactive outbound messaging via channel adapters
+// ---------------------------------------------------------------------------
+
+/// `POST /api/agents/:id/push` — push a proactive outbound message from an
+/// agent to a channel recipient (e.g., Telegram chat, Slack channel, email).
+///
+/// The agent must exist, but the message is sent directly through the channel
+/// adapter without going through the agent loop. This is the REST API
+/// counterpart of the built-in `channel_send` tool that agents can self-invoke.
+pub async fn push_message(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    lang: Option<axum::Extension<RequestLanguage>>,
+    Json(req): Json<crate::types::PushMessageRequest>,
+) -> impl IntoResponse {
+    let l = super::resolve_lang(lang.as_ref());
+    let (err_invalid_id, err_not_found) = {
+        let t = ErrorTranslator::new(l);
+        (
+            t.t("api-error-agent-invalid-id"),
+            t.t("api-error-agent-not-found"),
+        )
+    };
+
+    let agent_id: AgentId = match id.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": err_invalid_id})),
+            );
+        }
+    };
+
+    // Validate agent exists
+    if state.kernel.agent_registry().get(agent_id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": err_not_found})),
+        );
+    }
+
+    // Validate request fields
+    if req.channel.is_empty() || req.recipient.is_empty() || req.message.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "channel, recipient, and message are required"})),
+        );
+    }
+
+    // Delegate to the bridge manager if available, otherwise use kernel directly
+    let thread_id = req.thread_id.as_deref();
+    let result = {
+        let bridge = state.bridge_manager.lock().await;
+        if let Some(ref bm) = *bridge {
+            bm.push_message(&req.channel, &req.recipient, &req.message, thread_id)
+                .await
+        } else {
+            // No bridge manager — fall back to kernel's channel adapter registry
+            state
+                .kernel
+                .send_channel_message(&req.channel, &req.recipient, &req.message, thread_id)
+                .await
+        }
+    };
+
+    match result {
+        Ok(detail) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "detail": detail,
+                "agent_id": agent_id.to_string(),
+            })),
+        ),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "success": false,
+                "detail": e,
+                "agent_id": agent_id.to_string(),
+            })),
+        ),
     }
 }
 
