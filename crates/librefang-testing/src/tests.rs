@@ -110,6 +110,7 @@ async fn test_mock_llm_driver_recording() {
         system: Some("test system prompt".into()),
         thinking: None,
         prompt_caching: false,
+        response_format: None,
     };
 
     // First call
@@ -278,6 +279,7 @@ async fn test_mock_llm_driver_custom_tokens_and_stop_reason() {
         system: None,
         thinking: None,
         prompt_caching: false,
+        response_format: None,
     };
 
     let resp = driver.complete(request).await.unwrap();
@@ -315,6 +317,7 @@ async fn test_failing_llm_driver() {
         system: None,
         thinking: None,
         prompt_caching: false,
+        response_format: None,
     };
 
     let result = driver.complete(request).await;
