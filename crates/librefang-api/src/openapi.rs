@@ -41,6 +41,8 @@ use crate::types;
         routes::get_profile,
         routes::list_agent_templates,
         routes::get_agent_template,
+        routes::list_workflow_templates,
+        routes::get_workflow_template,
         routes::list_commands,
         routes::get_command,
         routes::queue_status,
