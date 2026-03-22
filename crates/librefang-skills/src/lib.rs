@@ -15,6 +15,7 @@ pub mod marketplace;
 pub mod openclaw_compat;
 pub mod publish;
 pub mod registry;
+pub mod skillhub;
 pub mod verify;
 
 use serde::{Deserialize, Serialize};
@@ -82,6 +83,8 @@ pub enum SkillSource {
     OpenClaw,
     /// Downloaded from ClawHub marketplace.
     ClawHub { slug: String, version: String },
+    /// Downloaded from Skillhub marketplace.
+    Skillhub { slug: String, version: String },
 }
 
 /// A tool provided by a skill.

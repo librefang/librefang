@@ -753,6 +753,27 @@ export async function clawhubInstall(slug: string, version?: string): Promise<Ap
   return post<ApiActionResponse>("/api/clawhub/install", { slug, version: version || "latest" });
 }
 
+// ── Skillhub API ─────────────────────────────────────
+
+export async function skillhubSearch(query: string): Promise<ClawHubBrowseResponse> {
+  return get<ClawHubBrowseResponse>(`/api/skillhub/search?q=${encodeURIComponent(query)}&limit=20`);
+}
+
+export async function skillhubBrowse(sort?: string): Promise<ClawHubBrowseResponse> {
+  const params = new URLSearchParams();
+  if (sort) params.set("sort", sort);
+  params.set("limit", "50");
+  return get<ClawHubBrowseResponse>(`/api/skillhub/browse?${params}`);
+}
+
+export async function skillhubInstall(slug: string): Promise<ApiActionResponse> {
+  return post<ApiActionResponse>("/api/skillhub/install", { slug });
+}
+
+export async function skillhubGetSkill(slug: string): Promise<ClawHubSkillDetail> {
+  return get<ClawHubSkillDetail>(`/api/skillhub/skill/${encodeURIComponent(slug)}`);
+}
+
 // ── Workflow Templates ────────────────────────────────
 
 export interface TemplateParameter {

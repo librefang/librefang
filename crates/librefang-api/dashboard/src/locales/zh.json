@@ -267,7 +267,10 @@
     "stars_count": "星标",
     "downloads_count": "下载",
     "install_timeout": "安装超时",
-    "outputs": "技能输出"
+    "outputs": "技能输出",
+    "skillhub": "Skillhub",
+    "skillhub_search_placeholder": "搜索 Skillhub 技能...",
+    "skillhub_rate_limited_desc": "Skillhub API 请求次数超限，请稍后重试。"
   },
   "hands": {
     "title": "Hands",
