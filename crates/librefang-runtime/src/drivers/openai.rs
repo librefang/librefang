@@ -3,10 +3,10 @@
 //! Works with OpenAI, Ollama, vLLM, and any other OpenAI-compatible endpoint.
 
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
-use librefang_types::config::ResponseFormat;
 use crate::think_filter::{FilterAction, StreamingThinkFilter};
 use async_trait::async_trait;
 use futures::StreamExt;
+use librefang_types::config::ResponseFormat;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
 use serde::{Deserialize, Serialize};
@@ -507,7 +507,10 @@ impl LlmDriver for OpenAIDriver {
             } else {
                 None
             },
-            response_format: request.response_format.as_ref().and_then(oai_response_format),
+            response_format: request
+                .response_format
+                .as_ref()
+                .and_then(oai_response_format),
         };
 
         let max_retries = 3;
@@ -1011,7 +1014,10 @@ impl LlmDriver for OpenAIDriver {
             } else {
                 None
             },
-            response_format: request.response_format.as_ref().and_then(oai_response_format),
+            response_format: request
+                .response_format
+                .as_ref()
+                .and_then(oai_response_format),
         };
 
         // Retry loop for the initial HTTP request

@@ -4,9 +4,9 @@
 //! system prompt extraction, and retry on 429/529 errors.
 
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
-use librefang_types::config::ResponseFormat;
 use async_trait::async_trait;
 use futures::StreamExt;
+use librefang_types::config::ResponseFormat;
 use librefang_types::message::{
     ContentBlock, Message, MessageContent, Role, StopReason, TokenUsage,
 };
