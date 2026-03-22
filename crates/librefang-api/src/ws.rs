@@ -249,7 +249,7 @@ async fn handle_agent_ws(
             interval.tick().await;
             let agents: Vec<serde_json::Value> = state_clone
                 .kernel
-                .registry
+                .agent_registry()
                 .list()
                 .into_iter()
                 .map(|e| {
@@ -461,13 +461,13 @@ async fn handle_text_message(
             if has_images {
                 let model_name = state
                     .kernel
-                    .registry
+                    .agent_registry()
                     .get(agent_id)
                     .map(|e| e.manifest.model.model.clone())
                     .unwrap_or_default();
                 let supports_vision = state
                     .kernel
-                    .model_catalog
+                    .model_catalog_ref()
                     .read()
                     .ok()
                     .and_then(|cat| cat.find_model(&model_name).map(|m| m.supports_vision))
@@ -966,7 +966,7 @@ async fn handle_command(
         "a2a" => {
             let agents = state
                 .kernel
-                .a2a_external_agents
+                .a2a_agents()
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let msg = if agents.is_empty() {

@@ -208,7 +208,7 @@ async fn resolve_manifest(
             }
             let tmpl_path = state
                 .kernel
-                .config
+                .config_ref()
                 .home_dir
                 .join("agents")
                 .join(&safe_name)
@@ -909,12 +909,12 @@ pub fn inject_attachments_into_session(
 ) {
     use librefang_types::message::{Message, MessageContent, Role};
 
-    let entry = match kernel.registry.get(agent_id) {
+    let entry = match kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => return,
     };
 
-    let mut session = match kernel.memory.get_session(entry.session_id) {
+    let mut session = match kernel.memory_substrate().get_session(entry.session_id) {
         Ok(Some(s)) => s,
         _ => librefang_memory::session::Session {
             id: entry.session_id,
@@ -931,7 +931,7 @@ pub fn inject_attachments_into_session(
         pinned: false,
     });
 
-    if let Err(e) = kernel.memory.save_session(&session) {
+    if let Err(e) = kernel.memory_substrate().save_session(&session) {
         tracing::warn!(error = %e, "Failed to save session with image attachments");
     }
 }
@@ -2241,7 +2241,7 @@ pub async fn set_model(
             // so we read it back from the registry instead of echoing the raw input.
             let (resolved_model, resolved_provider) = state
                 .kernel
-                .registry
+                .agent_registry()
                 .get(agent_id)
                 .map(|e| {
                     (
@@ -2305,7 +2305,7 @@ pub async fn get_agent_traces(
 
     let traces = state
         .kernel
-        .decision_traces
+        .traces()
         .get(&agent_id)
         .map(|entry| entry.value().clone())
         .unwrap_or_default();
@@ -2463,7 +2463,7 @@ pub async fn get_agent_skills(
     };
     let available = state
         .kernel
-        .skill_registry
+        .skill_registry_ref()
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .skill_names();
@@ -2566,7 +2566,7 @@ pub async fn get_agent_mcp_servers(
     if let Ok(mcp_tools) = state.kernel.mcp_tools_ref().lock() {
         let configured_servers: Vec<String> = state
             .kernel
-            .effective_mcp_servers
+            .effective_mcp_servers_ref()
             .read()
             .map(|servers| servers.iter().map(|s| s.name.clone()).collect())
             .unwrap_or_default();
@@ -2750,7 +2750,7 @@ pub async fn patch_agent(
     if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
         if let Err(e) = state
             .kernel
-            .registry
+            .agent_registry()
             .update_name(agent_id, name.to_string())
         {
             return (
@@ -2764,7 +2764,7 @@ pub async fn patch_agent(
     if let Some(desc) = body.get("description").and_then(|v| v.as_str()) {
         if let Err(e) = state
             .kernel
-            .registry
+            .agent_registry()
             .update_description(agent_id, desc.to_string())
         {
             return (
@@ -2792,7 +2792,7 @@ pub async fn patch_agent(
     if let Some(system_prompt) = body.get("system_prompt").and_then(|v| v.as_str()) {
         if let Err(e) = state
             .kernel
-            .registry
+            .agent_registry()
             .update_system_prompt(agent_id, system_prompt.to_string())
         {
             return (
@@ -3043,7 +3043,7 @@ pub async fn patch_agent_config(
         if !new_name.is_empty() {
             if let Err(e) = state
                 .kernel
-                .registry
+                .agent_registry()
                 .update_name(agent_id, new_name.clone())
             {
                 return (
@@ -3060,7 +3060,7 @@ pub async fn patch_agent_config(
     if let Some(ref new_desc) = req.description {
         if state
             .kernel
-            .registry
+            .agent_registry()
             .update_description(agent_id, new_desc.clone())
             .is_err()
         {
@@ -3075,7 +3075,7 @@ pub async fn patch_agent_config(
     if let Some(ref new_prompt) = req.system_prompt {
         if state
             .kernel
-            .registry
+            .agent_registry()
             .update_system_prompt(agent_id, new_prompt.clone())
             .is_err()
         {
@@ -3098,7 +3098,7 @@ pub async fn patch_agent_config(
         // Read current identity, merge with provided fields
         let current = state
             .kernel
-            .registry
+            .agent_registry()
             .get(agent_id)
             .map(|e| e.identity)
             .unwrap_or_default();
@@ -3112,7 +3112,7 @@ pub async fn patch_agent_config(
         };
         if state
             .kernel
-            .registry
+            .agent_registry()
             .update_identity(agent_id, merged)
             .is_err()
         {
@@ -3134,7 +3134,7 @@ pub async fn patch_agent_config(
                     // Explicit provider given — use it directly
                     if state
                         .kernel
-                        .registry
+                        .agent_registry()
                         .update_model_and_provider(
                             agent_id,
                             new_model.clone(),
@@ -3176,7 +3176,7 @@ pub async fn patch_agent_config(
     if let Some(fallbacks) = req.fallback_models {
         if state
             .kernel
-            .registry
+            .agent_registry()
             .update_fallback_models(agent_id, fallbacks)
             .is_err()
         {
@@ -3343,7 +3343,7 @@ pub async fn clone_agent(
     // Copy identity from source
     if let Err(e) = state
         .kernel
-        .registry
+        .agent_registry()
         .update_identity(new_id, source.identity.clone())
     {
         tracing::warn!("Failed to copy agent identity: {e}");
@@ -3949,12 +3949,7 @@ pub async fn upload_file(
             },
             size_bytes: size as u64,
         };
-        match state
-            .kernel
-            .media_engine
-            .transcribe_audio(&attachment)
-            .await
-        {
+        match state.kernel.media().transcribe_audio(&attachment).await {
             Ok(result) => {
                 tracing::info!(chars = result.description.len(), provider = %result.provider, "Audio transcribed");
                 Some(result.description)
@@ -4338,7 +4333,7 @@ pub async fn agent_metrics(
     // Persistent usage summary from the UsageStore (SQLite).
     let usage_summary = state
         .kernel
-        .memory
+        .memory_substrate()
         .usage()
         .query_summary(Some(agent_id))
         .ok();
@@ -4346,7 +4341,7 @@ pub async fn agent_metrics(
     // Message count from the active session.
     let message_count: u64 = state
         .kernel
-        .memory
+        .memory_substrate()
         .get_session(entry.session_id)
         .ok()
         .flatten()
@@ -4360,7 +4355,7 @@ pub async fn agent_metrics(
     let agent_id_str = agent_id.to_string();
     let error_count: u64 = state
         .kernel
-        .audit_log
+        .audit()
         .recent(100_000)
         .iter()
         .filter(|e| e.agent_id == agent_id_str && e.outcome != "ok" && e.outcome != "success")
@@ -4465,7 +4460,7 @@ pub async fn agent_logs(
     // Filter audit log entries belonging to this agent.
     let entries: Vec<serde_json::Value> = state
         .kernel
-        .audit_log
+        .audit()
         .recent(100_000)
         .iter()
         .filter(|e| e.agent_id == agent_id_str)

@@ -733,7 +733,7 @@ pub async fn list_hands(State(state): State<Arc<AppState>>) -> impl IntoResponse
         .map(|d| {
             let reqs = state
                 .kernel
-                .hand_registry
+                .hands()
                 .check_requirements(&d.id)
                 .unwrap_or_default();
             let readiness = state.kernel.hands().readiness(&d.id);
@@ -819,7 +819,7 @@ pub async fn get_hand(
         Some(def) => {
             let reqs = state
                 .kernel
-                .hand_registry
+                .hands()
                 .check_requirements(&hand_id)
                 .unwrap_or_default();
             let readiness = state.kernel.hands().readiness(&hand_id);
@@ -831,7 +831,7 @@ pub async fn get_hand(
             let degraded = readiness.as_ref().map(|r| r.degraded).unwrap_or(false);
             let settings_status = state
                 .kernel
-                .hand_registry
+                .hands()
                 .check_settings_availability(&hand_id)
                 .unwrap_or_default();
             (
@@ -911,7 +911,7 @@ pub async fn check_hand_deps(
         Some(def) => {
             let reqs = state
                 .kernel
-                .hand_registry
+                .hands()
                 .check_requirements(&hand_id)
                 .unwrap_or_default();
             let readiness = state.kernel.hands().readiness(&hand_id);
@@ -984,7 +984,7 @@ pub async fn install_hand_deps(
 
     let reqs = state
         .kernel
-        .hand_registry
+        .hands()
         .check_requirements(&hand_id)
         .unwrap_or_default();
 
@@ -1181,7 +1181,7 @@ pub async fn install_hand_deps(
     // Re-check requirements after installation
     let reqs_after = state
         .kernel
-        .hand_registry
+        .hands()
         .check_requirements(&hand_id)
         .unwrap_or_default();
     let all_satisfied = reqs_after.iter().all(|(_, ok)| *ok);
@@ -1278,7 +1278,7 @@ pub async fn activate_hand(
             if let Some(agent_id) = instance.agent_id {
                 let entry = state
                     .kernel
-                    .registry
+                    .agent_registry()
                     .list()
                     .into_iter()
                     .find(|e| e.id == agent_id);
@@ -1414,11 +1414,7 @@ pub async fn get_hand_settings(
     State(state): State<Arc<AppState>>,
     Path(hand_id): Path<String>,
 ) -> impl IntoResponse {
-    let settings_status = match state
-        .kernel
-        .hand_registry
-        .check_settings_availability(&hand_id)
-    {
+    let settings_status = match state.kernel.hands().check_settings_availability(&hand_id) {
         Ok(s) => s,
         Err(_) => {
             return (
@@ -1431,7 +1427,7 @@ pub async fn get_hand_settings(
     // Find active instance config values (if any)
     let instance_config: std::collections::HashMap<String, serde_json::Value> = state
         .kernel
-        .hand_registry
+        .hands()
         .list_instances()
         .iter()
         .find(|i| i.hand_id == hand_id)
@@ -1469,7 +1465,7 @@ pub async fn update_hand_settings(
     // Find active instance for this hand
     let instance_id = state
         .kernel
-        .hand_registry
+        .hands()
         .list_instances()
         .iter()
         .find(|i| i.hand_id == hand_id)
@@ -1555,7 +1551,7 @@ pub async fn hand_stats(
     for metric in &def.dashboard.metrics {
         let value = state
             .kernel
-            .memory
+            .memory_substrate()
             .structured_get(agent_id, &metric.memory_key)
             .ok()
             .flatten()
@@ -1630,7 +1626,7 @@ pub async fn hand_instance_browser(
 
     match state
         .kernel
-        .browser_ctx
+        .browser()
         .send_command(
             &agent_id_str,
             librefang_runtime::browser::BrowserCommand::ReadPage,
@@ -1660,7 +1656,7 @@ pub async fn hand_instance_browser(
 
     match state
         .kernel
-        .browser_ctx
+        .browser()
         .send_command(
             &agent_id_str,
             librefang_runtime::browser::BrowserCommand::Screenshot,
@@ -1774,7 +1770,7 @@ pub async fn list_mcp_servers(State(state): State<Arc<AppState>>) -> impl IntoRe
     // Get configured servers from config
     let config_servers: Vec<serde_json::Value> = state
         .kernel
-        .config
+        .config_ref()
         .mcp_servers
         .iter()
         .map(|s| {
@@ -1843,7 +1839,7 @@ pub async fn get_mcp_server(
     // Find the configured entry by name
     let entry = state
         .kernel
-        .config
+        .config_ref()
         .mcp_servers
         .iter()
         .find(|s| s.name == name);
@@ -1940,7 +1936,7 @@ pub async fn add_mcp_server(
     // Check for duplicate name
     if state
         .kernel
-        .config
+        .config_ref()
         .mcp_servers
         .iter()
         .any(|s| s.name == name)
@@ -2016,7 +2012,7 @@ pub async fn update_mcp_server(
     // Ensure the entry exists
     if !state
         .kernel
-        .config
+        .config_ref()
         .mcp_servers
         .iter()
         .any(|s| s.name == name)
@@ -2114,7 +2110,7 @@ pub async fn delete_mcp_server(
     // Ensure the entry exists
     if !state
         .kernel
-        .config
+        .config_ref()
         .mcp_servers
         .iter()
         .any(|s| s.name == name)
@@ -2620,7 +2616,7 @@ fn integration_status_str(
 pub async fn list_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let registry = state
         .kernel
-        .extension_registry
+        .extensions()
         .read()
         .unwrap_or_else(|e| e.into_inner());
     let health = &state.kernel.extension_monitor();
@@ -2668,7 +2664,7 @@ pub async fn get_integration(
 ) -> impl IntoResponse {
     let registry = state
         .kernel
-        .extension_registry
+        .extensions()
         .read()
         .unwrap_or_else(|e| e.into_inner());
     let health = &state.kernel.extension_monitor();
@@ -2736,7 +2732,7 @@ pub async fn get_integration(
 pub async fn list_available_integrations(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let registry = state
         .kernel
-        .extension_registry
+        .extensions()
         .read()
         .unwrap_or_else(|e| e.into_inner());
     let templates: Vec<serde_json::Value> = registry
@@ -2799,7 +2795,7 @@ pub async fn add_integration(
     let install_err = {
         let mut registry = state
             .kernel
-            .extension_registry
+            .extensions()
             .write()
             .unwrap_or_else(|e| e.into_inner());
 
@@ -2868,7 +2864,7 @@ pub async fn remove_integration(
     let uninstall_err = {
         let mut registry = state
             .kernel
-            .extension_registry
+            .extensions()
             .write()
             .unwrap_or_else(|e| e.into_inner());
         registry.uninstall(&id).err()
@@ -2916,7 +2912,7 @@ pub async fn reconnect_integration(
     let is_installed = {
         let registry = state
             .kernel
-            .extension_registry
+            .extensions()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         registry.is_installed(&id)
@@ -3024,7 +3020,7 @@ pub async fn reload_integrations(State(state): State<Arc<AppState>>) -> impl Int
 pub async fn list_extensions(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let registry = state
         .kernel
-        .extension_registry
+        .extensions()
         .read()
         .unwrap_or_else(|e| e.into_inner());
     let health = &state.kernel.extension_monitor();
@@ -3079,7 +3075,7 @@ pub async fn get_extension(
 ) -> impl IntoResponse {
     let registry = state
         .kernel
-        .extension_registry
+        .extensions()
         .read()
         .unwrap_or_else(|e| e.into_inner());
 
@@ -3164,7 +3160,7 @@ pub async fn install_extension(
     let install_err = {
         let mut registry = state
             .kernel
-            .extension_registry
+            .extensions()
             .write()
             .unwrap_or_else(|e| e.into_inner());
 
@@ -3238,7 +3234,7 @@ pub async fn uninstall_extension(
     let uninstall_err = {
         let mut registry = state
             .kernel
-            .extension_registry
+            .extensions()
             .write()
             .unwrap_or_else(|e| e.into_inner());
         registry.uninstall(&name).err()

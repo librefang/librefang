@@ -505,7 +505,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn list_agents(&self) -> Result<Vec<(AgentId, String)>, String> {
         Ok(self
             .kernel
-            .registry
+            .agent_registry()
             .list()
             .iter()
             .map(|e| (e.id, e.name.clone()))
@@ -516,7 +516,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         // Look for manifest at ~/.librefang/agents/{name}/agent.toml
         let manifest_path = self
             .kernel
-            .config
+            .config_ref()
             .home_dir
             .join("agents")
             .join(manifest_name)
@@ -565,7 +565,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn list_models_text(&self) -> String {
         let catalog = self
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         let available = catalog.available_models();
@@ -607,7 +607,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn list_providers_text(&self) -> String {
         let catalog = self
             .kernel
-            .model_catalog
+            .model_catalog_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         let mut msg = "Providers:\n".to_string();
@@ -628,7 +628,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn list_skills_text(&self) -> String {
         let skills = self
             .kernel
-            .skill_registry
+            .skill_registry_ref()
             .read()
             .unwrap_or_else(|e| e.into_inner());
         let skills = skills.list();
@@ -662,7 +662,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         for d in &defs {
             let reqs_met = self
                 .kernel
-                .hand_registry
+                .hands()
                 .check_requirements(&d.id)
                 .map(|r| r.iter().all(|(_, ok)| *ok))
                 .unwrap_or(false);
@@ -713,7 +713,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
         let run_id = match self
             .kernel
-            .workflows
+            .workflow_engine()
             .create_run(wf.id, input.to_string())
             .await
         {
@@ -725,7 +725,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         let registry_ref = &self.kernel.agent_registry();
         let result = self
             .kernel
-            .workflows
+            .workflow_engine()
             .execute_run(
                 run_id,
                 |step_agent| match step_agent {
@@ -773,7 +773,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         for t in &triggers {
             let agent_name = self
                 .kernel
-                .registry
+                .agent_registry()
                 .get(t.agent_id)
                 .map(|e| e.name.clone())
                 .unwrap_or_else(|| t.agent_id.to_string());
@@ -814,10 +814,10 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             }
         };
 
-        let trigger_id = self
-            .kernel
-            .triggers
-            .register(agent.id, pattern, prompt.to_string(), 0);
+        let trigger_id =
+            self.kernel
+                .trigger_engine()
+                .register(agent.id, pattern, prompt.to_string(), 0);
         let id_str = trigger_id.0.to_string();
         let id_short = safe_truncate_str(&id_str, 8);
         format!("Trigger created [{id_short}] for agent '{agent_name}'.")
@@ -853,7 +853,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         for job in &jobs {
             let agent_name = self
                 .kernel
-                .registry
+                .agent_registry()
                 .get(job.agent_id)
                 .map(|e| e.name.clone())
                 .unwrap_or_else(|| job.agent_id.to_string());
@@ -1127,7 +1127,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             // Show current model
             let entry = self
                 .kernel
-                .registry
+                .agent_registry()
                 .get(agent_id)
                 .ok_or_else(|| "Agent not found".to_string())?;
             return Ok(format!(
@@ -1141,7 +1141,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         // Read back resolved model+provider from registry
         let entry = self
             .kernel
-            .registry
+            .agent_registry()
             .get(agent_id)
             .ok_or_else(|| "Agent not found after model switch".to_string())?;
         Ok(format!(
@@ -1268,7 +1268,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
 
         let user_id = self
             .kernel
-            .auth
+            .auth_manager()
             .identify(channel_type, platform_id)
             .ok_or_else(|| "Unrecognized user. Contact an admin to get access.".to_string())?;
 
@@ -1281,7 +1281,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         };
 
         self.kernel
-            .auth
+            .auth_manager()
             .authorize(user_id, &auth_action)
             .map_err(|e| e.to_string())
     }
@@ -1313,10 +1313,11 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
             if let Some(tid) = thread_id {
                 kv_val["thread_id"] = serde_json::json!(tid);
             }
-            let _ = self
-                .kernel
-                .memory
-                .structured_set(agent_id, "delivery.last_channel", kv_val);
+            let _ = self.kernel.memory_substrate().structured_set(
+                agent_id,
+                "delivery.last_channel",
+                kv_val,
+            );
         }
     }
 
@@ -1324,7 +1325,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
         // Check if auto-reply should fire for this message
         let channel_type = "bridge"; // Generic; the bridge layer handles specifics
         self.kernel
-            .auto_reply_engine
+            .auto_reply()
             .should_reply(message, channel_type, agent_id)?;
         // Fire auto-reply synchronously (bridge already runs in background task)
         match self.kernel.send_message(agent_id, message).await {
@@ -1406,7 +1407,7 @@ impl ChannelBridgeHandle for KernelBridgeAdapter {
     async fn a2a_agents_text(&self) -> String {
         let agents = self
             .kernel
-            .a2a_external_agents
+            .a2a_agents()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if agents.is_empty() {
@@ -1479,7 +1480,7 @@ fn read_token(env_var: &str, adapter_name: &str) -> Option<String> {
 /// Returns `Some(BridgeManager)` if any channels were configured and started,
 /// or `None` if no channels are configured.
 pub async fn start_channel_bridge(kernel: Arc<LibreFangKernel>) -> Option<BridgeManager> {
-    let channels = kernel.config.channels.clone();
+    let channels = kernel.config_ref().channels.clone();
     let (bridge, _names) = start_channel_bridge_with_config(kernel, &channels).await;
     bridge
 }
@@ -1556,7 +1557,7 @@ pub async fn start_channel_bridge_with_config(
     check_channel!(linkedin, "channel-linkedin", "LinkedIn");
 
     // Sidecar channels (always available, not feature-gated)
-    if !kernel.config.sidecar_channels.is_empty() {
+    if !kernel.config_ref().sidecar_channels.is_empty() {
         has_any = true;
     }
 
@@ -2439,7 +2440,7 @@ pub async fn start_channel_bridge_with_config(
     }
 
     // ── Sidecar channel adapters ───────────────────────────────
-    for sidecar_config in &kernel.config.sidecar_channels {
+    for sidecar_config in &kernel.config_ref().sidecar_channels {
         info!(
             name = %sidecar_config.name,
             command = %sidecar_config.command,
@@ -2497,13 +2498,13 @@ pub async fn start_channel_bridge_with_config(
     let bindings = kernel.list_bindings();
     if !bindings.is_empty() {
         // Register all known agents in the router's name cache for binding resolution
-        for entry in kernel.registry.list() {
+        for entry in kernel.agent_registry().list() {
             router.register_agent(entry.name.clone(), entry.id);
         }
         router.load_bindings(&bindings);
         info!(count = bindings.len(), "Loaded agent bindings into router");
     }
-    router.load_broadcast(kernel.broadcast.clone());
+    router.load_broadcast(kernel.broadcast_ref().clone());
 
     let bridge_handle: Arc<dyn ChannelBridgeHandle> = Arc::new(KernelBridgeAdapter {
         kernel: kernel.clone(),
@@ -2517,7 +2518,7 @@ pub async fn start_channel_bridge_with_config(
         let name = adapter.name().to_string();
         // Register adapter in kernel so agents can use `channel_send` tool
         kernel
-            .channel_adapters
+            .channel_adapters_ref()
             .insert(name.clone(), adapter.clone());
         match manager.start_adapter(adapter).await {
             Ok(()) => {
@@ -2526,7 +2527,7 @@ pub async fn start_channel_bridge_with_config(
             }
             Err(e) => {
                 // Remove from kernel map if start failed
-                kernel.channel_adapters.remove(&name);
+                kernel.channel_adapters_ref().remove(&name);
                 error!("Failed to start {name} bridge: {e}");
             }
         }
