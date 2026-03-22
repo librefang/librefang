@@ -313,6 +313,21 @@ pub trait ChannelBridgeHandle: Send + Sync {
         let _ = sender;
         self.send_message_streaming(agent_id, message).await
     }
+
+    /// Push a proactive outbound message to a channel recipient.
+    ///
+    /// Used by the REST API push endpoint (`POST /api/agents/:id/push`) to let
+    /// external callers send messages through a configured channel adapter without
+    /// going through the agent loop. The `thread_id` is optional and adapter-specific.
+    async fn send_channel_push(
+        &self,
+        _channel_type: &str,
+        _recipient: &str,
+        _message: &str,
+        _thread_id: Option<&str>,
+    ) -> Result<String, String> {
+        Err("Channel push not available".to_string())
+    }
 }
 
 /// Owns all running channel adapters and dispatches messages to agents.
@@ -492,6 +507,40 @@ impl BridgeManager {
         });
 
         self.tasks.push(task);
+    }
+
+    /// Push a proactive outbound message to a channel recipient.
+    ///
+    /// Routes the message through the kernel's `send_channel_message` which
+    /// looks up the adapter by name and delivers via `ChannelAdapter::send()`.
+    /// This is the bridge-level entry point used by the REST API push endpoint.
+    pub async fn push_message(
+        &self,
+        channel_type: &str,
+        recipient: &str,
+        message: &str,
+        thread_id: Option<&str>,
+    ) -> Result<String, String> {
+        if channel_type.is_empty() {
+            return Err("channel_type cannot be empty".to_string());
+        }
+        if recipient.is_empty() {
+            return Err("recipient cannot be empty".to_string());
+        }
+        if message.is_empty() {
+            return Err("message cannot be empty".to_string());
+        }
+
+        info!(
+            channel = channel_type,
+            recipient = recipient,
+            "Pushing outbound message via bridge"
+        );
+
+        // Delegate to the kernel handle which owns the adapter registry
+        self.handle
+            .send_channel_push(channel_type, recipient, message, thread_id)
+            .await
     }
 
     /// Stop all adapters and wait for dispatch tasks to finish.
