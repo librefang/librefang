@@ -128,39 +128,39 @@ export function SessionsPage() {
             const agent = agentMap.get(s.agent_id || "");
             return (
               <div key={s.session_id}
-                className={`flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 p-3 sm:p-4 rounded-2xl border transition-all duration-300 card-glow cursor-pointer ${
+                className={`flex items-center gap-3 p-3 sm:p-4 rounded-xl sm:rounded-2xl border transition-all duration-300 card-glow cursor-pointer ${
                   (s as any).active ? "border-success/30 bg-success/5" : "border-border-subtle hover:border-brand/30 hover:-translate-y-0.5"
                 }`}>
                 {/* Agent avatar */}
-                <div className={`relative w-10 h-10 rounded-xl flex items-center justify-center text-lg font-bold shrink-0 ${
+                <div className={`relative w-9 h-9 sm:w-10 sm:h-10 rounded-lg sm:rounded-xl flex items-center justify-center text-base sm:text-lg font-bold shrink-0 ${
                   (s as any).active ? "bg-success/20 text-success" : "bg-main text-text-dim/40"
                 }`}>
-                  {agent?.name?.charAt(0).toUpperCase() || <Users className="w-5 h-5" />}
-                  {(s as any).active && <span className="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />}
+                  {agent?.name?.charAt(0).toUpperCase() || <Users className="w-4 h-4 sm:w-5 sm:h-5" />}
+                  {(s as any).active && <span className="absolute -bottom-0.5 -right-0.5 w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full bg-success border-2 border-white dark:border-surface animate-pulse" />}
                 </div>
 
                 {/* Info */}
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-sm font-bold truncate">{agent?.name || t("sessions.unknown_agent")}</h3>
+                  <div className="flex items-center gap-1.5 sm:gap-2">
+                    <h3 className="text-xs sm:text-sm font-bold truncate">{agent?.name || t("sessions.unknown_agent")}</h3>
                     <Badge variant={(s as any).active ? "success" : "default"}>
                       {(s as any).active ? t("common.active") : t("common.idle")}
                     </Badge>
                   </div>
-                  <div className="flex items-center gap-3 mt-1 text-[10px] text-text-dim/60">
+                  <div className="flex items-center gap-2 sm:gap-3 mt-0.5 sm:mt-1 text-[9px] sm:text-[10px] text-text-dim/60">
                     <span className="font-mono">{s.session_id.slice(0, 8)}</span>
                     <span className="flex items-center gap-1"><Clock className="w-3 h-3" /> {formatTime(s.created_at || "")}</span>
                     {s.message_count !== undefined && (
-                      <span className="flex items-center gap-1"><MessageCircle className="w-3 h-3" /> {s.message_count}</span>
+                      <span className="flex items-center gap-1 hidden sm:flex"><MessageCircle className="w-3 h-3" /> {s.message_count}</span>
                     )}
                   </div>
                 </div>
 
                 {/* Actions */}
-                <div className="flex items-center gap-1 shrink-0 self-end sm:self-auto">
+                <div className="flex items-center gap-1 shrink-0">
                   {!(s as any).active && s.agent_id && (
                     <Button variant="secondary" size="sm" onClick={() => handleSwitch(s.agent_id!, s.session_id)} disabled={pendingId === s.session_id}>
-                      <Play className="w-3.5 h-3.5 sm:mr-1" /> <span className="hidden sm:inline">{t("common.resume")}</span>
+                      <Play className="w-3.5 h-3.5" />
                     </Button>
                   )}
                   {confirmDeleteId === s.session_id ? (
@@ -170,7 +170,7 @@ export function SessionsPage() {
                     </div>
                   ) : (
                     <button onClick={() => handleDelete(s.session_id)} disabled={pendingId === s.session_id}
-                      className="p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
+                      className="p-1.5 sm:p-2 rounded-lg text-text-dim/30 hover:text-error hover:bg-error/10 transition-all">
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}
