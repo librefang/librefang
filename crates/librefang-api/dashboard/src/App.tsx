@@ -290,7 +290,11 @@ export function App() {
   }
 
   if (authNeeded) {
-    return <LoginScreen mode={authMode} onAuthenticated={() => setAuthNeeded(false)} />;
+    return <LoginScreen mode={authMode} onAuthenticated={() => {
+      setAuthNeeded(false);
+      // Reset 401 flag so future 401s can trigger logout again
+      setOnUnauthorized(() => setAuthNeeded(true));
+    }} />;
   }
 
   return (
