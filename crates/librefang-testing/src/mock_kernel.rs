@@ -21,10 +21,12 @@ use tempfile::TempDir;
 /// let (kernel, _tmp) = MockKernelBuilder::new().build();
 /// assert!(kernel.registry.list().is_empty());
 /// ```
+type ConfigFn = Box<dyn FnOnce(&mut KernelConfig)>;
+
 pub struct MockKernelBuilder {
     config: KernelConfig,
     /// 自定义 config 修改函数。
-    config_fn: Option<Box<dyn FnOnce(&mut KernelConfig)>>,
+    config_fn: Option<ConfigFn>,
 }
 
 impl MockKernelBuilder {

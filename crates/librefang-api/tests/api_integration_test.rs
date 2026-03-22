@@ -1339,7 +1339,9 @@ async fn start_test_server_with_auth(api_key: &str) -> TestServer {
         )),
     });
 
-    let api_key_state = state.kernel.config.api_key.clone();
+    let api_key_state = std::sync::Arc::new(tokio::sync::RwLock::new(
+        state.kernel.config.api_key.clone(),
+    ));
 
     let app = Router::new()
         .route("/api/health", axum::routing::get(routes::health))

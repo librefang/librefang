@@ -693,7 +693,7 @@ impl WorkflowEngine {
         send_message: F,
     ) -> Result<String, String>
     where
-        F: Fn(AgentId, String) -> Fut,
+        F: Fn(AgentId, String) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
     {
         // Get the run and workflow
@@ -1135,11 +1135,11 @@ impl WorkflowEngine {
         run_id: WorkflowRunId,
         workflow: &Workflow,
         input: &str,
-        agent_resolver: &impl Fn(&StepAgent) -> Option<(AgentId, String)>,
+        agent_resolver: &impl Fn(&StepAgent) -> Option<(AgentId, String, bool)>,
         send_message: &F,
     ) -> Result<String, String>
     where
-        F: Fn(AgentId, String) -> Fut,
+        F: Fn(AgentId, String) -> Fut + Sync,
         Fut: std::future::Future<Output = Result<(String, u64, u64), String>> + Send,
     {
         let layers = Self::topological_sort(&workflow.steps)?;
@@ -1192,7 +1192,7 @@ impl WorkflowEngine {
                     }
                 }
 
-                let (agent_id, agent_name) = agent_resolver(&step.agent)
+                let (agent_id, agent_name, _agent_inherit) = agent_resolver(&step.agent)
                     .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
 
                 let prompt = Self::expand_variables(&step.prompt_template, input, &variables);
@@ -1252,7 +1252,7 @@ impl WorkflowEngine {
 
                     let dep_failed = step.depends_on.iter().any(|dep| failed_steps.contains(dep));
 
-                    let (agent_id, agent_name) = agent_resolver(&step.agent)
+                    let (agent_id, agent_name, _agent_inherit) = agent_resolver(&step.agent)
                         .ok_or_else(|| format!("Agent not found for step '{}'", step.name))?;
 
                     step_metas.push((
@@ -1679,6 +1679,7 @@ impl WorkflowTemplateRegistry {
                     // Use step name as output_var so subsequent steps can reference via {{step_name}}
                     output_var: Some(ts.name.clone()),
                     inherit_context: None,
+                    depends_on: vec![],
                 }
             })
             .collect();
@@ -2608,7 +2609,7 @@ id = "{id}"
             let rp = rp.clone();
             async move {
                 rp.lock().unwrap().push(msg.clone());
-                Ok((format!("Output for step"), 10u64, 5u64))
+                Ok(("Output for step".to_string(), 10u64, 5u64))
             }
         };
 
@@ -2640,7 +2641,7 @@ id = "{id}"
             let rp = rp.clone();
             async move {
                 rp.lock().unwrap().push(msg.clone());
-                Ok((format!("Output"), 10u64, 5u64))
+                Ok(("Output".to_string(), 10u64, 5u64))
             }
         };
 
@@ -2675,6 +2676,7 @@ id = "{id}"
                     error_mode: ErrorMode::Fail,
                     output_var: None,
                     inherit_context: None,
+                    depends_on: vec![],
                 },
                 WorkflowStep {
                     name: "second".to_string(),
@@ -2682,6 +2684,41 @@ id = "{id}"
                         name: "a".to_string(),
                     },
                     prompt_template: "Do: {{input}}".to_string(),
+                    mode: StepMode::Sequential,
+                    timeout_secs: 10,
+                    error_mode: ErrorMode::Fail,
+                    output_var: None,
+                    inherit_context: Some(false),
+                    depends_on: vec![],
+                },
+            ],
+            created_at: Utc::now(),
+            layout: None,
+        };
+        let wf_id = engine.register(wf).await;
+        let run_id = engine
+            .create_run(wf_id, "test input".to_string())
+            .await
+            .unwrap();
+
+        let received_prompts = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let rp = received_prompts.clone();
+        let sender = move |_id: AgentId, msg: String| {
+            let rp = rp.clone();
+            async move {
+                rp.lock().unwrap().push(msg.clone());
+                Ok(("Output".to_string(), 10u64, 5u64))
+            }
+        };
+
+        let result = engine.execute_run(run_id, mock_resolver, sender).await;
+        assert!(result.is_ok());
+
+        let prompts = received_prompts.lock().unwrap();
+        // Second step has inherit_context=false, so no context injection
+        assert!(!prompts[1].contains("[Parent workflow context]"));
+    }
+
     // ---- DAG execution tests ----
 
     #[test]
@@ -2698,6 +2735,7 @@ id = "{id}"
                 timeout_secs: 10,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                inherit_context: None,
                 depends_on: vec![],
             },
             WorkflowStep {
@@ -2710,6 +2748,7 @@ id = "{id}"
                 timeout_secs: 10,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                inherit_context: None,
                 depends_on: vec!["A".to_string()],
             },
             WorkflowStep {
@@ -2722,6 +2761,7 @@ id = "{id}"
                 timeout_secs: 10,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                inherit_context: None,
                 depends_on: vec!["B".to_string()],
             },
         ];
@@ -2752,6 +2792,7 @@ id = "{id}"
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: Some("a_result".to_string()),
+                    inherit_context: None,
                     depends_on: vec![],
                 },
                 WorkflowStep {
@@ -2764,6 +2805,7 @@ id = "{id}"
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: Some("b_result".to_string()),
+                    inherit_context: None,
                     depends_on: vec![],
                 },
                 WorkflowStep {
@@ -2819,6 +2861,7 @@ id = "{id}"
             error_mode: ErrorMode::Fail,
             output_var: None,
             inherit_context: None,
+            depends_on: vec![],
         };
         let result = WorkflowEngine::build_context_prompt("hello", &step, 0, "wf", &[], true);
         // No previous results => no preamble
@@ -2838,6 +2881,7 @@ id = "{id}"
             error_mode: ErrorMode::Fail,
             output_var: None,
             inherit_context: None,
+            depends_on: vec![],
         };
         let results = vec![StepResult {
             step_name: "s1".to_string(),
@@ -2875,6 +2919,7 @@ id = "{id}"
             error_mode: ErrorMode::Fail,
             output_var: None,
             inherit_context: None,
+            depends_on: vec![],
         };
         let results = vec![StepResult {
             step_name: "s1".to_string(),
@@ -2913,21 +2958,10 @@ id = "{id}"
         }"#;
         let step: WorkflowStep = serde_json::from_str(json).unwrap();
         assert_eq!(step.inherit_context, Some(false));
+    }
 
-        let wf_id = engine.register(wf).await;
-        let run_id = engine.create_run(wf_id, "data".to_string()).await.unwrap();
-
-        let sender =
-            |_id: AgentId, msg: String| async move { Ok((format!("Done: {msg}"), 10u64, 5u64)) };
-
-        let result = engine.execute_run(run_id, mock_resolver, sender).await;
-        assert!(result.is_ok());
-
-        let run = engine.get_run(run_id).await.unwrap();
-        assert!(matches!(run.state, WorkflowRunState::Completed));
-        // A and B run in layer 1 (parallel), C in layer 2
-        assert_eq!(run.step_results.len(), 3);
-
+    #[test]
+    fn test_dag_topological_sort_layers() {
         // Verify topological order: A and B in first layer, C in second
         let layers = WorkflowEngine::topological_sort(&[
             WorkflowStep {
@@ -2940,6 +2974,7 @@ id = "{id}"
                 timeout_secs: 10,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                inherit_context: None,
                 depends_on: vec![],
             },
             WorkflowStep {
@@ -2952,6 +2987,7 @@ id = "{id}"
                 timeout_secs: 10,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                inherit_context: None,
                 depends_on: vec![],
             },
             WorkflowStep {
@@ -2964,6 +3000,7 @@ id = "{id}"
                 timeout_secs: 10,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                inherit_context: None,
                 depends_on: vec!["A".to_string(), "B".to_string()],
             },
         ])
@@ -2987,6 +3024,7 @@ id = "{id}"
                 timeout_secs: 10,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                inherit_context: None,
                 depends_on: vec!["B".to_string()],
             },
             WorkflowStep {
@@ -2999,6 +3037,7 @@ id = "{id}"
                 timeout_secs: 10,
                 error_mode: ErrorMode::Fail,
                 output_var: None,
+                inherit_context: None,
                 depends_on: vec!["A".to_string()],
             },
         ];
@@ -3027,6 +3066,7 @@ id = "{id}"
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                     depends_on: vec![],
                 },
                 WorkflowStep {
@@ -3039,6 +3079,7 @@ id = "{id}"
                     timeout_secs: 10,
                     error_mode: ErrorMode::Fail,
                     output_var: None,
+                    inherit_context: None,
                     depends_on: vec!["A".to_string()],
                 },
             ],
