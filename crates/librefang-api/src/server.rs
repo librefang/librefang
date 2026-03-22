@@ -189,6 +189,10 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
         )
         .route("/agents/{id}/ws", axum::routing::get(ws::agent_ws))
         .route(
+            "/agents/{id}/push",
+            axum::routing::post(routes::push_message),
+        )
+        .route(
             "/uploads/{file_id}",
             axum::routing::get(routes::serve_upload),
         )

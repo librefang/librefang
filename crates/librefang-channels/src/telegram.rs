@@ -665,6 +665,24 @@ impl TelegramAdapter {
         }
         Ok(())
     }
+
+    /// Send a proactive outbound text message to a Telegram chat.
+    ///
+    /// This is a convenience method for push messaging that takes a raw chat ID
+    /// string and message text, without requiring a `ChannelUser` or `ChannelContent`.
+    /// Useful for the REST push endpoint and the `channel_send` built-in tool.
+    pub async fn send_outbound(
+        &self,
+        chat_id: &str,
+        message: &str,
+        thread_id: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let cid: i64 = chat_id
+            .parse()
+            .map_err(|_| format!("Invalid Telegram chat_id: {chat_id}"))?;
+        let tid: Option<i64> = thread_id.and_then(|t| t.parse().ok());
+        self.api_send_message(cid, message, tid).await
+    }
 }
 
 #[async_trait]
