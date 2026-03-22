@@ -108,6 +108,9 @@ echo "  Tag:     $TAG"
 if [ "$IS_PRERELEASE" = true ]; then
     echo "  Type:    pre-release"
 fi
+if [ -n "$PREV_TAG" ]; then
+    echo "  Review:  https://github.com/librefang/librefang/compare/${PREV_TAG}...main"
+fi
 echo ""
 read -rp "Confirm? [Y/n]: " confirm
 if [[ "$confirm" =~ ^[Nn] ]]; then
