@@ -3,6 +3,7 @@
 //! Composes the structured store, semantic store, knowledge store,
 //! session store, and consolidation engine behind a single async API.
 
+use crate::chunker;
 use crate::consolidation::ConsolidationEngine;
 use crate::knowledge::KnowledgeStore;
 use crate::migration::run_migrations;
@@ -13,6 +14,7 @@ use crate::usage::UsageStore;
 
 use async_trait::async_trait;
 use librefang_types::agent::{AgentEntry, AgentId, SessionId};
+use librefang_types::config::ChunkConfig;
 use librefang_types::error::{LibreFangError, LibreFangResult};
 use librefang_types::memory::{
     ConsolidationReport, Entity, ExportFormat, GraphMatch, GraphPattern, ImportReport, Memory,
@@ -33,11 +35,21 @@ pub struct MemorySubstrate {
     sessions: SessionStore,
     consolidation: ConsolidationEngine,
     usage: UsageStore,
+    chunk_config: ChunkConfig,
 }
 
 impl MemorySubstrate {
     /// Open or create a memory substrate at the given database path.
     pub fn open(db_path: &Path, decay_rate: f32) -> LibreFangResult<Self> {
+        Self::open_with_chunking(db_path, decay_rate, ChunkConfig::default())
+    }
+
+    /// Open or create a memory substrate with explicit chunking configuration.
+    pub fn open_with_chunking(
+        db_path: &Path,
+        decay_rate: f32,
+        chunk_config: ChunkConfig,
+    ) -> LibreFangResult<Self> {
         let conn = Connection::open(db_path).map_err(|e| LibreFangError::Memory(e.to_string()))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;")
             .map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -52,11 +64,20 @@ impl MemorySubstrate {
             sessions: SessionStore::new(Arc::clone(&shared)),
             usage: UsageStore::new(Arc::clone(&shared)),
             consolidation: ConsolidationEngine::new(shared, decay_rate),
+            chunk_config,
         })
     }
 
     /// Create an in-memory substrate (for testing).
     pub fn open_in_memory(decay_rate: f32) -> LibreFangResult<Self> {
+        Self::open_in_memory_with_chunking(decay_rate, ChunkConfig::default())
+    }
+
+    /// Create an in-memory substrate with explicit chunking configuration.
+    pub fn open_in_memory_with_chunking(
+        decay_rate: f32,
+        chunk_config: ChunkConfig,
+    ) -> LibreFangResult<Self> {
         let conn =
             Connection::open_in_memory().map_err(|e| LibreFangError::Memory(e.to_string()))?;
         run_migrations(&conn).map_err(|e| LibreFangError::Memory(e.to_string()))?;
@@ -70,6 +91,7 @@ impl MemorySubstrate {
             sessions: SessionStore::new(Arc::clone(&shared)),
             usage: UsageStore::new(Arc::clone(&shared)),
             consolidation: ConsolidationEngine::new(shared, decay_rate),
+            chunk_config,
         })
     }
 
@@ -386,6 +408,12 @@ impl MemorySubstrate {
     // -----------------------------------------------------------------
 
     /// Store a memory with an embedding vector.
+    ///
+    /// When chunking is enabled and the content exceeds `max_chunk_size`,
+    /// the text is split into overlapping chunks. Each chunk is stored as a
+    /// separate memory entry with `parent_id` and `chunk_index` in its
+    /// metadata. The returned `MemoryId` belongs to the first chunk (the
+    /// logical parent).
     pub fn remember_with_embedding(
         &self,
         agent_id: AgentId,
@@ -395,8 +423,63 @@ impl MemorySubstrate {
         metadata: HashMap<String, serde_json::Value>,
         embedding: Option<&[f32]>,
     ) -> LibreFangResult<MemoryId> {
-        self.semantic
-            .remember_with_embedding(agent_id, content, source, scope, metadata, embedding)
+        let should_chunk =
+            self.chunk_config.enabled && content.len() > self.chunk_config.max_chunk_size;
+
+        if !should_chunk {
+            return self
+                .semantic
+                .remember_with_embedding(agent_id, content, source, scope, metadata, embedding);
+        }
+
+        let chunks = chunker::chunk_text(
+            content,
+            self.chunk_config.max_chunk_size,
+            self.chunk_config.overlap,
+        );
+
+        // Store the first chunk and use its ID as the parent_id for siblings.
+        let mut parent_id: Option<MemoryId> = None;
+        let total_chunks = chunks.len();
+
+        for (idx, chunk) in chunks.iter().enumerate() {
+            let mut chunk_meta = metadata.clone();
+            chunk_meta.insert(
+                "chunk_index".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(idx)),
+            );
+            chunk_meta.insert(
+                "total_chunks".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(total_chunks)),
+            );
+
+            if let Some(pid) = &parent_id {
+                chunk_meta.insert(
+                    "parent_id".to_string(),
+                    serde_json::Value::String(pid.0.to_string()),
+                );
+            }
+
+            // Only the first chunk can reuse the caller-provided embedding.
+            // Subsequent chunks get None — the caller can embed them later via
+            // `update_embedding`.
+            let emb = if idx == 0 { embedding } else { None };
+
+            let id = self.semantic.remember_with_embedding(
+                agent_id,
+                chunk,
+                source.clone(),
+                scope,
+                chunk_meta,
+                emb,
+            )?;
+
+            if parent_id.is_none() {
+                parent_id = Some(id);
+            }
+        }
+
+        Ok(parent_id.expect("chunks is non-empty"))
     }
 
     /// Recall memories using vector similarity when a query embedding is provided.
@@ -435,6 +518,8 @@ impl MemorySubstrate {
     }
 
     /// Async wrapper for `remember_with_embedding` — runs in a blocking thread.
+    ///
+    /// Applies chunking when enabled and the content exceeds `max_chunk_size`.
     pub async fn remember_with_embedding_async(
         &self,
         agent_id: AgentId,
@@ -448,15 +533,65 @@ impl MemorySubstrate {
         let content = content.to_string();
         let scope = scope.to_string();
         let embedding_owned = embedding.map(|e| e.to_vec());
+        let chunk_config = self.chunk_config.clone();
         tokio::task::spawn_blocking(move || {
-            store.remember_with_embedding(
-                agent_id,
-                &content,
-                source,
-                &scope,
-                metadata,
-                embedding_owned.as_deref(),
-            )
+            let should_chunk = chunk_config.enabled && content.len() > chunk_config.max_chunk_size;
+
+            if !should_chunk {
+                return store.remember_with_embedding(
+                    agent_id,
+                    &content,
+                    source,
+                    &scope,
+                    metadata,
+                    embedding_owned.as_deref(),
+                );
+            }
+
+            let chunks =
+                chunker::chunk_text(&content, chunk_config.max_chunk_size, chunk_config.overlap);
+
+            let mut parent_id: Option<MemoryId> = None;
+            let total_chunks = chunks.len();
+
+            for (idx, chunk) in chunks.iter().enumerate() {
+                let mut chunk_meta = metadata.clone();
+                chunk_meta.insert(
+                    "chunk_index".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(idx)),
+                );
+                chunk_meta.insert(
+                    "total_chunks".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(total_chunks)),
+                );
+                if let Some(pid) = &parent_id {
+                    chunk_meta.insert(
+                        "parent_id".to_string(),
+                        serde_json::Value::String(pid.0.to_string()),
+                    );
+                }
+
+                let emb = if idx == 0 {
+                    embedding_owned.as_deref()
+                } else {
+                    None
+                };
+
+                let id = store.remember_with_embedding(
+                    agent_id,
+                    chunk,
+                    source.clone(),
+                    &scope,
+                    chunk_meta,
+                    emb,
+                )?;
+
+                if parent_id.is_none() {
+                    parent_id = Some(id);
+                }
+            }
+
+            Ok(parent_id.expect("chunks is non-empty"))
         })
         .await
         .map_err(|e| LibreFangError::Internal(e.to_string()))?
@@ -705,14 +840,9 @@ impl Memory for MemorySubstrate {
         scope: &str,
         metadata: HashMap<String, serde_json::Value>,
     ) -> LibreFangResult<MemoryId> {
-        let store = self.semantic.clone();
-        let content = content.to_string();
-        let scope = scope.to_string();
-        tokio::task::spawn_blocking(move || {
-            store.remember(agent_id, &content, source, &scope, metadata)
-        })
-        .await
-        .map_err(|e| LibreFangError::Internal(e.to_string()))?
+        // Delegate to remember_with_embedding (no embedding) which handles chunking.
+        self.remember_with_embedding_async(agent_id, content, source, scope, metadata, None)
+            .await
     }
 
     async fn recall(
@@ -870,5 +1000,103 @@ mod tests {
         let substrate = MemorySubstrate::open_in_memory(0.1).unwrap();
         let claimed = substrate.task_claim("nobody").await.unwrap();
         assert!(claimed.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_chunking_short_text_passthrough() {
+        let config = ChunkConfig {
+            enabled: true,
+            max_chunk_size: 1500,
+            overlap: 200,
+        };
+        let substrate = MemorySubstrate::open_in_memory_with_chunking(0.1, config).unwrap();
+        let agent_id = AgentId::new();
+        // Short text should be stored as a single memory.
+        substrate
+            .remember(
+                agent_id,
+                "Short text",
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let results = substrate.recall("Short", 10, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].content.contains("Short text"));
+    }
+
+    #[tokio::test]
+    async fn test_chunking_long_text_splits() {
+        let config = ChunkConfig {
+            enabled: true,
+            max_chunk_size: 100,
+            overlap: 20,
+        };
+        let substrate = MemorySubstrate::open_in_memory_with_chunking(0.1, config).unwrap();
+        let agent_id = AgentId::new();
+
+        // Create text that exceeds max_chunk_size.
+        let long_text = "The quick brown fox jumps over the lazy dog. ".repeat(10);
+        assert!(long_text.len() > 100);
+
+        substrate
+            .remember(
+                agent_id,
+                &long_text,
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        // Should have stored multiple chunks.
+        let results = substrate.recall("fox", 20, None).await.unwrap();
+        assert!(
+            results.len() > 1,
+            "expected multiple chunks, got {}",
+            results.len()
+        );
+
+        // Each chunk should have chunk_index metadata.
+        for result in &results {
+            assert!(
+                result.metadata.contains_key("chunk_index"),
+                "chunk should have chunk_index metadata"
+            );
+            assert!(
+                result.metadata.contains_key("total_chunks"),
+                "chunk should have total_chunks metadata"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_chunking_disabled_stores_as_single() {
+        let config = ChunkConfig {
+            enabled: false,
+            max_chunk_size: 100,
+            overlap: 20,
+        };
+        let substrate = MemorySubstrate::open_in_memory_with_chunking(0.1, config).unwrap();
+        let agent_id = AgentId::new();
+
+        let long_text = "The quick brown fox jumps over the lazy dog. ".repeat(10);
+        substrate
+            .remember(
+                agent_id,
+                &long_text,
+                MemorySource::Conversation,
+                "episodic",
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+
+        // With chunking disabled, should store as one entry.
+        let results = substrate.recall("fox", 20, None).await.unwrap();
+        assert_eq!(results.len(), 1);
     }
 }
