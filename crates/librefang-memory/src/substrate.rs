@@ -436,6 +436,7 @@ impl MemorySubstrate {
     }
 
     /// Shared chunking + storing logic used by both sync and async paths.
+    #[allow(clippy::too_many_arguments)]
     fn store_with_chunking(
         semantic: &SemanticStore,
         chunk_config: &ChunkConfig,
