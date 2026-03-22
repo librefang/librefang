@@ -42,6 +42,8 @@ dirs = { workspace = true }
 jsonwebtoken = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+argon2 = { workspace = true }
+rand = { workspace = true }
 utoipa = { version = "5", features = ["axum_extras"] }
 include_dir = "0.7"
 

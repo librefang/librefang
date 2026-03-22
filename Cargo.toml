@@ -132,7 +132,7 @@ colored = "3"
 
 # Encryption
 aes-gcm = "0.10"
-argon2 = "0.5"
+argon2 = { version = "0.5", features = ["rand"] }
 
 # HTML entity decoding
 html-escape = "0.2"
