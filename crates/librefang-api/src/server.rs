@@ -799,8 +799,12 @@ async fn dashboard_login(
     axum::Json(body): axum::Json<serde_json::Value>,
 ) -> axum::response::Response {
     let cfg = &state.kernel.config;
-    let cfg_user = cfg.dashboard_user.trim();
-    let cfg_pass = cfg.dashboard_pass.trim();
+    let cfg_user = std::env::var("LIBREFANG_DASHBOARD_USER")
+        .unwrap_or_else(|_| cfg.dashboard_user.clone());
+    let cfg_user = cfg_user.trim();
+    let cfg_pass = std::env::var("LIBREFANG_DASHBOARD_PASS")
+        .unwrap_or_else(|_| cfg.dashboard_pass.clone());
+    let cfg_pass = cfg_pass.trim();
 
     // If not configured, login is not needed
     if cfg_user.is_empty() || cfg_pass.is_empty() {
@@ -850,8 +854,11 @@ async fn dashboard_auth_check(
     axum::extract::State(state): axum::extract::State<Arc<routes::AppState>>,
 ) -> axum::response::Json<serde_json::Value> {
     let cfg = &state.kernel.config;
-    let has_credentials =
-        !cfg.dashboard_user.trim().is_empty() && !cfg.dashboard_pass.trim().is_empty();
+    let du = std::env::var("LIBREFANG_DASHBOARD_USER")
+        .unwrap_or_else(|_| cfg.dashboard_user.clone());
+    let dp = std::env::var("LIBREFANG_DASHBOARD_PASS")
+        .unwrap_or_else(|_| cfg.dashboard_pass.clone());
+    let has_credentials = !du.trim().is_empty() && !dp.trim().is_empty();
     let has_api_key = !cfg.api_key.trim().is_empty();
 
     axum::response::Json(serde_json::json!({
@@ -927,8 +934,12 @@ pub async fn build_router(
     // If dashboard credentials are configured but no api_key, derive one from credentials.
     // This ensures the auth middleware protects write endpoints when credentials are set.
     if api_key.is_empty() {
-        let du = state.kernel.config.dashboard_user.trim();
-        let dp = state.kernel.config.dashboard_pass.trim();
+        let du_val = std::env::var("LIBREFANG_DASHBOARD_USER")
+            .unwrap_or_else(|_| state.kernel.config.dashboard_user.clone());
+        let dp_val = std::env::var("LIBREFANG_DASHBOARD_PASS")
+            .unwrap_or_else(|_| state.kernel.config.dashboard_pass.clone());
+        let du = du_val.trim();
+        let dp = dp_val.trim();
         if !du.is_empty() && !dp.is_empty() {
             use hmac::{Hmac, Mac};
             use sha2::Sha256;
