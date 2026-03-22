@@ -4,6 +4,7 @@
 //! system prompt extraction, and retry on 429/529 errors.
 
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmDriver, LlmError, StreamEvent};
+use librefang_types::config::ResponseFormat;
 use async_trait::async_trait;
 use futures::StreamExt;
 use librefang_types::message::{
@@ -165,7 +166,7 @@ enum ContentBlockAccum {
 impl LlmDriver for AnthropicDriver {
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         // Extract system prompt from messages or use the provided one
-        let system_text = request.system.clone().or_else(|| {
+        let mut system_text = request.system.clone().or_else(|| {
             request.messages.iter().find_map(|m| {
                 if m.role == Role::System {
                     match &m.content {
@@ -177,6 +178,12 @@ impl LlmDriver for AnthropicDriver {
                 }
             })
         });
+
+        // Anthropic has no native response_format field — inject instructions
+        // into the system prompt when structured output is requested.
+        if let Some(rf) = &request.response_format {
+            append_response_format_instructions(&mut system_text, rf);
+        }
 
         // Build the system field: structured blocks with cache_control when
         // prompt caching is enabled, plain string otherwise.
@@ -304,7 +311,7 @@ impl LlmDriver for AnthropicDriver {
         tx: tokio::sync::mpsc::Sender<StreamEvent>,
     ) -> Result<CompletionResponse, LlmError> {
         // Build request (same as complete but with stream: true)
-        let system_text = request.system.clone().or_else(|| {
+        let mut system_text = request.system.clone().or_else(|| {
             request.messages.iter().find_map(|m| {
                 if m.role == Role::System {
                     match &m.content {
@@ -316,6 +323,11 @@ impl LlmDriver for AnthropicDriver {
                 }
             })
         });
+
+        // Inject structured-output instructions into system prompt.
+        if let Some(rf) = &request.response_format {
+            append_response_format_instructions(&mut system_text, rf);
+        }
 
         let system = system_text.map(|text| build_system_value(&text, request.prompt_caching));
 
@@ -669,6 +681,41 @@ fn ensure_object(v: serde_json::Value) -> serde_json::Value {
 /// with `cache_control: {"type": "ephemeral"}` on the last block so that
 /// Anthropic caches the system prompt prefix.  When disabled, returns a
 /// plain JSON string.
+/// Append structured-output instructions to the system prompt for Anthropic.
+///
+/// Anthropic does not have a native `response_format` field, so we inject
+/// formatting instructions into the system prompt instead.
+fn append_response_format_instructions(system: &mut Option<String>, rf: &ResponseFormat) {
+    match rf {
+        ResponseFormat::Text => {} // nothing to do
+        ResponseFormat::Json => {
+            let suffix = "\n\nIMPORTANT: You MUST respond with valid JSON only. \
+                           Do not include any text outside the JSON object.";
+            if let Some(s) = system.as_mut() {
+                s.push_str(suffix);
+            } else {
+                *system = Some(suffix.trim_start().to_string());
+            }
+        }
+        ResponseFormat::JsonSchema {
+            name,
+            schema,
+            strict: _,
+        } => {
+            let suffix = format!(
+                "\n\nIMPORTANT: You MUST respond with valid JSON that conforms to the \
+                 following schema (name: \"{name}\"):\n```json\n{schema}\n```\n\
+                 Do not include any text outside the JSON object."
+            );
+            if let Some(s) = system.as_mut() {
+                s.push_str(&suffix);
+            } else {
+                *system = Some(suffix.trim_start().to_string());
+            }
+        }
+    }
+}
+
 fn build_system_value(text: &str, prompt_caching: bool) -> serde_json::Value {
     if prompt_caching {
         serde_json::json!([

@@ -277,6 +277,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             system: Some(EXTRACTION_SYSTEM_PROMPT.to_string()),
             thinking: None,
             prompt_caching: false,
+            response_format: None,
         };
 
         let response = self
@@ -328,6 +329,7 @@ impl MemoryExtractor for LlmMemoryExtractor {
             system: Some(DECISION_SYSTEM_PROMPT.to_string()),
             thinking: None,
             prompt_caching: false,
+            response_format: None,
         };
 
         match self.driver.complete(request).await {

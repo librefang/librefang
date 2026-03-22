@@ -998,6 +998,7 @@ mod tests {
             system: Some("You are helpful.".to_string()),
             thinking: None,
             prompt_caching: false,
+            response_format: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.model, "gpt-4o");
@@ -1029,6 +1030,7 @@ mod tests {
             system: None,
             thinking: None,
             prompt_caching: false,
+            response_format: None,
         };
         let api_req = ChatGptDriver::build_responses_request(&req);
         assert_eq!(api_req.instructions.as_deref(), Some("System prompt."));
