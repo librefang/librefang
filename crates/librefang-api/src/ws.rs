@@ -146,30 +146,27 @@ pub async fn agent_ws(
     uri: axum::http::Uri,
 ) -> impl IntoResponse {
     // SECURITY: Authenticate WebSocket upgrades (bypasses middleware).
-    // Trim whitespace so empty/whitespace-only api_key disables auth.
-    let api_key_raw = &state.kernel.config_ref().api_key;
-    let api_key = api_key_raw.trim();
-    if !api_key.is_empty() {
-        // SECURITY: Use constant-time comparison to prevent timing attacks on API key
-        let ct_eq = |token: &str, key: &str| -> bool {
+    let valid_tokens = crate::server::valid_api_tokens(state.kernel.as_ref());
+    if !valid_tokens.is_empty() {
+        // SECURITY: Use constant-time comparison to prevent timing attacks on auth tokens.
+        let matches_any = |token: &str| -> bool {
             use subtle::ConstantTimeEq;
-            if token.len() != key.len() {
-                return false;
-            }
-            token.as_bytes().ct_eq(key.as_bytes()).into()
+            valid_tokens.iter().any(|key| {
+                token.len() == key.len() && token.as_bytes().ct_eq(key.as_bytes()).into()
+            })
         };
 
         let header_auth = headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .map(|token| ct_eq(token, api_key))
+            .map(&matches_any)
             .unwrap_or(false);
 
         let query_auth = uri
             .query()
             .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("token=")))
-            .map(|token| ct_eq(token, api_key))
+            .map(&matches_any)
             .unwrap_or(false);
 
         if !header_auth && !query_auth {
