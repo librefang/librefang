@@ -4758,7 +4758,28 @@ system_prompt = "You are a helpful assistant."
     ///
     /// Any matching triggers will dispatch messages to the subscribing agents.
     /// Returns the list of (agent_id, message) pairs that were triggered.
+    /// Includes depth limiting to prevent circular trigger chains (max 5 levels).
     pub async fn publish_event(&self, event: Event) -> Vec<(AgentId, String)> {
+        // Depth guard: prevent circular trigger chains
+        static TRIGGER_DEPTH: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        const MAX_TRIGGER_DEPTH: u32 = 5;
+
+        let depth = TRIGGER_DEPTH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if depth >= MAX_TRIGGER_DEPTH {
+            TRIGGER_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            warn!(depth, "Trigger depth limit reached, skipping evaluation to prevent circular chain");
+            return vec![];
+        }
+
+        // Decrement depth on all exit paths using a drop guard
+        struct DepthGuard;
+        impl Drop for DepthGuard {
+            fn drop(&mut self) {
+                TRIGGER_DEPTH.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let _guard = DepthGuard;
+
         // Evaluate triggers before publishing (so describe_event works on the event)
         let triggered = self.triggers.evaluate(&event);
 
