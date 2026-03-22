@@ -71,7 +71,10 @@ impl ApprovalManager {
         // Trusted sender bypass: auto-approve all tools.
         if let Some(sid) = sender_id {
             if policy.is_trusted_sender(sid) {
-                debug!(sender_id = sid, tool_name, "Trusted sender — approval bypassed");
+                debug!(
+                    sender_id = sid,
+                    tool_name, "Trusted sender — approval bypassed"
+                );
                 return false;
             }
         }
@@ -82,11 +85,17 @@ impl ApprovalManager {
                 if !allowed {
                     // Channel rule explicitly denies this tool — require approval
                     // (which will effectively block it since there's no auto-approve path).
-                    debug!(channel = ch, tool_name, "Channel rule denies tool — approval required");
+                    debug!(
+                        channel = ch,
+                        tool_name, "Channel rule denies tool — approval required"
+                    );
                     return true;
                 }
                 // Channel rule explicitly allows — bypass approval.
-                debug!(channel = ch, tool_name, "Channel rule allows tool — approval bypassed");
+                debug!(
+                    channel = ch,
+                    tool_name, "Channel rule allows tool — approval bypassed"
+                );
                 return false;
             }
         }
@@ -560,18 +569,10 @@ mod tests {
         let mgr = ApprovalManager::new(policy);
 
         // Trusted sender should bypass even for shell_exec
-        assert!(!mgr.requires_approval_with_context(
-            "shell_exec",
-            Some("admin_123"),
-            None
-        ));
+        assert!(!mgr.requires_approval_with_context("shell_exec", Some("admin_123"), None));
 
         // Untrusted sender still requires approval
-        assert!(mgr.requires_approval_with_context(
-            "shell_exec",
-            Some("random_user"),
-            None
-        ));
+        assert!(mgr.requires_approval_with_context("shell_exec", Some("random_user"), None));
 
         // No sender context falls back to default
         assert!(mgr.requires_approval_with_context("shell_exec", None, None));
@@ -591,18 +592,10 @@ mod tests {
         let mgr = ApprovalManager::new(policy);
 
         // file_write is not in require_approval, but telegram channel denies it
-        assert!(mgr.requires_approval_with_context(
-            "file_write",
-            None,
-            Some("telegram")
-        ));
+        assert!(mgr.requires_approval_with_context("file_write", None, Some("telegram")));
 
         // file_write from other channels is not gated
-        assert!(!mgr.requires_approval_with_context(
-            "file_write",
-            None,
-            Some("discord")
-        ));
+        assert!(!mgr.requires_approval_with_context("file_write", None, Some("discord")));
     }
 
     #[test]
@@ -619,18 +612,10 @@ mod tests {
         let mgr = ApprovalManager::new(policy);
 
         // shell_exec from admin_cli channel is explicitly allowed — bypass approval
-        assert!(!mgr.requires_approval_with_context(
-            "shell_exec",
-            None,
-            Some("admin_cli")
-        ));
+        assert!(!mgr.requires_approval_with_context("shell_exec", None, Some("admin_cli")));
 
         // shell_exec from other channels still requires approval
-        assert!(mgr.requires_approval_with_context(
-            "shell_exec",
-            None,
-            Some("telegram")
-        ));
+        assert!(mgr.requires_approval_with_context("shell_exec", None, Some("telegram")));
     }
 
     #[test]

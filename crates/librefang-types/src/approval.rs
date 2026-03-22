@@ -923,7 +923,10 @@ mod tests {
             allowed_tools: vec![],
             denied_tools: vec![],
         };
-        assert!(rule.validate().unwrap_err().contains("channel must not be empty"));
+        assert!(rule
+            .validate()
+            .unwrap_err()
+            .contains("channel must not be empty"));
     }
 
     #[test]
@@ -981,10 +984,19 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert_eq!(policy.check_channel_tool("telegram", "shell_exec"), Some(false));
+        assert_eq!(
+            policy.check_channel_tool("telegram", "shell_exec"),
+            Some(false)
+        );
         assert_eq!(policy.check_channel_tool("telegram", "file_read"), None);
-        assert_eq!(policy.check_channel_tool("discord", "file_read"), Some(true));
-        assert_eq!(policy.check_channel_tool("discord", "shell_exec"), Some(false));
+        assert_eq!(
+            policy.check_channel_tool("discord", "file_read"),
+            Some(true)
+        );
+        assert_eq!(
+            policy.check_channel_tool("discord", "shell_exec"),
+            Some(false)
+        );
         assert_eq!(policy.check_channel_tool("slack", "shell_exec"), None);
     }
 
