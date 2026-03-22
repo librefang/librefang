@@ -22,6 +22,7 @@ pub mod message;
 pub mod model_catalog;
 pub mod scheduler;
 pub mod serde_compat;
+pub mod subagent;
 pub mod taint;
 pub mod tool;
 pub mod tool_compat;
