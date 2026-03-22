@@ -12,7 +12,9 @@ use crate::router;
 use crate::scheduler::AgentScheduler;
 use crate::supervisor::Supervisor;
 use crate::triggers::{TriggerEngine, TriggerId, TriggerPattern};
-use crate::workflow::{StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId};
+use crate::workflow::{
+    StepAgent, Workflow, WorkflowEngine, WorkflowId, WorkflowRunId, WorkflowTemplateRegistry,
+};
 
 use librefang_memory::MemorySubstrate;
 use librefang_runtime::agent_loop::{
@@ -247,6 +249,8 @@ pub struct LibreFangKernel {
     pub supervisor: Supervisor,
     /// Workflow engine.
     pub workflows: WorkflowEngine,
+    /// Workflow template registry.
+    pub template_registry: WorkflowTemplateRegistry,
     /// Event-driven trigger engine.
     pub triggers: TriggerEngine,
     /// Background agent executor.
@@ -1385,6 +1389,7 @@ impl LibreFangKernel {
             proactive_memory: OnceLock::new(),
             supervisor,
             workflows: WorkflowEngine::new(),
+            template_registry: WorkflowTemplateRegistry::new(),
             triggers: TriggerEngine::new(),
             background,
             audit_log: Arc::new(AuditLog::with_db(memory.usage_conn())),
@@ -1704,6 +1709,18 @@ system_prompt = "You are a helpful assistant."
                 info!(
                     "Auto-registered {loaded} workflow(s) from {}",
                     workflows_dir.display()
+                );
+            }
+        }
+
+        // Load workflow templates from ~/.librefang/workflows/templates/
+        {
+            let user_dir = kernel.config.home_dir.join("workflows").join("templates");
+            let loaded = kernel.template_registry.load_templates_from_dir(&user_dir);
+            if loaded > 0 {
+                info!(
+                    "Loaded {loaded} workflow template(s) from {}",
+                    user_dir.display()
                 );
             }
         }
