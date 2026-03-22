@@ -18,6 +18,7 @@ use zeroize::Zeroizing;
 use crate::chatgpt_oauth::CHATGPT_BASE_URL;
 use crate::llm_driver::{CompletionRequest, CompletionResponse, LlmError, StreamEvent};
 use futures::StreamExt;
+use librefang_types::config::ResponseFormat;
 use librefang_types::message::{ContentBlock, MessageContent, Role, StopReason, TokenUsage};
 use librefang_types::tool::ToolCall;
 #[cfg(test)]
@@ -341,6 +342,10 @@ impl ChatGptDriver {
                     content: text,
                 });
             }
+        }
+
+        if let Some(rf) = &request.response_format {
+            append_response_format_instructions(&mut instructions, rf);
         }
 
         ResponsesApiRequest {
@@ -806,6 +811,37 @@ fn extract_text_content(content: &MessageContent) -> String {
     }
 }
 
+fn append_response_format_instructions(instructions: &mut Option<String>, rf: &ResponseFormat) {
+    match rf {
+        ResponseFormat::Text => {}
+        ResponseFormat::Json => {
+            let suffix = "\n\nIMPORTANT: You MUST respond with valid JSON only. \
+                           Do not include any text outside the JSON object.";
+            if let Some(existing) = instructions.as_mut() {
+                existing.push_str(suffix);
+            } else {
+                *instructions = Some(suffix.trim_start().to_string());
+            }
+        }
+        ResponseFormat::JsonSchema {
+            name,
+            schema,
+            strict: _,
+        } => {
+            let suffix = format!(
+                "\n\nIMPORTANT: You MUST respond with valid JSON that conforms to the \
+                 following schema (name: \"{name}\"):\n```json\n{schema}\n```\n\
+                 Do not include any text outside the JSON object."
+            );
+            if let Some(existing) = instructions.as_mut() {
+                existing.push_str(&suffix);
+            } else {
+                *instructions = Some(suffix.trim_start().to_string());
+            }
+        }
+    }
+}
+
 fn should_treat_post_refresh_status_as_auth_failure(status: reqwest::StatusCode) -> bool {
     status == reqwest::StatusCode::UNAUTHORIZED
 }
@@ -1035,6 +1071,62 @@ mod tests {
         assert_eq!(api_req.input.len(), 1);
         assert!(api_req.max_output_tokens.is_none());
         assert!(api_req.temperature.is_none());
+    }
+
+    #[test]
+    fn test_build_responses_request_appends_json_response_format() {
+        let req = CompletionRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("Hi".to_string()),
+                pinned: false,
+            }],
+            tools: Vec::new(),
+            max_tokens: 0,
+            temperature: 1.0,
+            system: Some("System prompt.".to_string()),
+            thinking: None,
+            prompt_caching: false,
+            response_format: Some(ResponseFormat::Json),
+        };
+        let api_req = ChatGptDriver::build_responses_request(&req);
+        let instructions = api_req.instructions.expect("instructions");
+        assert!(instructions.contains("System prompt."));
+        assert!(instructions.contains("valid JSON only"));
+    }
+
+    #[test]
+    fn test_build_responses_request_appends_json_schema_response_format() {
+        let req = CompletionRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![Message {
+                role: Role::User,
+                content: MessageContent::Text("Hi".to_string()),
+                pinned: false,
+            }],
+            tools: Vec::new(),
+            max_tokens: 0,
+            temperature: 1.0,
+            system: None,
+            thinking: None,
+            prompt_caching: false,
+            response_format: Some(ResponseFormat::JsonSchema {
+                name: "answer".to_string(),
+                schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "ok": {"type": "boolean"}
+                    },
+                    "required": ["ok"]
+                }),
+                strict: Some(true),
+            }),
+        };
+        let api_req = ChatGptDriver::build_responses_request(&req);
+        let instructions = api_req.instructions.expect("instructions");
+        assert!(instructions.contains("name: \"answer\""));
+        assert!(instructions.contains("\"required\":[\"ok\"]"));
     }
 
     #[test]
