@@ -1073,8 +1073,9 @@ pub struct SidecarChannelConfig {
 
 /// Session retention policy configuration.
 ///
-/// Controls automatic cleanup of idle or excess sessions and optional
-/// startup prompt injection.
+/// Controls automatic cleanup of idle or excess sessions, optional
+/// startup prompt injection, and lifecycle context injection hooks.
+///
 /// Configure in `config.toml`:
 /// ```toml
 /// [session]
@@ -1082,6 +1083,18 @@ pub struct SidecarChannelConfig {
 /// max_sessions_per_agent = 100
 /// cleanup_interval_hours = 24
 /// reset_prompt = "You are a helpful coding assistant. Always respond in English."
+/// on_session_start_script = "/path/to/start_hook.sh"
+///
+/// [[session.context_injection]]
+/// name = "project-rules"
+/// content = "Always follow the project coding standards."
+/// position = "system"
+///
+/// [[session.context_injection]]
+/// name = "user-prefs"
+/// content = "The user prefers concise answers."
+/// position = "after_reset"
+/// condition = "agent.tags contains 'chat'"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -1097,6 +1110,15 @@ pub struct SessionConfig {
     /// context or instructions across all agents.
     #[serde(default)]
     pub reset_prompt: Option<String>,
+    /// Multiple context injection sources, each with a name, content, position,
+    /// and optional condition. Injected when a new session starts or is reset.
+    #[serde(default)]
+    pub context_injection: Vec<ContextInjection>,
+    /// Path to a script executed on session start. The script receives the
+    /// agent ID and session ID as arguments. Runs asynchronously — failures
+    /// are logged but do not block session creation.
+    #[serde(default)]
+    pub on_session_start_script: Option<String>,
 }
 
 impl Default for SessionConfig {
@@ -1106,8 +1128,40 @@ impl Default for SessionConfig {
             max_sessions_per_agent: 0,
             cleanup_interval_hours: 24,
             reset_prompt: None,
+            context_injection: Vec::new(),
+            on_session_start_script: None,
         }
     }
+}
+
+/// A single context injection entry that gets injected into sessions on start/reset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextInjection {
+    /// Human-readable name for this injection (used in logs).
+    pub name: String,
+    /// The text content to inject into the session.
+    pub content: String,
+    /// Where to place this injection relative to other session messages.
+    #[serde(default)]
+    pub position: InjectionPosition,
+    /// Optional condition expression. When set, this injection is only applied
+    /// if the condition evaluates to true. Currently supports simple tag-based
+    /// conditions like `"agent.tags contains 'chat'"`. If `None`, always applied.
+    #[serde(default)]
+    pub condition: Option<String>,
+}
+
+/// Position where a context injection is inserted in the session message list.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InjectionPosition {
+    /// Prepend as the first system message (before reset prompt).
+    #[default]
+    System,
+    /// Insert before the first user message.
+    BeforeUser,
+    /// Insert after the reset prompt.
+    AfterReset,
 }
 
 /// Message queue configuration.
@@ -5728,5 +5782,89 @@ mod tests {
         "#;
         let config: KernelConfig = toml::from_str(toml_str).unwrap();
         assert!(config.thinking.is_none());
+    fn test_session_config_defaults_backward_compatible() {
+        let sc = SessionConfig::default();
+        assert!(sc.reset_prompt.is_none());
+        assert!(sc.context_injection.is_empty());
+        assert!(sc.on_session_start_script.is_none());
+    }
+
+    #[test]
+    fn test_session_config_with_context_injection() {
+        let toml_str = r#"
+            reset_prompt = "Hello"
+
+            [[context_injection]]
+            name = "rules"
+            content = "Follow the rules."
+            position = "system"
+
+            [[context_injection]]
+            name = "prefs"
+            content = "Be concise."
+            position = "after_reset"
+            condition = "agent.tags contains 'chat'"
+        "#;
+        let sc: SessionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(sc.reset_prompt.as_deref(), Some("Hello"));
+        assert_eq!(sc.context_injection.len(), 2);
+
+        assert_eq!(sc.context_injection[0].name, "rules");
+        assert_eq!(sc.context_injection[0].position, InjectionPosition::System);
+        assert!(sc.context_injection[0].condition.is_none());
+
+        assert_eq!(sc.context_injection[1].name, "prefs");
+        assert_eq!(
+            sc.context_injection[1].position,
+            InjectionPosition::AfterReset
+        );
+        assert_eq!(
+            sc.context_injection[1].condition.as_deref(),
+            Some("agent.tags contains 'chat'")
+        );
+    }
+
+    #[test]
+    fn test_session_config_empty_injection_list() {
+        let toml_str = r#"
+            retention_days = 7
+        "#;
+        let sc: SessionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(sc.retention_days, 7);
+        assert!(sc.context_injection.is_empty());
+        assert!(sc.on_session_start_script.is_none());
+    }
+
+    #[test]
+    fn test_injection_position_default() {
+        assert_eq!(InjectionPosition::default(), InjectionPosition::System);
+    }
+
+    #[test]
+    fn test_injection_position_deserialization() {
+        #[derive(Deserialize)]
+        struct Wrapper {
+            pos: InjectionPosition,
+        }
+        let w: Wrapper = toml::from_str(r#"pos = "system""#).unwrap();
+        assert_eq!(w.pos, InjectionPosition::System);
+
+        let w: Wrapper = toml::from_str(r#"pos = "before_user""#).unwrap();
+        assert_eq!(w.pos, InjectionPosition::BeforeUser);
+
+        let w: Wrapper = toml::from_str(r#"pos = "after_reset""#).unwrap();
+        assert_eq!(w.pos, InjectionPosition::AfterReset);
+    }
+
+    #[test]
+    fn test_session_config_with_start_script() {
+        let toml_str = r#"
+            on_session_start_script = "/usr/local/bin/on_start.sh"
+        "#;
+        let sc: SessionConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            sc.on_session_start_script.as_deref(),
+            Some("/usr/local/bin/on_start.sh")
+        );
     }
 }
