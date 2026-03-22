@@ -259,6 +259,15 @@ debounce_ms = 500
 # client_id = ""
 # client_secret_env = "OAUTH_CLIENT_SECRET"
 
+# ── File Inbox (Async External Commands) ──────────────────────
+# Drop text files into a directory to send messages to agents.
+# First line may contain `agent:<name>` to target a specific agent.
+# [inbox]
+# enabled = false
+# directory = "~/.librefang/inbox/"   # Defaults to $HOME_DIR/inbox/
+# poll_interval_secs = 5
+# default_agent = "assistant"         # Agent to use when no agent: directive
+
 # ── Vault (Encrypted Credential Storage) ─────────────────────
 # [vault]
 # enabled = true               # Auto-detected if vault.enc exists
