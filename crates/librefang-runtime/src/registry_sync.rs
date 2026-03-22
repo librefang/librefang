@@ -146,12 +146,12 @@ fn download_and_extract(registry_cache: &Path) -> Result<(), Box<dyn std::error:
 
     // Extract, stripping the `librefang-registry-main/` prefix
     for entry in archive.entries()? {
-        let mut entry = entry?;
+        let mut entry: tar::Entry<_> = entry?;
         let path = entry.path()?;
         let path_str = path.to_string_lossy();
 
         // Strip the tarball prefix
-        let relative = match path_str.strip_prefix(TARBALL_PREFIX) {
+        let relative: String = match path_str.strip_prefix(TARBALL_PREFIX) {
             Some(r) if !r.is_empty() => r.to_string(),
             _ => continue,
         };
