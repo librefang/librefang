@@ -349,7 +349,11 @@ export function SkillsPage() {
 
   // Merge detail data with skill
   const skillWithDetails = detailQuery.data && detailsSkill
-    ? { ...detailsSkill, ...detailQuery.data, is_installed: detailQuery.data.is_installed } as ClawHubSkillWithStatus
+    ? {
+        ...detailsSkill,
+        ...detailQuery.data,
+        is_installed: detailQuery.data.is_installed ?? detailQuery.data.installed,
+      } as ClawHubSkillWithStatus
     : detailsSkill;
 
   const installedSkills = skillsQuery.data ?? [];

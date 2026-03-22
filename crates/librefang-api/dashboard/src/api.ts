@@ -729,6 +729,7 @@ export interface ClawHubSkillDetail {
   readme: string;
   icon_url?: string;
   is_installed?: boolean;
+  installed?: boolean;
 }
 
 // ClawHub API
