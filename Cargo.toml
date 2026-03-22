@@ -159,6 +159,13 @@ unic-langid = "0.9"
 # MQTT client
 rumqttc = "0.25"
 
+# Sync HTTP client (for registry sync without async runtime)
+ureq = "3"
+
+# Tar archive extraction
+flate2 = "1"
+tar = "0.4"
+
 # Testing
 tokio-test = "0.4"
 tempfile = "3"

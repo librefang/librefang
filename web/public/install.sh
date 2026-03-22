@@ -326,6 +326,10 @@ install() {
     echo "  and configuration."
     echo ""
 
+    # Auto-initialize (sync registry, generate config)
+    echo "  Initializing LibreFang..."
+    "$INSTALL_DIR/librefang" init 2>/dev/null || true
+
     AUTO_START="${LIBREFANG_AUTO_START:-1}"
     if is_enabled "$AUTO_START"; then
         echo "  Starting daemon in background..."
