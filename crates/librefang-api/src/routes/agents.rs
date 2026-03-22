@@ -2,14 +2,14 @@
 
 use super::AppState;
 
-/// 构建 Agent 领域的所有路由。
+/// Build all routes for the Agent domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
         .route(
             "/agents",
             axum::routing::get(list_agents).post(spawn_agent),
         )
-        // 批量 agent 操作（放在 /agents/{id} 之前避免路径冲突）
+        // Bulk agent operations (placed before /agents/{id} to avoid path conflicts)
         .route(
             "/agents/bulk",
             axum::routing::post(bulk_create_agents).delete(bulk_delete_agents),
@@ -213,7 +213,7 @@ async fn resolve_manifest(
                 .join("agents")
                 .join(&safe_name)
                 .join("agent.toml");
-            // 使用 tokio::fs 避免在异步上下文中阻塞
+            // Use tokio::fs to avoid blocking in an async context
             match tokio::fs::read_to_string(&tmpl_path).await {
                 Ok(content) => content,
                 Err(_) => {

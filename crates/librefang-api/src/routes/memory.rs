@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use super::AppState;
 
-/// 构建内存/KV 领域的路由。
+/// Build routes for the memory/KV domain.
 pub fn router() -> axum::Router<Arc<AppState>> {
     axum::Router::new()
-        // 全局 proactive memory 端点
+        // Global proactive memory endpoints
         .route(
             "/memory",
             axum::routing::get(memory_list).post(memory_add),
@@ -32,7 +32,7 @@ pub fn router() -> axum::Router<Arc<AppState>> {
             "/memory/user/{user_id}",
             axum::routing::get(memory_get_user),
         )
-        // 每个 agent 的 proactive memory 端点
+        // Per-agent proactive memory endpoints
         .route(
             "/memory/agents/{id}",
             axum::routing::get(memory_list_agent).delete(memory_reset_agent),

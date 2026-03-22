@@ -2,7 +2,7 @@
 
 use super::AppState;
 
-/// 构建预算和用量领域的路由。
+/// Build routes for the budget and usage domain.
 pub fn router() -> axum::Router<std::sync::Arc<AppState>> {
     axum::Router::new()
         .route("/usage", axum::routing::get(usage_stats))
