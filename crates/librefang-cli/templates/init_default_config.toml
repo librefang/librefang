@@ -4,16 +4,16 @@
 # ══════════════════════════════════════════════════════════════
 
 # ── Server ────────────────────────────────────────────────────
-# For Docker/remote access, use "0.0.0.0:4545".
-# For local-only, use "127.0.0.1:4545".
-api_listen = "0.0.0.0:4545"
+api_listen = "0.0.0.0:4545"    # Use "127.0.0.1:4545" for local-only
+log_level = "info"             # trace | debug | info | warn | error
+mode = "default"               # stable | default | dev
 
 # ── Dashboard Login ───────────────────────────────────────────
-# Default credentials — CHANGE THE PASSWORD after first login!
-# Secure options:
-#   1. Vault:    librefang vault set dashboard_password
-#                dashboard_pass = "vault:dashboard_password"
-#   2. Env var:  LIBREFANG_DASHBOARD_PASS=your-secret
+# ⚠️  Change the default password after first login!
+# Secure storage options:
+#   1. Vault:   librefang vault set dashboard_password
+#               dashboard_pass = "vault:dashboard_password"
+#   2. Env var: LIBREFANG_DASHBOARD_PASS=your-secret
 dashboard_user = "librefang"
 dashboard_pass = "librefang"
 
@@ -22,42 +22,123 @@ dashboard_pass = "librefang"
 provider = "{{provider}}"
 model = "{{model}}"
 api_key_env = "{{api_key_env}}"
-
-# ── Memory ───────────────────────────────────────────────────
-[memory]
-decay_rate = 0.05
-
-# ── Proactive Memory (auto-memorize & auto-retrieve) ─────────
-[proactive_memory]
-enabled = true
-auto_memorize = true
-auto_retrieve = true
-max_retrieve = 10
+# base_url = ""               # Override API endpoint (e.g., local proxy)
 
 # ── Performance ──────────────────────────────────────────────
 prompt_caching = true           # Reduce LLM costs (Anthropic/OpenAI)
 stable_prefix_mode = true       # Improve prompt cache hit rate
-usage_footer = "tokens"         # Show token usage: "off" | "tokens" | "cost" | "full"
+usage_footer = "tokens"         # off | tokens | cost | full
 
-# ── Provider Regions (uncomment to use regional endpoints) ───
+# ── Memory ───────────────────────────────────────────────────
+[memory]
+decay_rate = 0.05               # Memory confidence decay per cycle
+# embedding_model = "all-MiniLM-L6-v2"
+
+# ── Proactive Memory (auto-memorize & auto-retrieve) ─────────
+[proactive_memory]
+enabled = true
+auto_memorize = true            # Auto-extract facts from conversations
+auto_retrieve = true            # Auto-recall relevant memories
+max_retrieve = 10               # Max memories per retrieval
+# extraction_threshold = 0.7   # Min confidence to save memory
+# session_ttl_hours = 24
+# duplicate_threshold = 0.5
+# max_memories_per_agent = 1000
+
+# ── Web Tools ────────────────────────────────────────────────
+[web]
+search_provider = "auto"        # Tavily → Brave → DuckDuckGo (auto-detect)
+# cache_ttl_minutes = 15
+
+[web.fetch]
+max_chars = 50000               # Max chars extracted from web pages
+timeout_secs = 30
+readability = true              # Clean HTML → readable text
+
+# ── Task Queue ───────────────────────────────────────────────
+[queue.concurrency]
+main_lane = 3                   # Concurrent user messages
+cron_lane = 2                   # Concurrent scheduled jobs
+subagent_lane = 3               # Concurrent child agents
+
+# ── Shell Execution Policy ───────────────────────────────────
+[exec_policy]
+mode = "deny"                   # deny | allowlist | full
+timeout_secs = 30
+max_output_bytes = 102400       # 100 KB
+
+# ── Config Hot-Reload ────────────────────────────────────────
+[reload]
+mode = "hybrid"                 # off | restart | hot | hybrid
+debounce_ms = 500
+
+# ── Provider Regions (uncomment to use) ──────────────────────
 # [provider_regions]
-# qwen = "intl"                 # Qwen international endpoint
-# minimax = "china"             # MiniMax China endpoint
+# qwen = "intl"                # Qwen international endpoint
+# minimax = "china"            # MiniMax China endpoint
+
+# ── Provider URL Overrides (uncomment to use) ────────────────
+# [provider_urls]
+# ollama = "http://localhost:11434/v1"
+# vllm = "http://localhost:8000/v1"
+
+# ── Fallback Providers (LLM failover chain) ──────────────────
+# [[fallback_providers]]
+# provider = "openai"
+# model = "gpt-4o"
+# api_key_env = "OPENAI_API_KEY"
+
+# ── Budget & Cost Control ────────────────────────────────────
+# [budget]
+# max_hourly_usd = 0.0         # 0 = unlimited
+# max_daily_usd = 0.0
+# max_monthly_usd = 0.0
+# alert_threshold = 0.8        # Alert at 80% of limit
+
+# ── Extended Thinking (Claude models) ────────────────────────
+# [thinking]
+# budget_tokens = 10000
+# stream_thinking = false
 
 # ── Channels (uncomment to enable) ───────────────────────────
 # [channels.telegram]
 # bot_token_env = "TELEGRAM_BOT_TOKEN"
 # default_agent = "assistant"
-# allowed_users = []            # Empty = allow all
+# allowed_users = []
 
 # [channels.discord]
 # bot_token_env = "DISCORD_BOT_TOKEN"
 # default_agent = "assistant"
 
-# ── MCP Servers (uncomment to add external tools) ────────────
+# [channels.slack]
+# bot_token_env = "SLACK_BOT_TOKEN"
+# app_token_env = "SLACK_APP_TOKEN"
+# default_agent = "assistant"
+
+# ── MCP Servers (external tool integration) ──────────────────
 # [[mcp_servers]]
 # name = "filesystem"
+# timeout_secs = 30
 # [mcp_servers.transport]
 # type = "stdio"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+# ── Browser Automation ───────────────────────────────────────
+# [browser]
+# headless = true
+# viewport_width = 1280
+# viewport_height = 720
+# max_sessions = 5
+
+# ── Docker Sandbox ───────────────────────────────────────────
+# [docker]
+# enabled = false
+# image = "python:3.12-slim"
+# memory_limit = "512m"
+# timeout_secs = 60
+
+# ── Network (P2P Federation) ─────────────────────────────────
+# network_enabled = false
+# [network]
+# shared_secret = ""           # Required for P2P auth

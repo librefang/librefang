@@ -1,65 +1,144 @@
+# ══════════════════════════════════════════════════════════════
 # LibreFang Agent OS — Example Configuration
 # Copy to ~/.librefang/config.toml and customize.
+# Docs: https://docs.librefang.ai/configuration
+# ══════════════════════════════════════════════════════════════
 
-# API server settings
-# api_key = ""                               # Set to enable Bearer auth (recommended)
-# api_listen = "127.0.0.1:4545"              # HTTP API bind address (use 0.0.0.0 for public)
+# ── Server ────────────────────────────────────────────────────
+api_listen = "0.0.0.0:4545"    # Use "127.0.0.1:4545" for local-only
+log_level = "info"             # trace | debug | info | warn | error
+mode = "default"               # stable | default | dev
 
-# Dashboard login — when both are set, dashboard requires username/password.
-# Change the default password! Recommended: use vault for secure storage:
-#   librefang vault set dashboard_password
-#   dashboard_pass = "vault:dashboard_password"
-# Or use env var: LIBREFANG_DASHBOARD_PASS
+# ── Dashboard Login ───────────────────────────────────────────
+# ⚠️  Change the default password after first login!
+# Secure storage options:
+#   1. Vault:   librefang vault set dashboard_password
+#               dashboard_pass = "vault:dashboard_password"
+#   2. Env var: LIBREFANG_DASHBOARD_PASS=your-secret
 dashboard_user = "librefang"
 dashboard_pass = "librefang"
 
+# ── API Authentication ────────────────────────────────────────
+# api_key = ""                 # Set to enable Bearer auth for API clients
+
+# ── Default LLM ──────────────────────────────────────────────
 [default_model]
-provider = "anthropic"                    # "anthropic", "gemini", "openai", "groq", "z.ai", "kimi2", "ollama", etc.
+provider = "anthropic"                    # "anthropic", "openai", "gemini", "groq", "ollama", etc.
 model = "claude-sonnet-4-20250514"        # Model identifier
 api_key_env = "ANTHROPIC_API_KEY"         # Environment variable holding API key
-# base_url = "https://api.anthropic.com"  # Optional: override API endpoint
+# base_url = ""                           # Override API endpoint
 
+# ── Performance ──────────────────────────────────────────────
+prompt_caching = true           # Reduce LLM costs (Anthropic/OpenAI)
+stable_prefix_mode = true       # Improve prompt cache hit rate
+usage_footer = "tokens"         # off | tokens | cost | full
+
+# ── Memory ───────────────────────────────────────────────────
 [memory]
-decay_rate = 0.05                         # Memory confidence decay rate
-# sqlite_path = "~/.librefang/data/librefang.db"   # Optional: custom DB path
+decay_rate = 0.05               # Memory confidence decay per cycle
+# embedding_model = "all-MiniLM-L6-v2"
 
-[network]
-listen_addr = "127.0.0.1:4545"           # OFP listen address
-# shared_secret = ""                      # Required for P2P authentication
+# ── Proactive Memory (auto-memorize & auto-retrieve) ─────────
+[proactive_memory]
+enabled = true
+auto_memorize = true            # Auto-extract facts from conversations
+auto_retrieve = true            # Auto-recall relevant memories
+max_retrieve = 10               # Max memories per retrieval
+# extraction_threshold = 0.7   # Min confidence to save memory
+# session_ttl_hours = 24
+# duplicate_threshold = 0.5
+# max_memories_per_agent = 1000
 
-# Session compaction (LLM-based context management)
-# [compaction]
-# threshold = 80                          # Compact when messages exceed this count
-# keep_recent = 20                        # Keep this many recent messages after compaction
-# max_summary_tokens = 1024               # Max tokens for LLM summary
+# ── Web Tools ────────────────────────────────────────────────
+[web]
+search_provider = "auto"        # Tavily → Brave → DuckDuckGo (auto-detect)
+# cache_ttl_minutes = 15
 
-# Usage tracking display
-# usage_footer = "Full"                   # "Off", "Tokens", "Cost", or "Full"
+[web.fetch]
+max_chars = 50000               # Max chars extracted from web pages
+timeout_secs = 30
+readability = true              # Clean HTML → readable text
 
-# Prompt caching — reduces LLM costs by caching system prompts (default: true)
-# prompt_caching = true                   # Anthropic cache_control + OpenAI auto-cache
+# ── Task Queue ───────────────────────────────────────────────
+[queue.concurrency]
+main_lane = 3                   # Concurrent user messages
+cron_lane = 2                   # Concurrent scheduled jobs
+subagent_lane = 3               # Concurrent child agents
 
-# Provider region selection (provider ID → region name)
-# Some providers offer region-specific endpoints defined in registry TOML files.
-# Selecting a region overrides the provider's base_url (and optionally api_key_env).
+# ── Shell Execution Policy ───────────────────────────────────
+[exec_policy]
+mode = "deny"                   # deny | allowlist | full
+timeout_secs = 30
+max_output_bytes = 102400       # 100 KB
+
+# ── Config Hot-Reload ────────────────────────────────────────
+[reload]
+mode = "hybrid"                 # off | restart | hot | hybrid
+debounce_ms = 500
+
+# ── Provider Regions (uncomment to use) ──────────────────────
 # [provider_regions]
-# qwen = "intl"                           # Use Qwen's international endpoint
-# minimax = "china"                       # Use MiniMax's China endpoint (uses MINIMAX_CN_API_KEY)
+# qwen = "intl"                # Qwen international endpoint
+# minimax = "china"            # MiniMax China endpoint
 
-# Channel adapters (configure tokens via environment variables)
-# [telegram]
+# ── Provider URL Overrides (uncomment to use) ────────────────
+# [provider_urls]
+# ollama = "http://localhost:11434/v1"
+# vllm = "http://localhost:8000/v1"
+
+# ── Provider API Key Overrides ───────────────────────────────
+# [provider_api_keys]
+# openai = "OPENAI_API_KEY"
+# nvidia = "NVIDIA_API_KEY"
+
+# ── Fallback Providers (LLM failover chain) ──────────────────
+# [[fallback_providers]]
+# provider = "openai"
+# model = "gpt-4o"
+# api_key_env = "OPENAI_API_KEY"
+
+# ── Budget & Cost Control ────────────────────────────────────
+# [budget]
+# max_hourly_usd = 0.0         # 0 = unlimited
+# max_daily_usd = 0.0
+# max_monthly_usd = 0.0
+# alert_threshold = 0.8        # Alert at 80% of limit
+
+# ── Extended Thinking (Claude models) ────────────────────────
+# [thinking]
+# budget_tokens = 10000
+# stream_thinking = false
+
+# ── Session Retention ────────────────────────────────────────
+# [session]
+# retention_days = 30
+# max_sessions_per_agent = 100
+
+# ── Audit Logging ────────────────────────────────────────────
+# [audit]
+# retention_days = 90
+
+# ── Channels (uncomment to enable) ───────────────────────────
+# [channels.telegram]
 # bot_token_env = "TELEGRAM_BOT_TOKEN"
-# allowed_users = []                      # Empty = allow all
+# default_agent = "assistant"
+# allowed_users = []
 
-# [discord]
+# [channels.discord]
 # bot_token_env = "DISCORD_BOT_TOKEN"
-# guild_ids = []                          # Empty = all guilds
+# default_agent = "assistant"
 
-# [slack]
+# [channels.slack]
 # bot_token_env = "SLACK_BOT_TOKEN"
 # app_token_env = "SLACK_APP_TOKEN"
+# default_agent = "assistant"
 
-# MCP server connections
+# [channels.whatsapp]
+# phone_number_id_env = "WHATSAPP_PHONE_ID"
+# access_token_env = "WHATSAPP_ACCESS_TOKEN"
+# default_agent = "assistant"
+
+# ── MCP Servers (external tool integration) ──────────────────
 # [[mcp_servers]]
 # name = "filesystem"
 # timeout_secs = 30
@@ -67,26 +146,45 @@ listen_addr = "127.0.0.1:4545"           # OFP listen address
 # type = "stdio"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-#
+
 # [[mcp_servers]]
 # name = "remote-tools"
 # timeout_secs = 60
 # [mcp_servers.transport]
 # type = "sse"
 # url = "https://mcp.example.com/events"
-#
-# [[mcp_servers]]
-# name = "internal-http"
-# timeout_secs = 30
-# [mcp_servers.transport]
-# type = "http_compat"
-# base_url = "http://127.0.0.1:8080"
-# [[mcp_servers.transport.headers]]
-# name = "Authorization"
-# value_env = "INTERNAL_HTTP_TOKEN"
-# [[mcp_servers.transport.tools]]
-# name = "search"
-# path = "/search"
-# method = "get"
-# request_mode = "query"
-# response_mode = "json"
+
+# ── Browser Automation ───────────────────────────────────────
+# [browser]
+# headless = true
+# viewport_width = 1280
+# viewport_height = 720
+# max_sessions = 5
+
+# ── Docker Sandbox ───────────────────────────────────────────
+# [docker]
+# enabled = false
+# image = "python:3.12-slim"
+# memory_limit = "512m"
+# timeout_secs = 60
+
+# ── Text-to-Speech ───────────────────────────────────────────
+# [tts]
+# enabled = false
+# provider = "openai"          # or "elevenlabs"
+
+# ── Network (P2P Federation) ─────────────────────────────────
+# network_enabled = false
+# [network]
+# shared_secret = ""           # Required for P2P auth
+
+# ── External Auth (OAuth2/OIDC) ──────────────────────────────
+# [external_auth]
+# enabled = false
+# issuer_url = "https://accounts.google.com"
+# client_id = ""
+# client_secret_env = "OAUTH_CLIENT_SECRET"
+
+# ── Vault (Encrypted Credential Storage) ─────────────────────
+# [vault]
+# enabled = true               # Auto-detected if vault.enc exists
