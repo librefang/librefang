@@ -1201,6 +1201,12 @@ pub struct KernelConfig {
     /// then run `librefang vault set dashboard_password`.
     #[serde(default)]
     pub dashboard_pass: String,
+    /// Argon2id hash of the dashboard password (PHC-format string).
+    /// When set, the password is verified against this hash instead of
+    /// the plaintext `dashboard_pass` value. Populated automatically on
+    /// first successful login (transparent upgrade from plaintext).
+    #[serde(default)]
+    pub dashboard_pass_hash: String,
     /// Kernel operating mode (stable, default, dev).
     #[serde(default)]
     pub mode: KernelMode,
@@ -2116,6 +2122,7 @@ impl Default for KernelConfig {
             api_key: String::new(),
             dashboard_user: String::new(),
             dashboard_pass: String::new(),
+            dashboard_pass_hash: String::new(),
             mode: KernelMode::default(),
             language: "en".to_string(),
             users: Vec::new(),
