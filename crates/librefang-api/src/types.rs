@@ -87,6 +87,20 @@ pub struct MessageResponse {
     pub memory_conflicts: Vec<librefang_types::memory::MemoryConflict>,
 }
 
+/// Request to inject a message into a running agent's tool-execution loop (#956).
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct InjectMessageRequest {
+    /// The message to inject between tool calls.
+    pub message: String,
+}
+
+/// Response from a mid-turn message injection.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct InjectMessageResponse {
+    /// Whether the message was accepted (true = injected, false = no active loop).
+    pub injected: bool,
+}
+
 /// Request to install a skill from the marketplace.
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SkillInstallRequest {

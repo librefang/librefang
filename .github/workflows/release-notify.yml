@@ -27,6 +27,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_RELEASE_WEBHOOK_URL }}
           BLUESKY_HANDLE: ${{ secrets.BLUESKY_HANDLE }}
           BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
+          WORKFLOW_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
           if [ -z "$DISCORD_WEBHOOK_URL" ]; then
             echo "No Discord release webhook configured, skipping"
@@ -34,7 +35,7 @@ jobs:
           fi
 
           # Get tag from triggering workflow run
-          TAG="${{ github.event.workflow_run.head_branch }}"
+          TAG="$WORKFLOW_BRANCH"
 
           # Only proceed for release tags
           if [[ ! "$TAG" =~ ^v ]]; then
