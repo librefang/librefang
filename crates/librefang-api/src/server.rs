@@ -346,6 +346,18 @@ fn api_v1_routes() -> Router<Arc<AppState>> {
             "/workflows/{id}/runs",
             axum::routing::get(routes::list_workflow_runs),
         )
+        .route(
+            "/workflow-templates",
+            axum::routing::get(routes::list_templates),
+        )
+        .route(
+            "/workflow-templates/{id}",
+            axum::routing::get(routes::get_template),
+        )
+        .route(
+            "/workflow-templates/{id}/instantiate",
+            axum::routing::post(routes::instantiate_template),
+        )
         .route("/skills", axum::routing::get(routes::list_skills))
         .route(
             "/skills/install",
