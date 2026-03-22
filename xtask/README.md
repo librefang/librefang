@@ -121,11 +121,11 @@ Default binary: `target/release/librefang`. Build it first with `cargo build --r
 
 ## What This Replaces
 
-| xtask command | Old script |
-|---------------|------------|
-| `release` | `scripts/release.sh` |
-| `sync-versions` | `scripts/sync-versions.sh` |
-| `changelog` | `scripts/generate-changelog.sh` |
-| `ci` | manual 3-step workflow from CLAUDE.md |
+| xtask command | Replaced |
+|---------------|----------|
+| `release` | `scripts/release.sh` (removed) |
+| `sync-versions` | `scripts/sync-versions.sh` (removed) |
+| `changelog` | `scripts/generate-changelog.sh` (removed) |
+| `ci` | manual 3-step workflow |
 | `build-web` | manual pnpm commands |
-| `integration-test` | manual 8-step curl workflow from CLAUDE.md |
+| `integration-test` | manual 8-step curl workflow |
