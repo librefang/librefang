@@ -44,7 +44,7 @@ impl InputSanitizer {
         // Built-in patterns -------------------------------------------------
 
         // Role impersonation: lines starting with "System:", "Assistant:", "Human:"
-        if let Ok(re) = Regex::new(r"(?i)^(System|Assistant|Human):\s") {
+        if let Ok(re) = Regex::new(r"(?im)^(System|Assistant|Human):\s") {
             patterns.push(CompiledPattern {
                 regex: re,
                 label: "role_impersonation",
