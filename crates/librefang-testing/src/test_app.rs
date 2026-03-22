@@ -124,7 +124,7 @@ impl TestAppState {
     /// 内部：从 kernel 构建 AppState。
     fn build_state(kernel: LibreFangKernel, tmp: &TempDir) -> Arc<AppState> {
         let kernel = Arc::new(kernel);
-        let channels_config = kernel.config.channels.clone();
+        let channels_config = kernel.config_ref().channels.clone();
 
         Arc::new(AppState {
             kernel,

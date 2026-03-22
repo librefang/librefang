@@ -2715,7 +2715,10 @@ id = "{id}"
         assert!(result.is_ok());
 
         let prompts = received_prompts.lock().unwrap();
-        // Second step has inherit_context=false, so no context injection
+        // First step: no previous outputs, so no context preamble
+        assert!(!prompts[0].contains("[Parent workflow context]"));
+        // Second step: inherit_context=Some(false) overrides agent setting,
+        // so no context should be injected
         assert!(!prompts[1].contains("[Parent workflow context]"));
     }
 

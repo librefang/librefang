@@ -150,27 +150,31 @@ memory_write = ["self.*"]
     let wf_id = kernel.register_workflow(workflow).await;
 
     // Verify workflow is registered
-    let workflows = kernel.workflows.list_workflows().await;
+    let workflows = kernel.workflow_engine().list_workflows().await;
     assert_eq!(workflows.len(), 1);
     assert_eq!(workflows[0].name, "alpha-beta-pipeline");
 
     // Verify agents can be found by name
-    let alpha = kernel.registry.find_by_name("agent-alpha");
+    let alpha = kernel.agent_registry().find_by_name("agent-alpha");
     assert!(alpha.is_some());
     assert_eq!(alpha.unwrap().id, alpha_id);
 
-    let beta = kernel.registry.find_by_name("agent-beta");
+    let beta = kernel.agent_registry().find_by_name("agent-beta");
     assert!(beta.is_some());
     assert_eq!(beta.unwrap().id, beta_id);
 
     // Verify workflow run can be created
     let run_id = kernel
-        .workflows
+        .workflow_engine()
         .create_run(wf_id, "test input".to_string())
         .await;
     assert!(run_id.is_some());
 
-    let run = kernel.workflows.get_run(run_id.unwrap()).await.unwrap();
+    let run = kernel
+        .workflow_engine()
+        .get_run(run_id.unwrap())
+        .await
+        .unwrap();
     assert_eq!(run.input, "test input");
 
     kernel.shutdown();
@@ -228,7 +232,7 @@ memory_write = ["self.*"]
 
     // Can create run (agent resolution happens at execute time)
     let run_id = kernel
-        .workflows
+        .workflow_engine()
         .create_run(wf_id, "hello".to_string())
         .await;
     assert!(run_id.is_some());
@@ -394,7 +398,7 @@ async fn test_workflow_e2e_with_groq() {
     assert!(!output.is_empty(), "Workflow output should not be empty");
 
     // Verify the workflow run record
-    let run = kernel.workflows.get_run(run_id).await.unwrap();
+    let run = kernel.workflow_engine().get_run(run_id).await.unwrap();
     assert!(matches!(
         run.state,
         librefang_kernel::workflow::WorkflowRunState::Completed
@@ -410,7 +414,7 @@ async fn test_workflow_e2e_with_groq() {
     assert!(run.step_results[1].output_tokens > 0);
 
     // List runs
-    let runs = kernel.workflows.list_runs(None).await;
+    let runs = kernel.workflow_engine().list_runs(None).await;
     assert_eq!(runs.len(), 1);
 
     kernel.shutdown();

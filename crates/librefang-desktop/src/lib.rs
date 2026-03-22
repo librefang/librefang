@@ -134,7 +134,7 @@ pub fn run() {
             // limits, and kernel shutdown. Health checks and quota warnings are
             // too noisy for desktop notifications.
             let app_handle = app.handle().clone();
-            let mut event_rx = kernel_for_notifications.event_bus.subscribe_all();
+            let mut event_rx = kernel_for_notifications.event_bus_ref().subscribe_all();
             tauri::async_runtime::spawn(async move {
                 loop {
                     match event_rx.recv().await {

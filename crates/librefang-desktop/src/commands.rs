@@ -18,7 +18,7 @@ pub fn get_status(
     port: tauri::State<'_, PortState>,
     kernel_state: tauri::State<'_, KernelState>,
 ) -> serde_json::Value {
-    let agents = kernel_state.kernel.registry.list().len();
+    let agents = kernel_state.kernel.agent_registry().list().len();
     let uptime_secs = kernel_state.started_at.elapsed().as_secs();
 
     serde_json::json!({
@@ -32,7 +32,7 @@ pub fn get_status(
 /// Get the number of registered agents.
 #[tauri::command]
 pub fn get_agent_count(kernel_state: tauri::State<'_, KernelState>) -> usize {
-    kernel_state.kernel.registry.list().len()
+    kernel_state.kernel.agent_registry().list().len()
 }
 
 /// Open a native file picker to import an agent TOML manifest.

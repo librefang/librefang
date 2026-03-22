@@ -1764,7 +1764,7 @@ impl App {
         self.chat.mode_label = "in-process".to_string();
 
         if let Backend::InProcess { ref kernel } = self.backend {
-            if let Some(entry) = kernel.registry.get(id) {
+            if let Some(entry) = kernel.agent_registry().get(id) {
                 self.chat.model_label = format!(
                     "{}/{}",
                     entry.manifest.model.provider, entry.manifest.model.model
@@ -1880,7 +1880,7 @@ impl App {
                 }
             }
             Backend::InProcess { kernel } => {
-                let catalog = kernel.model_catalog.read().unwrap();
+                let catalog = kernel.model_catalog_ref().read().unwrap();
                 catalog
                     .available_models()
                     .into_iter()
@@ -1950,25 +1950,27 @@ impl App {
             (Backend::InProcess { kernel }, Some(target)) => {
                 if let Some(id) = target.agent_id_inprocess {
                     let provider = kernel
-                        .model_catalog
+                        .model_catalog_ref()
                         .read()
                         .unwrap()
                         .find_model(model_id)
                         .map(|e| e.provider.clone());
                     let result = if let Some(ref prov) = provider {
-                        kernel.registry.update_model_and_provider(
+                        kernel.agent_registry().update_model_and_provider(
                             id,
                             model_id.to_string(),
                             prov.clone(),
                         )
                     } else {
-                        kernel.registry.update_model(id, model_id.to_string())
+                        kernel
+                            .agent_registry()
+                            .update_model(id, model_id.to_string())
                     };
                     match result {
                         Ok(()) => {
                             let prov_label = provider.unwrap_or_else(|| {
                                 kernel
-                                    .registry
+                                    .agent_registry()
                                     .get(id)
                                     .map(|e| e.manifest.model.provider.clone())
                                     .unwrap_or_else(|| "?".to_string())
@@ -2026,7 +2028,7 @@ impl App {
                     }
                     Backend::InProcess { kernel } => {
                         s.push("Mode: in-process".to_string());
-                        s.push(format!("Agents: {}", kernel.registry.count()));
+                        s.push(format!("Agents: {}", kernel.agent_registry().count()));
                         if let Some(ref t) = self.chat_target {
                             s.push(format!("Agent: {}", t.agent_name));
                         }
@@ -2056,7 +2058,7 @@ impl App {
                         }
                     }
                     Backend::InProcess { kernel } => {
-                        for e in kernel.registry.list() {
+                        for e in kernel.agent_registry().list() {
                             lines.push(format!(
                                 "{} [{:?}] {}/{}",
                                 e.name, e.state, e.manifest.model.provider, e.manifest.model.model,
@@ -2144,12 +2146,12 @@ impl App {
             }
             "/hands" => match &self.backend {
                 Backend::InProcess { kernel } => {
-                    let defs = kernel.hand_registry.list_definitions();
-                    let instances = kernel.hand_registry.list_instances();
+                    let defs = kernel.hands().list_definitions();
+                    let instances = kernel.hands().list_instances();
                     let mut msg = format!("Available hands ({}):\n", defs.len());
                     for d in &defs {
                         let reqs_met = kernel
-                            .hand_registry
+                            .hands()
                             .check_requirements(&d.id)
                             .map(|r| r.iter().all(|(_, ok)| *ok))
                             .unwrap_or(false);

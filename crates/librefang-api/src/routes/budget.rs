@@ -40,11 +40,15 @@ use std::sync::Arc;
 pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let agents: Vec<serde_json::Value> = state
         .kernel
-        .registry
+        .agent_registry()
         .list()
         .iter()
         .map(|e| {
-            let (tokens, tool_calls) = state.kernel.scheduler.get_usage(e.id).unwrap_or((0, 0));
+            let (tokens, tool_calls) = state
+                .kernel
+                .scheduler_ref()
+                .get_usage(e.id)
+                .unwrap_or((0, 0));
             serde_json::json!({
                 "agent_id": e.id.to_string(),
                 "name": e.name,
@@ -69,7 +73,7 @@ pub async fn usage_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
     responses((status = 200, description = "Overall usage summary", body = serde_json::Value))
 )]
 pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.kernel.memory.usage().query_summary(None) {
+    match state.kernel.memory_substrate().usage().query_summary(None) {
         Ok(s) => Json(serde_json::json!({
             "total_input_tokens": s.total_input_tokens,
             "total_output_tokens": s.total_output_tokens,
@@ -95,7 +99,7 @@ pub async fn usage_summary(State(state): State<Arc<AppState>>) -> impl IntoRespo
     responses((status = 200, description = "Usage grouped by model", body = serde_json::Value))
 )]
 pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match state.kernel.memory.usage().query_by_model() {
+    match state.kernel.memory_substrate().usage().query_by_model() {
         Ok(models) => {
             let list: Vec<serde_json::Value> = models
                 .iter()
@@ -123,9 +127,17 @@ pub async fn usage_by_model(State(state): State<Arc<AppState>>) -> impl IntoResp
     responses((status = 200, description = "Daily usage breakdown", body = serde_json::Value))
 )]
 pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let days = state.kernel.memory.usage().query_daily_breakdown(7);
-    let today_cost = state.kernel.memory.usage().query_today_cost();
-    let first_event = state.kernel.memory.usage().query_first_event_date();
+    let days = state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .query_daily_breakdown(7);
+    let today_cost = state.kernel.memory_substrate().usage().query_today_cost();
+    let first_event = state
+        .kernel
+        .memory_substrate()
+        .usage()
+        .query_first_event_date();
 
     let days_list = match days {
         Ok(d) => d
@@ -165,8 +177,8 @@ pub async fn usage_daily(State(state): State<Arc<AppState>>) -> impl IntoRespons
 pub async fn budget_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let status = state
         .kernel
-        .metering
-        .budget_status(&state.kernel.config.budget);
+        .metering_ref()
+        .budget_status(&state.kernel.config_ref().budget);
     Json(serde_json::to_value(&status).unwrap_or_default())
 }
 
@@ -183,7 +195,7 @@ pub async fn update_budget(
 ) -> impl IntoResponse {
     // SAFETY: Budget config is updated in-place. Since KernelConfig is behind
     // an Arc and we only have &self, we use ptr mutation (same pattern as OFP).
-    let config_ptr = &state.kernel.config as *const librefang_types::config::KernelConfig
+    let config_ptr = state.kernel.config_ref() as *const librefang_types::config::KernelConfig
         as *mut librefang_types::config::KernelConfig;
 
     // Apply updates — accept both config field names (max_hourly_usd) and
@@ -217,8 +229,8 @@ pub async fn update_budget(
 
     let status = state
         .kernel
-        .metering
-        .budget_status(&state.kernel.config.budget);
+        .metering_ref()
+        .budget_status(&state.kernel.config_ref().budget);
     Json(serde_json::to_value(&status).unwrap_or_default())
 }
 
@@ -244,7 +256,7 @@ pub async fn agent_budget_status(
         }
     };
 
-    let entry = match state.kernel.registry.get(agent_id) {
+    let entry = match state.kernel.agent_registry().get(agent_id) {
         Some(e) => e,
         None => {
             return (
@@ -255,13 +267,14 @@ pub async fn agent_budget_status(
     };
 
     let quota = &entry.manifest.resources;
-    let usage_store = librefang_memory::usage::UsageStore::new(state.kernel.memory.usage_conn());
+    let usage_store =
+        librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().usage_conn());
     let hourly = usage_store.query_hourly(agent_id).unwrap_or(0.0);
     let daily = usage_store.query_daily(agent_id).unwrap_or(0.0);
     let monthly = usage_store.query_monthly(agent_id).unwrap_or(0.0);
 
     // Token usage from scheduler
-    let token_usage = state.kernel.scheduler.get_usage(agent_id);
+    let token_usage = state.kernel.scheduler_ref().get_usage(agent_id);
     let tokens_used = token_usage.map(|(t, _)| t).unwrap_or(0);
 
     (
@@ -303,10 +316,11 @@ pub async fn agent_budget_status(
     )
 )]
 pub async fn agent_budget_ranking(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let usage_store = librefang_memory::usage::UsageStore::new(state.kernel.memory.usage_conn());
+    let usage_store =
+        librefang_memory::usage::UsageStore::new(state.kernel.memory_substrate().usage_conn());
     let agents: Vec<serde_json::Value> = state
         .kernel
-        .registry
+        .agent_registry()
         .list()
         .iter()
         .filter_map(|entry| {
@@ -369,13 +383,13 @@ pub async fn update_agent_budget(
 
     match state
         .kernel
-        .registry
+        .agent_registry()
         .update_resources(agent_id, hourly, daily, monthly, tokens)
     {
         Ok(()) => {
             // Persist updated entry
-            if let Some(entry) = state.kernel.registry.get(agent_id) {
-                if let Err(e) = state.kernel.memory.save_agent(&entry) {
+            if let Some(entry) = state.kernel.agent_registry().get(agent_id) {
+                if let Err(e) = state.kernel.memory_substrate().save_agent(&entry) {
                     tracing::warn!("Failed to persist agent state: {e}");
                 }
             }
